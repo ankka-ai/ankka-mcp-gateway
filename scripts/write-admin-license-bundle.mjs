@@ -41,8 +41,17 @@ if (lock.lockfileVersion !== 3 || !v.is(OBJECT_SCHEMA, lock.packages)) {
   throw new Error('license_bundle_lock_invalid');
 }
 
+// npm lockfile regeneration can drop `dev` from these optional build/watch
+// binaries. They are not shipped in the browser dashboard. Keep this exception
+// bounded: other optional packages must still supply their license notices.
+function developmentOnlyBinary(relative, value) {
+  return value.optional === true && (Array.isArray(value.os) || Array.isArray(value.cpu)) &&
+    /(?:^|\/)node_modules\/(?:@typescript\/typescript-[^/]+|lightningcss-[^/]+|fsevents)$/u.test(relative);
+}
+
 const external = Object.entries(lock.packages)
-  .filter(([relative, value]) => relative.startsWith('node_modules/') && value.dev !== true && value.link !== true)
+  .filter(([relative, value]) => relative.startsWith('node_modules/') && value.dev !== true &&
+    value.link !== true && !developmentOnlyBinary(relative, value))
   .sort(([left], [right]) => lexicalCompare(left, right));
 if (external.length === 0) throw new Error('license_bundle_empty');
 

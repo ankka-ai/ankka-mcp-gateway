@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Keep admin license generation working when npm loses development flags on
+  optional TypeScript, lightningcss, and fsevents binaries. Retain license
+  checks for other dependencies and the existing esbuild/rolldown notices.
+
 - Use the selected zone's Access API for managed BigQuery setup and removal,
   matching the approved permission. Show the pending resource and bounded
   HTTP failure details while keeping uncertain creates blocked for review.
