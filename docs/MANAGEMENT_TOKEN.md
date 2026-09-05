@@ -20,14 +20,15 @@ installation: a stolen Access-policy credential can affect other policies in
 its selected account. Gateway ownership checks constrain our code, not the
 provider authority of a stolen token.
 
-## Setup and permission candidate
+## Setup and verified endpoint permissions
 
 1. In Cloudflare, open **Manage Account → Account API Tokens → Create Token**.
    This requires a Super Administrator. Use an account-owned token, not a user
    OAuth grant or Global API Key. See [Cloudflare's account-token guide](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/).
-2. For the selected account, start qualification with **Access: Apps and Policies
-   Write** and **MCP Portals Write**. Do not add unrelated permissions to make a
-   failing test pass. The precise account/zone coverage still needs live proof.
+2. For the selected account, use **Access: Apps and Policies
+   Write** and **MCP Portals Write**. These passed the endpoint check below,
+   including both account and zone Access routes. Do not add unrelated permissions
+   to make a failing test pass.
 3. Add the value directly as the encrypted Worker secret `ANKKA_MANAGEMENT_TOKEN`.
    Do not put it in a plaintext variable, command argument, repository or support
    message. Alternatively use the local interactive `wrangler secret put
@@ -36,7 +37,7 @@ provider authority of a stolen token.
    validity and reads owned Team policies; it does not prove source-create or
    policy-write permissions. Complete the disposable-account qualification below.
 
-| Fixed operations | Permission candidate |
+| Fixed operations | Verified permission set |
 | --- | --- |
 | GET account token verification | The account token itself; no token-management permission requested |
 | GET account/zone Access apps, exact app and attached policies; POST source app/policy; PUT attached Team policy | Access: Apps and Policies Write |
@@ -44,9 +45,10 @@ provider authority of a stolen token.
 
 Cloudflare documents [Apps and Policies Write for attached policy updates](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/subresources/policies/methods/update/)
 and [MCP Portals Write for server creation](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/ai_controls/subresources/mcp/subresources/servers/methods/create/).
-This is an endpoint-derived candidate, not a claim of live minimum-permission
-qualification. The existing source executor uses zone-scoped Access routes and
-account MCP routes; the Team executor uses account-scoped Access routes.
+This permission set passed the real-provider endpoint check below. The existing
+source executor uses zone-scoped Access routes and account MCP routes; the Team
+executor uses account-scoped Access routes. This is not full gateway release
+qualification or proof that every narrower permission combination fails.
 
 ## Operations
 
@@ -94,3 +96,32 @@ removal requires separate authority. Keep a secret-free result matrix naming
 operations and permission labels only; never capture request authorization,
 identities, resource IDs or provider bodies in publishable evidence. Release
 qualification remains pending until these real-provider checks succeed.
+
+
+### Real-provider endpoint check
+
+A disposable-account check for issue #123 passed with one account-owned token
+carrying only **Access: Apps and Policies Write** and **MCP Portals Write**.
+No Worker deployment, DNS or token-management permissions were added.
+
+| Operation | Observed result |
+| --- | --- |
+| Account-token verification; account/zone Access app lists; Portal list | HTTP 200 |
+| Create and read synthetic MCP server | HTTP 201 / 200 |
+| Create zone-scoped MCP Access app and deny-Everyone attached policy | HTTP 201; exact deny audience read back |
+| Read that policy through its account-scoped route | HTTP 200 |
+| Assign synthetic email, then restore deny-Everyone through account-scoped policy updates | HTTP 200; both audiences read back |
+| Create/read disposable Portal; update/read its source mapping and tool allowlist | HTTP 201 / 200; source mapping read back |
+| Delete only receipt-recorded test resources | Every resource subsequently returned HTTP 404 |
+| Revoke test token in Cloudflare, then retry verification and account/zone/Portal reads | Every request returned HTTP 401 |
+
+The first mapping attempt used the wrong synthetic tool name and returned a
+validation error. The repeat used the fixture's actual advertised tool and
+passed with unchanged permissions. Both attempts left no recorded resources.
+The test token was revoked after qualification.
+
+This check exercised real API endpoints directly. It did not deploy the new
+Worker, exercise browser-to-gateway operations, or prove secret inheritance
+through a live signed update. Those end-to-end checks, live secret replacement,
+and ambiguous-write recovery remain release qualification work. Local tests
+cover these implementation paths separately; they do not replace that evidence.
