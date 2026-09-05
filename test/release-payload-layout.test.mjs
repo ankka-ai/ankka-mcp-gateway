@@ -21,7 +21,7 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: '0bb473820fa8a31286f9aa1a08636c9194f6ebcb25ee23eaec133c9033d6b7fd',
+  installer: '5af2c482d55cb88ac9d90f47f99669e8675aa139c9f5123988d4484ab8b0e06c',
   worker: '7de142e9e500f8f2b9f7387e362abb5bed625fa575a22ac150e21f2e614766e4',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -253,8 +253,8 @@ test('installer assets cover the exact hosted two-stage session, plan, approval,
   ]) assert.match(combined, new RegExp(copy, 'u'));
   assert.match(html, /Approval 1/u);
   assert.match(html, /Approval 2/u);
-  assert.match(html, /No Cloudflare token is stored anywhere/u);
-  assert.match(html, /Team membership is managed in Cloudflare Access/u);
+  assert.match(html, /Installer grants are revoked/u);
+  assert.match(html, /add an account-owned token directly to your gateway in Cloudflare/u);
   assert.match(html, /stores no Cloudflare token and sends no analytics/u);
   assert.doesNotMatch(html, /target="_blank"/u);
   assert.doesNotMatch(script, /window\.open/u);
