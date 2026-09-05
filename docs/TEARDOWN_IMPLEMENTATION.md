@@ -227,11 +227,39 @@ and management resources remained. A bounded Portal detail read returned HTTP
 source mapping. The second removal phase was not reached. The partial
 installation and its journal were preserved.
 
-The deployed three-field diagnostic does not distinguish the pre-delete Portal
-GET from its DELETE, nor expose the exact HTTP status. It therefore does not
-establish a deletion-order defect or the cause of the authorization failure.
-The added operation/status fields address that evidence gap; they have not yet
-been qualified on a live deployment. Automatic removal remains unqualified.
+The three-field diagnostic in that release did not distinguish the pre-delete
+Portal GET from its DELETE or expose the exact HTTP status.
+
+A second fresh installation completed managed BigQuery setup under `v0.1.60`
+and then used the supported signed update to `v0.1.61`, source commit
+`4395f4a92e3bdaa2ff93446286c709e27c2bc238`. Activation and health checks
+passed with Durable Object data preserved. The source attachment and
+operator-only policy remained unchanged. A fresh client again passed direct
+and Code Mode discovery, both `SELECT 1` calls, and anonymous rejection checks.
+
+The new diagnostic identified the normal-removal failure as
+`root_remove / portal / provider_server_error / read / HTTP 503`. An independent
+read confirmed the same three prior deletions: Portal DNS, Access policy, and
+Access application. A later exact Portal GET using the test account's
+administrative credential returned HTTP 200 with a valid envelope, unchanged
+ownership fields, and its expected source mapping. Supported fresh-consent
+recovery then reported
+`root_remove / portal / provider_auth / read / HTTP 401`.
+
+Both failures occurred on the Portal read before DELETE. Reaching that stage
+also means the callback had already completed its graph preflight, including a
+successful Portal read under the same operation grant. Regression coverage now
+matches the observed 503 followed by fresh-preflight success and a later 401;
+it asserts that the three deletion receipts remain and no Portal DELETE is
+sent. Provider failures never authorize skipping the ownership read or deleting
+a resource whose current ownership cannot be verified.
+
+The exact failing operation and HTTP statuses are now confirmed for the second
+installation. The underlying cause, including provider consistency or grant
+lifetime, remains unconfirmed. No successful Portal DELETE, bridge cleanup, or
+second removal phase has been observed in either full fixture. Both partial
+installations and their journals remain preserved. **Automatic removal
+qualification remains failed.**
 
 Use fresh disposable installations for this bounded checklist. No active
 shared gateway is a disposable test fixture. Keep all private locators,

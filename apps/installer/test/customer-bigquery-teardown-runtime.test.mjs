@@ -167,6 +167,55 @@ async function fixture(run, { stopAfter, knownPending = false, portalPending = f
 }
 
 describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
+  it('preserves the live partial-removal boundary after Portal read 503 and fresh-consent read 401', async () => fixture(async (test) => {
+    const rootStorage = test.objects.get(`v1:${test.readyReceipt.installationId}`).storage;
+    const portalPath = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals/${test.provider.state.portal.id}`;
+    const reads = [];
+    let consent = 1;
+    test.provider.intercept(({ record }) => {
+      if (record.method !== 'GET' || record.pathname !== portalPath) return;
+      const progress = rootStorage.snapshot('ankka-mcp-gateway/root-teardown-progress/v1');
+      const status = progress.phase === 'remove' ? consent === 1 ? 503 : 401 : 200;
+      reads.push({ consent, phase: progress.phase, status });
+      if (status !== 200) return Response.json({ success: false, result: null }, { status });
+    });
+    // The live callbacks named these two pre-delete read failures. They do
+    // not establish whether grant lifetime or provider behavior caused them.
+    const first = await test.teardown();
+    expect(first.prepared.status).toBe(200);
+    const failed = await first.send('apply');
+    expect(failed.status).toBe(409);
+    expect((await failed.json()).failure).toEqual({ phase: 'root_remove', resourceKind: 'portal',
+      category: 'provider_server_error', providerOperation: 'read', providerHttpStatus: 503 });
+    const firstJournal = structuredClone(rootStorage.snapshot().teardown);
+    expect(firstJournal.removedKeys).toHaveLength(3);
+    expect(firstJournal.pending).toBeNull();
+    expect(test.accessDeleteResponses).toEqual([{ status: 202, kind: 'policy' }, { status: 202, kind: 'application' }]);
+    expect(test.provider.deletes()).toHaveLength(3);
+    expect((await first.send('settle')).status).toBe(200);
+    consent = 2;
+    const fresh = await test.teardown('v');
+    expect(fresh.prepared.status).toBe(200);
+    const retried = await fresh.send('apply', 'w'.repeat(22));
+    expect(retried.status).toBe(409);
+    expect((await retried.json()).failure).toEqual({ phase: 'root_remove', resourceKind: 'portal',
+      category: 'provider_auth', providerOperation: 'read', providerHttpStatus: 401 });
+    expect(reads).toEqual([
+      { consent: 1, phase: 'preflight', status: 200 },
+      { consent: 1, phase: 'remove', status: 503 },
+      { consent: 2, phase: 'preflight', status: 200 },
+      { consent: 2, phase: 'remove', status: 401 },
+    ]);
+    expect(rootStorage.snapshot().teardown).toEqual(firstJournal);
+    expect(test.provider.deletes()).toHaveLength(3);
+    expect(test.provider.deletes().some((record) => record.pathname === portalPath)).toBe(false);
+    expect(test.provider.state.dns).toBeNull();
+    expect(test.provider.state.apps.has(test.portalApplicationId)).toBe(false);
+    expect(test.provider.state.policies.has(test.portalApplicationId)).toBe(false);
+    expect(test.provider.state.portal).not.toBeNull();
+    expect(test.provider.state.servers.size).toBe(1);
+    expect(test.bridge.deletions).toEqual([]);
+  }));
   for (const scenario of [
     { name: 'pre-delete GET 403', operation: 'read', status: 403, category: 'provider_auth', pending: null },
     { name: 'DELETE 403', operation: 'delete', status: 403, category: 'provider_auth', pending: 'not_applied' },
