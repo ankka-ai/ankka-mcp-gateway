@@ -155,7 +155,26 @@ The original bootstrap progress page did not automatically open the management
 page during this run; opening the reviewed management address reached the Ready
 dashboard. This observation is separate from management-token operation.
 
-Live signed-update inheritance, subsequent cleanup, and final token revocation
-remain pending for this deployed run. Restoring the same secret does not prove
-rotation to a different token. Ambiguous-write recovery remains covered by the
-local fault-injection tests rather than this live run.
+The real runtime-update API harness upgraded the gateway to signed canary
+`gateway-v0.1.63`, built from the same public commit. Provider metadata confirmed
+the new release and inherited management secret; the dashboard subsequently
+verified the token and current policies. The harness used separate deployment
+API authority and a stand-in operation journal. This proves signed updater and
+secret inheritance behavior, not the complete browser update workflow.
+
+The built-in removal flow ([tracked separately](https://github.com/ankka-ai/ankka-mcp-gateway/issues/139))
+failed twice with a fresh-authorization recovery
+message after partial progress. Cleanup therefore used separate deployment
+authority through an API fallback that checked exact installation ownership
+and shared-resource references before deletion. Independent provider reads
+confirmed the test Worker, Durable Object namespace, Access applications,
+Portal, source, custom domain, and both DNS names were absent. The scoped test
+token was separately revoked; token verification and account/zone Access and
+Portal reads all returned HTTP 401. Its temporary local credential file was
+removed. This is successful cleanup, not a passing built-in teardown test.
+
+Restoring the same secret does not prove rotation to a different token.
+Revocation was checked after cleanup, not during a recorded gateway write.
+Ambiguous-write recovery remains covered by local fault-injection tests rather
+than this live run. These remaining scenarios and the teardown failure prevent
+this report from claiming the entire live qualification procedure passed.
