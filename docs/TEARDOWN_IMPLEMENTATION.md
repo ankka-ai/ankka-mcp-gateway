@@ -22,14 +22,31 @@ application policies and server sharing are checked again before the relevant
 delete. These reads cannot provide an atomic lock against simultaneous manual
 changes in Cloudflare.
 
-The current removal order deletes the Portal graph before its source servers.
-This avoids depending on a Portal mapping that Cloudflare may remove when a
-server disappears. Each deletion is armed durably first. A lost response is
+The removal order deletes the Portal graph before its source servers. Within
+the Portal graph, the order remains DNS record, Access policy, Access
+application, and Portal. This avoids depending on mappings that Cloudflare may
+remove when a server disappears. Each deletion is armed durably first. A lost response is
 resolved by reading the exact resource on a new authorization; proven absence
 advances the journal without another delete. Unfinished source or runtime work
 blocks preparation. A current teardown action blocks runtime updates, and the
 existing source lifecycle checks block source changes. Compatibility floors
 remain unchanged.
+
+A successful Access `DELETE` can return HTTP `202 Accepted`. This records a
+submitted deletion, not confirmed removal. The executor advances only after
+reading the exact owned resource and confirming absence. If absence cannot be
+confirmed, it retains the pending deletion and requires fresh consent; that
+same callback cannot send the deletion again. A fresh consent rechecks the
+complete graph and resolves the pending operation from its recorded locator.
+The resource order, graph hashes, and existing journal format remain unchanged.
+No deletion prefix is rewritten and no new cascade exception changes the
+ownership checks.
+
+Managed BigQuery bridge removal follows the Portal and source graph. It
+detaches the owned custom domain, deletes the credential-bearing Worker, and
+then removes its Access application. Deleting Access protection requires fresh
+direct proof that both the Worker and its recorded custom domain are absent;
+earlier journal entries alone do not authorize that deletion.
 
 A distinct signed handoff binds the ownership certificate, removal action,
 ready-receipt checksum, dependency-graph hash, and the management resource
@@ -103,6 +120,31 @@ contexts. Provider bodies and credentials are never included in public errors.
 Hosted removal jobs retain secret-free authority and progress for recovery;
 no expiry alarm deletes them while removal may still need to resume.
 
+## Bounded failure diagnostics
+
+The gateway callback keeps the existing `recovery_required` result and adds a
+fixed diagnostic to the current customer-local removal attempt. The recovery
+page displays `phase / resourceKind / category`, with the provider operation
+and HTTP status when available. The operation is limited to `read`, `list`, or
+`delete`; the status is a bounded HTTP integer or null when no response is
+available. Existing three-field diagnostics remain readable. The contracts are
+defined in
+[`customer-teardown-failure.ts`](../apps/installer/src/customer-teardown-failure.ts).
+They distinguish authorization, account verification, root and bridge
+preflight/removal/verification, revocation, settlement, and handoff failures.
+Categories distinguish provider authorization, rate limits, server errors,
+transport failures, and other availability failures,
+rejected or invalid responses, ownership mismatches, unconfirmed absence,
+interruption, expiry, and bounded-progress limits.
+
+Diagnostics contain no credentials, account or resource identifiers,
+hostnames, URLs, provider bodies, raw exception messages, or free-form fields.
+They add no logging, telemetry, or transmission to Ankka. They remain in the
+gateway's Cloudflare Durable Object with the current removal attempt; a new
+consent replaces that attempt and clears its prior diagnostic. Final removal
+retires the gateway's state. Diagnostics do not change deletion authority or
+the requirement to revoke and discard the callback-local grant.
+
 ## Local verification
 
 Tests exercise the gateway payload with synthetic provider state, including
@@ -113,9 +155,142 @@ expiry, revocation, and signing only after verified completion. Hosted tests use
 real SQLite, recreated Durable Objects, complete fixed-root removal, failed
 revocation, rejected authority, and each uncertain provider mutation.
 
+The
+[`cloudflare-access-delete-accepted.json`](../test/fixtures/cloudflare-access-delete-accepted.json)
+fixture records observed HTTP statuses and a synthetic version of the Access
+deletion envelope. Regression coverage models HTTP 202 followed by exact
+absence, an accepted deletion whose absence remains unconfirmed, and recovery
+with fresh consent. The original runtime treated HTTP 202 as a rejected
+provider request even when Cloudflare had completed the deletion.
+
 ## Qualification still required
 
-- Generated installer and gateway artifacts running the complete flow together.
-- A disposable live installation with a source and changed membership, complete
-  removal with independent absence verification, and an interrupted run resumed
-  with fresh consent. No active shared gateway is a disposable test fixture.
+**Automatic removal qualification: FAILED, pending a successful live rerun.**
+
+The reported `v0.1.59` test, source commit
+`7714761028163101c78d984ff4cc2a3bf9ee74fe`, completed Add BigQuery,
+fresh-client authentication, tool discovery, read-only queries, and Code Mode.
+After changing the owned source policy to admit the gateway operator, removal
+returned `recovery_required`; fresh consent and supported resume returned the
+same result. Before manual cleanup, the Portal remained and Cloudflare
+reported its Access application missing. The source registration, bridge
+Worker, and gateway Worker remained, and the second phase had not started.
+Manual cleanup subsequently succeeded and resource absence was verified.
+
+The exact failing provider request, HTTP status, and internal stage were not
+captured. The deployment's state and journal are no longer available, so its
+precise failure cannot be conclusively reconstructed.
+
+On 2026-09-05, a separate live API probe created two fresh disposable empty
+Portals with the installer's Access application shape and a deny-everyone
+policy. It exercised both deletion orders without a source registration,
+Google key, DNS record, or Worker:
+
+- Access policy deletion returned HTTP 202 with `success: true`, empty
+  `errors` and `messages`, and `result: { id }`; the exact policy read then
+  returned HTTP 404. Access application deletion behaved the same way.
+- After both Access resources were deleted, the Portal remained listed and
+  its detail read returned HTTP 200. Its identity, marker, hostname, Code Mode,
+  secure-web-gateway setting, and empty server list were unchanged. Portal
+  deletion returned HTTP 200 and its exact read then returned HTTP 404.
+- Deleting the other Portal first returned HTTP 200 and left its Access
+  application and policy present. No automatic Access creation or deletion
+  cascade was observed through the Portal API in these probes; the Access
+  resources were created and removed explicitly.
+- Every created Portal, application, and policy was independently verified
+  absent by exact reads and relevant inventories after cleanup. The
+  preexisting Portal and Access inventories remained unchanged.
+
+This confirms a provider-status handling defect: the original runtime accepted
+only HTTP 200, 201, or 204 and rejected a successful Access deletion returning
+202. Stopping after policy deletion on one consent and application deletion on
+the next is consistent with the reported state. It remains an explanation of
+the historical report, not a recovered trace of that installation. The narrow
+probe does not qualify managed BigQuery removal, the browser callback, or the
+hosted finalizer, and does not establish every Portal's partial-state behavior.
+
+A subsequent fresh installation of signed `v0.1.60`, source commit
+`4255bb5a2cbc1c3826ba934ed0c63f71b4374618`, completed Add BigQuery,
+source authentication, Portal attachment, and an operator-only source policy
+change preserving its identity and marker. A fresh client discovered the
+expected direct and Code Mode tool surfaces; both executed `SELECT 1`
+successfully, and anonymous requests were denied.
+
+Automatic removal still failed. The first callback reported
+`root_remove / portal / provider_unavailable`; fresh-consent recovery reported
+`root_remove / portal / provider_auth`. A further attempt with all other
+installer consent flows paused repeated the authorization failure. Independent
+reads confirmed that the Portal DNS record and Access policy/application were
+absent while the Portal, source registration, source Access resources, bridge,
+and management resources remained. A bounded Portal detail read returned HTTP
+200 with a valid success envelope, matching ownership fields, and its expected
+source mapping. The second removal phase was not reached. The partial
+installation and its journal were preserved.
+
+The three-field diagnostic in that release did not distinguish the pre-delete
+Portal GET from its DELETE or expose the exact HTTP status.
+
+A second fresh installation completed managed BigQuery setup under `v0.1.60`
+and then used the supported signed update to `v0.1.61`, source commit
+`4395f4a92e3bdaa2ff93446286c709e27c2bc238`. Activation and health checks
+passed with Durable Object data preserved. The source attachment and
+operator-only policy remained unchanged. A fresh client again passed direct
+and Code Mode discovery, both `SELECT 1` calls, and anonymous rejection checks.
+
+The new diagnostic identified the normal-removal failure as
+`root_remove / portal / provider_server_error / read / HTTP 503`. An independent
+read confirmed the same three prior deletions: Portal DNS, Access policy, and
+Access application. A later exact Portal GET using the test account's
+administrative credential returned HTTP 200 with a valid envelope, unchanged
+ownership fields, and its expected source mapping. Supported fresh-consent
+recovery then reported
+`root_remove / portal / provider_auth / read / HTTP 401`.
+
+Both failures occurred on the Portal read before DELETE. Reaching that stage
+also means the callback had already completed its graph preflight, including a
+successful Portal read under the same operation grant. Regression coverage now
+matches the observed 503 followed by fresh-preflight success and a later 401;
+it asserts that the three deletion receipts remain and no Portal DELETE is
+sent. Provider failures never authorize skipping the ownership read or deleting
+a resource whose current ownership cannot be verified.
+
+The exact failing operation and HTTP statuses are now confirmed for the second
+installation. The underlying cause, including provider consistency or grant
+lifetime, remains unconfirmed. No successful Portal DELETE, bridge cleanup, or
+second removal phase has been observed in either full fixture. Both partial
+installations and their journals remain preserved. **Automatic removal
+qualification remains failed.**
+
+Use fresh disposable installations for this bounded checklist. No active
+shared gateway is a disposable test fixture. Keep all private locators,
+receipts, and provider evidence outside this public repository.
+
+1. Record the tested installer and gateway release identities. Run generated
+   artifacts containing the candidate fix together, including the separate
+   hosted finalizer. Retain an independent baseline inventory for the owned
+   resources and selected unrelated control resources.
+2. Complete Add BigQuery, source authentication, Portal attachment, and the
+   operator's supported source-policy membership change while retaining its
+   identity and ownership marker. Confirm fresh-client discovery, read-only
+   queries, and Code Mode before removal.
+3. Complete both automatic removal phases with the displayed operation-scoped
+   approvals. Capture the fixed failure diagnostic if any request fails;
+   capture only sanitized response shape and bounded status evidence needed
+   to establish the actual provider behavior. Do not publish raw responses.
+4. Repeat on another fresh installation with an interrupted deletion and fresh
+   consent. Verify that retained receipts resolve the uncertain operation,
+   already confirmed deletions are not resent, and both phases finish.
+   Include an accepted Access deletion whose response or absence confirmation
+   is interrupted, and interruptions at bridge domain/Worker deletion.
+5. During bridge cleanup, independently verify that Access protection remains
+   until its exact custom domain and credential-bearing Worker are confirmed
+   absent. Recreated or changed resources must block further deletion.
+6. Independently verify absence of every owned Portal, source registration,
+   Access application and policy, DNS record, bridge Worker and custom domain,
+   management custom domain and Access resources, gateway Worker, and retired
+   gateway namespace. Verify that unrelated control resources remain intact.
+   Removing the bridge's Google key copy does not revoke the original key in
+   Google; manage that key separately.
+7. Run `npm run check:fast` and require the full CI `check` gate to pass. Record
+   the live outcome separately from automated test results; retain FAILED
+   status until full automatic removal and interrupted recovery both pass.

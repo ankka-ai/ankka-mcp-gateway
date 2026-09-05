@@ -4196,12 +4196,13 @@ function teardownOwnershipMatches(resource, result, authority, currentPolicies =
   return accessApplicationIdentityMatches(result, resource.kind, entry.state);
 }
 
-async function teardownResourceRead(root, resource, authority, token, currentPolicies = false) {
+async function teardownResourceRead(root, resource, authority, token, currentPolicies = false, observeProvider) {
   const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token);
+  observeProvider?.('read', response);
   if (response.status === 'absent' || response.status === 'auth' || response.status === 'unknown') {
     return response.status;
   }
-  if (response.status !== 'ok') return 'conflict';
+  if (response.status !== 'ok') return response.status;
   return teardownOwnershipMatches(resource, response.result, authority, currentPolicies) ? 'present' : 'conflict';
 }
 
@@ -4228,26 +4229,31 @@ async function teardownServersUnshared(root, authority, token) {
   return true;
 }
 
-async function teardownApplicationChildrenMatch(root, resource, authority, token) {
-  if (!['source_access_application', 'portal_access_application'].includes(resource.kind)) return true;
+async function teardownApplicationChildrenRead(root, resource, authority, token, observeProvider) {
+  if (!['source_access_application', 'portal_access_application'].includes(resource.kind)) return 'present';
   const path = `${teardownProviderPath(resource, root.receipt.target)}/policies`;
   const listed = await providerList(path, token);
-  if (listed.status !== 'ok') return false;
+  observeProvider?.('list', listed);
+  if (listed.status !== 'ok') return listed.status;
   const owned = authority.resources.filter((entry) =>
     ['source_access_policy', 'portal_access_policy'].includes(entry.kind) &&
     entry.provider.parentId === resource.provider.id);
   const seen = new Set();
   for (const policy of listed.result) {
     const receipt = owned.find((entry) => entry.provider.id === policy?.id);
-    if (!receipt || seen.has(policy.id) || !teardownOwnershipMatches(receipt, policy, authority, true)) return false;
+    if (!receipt || seen.has(policy.id) || !teardownOwnershipMatches(receipt, policy, authority, true)) return 'conflict';
     seen.add(policy.id);
   }
-  return true;
+  return 'present';
 }
 
-async function teardownResourceDelete(root, resource, token) {
+async function teardownResourceDelete(root, resource, token, observeProvider) {
   const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE' });
-  if (response.status === 'ok') return 'submitted';
+  observeProvider?.('delete', response);
+  // Cloudflare Access DELETE returns 202 even when its next GET is already
+  // 404. Accepted is a submitted deletion, never proof of absence. Keep this
+  // interpretation local to teardown: creates and updates still fail closed.
+  if (response.status === 'ok' || (response.status === 'blocked' && response.httpStatus === 202)) return 'submitted';
   return response.status;
 }
 
@@ -4284,6 +4290,44 @@ function rootRemovalCompletion(root, removedResourceCount, resumed, resourcesHas
 // A new consent rechecks the full graph; it retains only deletion receipts.
 const ROOT_TEARDOWN_PROGRESS_KEY = 'ankka-mcp-gateway/root-teardown-progress/v1';
 
+// Mirror the installer's strict diagnostic contract. The standalone payload
+// cannot import installer modules, and provider data never enters this shape.
+function safeTeardownFailure(value) {
+  if (!isRecord(value) || !exactKeys(value, ['phase', 'resourceKind', 'category',
+    ...(Object.hasOwn(value, 'providerOperation') ? ['providerOperation'] : []),
+    ...(Object.hasOwn(value, 'providerHttpStatus') ? ['providerHttpStatus'] : []),
+  ]) || (Object.hasOwn(value, 'providerOperation') && value.providerOperation !== undefined &&
+      !['read', 'list', 'delete'].includes(value.providerOperation)) ||
+      (Object.hasOwn(value, 'providerHttpStatus') && value.providerHttpStatus !== undefined && value.providerHttpStatus !== null &&
+        (!Number.isSafeInteger(value.providerHttpStatus) || value.providerHttpStatus < 100 || value.providerHttpStatus > 599)) ||
+      !['authorization', 'account_check', 'apply', 'root_preflight', 'root_remove', 'root_verify',
+        'bridge_preflight', 'bridge_remove', 'bridge_verify', 'revocation', 'settlement', 'handoff'].includes(value.phase) ||
+      !['mcp_server', 'mcp_portal', 'portal', 'access_application', 'access_policy', 'dns_record', 'worker',
+        'worker_custom_domain', 'portal_access_application', 'portal_access_policy',
+        'source_access_application', 'source_access_policy', 'dependency_graph', 'none'].includes(value.resourceKind) ||
+      !['authorization_denied', 'authorization_failed', 'provider_auth', 'provider_rejected', 'provider_unavailable',
+        'provider_rate_limited', 'provider_server_error', 'transport_failed', 'response_invalid', 'ownership_mismatch',
+        'state_invalid', 'absence_unconfirmed', 'operation_interrupted',
+        'expired', 'no_progress', 'pass_limit', 'revocation_unconfirmed', 'settlement_failed', 'handoff_failed'].includes(value.category)) return null;
+  const failure = { phase: value.phase, resourceKind: value.resourceKind, category: value.category };
+  if (value.providerOperation !== undefined) failure.providerOperation = value.providerOperation;
+  if (value.providerHttpStatus !== undefined) failure.providerHttpStatus = value.providerHttpStatus;
+  return Object.freeze(failure);
+}
+
+function teardownFailure(phase, resourceKind, category, provider = {}) {
+  return Object.freeze({ schemaVersion: 1, error: 'teardown_action_recovery_required',
+    failure: safeTeardownFailure({ phase, resourceKind, category, ...provider }) });
+}
+
+function teardownReadFailure(status) {
+  if (status === 'auth') return 'provider_auth';
+  if (status === 'blocked') return 'provider_rejected';
+  if (status === 'unknown') return 'provider_unavailable';
+  if (status === 'absent') return 'absence_unconfirmed';
+  return 'ownership_mismatch';
+}
+
 async function processBoundedRootTeardown(storage, root, teardown, authority, resourcesHash, input) {
   const resources = authority.resources;
   const raw = await storage.get(ROOT_TEARDOWN_PROGRESS_KEY);
@@ -4294,11 +4338,31 @@ async function processBoundedRootTeardown(storage, root, teardown, authority, re
       !Number.isSafeInteger(raw.portalIndex) || raw.portalIndex < 0 ||
       !(raw.portalIds === null || (Array.isArray(raw.portalIds) && raw.portalIds.length <= MAX_PROVIDER_PAGES * PROVIDER_PAGE_SIZE &&
         raw.portalIds.every((id) => safeProviderId(id)) && new Set(raw.portalIds).size === raw.portalIds.length)) ||
-      raw.portalIndex > (raw.portalIds?.length ?? 0))) return null;
+      raw.portalIndex > (raw.portalIds?.length ?? 0))) return teardownFailure('root_preflight', 'dependency_graph', 'state_invalid');
   let progress = raw?.requestId === input.requestId ? raw : {
     requestId: input.requestId, resourcesHash, phase: 'sharing_preflight', checked: 0, portalIds: null, portalIndex: 0,
   };
   const active = () => Date.now() < input.expiresAt;
+  const phase = () => progress.phase === 'verify' ? 'root_verify' :
+    ['sharing_preflight', 'preflight'].includes(progress.phase) ? 'root_preflight' : 'root_remove';
+  const fail = (resourceKind, category) => teardownFailure(phase(), resourceKind, category);
+  let providerDiagnostic = {};
+  let providerFailureCategory = null;
+  const observeProvider = (providerOperation, response) => {
+    // Retain only the fixed operation and HTTP status, never a provider body,
+    // resource locator, error message, or callback credential.
+    const status = response.httpStatus;
+    providerDiagnostic = { providerOperation, providerHttpStatus: Number.isSafeInteger(status) &&
+      status >= 100 && status <= 599 ? status : null };
+    providerFailureCategory = status === 429 ? 'provider_rate_limited' :
+      status >= 500 && status <= 599 ? 'provider_server_error' :
+      response.status === 'unknown' && status === null ? 'transport_failed' :
+      response.status === 'unknown' && Number.isSafeInteger(status) ? 'response_invalid' : null;
+  };
+  const failureCategory = (status) => status === 'unknown' && providerFailureCategory !== null
+    ? providerFailureCategory : teardownReadFailure(status);
+  const providerFail = (resourceKind, status) => teardownFailure(phase(), resourceKind,
+    failureCategory(status), providerDiagnostic);
   const pause = async () => {
     await storage.put(ROOT_TEARDOWN_PROGRESS_KEY, progress);
     return Object.freeze({ schemaVersion: 1, status: 'removing', installationId: root.installationId,
@@ -4309,7 +4373,7 @@ async function processBoundedRootTeardown(storage, root, teardown, authority, re
     root = { ...root, teardown };
     await storage.put(STORAGE_KEY, root);
   };
-  if (!active()) return null;
+  if (!active()) return fail('dependency_graph', 'expired');
   if (progress.phase === 'complete') {
     return teardown.status === 'removed' ? rootRemovalCompletion(root, resources.length, true, resourcesHash, true) : null;
   }
@@ -4320,23 +4384,27 @@ async function processBoundedRootTeardown(storage, root, teardown, authority, re
       // A bounded catalogue read (at most 20 requests) is a separate pass
       // from the detail reads. Never assume the list includes server mappings.
       const listed = await providerList(path, input.cloudflareAccessToken);
-      if (listed.status !== 'ok' || listed.result.some((portal) => !safeProviderId(portal?.id))) return null;
+      observeProvider('list', listed);
+      if (listed.status !== 'ok') return providerFail('dependency_graph', listed.status);
+      if (listed.result.some((portal) => !safeProviderId(portal?.id))) return fail('dependency_graph', 'response_invalid');
       const ids = listed.result.map((portal) => portal.id);
-      if (new Set(ids).size !== ids.length) return null;
+      if (new Set(ids).size !== ids.length) return fail('dependency_graph', 'response_invalid');
       progress = { ...progress, portalIds: ids.filter((id) => id !== authority.control.portal.id), portalIndex: 0 };
       return pause();
     }
     const ids = progress.portalIds ?? [];
     const end = Math.min(progress.portalIndex + 20, ids.length);
     for (let index = progress.portalIndex; index < end; index++) {
-      if (!active()) return null;
+      if (!active()) return fail('dependency_graph', 'expired');
       const read = await providerCall(`${path}/${encodeURIComponent(ids[index])}`, input.cloudflareAccessToken);
-      if (read.status !== 'ok' || !isRecord(read.result) || read.result.id !== ids[index]) return null;
+      observeProvider('read', read);
+      if (read.status !== 'ok') return providerFail('dependency_graph', read.status);
+      if (!isRecord(read.result) || read.result.id !== ids[index]) return fail('dependency_graph', 'response_invalid');
       const mappings = Object.hasOwn(read.result, 'servers') ? read.result.servers : [];
       if (!Array.isArray(mappings) || mappings.some((mapping) => !isRecord(mapping) ||
         !safeProviderId(mapping.server_id ?? mapping.id) ||
         (mapping.server_id !== undefined && mapping.id !== undefined && mapping.server_id !== mapping.id) ||
-        serverIds.has(mapping.server_id ?? mapping.id))) return null;
+        serverIds.has(mapping.server_id ?? mapping.id))) return fail('dependency_graph', 'ownership_mismatch');
     }
     progress = end === ids.length ? { ...progress, phase: progress.phase === 'sharing_preflight' ? 'preflight' : 'delete',
       portalIds: null, portalIndex: 0 } : { ...progress, portalIndex: end };
@@ -4344,14 +4412,23 @@ async function processBoundedRootTeardown(storage, root, teardown, authority, re
   }
   if (progress.phase === 'preflight' || progress.phase === 'verify') {
     const resource = resources[progress.checked];
-    if (!resource) return null;
-    const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true);
-    if (observed === 'present' && !await teardownApplicationChildrenMatch(root, resource, authority, input.cloudflareAccessToken)) return null;
+    if (!resource) return fail('dependency_graph', 'state_invalid');
+    const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true, observeProvider);
+    const observedProvider = providerDiagnostic;
+    if (observed === 'present') {
+      const children = await teardownApplicationChildrenRead(root, resource, authority, input.cloudflareAccessToken, observeProvider);
+      if (children !== 'present') return providerFail(resource.kind, children);
+    }
     if (progress.checked < teardown.removedKeys.length) {
-      if (observed !== 'absent') return null;
+      if (observed !== 'absent') return observed === 'present'
+        ? teardownFailure(phase(), resource.kind, 'absence_unconfirmed', observedProvider)
+        : providerFail(resource.kind, observed);
     } else if (progress.checked === teardown.removedKeys.length && teardown.pending !== null) {
-      if (!['absent', 'present'].includes(observed)) return null;
-    } else if (observed !== 'present' && !(observed === 'absent' && authority.pendingResources.has(teardownResourceKey(resource)))) return null;
+      if (!['absent', 'present'].includes(observed)) return providerFail(resource.kind, observed);
+    } else if (observed !== 'present' && !(observed === 'absent' &&
+      authority.pendingResources.has(teardownResourceKey(resource)))) {
+      return providerFail(resource.kind, observed);
+    }
     const checked = progress.checked + 1;
     if (checked < resources.length) { progress = { ...progress, checked }; return pause(); }
     if (teardown.removedKeys.length === resources.length) {
@@ -4375,26 +4452,30 @@ async function processBoundedRootTeardown(storage, root, teardown, authority, re
     return pause();
   }
   const key = teardownResourceKey(resource);
-  const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true);
+  const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true, observeProvider);
   if (observed === 'absent') {
     await saveTeardown({ ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] });
     progress = { ...progress, phase: 'remove' };
     return pause();
   }
-  if (observed !== 'present' || !await teardownApplicationChildrenMatch(root, resource, authority, input.cloudflareAccessToken)) return null;
-  if (teardown.pending?.requestId === input.requestId && teardown.pending.phase !== 'not_applied') return null;
+  if (observed !== 'present') return providerFail(resource.kind, observed);
+  const dependencies = await teardownApplicationChildrenRead(root, resource, authority, input.cloudflareAccessToken, observeProvider);
+  if (dependencies !== 'present') return providerFail(resource.kind, dependencies);
+  if (teardown.pending?.requestId === input.requestId && teardown.pending.phase !== 'not_applied') return fail(resource.kind, 'operation_interrupted');
   // The resource and any Access children have just been re-read. Arm before
   // the single DELETE; an unknown response stops the callback and needs consent.
   await saveTeardown({ ...teardown, pending: { key, requestId: input.requestId, phase: 'send_armed' } });
-  if (!active()) return null;
-  const deleted = await teardownResourceDelete(root, resource, input.cloudflareAccessToken);
+  if (!active()) return fail(resource.kind, 'expired');
+  const deleted = await teardownResourceDelete(root, resource, input.cloudflareAccessToken, observeProvider);
   if (deleted === 'auth' || deleted === 'blocked') {
     await saveTeardown({ ...teardown, pending: { ...teardown.pending, phase: 'not_applied' } });
-    return null;
+    return providerFail(resource.kind, deleted);
   }
-  if (deleted === 'unknown') return null;
+  if (deleted === 'unknown') return providerFail(resource.kind, deleted);
   await saveTeardown({ ...teardown, pending: { ...teardown.pending, phase: 'submitted' } });
-  if (await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true) !== 'absent') return null;
+  const after = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true, observeProvider);
+  if (after !== 'absent') return teardownFailure('root_verify', resource.kind,
+    after === 'present' ? 'absence_unconfirmed' : failureCategory(after), providerDiagnostic);
   await saveTeardown({ ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] });
   progress = { ...progress, phase: 'remove' };
   return pause();
@@ -4412,7 +4493,7 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       !Number.isSafeInteger(input.issuedAt) || !Number.isSafeInteger(input.expiresAt) ||
       input.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 || input.expiresAt <= nowMs) return null;
   let root = await storedTeardownRoot(storage, environment, input.installationId);
-  if (!root) return null;
+  if (!root) return teardownFailure('root_preflight', 'dependency_graph', 'state_invalid');
   const authority = await teardownAuthorityState(root, input.control, input.sources, environment, currentPolicies, input.managedSourceActions ?? []);
   const resources = authority?.resources ?? null;
   let resourcesHash = null;
@@ -4422,13 +4503,13 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
     if (input.managedSourceActions?.length > 0) identity.managedSourceActions = input.managedSourceActions;
     resourcesHash = await sha256(identity);
   }
-  if (!authority || !resources || !resourcesHash) return null;
+  if (!authority || !resources || !resourcesHash) return teardownFailure('root_preflight', 'dependency_graph', 'state_invalid');
   let teardown = root.teardown === undefined ? null : safeRootTeardown(
     root.teardown, root, resources, resourcesHash,
   );
   if (root.status === 'ready') {
-    if (teardown !== null) return null;
-    teardown = Object.freeze({
+    if (teardown !== null) return teardownFailure('root_preflight', 'dependency_graph', 'state_invalid');
+    const nextTeardown = {
       schemaVersion: 1,
       installationId: root.installationId,
       resourcesHash,
@@ -4436,10 +4517,11 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       removedKeys: Object.freeze([]),
       pending: null,
       removedAt: null,
-    });
+    };
+    teardown = Object.freeze(nextTeardown);
     root = { ...root, status: 'tearing_down', teardown };
     await storage.put(STORAGE_KEY, root);
-  } else if (!teardown) return null;
+  } else if (!teardown) return teardownFailure('root_preflight', 'dependency_graph', 'state_invalid');
   if (currentPolicies && managed?.bounded === true) {
     return processBoundedRootTeardown(storage, root, teardown, authority, resourcesHash, input);
   }
@@ -4453,9 +4535,9 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
     const observed = await teardownResourceRead(
       root, resources[index], authority, input.cloudflareAccessToken, currentPolicies,
     );
-    if (currentPolicies && observed === 'present' && !await teardownApplicationChildrenMatch(
+    if (currentPolicies && observed === 'present' && await teardownApplicationChildrenRead(
       root, resources[index], authority, input.cloudflareAccessToken,
-    )) return null;
+    ) !== 'present') return null;
     if (index < teardown.removedKeys.length) {
       if (observed !== 'absent') return null;
       continue;
@@ -4464,7 +4546,8 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       if (observed !== 'absent' && observed !== 'present') return null;
       continue;
     }
-    if (observed !== 'present' && !(observed === 'absent' && authority.pendingResources.has(teardownResourceKey(resources[index])))) return null;
+    if (observed !== 'present' && !(observed === 'absent' &&
+      authority.pendingResources.has(teardownResourceKey(resources[index])))) return null;
   }
   if (teardown.status === 'removed') return rootRemovalCompletion(root, resources.length, true, resourcesHash, currentPolicies);
   let resumed = teardown.removedKeys.length > 0 || teardown.pending !== null;
@@ -4479,9 +4562,9 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       continue;
     }
     if (observed !== 'present') return null;
-    if (currentPolicies && !await teardownApplicationChildrenMatch(
+    if (currentPolicies && await teardownApplicationChildrenRead(
       root, resource, authority, input.cloudflareAccessToken,
-    )) return null;
+    ) !== 'present') return null;
     if (teardown.pending && teardown.pending.requestId === input.requestId &&
         teardown.pending.phase !== 'not_applied') return null;
     if (teardown.pending) {
@@ -4698,7 +4781,11 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   try {
     const preflight = await currentState?.bridges?.preflight(bridgeGrant, ownedServerIds);
     if (preflight && !preflight.complete) return paused('bridge_preflight', preflight.progress);
-  } catch { return null; }
+  } catch (error) {
+    const failure = safeTeardownFailure(error?.failure);
+    return failure ? teardownFailure(failure.phase, failure.resourceKind, failure.category, failure) :
+      teardownFailure('bridge_preflight', 'dependency_graph', 'operation_interrupted');
+  }
   if (currentPolicies && action.status === 'authorization_required') {
     // Receipt proof and consent navigation are read-only. Arm the persistent
     // lifecycle lock only when an actual apply is about to reach the root.
@@ -4721,8 +4808,13 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
       headers: { 'content-type': 'application/json' },
       body: canonicalJson(rootInput),
     }));
-    removed = response instanceof Response && response.status === 200 ? await response.json() : null;
-  } catch { removed = null; }
+    removed = response instanceof Response && [200, 409].includes(response.status) ? await response.json() : null;
+  } catch { return teardownFailure('root_remove', 'dependency_graph', 'operation_interrupted'); }
+  if (removed?.schemaVersion === 1 && removed.error === 'teardown_action_recovery_required') {
+    const failure = safeTeardownFailure(removed.failure);
+    return failure ? teardownFailure(failure.phase, failure.resourceKind, failure.category, failure) :
+      teardownFailure('root_remove', 'dependency_graph', 'response_invalid');
+  }
   if (currentPolicies && managed?.bounded === true && removed?.schemaVersion === 1 &&
       removed.status === 'removing' && removed.installationId === action.installationId && HASH.test(removed.progress)) {
     return paused('dependencies', removed.progress);
@@ -4730,7 +4822,7 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   if (!isRecord(removed) || removed.schemaVersion !== 1 || removed.status !== 'removed' ||
       removed.installationId !== action.installationId || !Number.isSafeInteger(removed.removedResourceCount) ||
       (currentPolicies && (!HASH.test(removed.readyReceiptChecksum) || !HASH.test(removed.dependencyResourcesHash)))) {
-    return null;
+    return teardownFailure('root_remove', 'dependency_graph', 'response_invalid');
   }
   if (currentState?.bridges !== null && currentState?.bridges !== undefined) {
     try {
@@ -4738,7 +4830,11 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
       if (!bridges.complete) return paused('bridges', bridges.progress);
       removed = { ...removed, removedResourceCount: removed.removedResourceCount + bridges.removedResourceCount,
         dependencyResourcesHash: await sha256({ schemaVersion: 1, dependencies: removed.dependencyResourcesHash, bridges: bridges.recordsHash }) };
-    } catch { return null; }
+    } catch (error) {
+      const failure = safeTeardownFailure(error?.failure);
+      return failure ? teardownFailure(failure.phase, failure.resourceKind, failure.category, failure) :
+        teardownFailure('bridge_remove', 'dependency_graph', 'operation_interrupted');
+    }
   }
   if (action.status !== 'gateway_removed') {
     const latest = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
@@ -4870,7 +4966,7 @@ export class AdminState {
         const removed = environment ? await processRootTeardownApply(
           this.state.storage, environment, input, Date.now(), url.pathname.endsWith('/apply-current'), this.managedTeardown,
         ) : null;
-        return removed ? fixedJson(200, removed) :
+        return removed ? fixedJson(safeTeardownFailure(removed.failure) ? 409 : 200, removed) :
           fixedJson(409, { schemaVersion: 1, error: 'teardown_root_recovery_required' });
       }
       if (url.pathname === INTERNAL_ACTIONS_PATH && request.method === 'POST') {
@@ -4945,7 +5041,7 @@ export class AdminState {
       }
       if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/apply-current` && request.method === 'POST') {
         const applied = await processTeardownActionApply(request, this.env, this.state.storage, Date.now(), true, this.managedTeardown);
-        return applied ? fixedJson(200, applied) :
+        return applied ? fixedJson(safeTeardownFailure(applied.failure) ? 409 : 200, applied) :
           fixedJson(409, { schemaVersion: 1, error: 'teardown_action_recovery_required' });
       }
       if (url.pathname === INTERNAL_TEARDOWNS_PATH && request.method === 'POST') {
@@ -4967,7 +5063,7 @@ export class AdminState {
       }
       if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/apply` && request.method === 'POST') {
         const applied = await processTeardownActionApply(request, this.env, this.state.storage);
-        return applied ? fixedJson(200, applied) :
+        return applied && !safeTeardownFailure(applied.failure) ? fixedJson(200, applied) :
           fixedJson(409, { schemaVersion: 1, error: 'teardown_action_recovery_required' });
       }
       if (url.pathname.startsWith(`${INTERNAL_TEARDOWNS_PATH}/`) && request.method === 'GET') {
