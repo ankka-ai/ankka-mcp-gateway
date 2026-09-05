@@ -16,9 +16,9 @@ import {
   withProviderFetch,
 } from './payload-lifecycle.mjs';
 
-// Exercise the real Worker against synthetic Cloudflare resource state. V1
-// keeps Team management read-only in the gateway; source and lifecycle tests
-// continue to verify customer-owned resource and recovery invariants.
+// Exercise the real Worker against synthetic Cloudflare resource state.
+// Current account-token management and retained source actions share the
+// receipt ownership, recovery and lifecycle invariants.
 const ADMIN = 'admin@example.com';
 const OWNER = 'owner@example.com';
 const MEMBER = 'member@example.com';
@@ -45,8 +45,10 @@ function teamProvider() {
       const intercepted = await hook?.(context);
       if (intercepted instanceof Response) return intercepted;
       const { record, state } = context;
-      if (record.method !== 'PUT' || !record.pathname.startsWith(`${API_APPS}/`)) return undefined;
-      const [appId, segment, policyId, extra] = record.pathname.slice(API_APPS.length + 1).split('/');
+      if (record.pathname === `/client/v4/accounts/${ACCOUNT_ID}/tokens/verify`) return envelope({ status: 'active' });
+      const appPath = record.pathname.startsWith(`${API_APPS}/`) ? API_APPS : `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+      if (record.method !== 'PUT' || !record.pathname.startsWith(`${appPath}/`)) return undefined;
+      const [appId, segment, policyId, extra] = record.pathname.slice(appPath.length + 1).split('/');
       assert.equal(segment, 'policies');
       assert.equal(extra, undefined);
       const policies = state.policies.get(appId);
@@ -68,6 +70,7 @@ async function fixture(run, claimInput) {
   const options = { provider };
   if (claimInput) options.claimInput = claimInput;
   const gateway = await installReadyGateway(options);
+  gateway.env.ANKKA_MANAGEMENT_TOKEN = 'synthetic-account-management-token-never-store';
   // Real Durable Object instances retain their operation queue. The shared
   // sequential lifecycle fixture recreates instances; retain them here so
   // concurrent API regressions exercise the actual runtime serialization.
@@ -253,17 +256,23 @@ async function prepareNewSource(gateway) {
   return { source, sources, ...await authorizeNewSource(gateway, source.id, sources.revision) };
 }
 
-async function authorizeNewSource(gateway, sourceId, revision) {
-  const response = await gateway.api('/api/source-actions', { method: 'POST', body: {
-    schemaVersion: 1, revision, sourceId,
-  } });
+// Build a retained pre-upgrade action to keep exercising the existing relay,
+// journal, cancellation and lifecycle recovery paths independently of new setup.
+async function authorizeNewSource(gateway, sourceId, revision, renewActionId = null) {
+  const source = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((item) => item.id === sourceId);
+  const claim = { actionId: renewActionId ?? `action_${Buffer.from(crypto.getRandomValues(new Uint8Array(24))).toString('base64url')}`,
+    actionKey: Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url'), actorEmail: ADMIN, accountId: ACCOUNT_ID, expiresAt: Date.now() + 600_000 };
+  const response = await gateway.env.ADMIN_STATE.get('v1:management').fetch(new Request(`https://admin-state.invalid/source-actions${renewActionId ? `/${renewActionId}/renew` : ''}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson({ schemaVersion: 1,
+      actionId: claim.actionId, sourceId, sourceRevision: revision, actorEmail: ADMIN,
+      issuedAt: claim.expiresAt - 600_000, expiresAt: claim.expiresAt,
+      actionKeyHash: await prefixedSha256(claim.actionKey), sourceHash: await prefixedSha256({
+        id: source.id, label: source.label, url: source.url, authMode: source.authMode,
+        onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools,
+      }),
+    }),
+  }));
   assert.equal(response.status, 200, await response.clone().text());
-  const prepared = await response.json();
-  // The dashboard hands the browser to the gateway's own operation page, never to the control plane.
-  assert.equal(new URL(prepared.handoffUrl).origin, MANAGEMENT_ORIGIN);
-  assert.equal(new URL(prepared.handoffUrl).pathname, '/__ankka/operation');
-  assert.equal(new URL(prepared.handoffUrl).search, '');
-  const claim = JSON.parse(Buffer.from(new URL(prepared.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
   return { claim };
 }
 
@@ -376,17 +385,19 @@ test('Team API requires matching administrator identity, same origin, exact sche
     assert.ok([400, 409].includes(response.status), await response.clone().text());
     assert.doesNotMatch(await response.text(), /new-person@example\.com|synthetic-team-action-grant/u);
   }
+  delete env.ANKKA_MANAGEMENT_TOKEN;
   const valid = await api('/api/team-actions', { method: 'POST', body: input });
   assert.equal(valid.status, 409);
-  assert.deepEqual(await valid.json(), { schemaVersion: 1, error: 'team_editing_managed_in_cloudflare' });
+  assert.deepEqual(await valid.json(), { schemaVersion: 1, error: 'team_action_conflict' });
   assertNoMutation(provider, baseline);
 }));
 
-test('V1 Team state is read-only and never provisions or accepts a permanent management credential', async () => fixture(async (gateway) => {
+test('missing management credential leaves Team read-only without provider writes', async () => fixture(async (gateway) => {
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
   const view = await gateway.view();
   const before = canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY));
   assert.equal(view.editingEnabled, false);
-  assert.equal(view.editingDisabledReason, 'managed_in_cloudflare');
+  assert.equal(view.editingDisabledReason, 'management_credential_missing');
   assert.equal(view.managementCredentialConfigured, false);
   assert.equal(Object.hasOwn(gateway.env, 'ANKKA_TEAM_MANAGEMENT_TOKEN'), false);
   const baseline = gateway.provider.requests.length;
@@ -395,7 +406,7 @@ test('V1 Team state is read-only and never provisions or accepts a permanent man
     body: changedRequest(view),
   });
   assert.equal(response.status, 409);
-  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_editing_managed_in_cloudflare' });
+  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_action_conflict' });
   assertNoMutation(gateway.provider, baseline);
   assert.equal(canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY)), before);
 }));
@@ -546,9 +557,10 @@ for (const initialState of ['before first Team view', 'after Team view']) {
     const next = { schemaVersion: 1, expectedRevision: team.revision,
       members: team.members.map((member) => member.email === ADMIN
         ? { ...member, sourceIds: [...member.sourceIds, prepared.source.id] } : member) };
+    delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
     const denied = await gateway.api('/api/team-actions', { method: 'POST', body: next });
     assert.equal(denied.status, 409);
-    assert.deepEqual(await denied.json(), { schemaVersion: 1, error: 'team_editing_managed_in_cloudflare' });
+    assert.deepEqual(await denied.json(), { schemaVersion: 1, error: 'team_action_conflict' });
     assert.deepEqual(gateway.provider.state.policies.get(ownership.resources[1].provider.id)[0].include,
       [{ everyone: {} }]);
   }));
@@ -575,7 +587,7 @@ for (const status of ['authorization_required', 'recovery_required']) {
     }
     const wrongKey = await gateway.apply({ ...prepared, claim: { ...prepared.claim, actionKey: 'Z'.repeat(43) } }, {}, null);
     assert.equal(wrongKey.status, 400);
-    assert.equal(gateway.provider.requests.length, baseline);
+    assert.deepEqual(gateway.provider.requests.slice(baseline).map(({ pathname }) => pathname), [`/client/v4/accounts/${ACCOUNT_ID}/tokens/verify`]);
     assert.equal(gateway.managementStorage.writes.length, storageWrites);
     assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), originalActions);
     assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), originalSources);
@@ -856,12 +868,7 @@ for (const [message, label] of [
 }
 
 async function renewPreparedSource(gateway, prepared) {
-  const response = await gateway.api(`/api/source-actions/${prepared.claim.actionId}/renew`, {
-    method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id },
-  });
-  assert.equal(response.status, 200, await response.clone().text());
-  const renewed = await response.json();
-  const claim = JSON.parse(Buffer.from(new URL(renewed.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
+  const { claim } = await authorizeNewSource(gateway, prepared.source.id, prepared.sources.revision, prepared.claim.actionId);
   assert.equal(claim.actionId, prepared.claim.actionId);
   assert.notEqual(claim.actionKey, prepared.claim.actionKey);
   return { ...prepared, claim };
@@ -994,7 +1001,7 @@ test('renewal refuses unknown Access application creation and leaves its evidenc
   assertNoMutation(gateway.provider, baseline);
 }));
 
-test('concurrent renewals rotate one key and retained resource drift prevents further writes', async () => fixture(async (gateway) => {
+test('concurrent token renewals complete one action without exposing a handoff', async () => fixture(async (gateway) => {
   const prepared = await prepareNewSource(gateway);
   gateway.provider.hook(({ record }) => record.method === 'PUT' && record.pathname.includes('/mcp/portals/')
     ? envelope(null, 503) : undefined);
@@ -1006,14 +1013,9 @@ test('concurrent renewals rotate one key and retained resource drift prevents fu
   })));
   assert.deepEqual(responses.map((response) => response.status).sort(), [200, 409]);
   const renewed = await responses.find((response) => response.status === 200).json();
-  const claim = JSON.parse(Buffer.from(new URL(renewed.handoffUrl).hash.slice(1), 'base64url').toString('utf8'));
-  const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
-  gateway.provider.state.servers.get(retained.resources[0].provider.id).hostname = 'https://changed.example.net/mcp';
-  const baseline = gateway.provider.requests.length;
-  const applied = await gateway.apply({ ...prepared, claim }, {}, null);
-  assert.equal(applied.status, 409);
-  assert.equal((await applied.json()).error, 'source_resource_drift');
-  assertNoMutation(gateway.provider, baseline);
+  assert.equal(renewed.status, 'succeeded');
+  assert.equal(renewed.actionId, prepared.claim.actionId);
+  assert.equal(Object.hasOwn(renewed, 'handoffUrl'), false);
 }));
 
 for (const createdBeforeFailure of [false, true]) {
@@ -1116,6 +1118,10 @@ for (const committedBeforeInterruption of [false, true]) {
       assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), retained);
     }
     assertNoMutation(gateway.provider, baseline);
+    if (!committedBeforeInterruption) {
+      assert.equal((await gateway.api('/api/team')).status, 503, 'uncertain portal ownership cannot be presented as a verified live view');
+      delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+    }
     const team = await gateway.view();
     assert.equal(team.sources.find((source) => source.id === prepared.source.id).status,
       committedBeforeInterruption ? 'installed' : 'draft');
@@ -1236,7 +1242,7 @@ test('new receipt hashes cannot be relabeled as legacy authority to grant access
       ? { ...member, sourceIds: [...member.sourceIds, prepared.source.id] } : member),
   }));
   assert.equal(response.status, 409);
-  assert.equal(gateway.provider.requests.length, baseline);
+  assert.deepEqual(gateway.provider.requests.slice(baseline).map(({ pathname }) => pathname), [`/client/v4/accounts/${ACCOUNT_ID}/tokens/verify`]);
 }));
 
 test('restoring Team from legacy and native source receipts never grants a new source or loses its compatibility floor', async () => fixture(async (gateway) => {
@@ -1336,7 +1342,7 @@ test('rollback authorized before a native mutation cannot begin below the subseq
   assert.equal(canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY)), before);
 }));
 
-test('a retained v16 proposal remains inspectable but cannot resume through the V1 gateway', async () => fixture(async (gateway) => {
+test('a retained proposal resumes locally but its old OAuth relay stays retired', async () => fixture(async (gateway) => {
   const input = changedRequest(await gateway.view());
   const legacy = await historicalPreparedTeam(gateway, input);
   const before = canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY));
@@ -1346,10 +1352,9 @@ test('a retained v16 proposal remains inspectable but cannot resume through the 
   assertNoMutation(gateway.provider, baseline);
   assert.equal(canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY)), before);
   const applied = await gateway.api('/api/team-actions', { method: 'POST', body: input });
-  assert.equal(applied.status, 409);
-  assert.deepEqual(await applied.json(), { schemaVersion: 1, error: 'team_editing_managed_in_cloudflare' });
-  assert.equal(canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY)), before);
-  assert.equal(gateway.provider.puts().length, 0);
+  assert.equal(applied.status, 200, await applied.clone().text());
+  assert.equal((await applied.json()).action.status, 'succeeded');
+  assert.ok(gateway.provider.puts().length > 0);
 }));
 
 for (const assignment of ['deny', 'members']) {
@@ -1546,4 +1551,91 @@ test('abandoning current consent expires its unstarted lifecycle lock without ch
   assert.deepEqual(gateway.storage.snapshot(), before);
   assert.equal((await first.send('apply')).status, 409);
   assert.equal(gateway.provider.deletes().length, 0);
+}));
+
+const MANAGEMENT_TOKEN = 'synthetic-account-management-token-never-store';
+
+test('account token reads live Team policies and applies a change without OAuth', async () => fixture(async (gateway) => {
+  gateway.env.ANKKA_MANAGEMENT_TOKEN = MANAGEMENT_TOKEN;
+  const before = await gateway.view();
+  assert.equal(before.editingEnabled, true);
+  assert.ok(before.observedAt);
+  const response = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(before) });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).action.status, 'succeeded');
+  const after = await gateway.view();
+  assert.ok(after.members.some(({ email }) => email === NEW_PERSON));
+  assert.doesNotMatch(JSON.stringify([...await gateway.managementStorage.list()]), /synthetic-account-management-token/);
+  assert.doesNotMatch(canonicalJson(after), /synthetic-account-management-token|handoffUrl/);
+}));
+
+test('live Team reads reconcile external membership and invalidate stale revisions', async () => fixture(async (gateway) => {
+  gateway.env.ANKKA_MANAGEMENT_TOKEN = MANAGEMENT_TOKEN;
+  const before = await gateway.view();
+  policy(gateway, 'mcp_portal').include.push({ email: { email: NEW_PERSON } });
+  const after = await gateway.view();
+  assert.ok(after.revision > before.revision);
+  assert.ok(after.members.some(({ email }) => email === NEW_PERSON));
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(before) });
+  assert.equal(response.status, 409);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('rejected management credential performs no writes and replacement restores reads', async () => fixture(async (gateway) => {
+  gateway.env.ANKKA_MANAGEMENT_TOKEN = MANAGEMENT_TOKEN;
+  gateway.provider.hook(({ record }) => record.pathname.endsWith('/tokens/verify') ? envelope(null, 403) : undefined);
+  const baseline = gateway.provider.requests.length;
+  assert.equal((await gateway.api('/api/team')).status, 503);
+  assert.equal((await gateway.api('/api/source-actions', { method: 'POST', body: {} })).status, 409);
+  assertNoMutation(gateway.provider, baseline);
+  gateway.env.ANKKA_MANAGEMENT_TOKEN = 'synthetic-replacement-account-token';
+  gateway.provider.hook(undefined);
+  assert.ok((await gateway.view()).observedAt);
+}));
+
+for (const committed of [false, true]) {
+  test(`Team resumes a lost policy-write response without losing its journal (committed: ${committed})`, async () => fixture(async (gateway) => {
+    const before = await gateway.view();
+    const input = changedRequest(before);
+    gateway.provider.hook(({ record, state }) => {
+      if (record.method !== 'PUT' || !record.pathname.includes('/policies/')) return undefined;
+      if (committed) {
+        const parts = record.pathname.split('/');
+        state.policies.set(parts.at(-3), [{ id: parts.at(-1), ...record.body }]);
+      }
+      return envelope(null, 503);
+    });
+    assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: input })).status, 409);
+    const retained = gateway.managementStorage.snapshot(TEAM_KEY);
+    assert.equal(retained.pendingAction.status, 'recovery_required');
+    assert.equal(retained.pendingAction.journal[0].phase, 'send_armed');
+    gateway.provider.hook(undefined);
+    const live = await gateway.view();
+    if (!committed) assert.ok(live.observedAt);
+    else assert.equal(live.observedAt, null, 'partial policy graph is not presented as a complete live membership snapshot');
+    const response = await gateway.api('/api/team-actions', { method: 'POST', body: input });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal((await response.json()).action.status, 'succeeded');
+  }));
+}
+
+test('new source applies with the account token, stays default-deny and exposes no consent URL', async () => fixture(async (gateway) => {
+  const current = await (await gateway.api('/api/sources')).json();
+  const saved = await gateway.api('/api/sources', { method: 'PUT', body: { schemaVersion: 1, revision: current.revision,
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+  } });
+  assert.equal(saved.status, 200);
+  const sources = await saved.json();
+  const source = sources.sources.find((item) => item.url === NEW_SOURCE_URL);
+  const response = await gateway.api('/api/source-actions', { method: 'POST', body: { schemaVersion: 1, revision: sources.revision, sourceId: source.id } });
+  assert.equal(response.status, 200, await response.clone().text());
+  const result = await response.json();
+  assert.equal(result.status, 'succeeded');
+  assert.equal(Object.hasOwn(result, 'handoffUrl'), false);
+  const team = await gateway.view();
+  assert.equal(team.members.some((member) => member.sourceIds.includes(source.id)), false);
+  for (const object of gateway.objects.values()) {
+    assert.doesNotMatch(JSON.stringify([...await object.storage.list()]), /synthetic-account-management-token/);
+  }
 }));

@@ -130,13 +130,12 @@ separate steps. Gateways still on the published v19 preview cannot add sources.
 
 - **Sources** is the home page, with a copyable MCP Gateway URL and a searchable
   source list. Expand a source to inspect its selected tools. When the installed
-  runtime enables installation, save and authorize a reviewed draft here.
+  runtime enables installation, save and install a reviewed draft here.
   New sources start denied; old prepared installation links cannot silently
   acquire the new default-deny authorization profile.
-- **Team** is read-only in V1. It shows the gateway's saved access snapshot and
-  shared source tools; manage membership and source audiences directly in
-  Cloudflare. Administrator rights remain fixed. See
-  [Team access](TEAM_ACCESS.md) for the manual workflow and recovery limits.
+- **Team** reads current Cloudflare policy membership, shows when it was
+  checked, and saves assignments using your gateway's management credential.
+  Administrator rights remain fixed. See [Team access](TEAM_ACCESS.md).
 - **Settings** checks the installed signed release channel, prepares an
   update or rollback, and contains the removal entry point in its danger zone.
   The sidebar footer shows the installed version and any available update. Older canary
@@ -144,9 +143,9 @@ separate steps. Gateways still on the published v19 preview cannot add sources.
   `/updates` as a redirect to `/settings`.
 
 Updates, rollback, and removal require a new short-lived Cloudflare
-authorization. Team writes are rejected in V1 and never fall back to hosted
-OAuth or a standing Worker credential. Source installation uses a separate
-short-lived installer authorization. Source draft saves do not request OAuth or
+authorization. Routine source installation and Team saves use the
+[account-owned management token](MANAGEMENT_TOKEN.md) stored in your Worker.
+Source draft saves do not request OAuth or
 grant access. The complete secret-free source-state record is bounded to 1 MiB
 of canonical UTF-8 JSON; a save that would cross the bound in its worst-case
 installed projection is rejected before Durable Object storage is changed.
@@ -318,7 +317,7 @@ Installer tools are `get_installer_status`, `prepare_deployment`,
 `prepare_deployment` takes no gateway fields; configuration happens in your
 Worker after the first approval.
 
-Dashboard tools cover Gateway capabilities and status, sources, read-only Team
+Dashboard tools cover Gateway capabilities and status, sources, live Team
 state and retained-action recovery, signed update review and handoffs, and
 recorded action status. See [the complete WebMCP tool contract](WEBMCP.md) for
 exact names, inputs, safe recovery, and browser-test instructions. No separate
@@ -329,9 +328,9 @@ just like the dashboard. Published v19 gateways keep them paused; the default-de
 candidate restores them without granting source access automatically.
 
 These tools call the same same-origin APIs as the visible interface. They add
-no independent mutation authority. V1 exposes Team state read-only and leaves
-membership changes in Cloudflare. Install/update/removal tools retain their
-reviewed short-lived authorization handoffs. An agent must not request or
+no independent mutation authority. Team saves use the visible dashboard and
+the customer management token. Source tools install directly with that token;
+update/removal tools retain their reviewed short-lived authorization handoffs. An agent must not request or
 receive the user's token or substitute tool metadata for required consent.
 
 ## Troubleshooting safely

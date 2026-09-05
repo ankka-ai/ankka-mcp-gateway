@@ -1,55 +1,33 @@
-# Retiring the Team-credential preview
+# Management-token release boundary
 
-Status: compatibility and cleanup guidance for an earlier canary preview. V1
-does not ship a customer-local Team policy editor or require a permanent
-Cloudflare management credential.
+Issue #123 introduces the optional `ANKKA_MANAGEMENT_TOKEN` customer Worker
+secret in the exact signed release contract. It does not revive the retired
+`ANKKA_TEAM_MANAGEMENT_TOKEN` contract or its OAuth relay.
 
-The former two-update bridge introduced an optional standing Team secret. That
-contract is no longer a release target. Do not publish, provision, or reactivate
-it as part of a V1 installation.
+## Fresh installation
 
-## Forward-update boundary
+Earlier runtimes verify a different exact contract and cannot accept this
+candidate through an ordinary in-dashboard update. While pre-users, qualify
+this release on a fresh installation. A transition for existing installations
+requires a separately reviewed bridge; this change does not silently broaden
+old signature or contract verification. Do not manually overwrite a live Worker
+to bypass its ownership state or release checks.
 
-The V1 signed release contract contains only the bootstrap secret required by
-the existing deployment lifecycle. It does not declare a Team-management
-binding.
+## Updates after setup
 
-The updater may accept the exact retired binding on the currently active
-preview version for one purpose: omit it from a reviewed forward candidate. It
-does not read, copy, inherit, rotate, or expose the secret value. Candidate
-readback fails if Cloudflare returns that binding on the new version.
+Compatible updates accept the optional management binding only as `secret_text`
+and preserve it through Cloudflare's strict secret inheritance. They never read
+its value. Unknown bindings and plaintext substitutes are rejected. The target
+release must match the new exact signed contract, so rollback to an incompatible
+older contract is unavailable. Existing lifecycle floors remain enforced.
 
-Rollback is refused when either the current or target version carries the
-retired binding. This prevents a normal code rollback from restoring standing
-authority in the active Worker.
+## Replacing and removing credentials
 
-## Customer cleanup
+Create the replacement account token directly in Cloudflare, replace the Worker
+secret, verify management access in Settings, then revoke the old token.
+Deleting a secret or Worker does not revoke its API token. Historical Worker
+versions may retain old bindings, so revoke at the provider to remove authority.
+The gateway has no token-creation or token-revocation permission.
 
-If your team created the old credential:
-
-1. Revoke the API token in Cloudflare. This is the step that removes provider
-   authority.
-2. Remove the retired Team-management secret from the active Worker.
-3. Review historical Worker versions according to your Cloudflare retention
-   policy; deleting the active binding alone does not erase old versions.
-4. Apply a reviewed forward release and verify that its exact binding list does
-   not contain the retired secret.
-
-Do not put a credential value in a repository, command argument, URL, log,
-screenshot, support ticket, or migration record. A forward update cannot revoke
-the separate API token on your behalf.
-
-## Retained action state
-
-Keep existing Team proposals and journals until their provider outcome is
-known. A definitely unstarted proposal may be canceled through its guarded
-existing endpoint. An armed, partial, or uncertain action requires comparison
-with the actual Cloudflare policies and manual reconciliation; token revocation
-does not prove that an earlier write was rolled back.
-
-The original lifecycle floor remains conservative after a possible Team write.
-Do not delete Durable Object records, rewrite release bookkeeping, or weaken
-receipt checks to make an update, rollback, or teardown proceed.
-
-See [Team access](TEAM_ACCESS.md) for the V1 manual workflow and future editor
-options.
+Do not delete pending operation journals or original receipts as a recovery
+shortcut. Restoring a credential does not prove a previous write was undone.

@@ -60,7 +60,9 @@ function actionLabel(action: SourceActionSummary): string {
   return actionLabels[action.state]
 }
 
-function actionGuidance(action: SourceActionSummary, pollingPaused: boolean): string {
+function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, accountToken: boolean): string {
+  if (accountToken && action.state === 'authorization_required') return 'This installation is prepared in your gateway. Check its status before taking another action. No new Cloudflare consent is needed.'
+  if (accountToken && action.state === 'authorization_expired') return 'This attempt expired before provisioning began. Cancel it, then install the saved draft again.'
   switch (action.state) {
     case 'authorization_required':
       return pollingPaused
@@ -71,23 +73,23 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean): st
     case 'applying':
       return 'The gateway is applying the source and verifying Cloudflare resources. Wait for a confirmed result before taking another action.'
     case 'succeeded':
-      return 'The source installation was verified. Review access in Cloudflare before sharing it with approved members.'
+      return 'The source installation was verified. Grant access in Team before sharing it with approved members.'
     case 'failed':
       return action.failureCode === 'source_action_denied'
         ? 'This authorization was cancelled. You can authorize the saved draft again.'
         : 'This attempt is closed. Review the saved draft before starting another authorization.'
     case 'recovery_required':
       if (action.failureCode === 'source_connection_required') {
-        return 'Authenticate the server in Cloudflare, keeping Require user auth off. Once its status is Ready, return here to renew consent and finish installation. Nobody has been assigned access.'
+        return 'Authenticate the server in Cloudflare, keeping Require user auth off. Once its status is Ready, return here to resume and finish installation. Nobody has been assigned access.'
       }
       if (action.failureCode === 'source_sync_required') {
-        return 'Open the server in Cloudflare and sync its capabilities. Resolve any connection error, then return when its status is Ready to renew consent and finish installation.'
+        return 'Open the server in Cloudflare and sync its capabilities. Resolve any connection error, then return when its status is Ready to resume and finish installation.'
       }
       if (action.failureCode === 'source_tools_mismatch') {
         return 'The synced source is missing one or more tools from your saved selection. Review its catalogue in Cloudflare and restore the selected tools before resuming. The gateway will keep your exact selection.'
       }
       return action.canRenew === true
-        ? 'Renew Cloudflare consent to resume this recorded installation. The gateway checks the retained resources before continuing.'
+        ? 'Resume this recorded installation using the gateway management credential. The gateway checks the retained resources before continuing.'
         : 'Provisioning may be incomplete or still finishing. Check status after the previous approval expires. The journal is retained; uncertain resource ownership requires review in Cloudflare.'
   }
 }
@@ -279,7 +281,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       const prepared = renewActionId === undefined
         ? await prepareSourceApply(sourceId)
         : await prepareSourceApply(sourceId, renewActionId)
-      window.location.assign(prepared.handoffUrl)
+      if (prepared.status === 'authorization_required') window.location.assign(prepared.handoffUrl)
     } catch { /* The provider keeps the safe error visible. */ }
   }
 
@@ -302,8 +304,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
       {showBigQuery && installationEnabled ? <BigQuerySetupForm disabled={applyBlocked || resumingBigQuery} /> : null}
 
-      {!installationEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
-      {installationEnabled ? <p className="notice-banner notice-warning mt-6">Before authorizing: once source provisioning starts, rollback below this runtime release is unavailable. Finish or recover any source action before removing your gateway. Saving a draft does not activate this restriction.</p> : null}
+      {!installationEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{sources.applyMode === 'account_token' ? <>Configure your Cloudflare management credential in <a href="/settings" className="underline">Settings</a> to enable source installation.</> : SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
+      {installationEnabled ? <p className="notice-banner notice-warning mt-6">Before installing: once source provisioning starts, rollback below this runtime release is unavailable. Finish or recover any source action before removing your gateway. Saving a draft does not activate this restriction.</p> : null}
 
       {sourceNotice ? (
         <div role="status" className={`notice-banner mt-6 notice-${sourceNotice.tone}`}>
@@ -337,7 +339,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   <h3 className="text-sm font-semibold text-kumo-strong">{sources.sources.find((source) => source.id === action.sourceId)?.label ?? action.sourceId}</h3>
                   <StatusPill tone={action.state === 'succeeded' ? 'ready' : action.state === 'recovery_required' || action.state === 'authorization_expired' ? 'attention' : 'waiting'}>{actionLabel(action)}</StatusPill>
                 </div>
-                <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(action, sourceActionsPollingPaused)}</p>
+                <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(action, sourceActionsPollingPaused, sources.applyMode === 'account_token')}</p>
                 <p className="mt-2 text-xs leading-5 text-kumo-subtle">
                   Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
                 </p>
@@ -351,12 +353,12 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                 <BigQueryFailure setup={bigQuery?.setups.find((setup) => setup.actionId === action.actionId)} />
                 {action.canRenew === true && action.state === 'recovery_required' && !bigQuery?.setups.some((setup) => setup.actionId === action.actionId && setup.recoveryRequired) ? (
                   <div className="mt-3">
-                    <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Renew consent and resume</Button>
+                    <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Resume installation</Button>
                   </div>
                 ) : null}
                 {action.canCancel ? (
                   <div className="mt-3 flex flex-wrap items-center gap-3">
-                    <Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void cancelSourceApply(action.actionId).catch(() => {})}>Cancel authorization</Button>
+                    <Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void cancelSourceApply(action.actionId).catch(() => {})}>Cancel installation</Button>
                     <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">The existing consent link will stop working. You can then authorize the saved draft again.</p>
                   </div>
                 ) : action.state === 'authorization_required' || action.state === 'authorization_expired' ? (

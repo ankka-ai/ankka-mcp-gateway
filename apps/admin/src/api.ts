@@ -21,6 +21,11 @@ const preparedActionSchema = v.strictObject({
   expiresAt: v.string(),
   handoffUrl: v.string(),
 })
+const sourceApplyResultSchema = v.union([
+  preparedActionSchema,
+  v.strictObject({ schemaVersion: v.literal(1), actionId: v.string(),
+    status: v.literal('succeeded'), expiresAt: v.string() }),
+])
 const controlPlaneOriginSchema = v.pipe(
   v.string(),
   v.check(validControlPlaneOrigin),
@@ -60,7 +65,7 @@ const managedSourceSchema = v.strictObject({
 const managedSourcesSchema = v.strictObject({
   schemaVersion: v.literal(1),
   revision: v.number(),
-  applyMode: v.literal('oauth_per_action'),
+  applyMode: v.picklist(['oauth_per_action', 'account_token']),
   installationEnabled: v.optional(v.boolean(), false),
   sources: v.array(managedSourceSchema),
 })
@@ -217,9 +222,10 @@ const teamSchema = v.strictObject({
   revision: v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(Number.MAX_SAFE_INTEGER - 1)),
   editingEnabled: v.boolean(),
   editingDisabledReason: v.nullable(v.picklist([
-    'managed_in_cloudflare', 'release_review_required', 'lifecycle_action_pending',
+    'managed_in_cloudflare', 'release_review_required', 'lifecycle_action_pending', 'management_credential_missing',
   ])),
   managementCredentialConfigured: v.boolean(),
+  observedAt: v.optional(v.nullable(v.string())),
   members: teamMembersSchema,
   adminEmails: v.pipe(v.array(teamEmailSchema), v.minLength(1)),
   sources: v.pipe(v.array(v.strictObject({
@@ -258,6 +264,7 @@ export interface SourceDraftInput {
   enabledTools: string[]
 }
 
+export type SourceApplyResult = v.InferOutput<typeof sourceApplyResultSchema>
 export type PreparedAction = v.InferOutput<typeof preparedActionSchema>
 export type SourceAction = v.InferOutput<typeof sourceActionSchema>
 export type SourceActionState = v.InferOutput<typeof sourceActionStateSchema>
@@ -287,7 +294,7 @@ export interface GatewayAdminApi {
   getUpdate(): Promise<RuntimeUpdate>
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
-  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<PreparedAction>
+  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<SourceApplyResult>
   getSourceActions(): Promise<SourceActions>
   getSourceAction(actionId: string): Promise<SourceAction>
   cancelSourceAction(actionId: string): Promise<SourceAction>
@@ -314,6 +321,7 @@ const ERROR_MESSAGES = new Map([
   ['webmcp_handoff_invalid', 'The authorization handoff could not be verified. Check the recorded action before retrying.'],
   ['access_required', 'Your Cloudflare Access session is no longer active. Sign in again and refresh.'],
   ['origin_required', 'Reload this management page before making changes.'],
+  ['management_credential_required', 'Configure a valid gateway management token in Cloudflare before installing sources.'],
   ['team_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
   ['team_invalid', 'Review the email addresses and installed source selections before trying again.'],
   ['team_action_conflict', 'A team access change is already in progress. Refresh to review or resume it.'],
@@ -328,8 +336,8 @@ const ERROR_MESSAGES = new Map([
   ['team_policy_drift', 'Cloudflare access policies no longer match the saved configuration. Review the Cloudflare policies before trying again. This page will not reset them automatically.'],
   ['team_release_review_required', 'Team access editing is not available in this gateway release.'],
   ['team_editing_managed_in_cloudflare', 'Team access is managed directly in Cloudflare for this release. No gateway management credential is accepted.'],
-  ['team_management_credential_missing', 'This legacy Team action cannot continue in the gateway. Review and reconcile its Access policies directly in Cloudflare.'],
-  ['team_management_credential_invalid', 'This legacy Team action cannot continue in the gateway. Review and reconcile its Access policies directly in Cloudflare.'],
+  ['team_management_credential_missing', 'Configure your gateway management token in Cloudflare Settings, then retry.'],
+  ['team_management_credential_invalid', 'Cloudflare rejected the gateway management token. Check its permissions or replace it in Cloudflare.'],
   ['team_prepare_failed', 'The team access request could not be confirmed. Refresh to check whether a change was recorded before trying again.'],
   ['team_cancel_failed', 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.'],
   ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable after source provisioning or team policy changes begin. A compatible removal release is required; do not discard the ownership or recovery records.'],
@@ -487,9 +495,9 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
 
-  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<PreparedAction> {
+  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<SourceApplyResult> {
     const path = renewActionId === undefined ? '/api/source-actions' : `/api/source-actions/${encodeURIComponent(renewActionId)}/renew`
-    return this.#request(path, preparedActionSchema, {
+    return this.#request(path, sourceApplyResultSchema, {
       method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, sourceId }),
     })
   }

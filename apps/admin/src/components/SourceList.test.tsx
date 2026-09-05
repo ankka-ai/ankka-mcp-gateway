@@ -58,13 +58,13 @@ describe('SourceList', () => {
     const onAuthorize = vi.fn()
     const { rerender } = render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
 
-    await user.click(screen.getByRole('button', { name: 'Authorize and apply' }))
+    await user.click(screen.getByRole('button', { name: 'Install source' }))
     expect(onAuthorize).toHaveBeenCalledExactlyOnceWith(sources[1].id)
 
     rerender(<SourceList sources={sources} installationEnabled={false} isBusy={false} onAuthorize={onAuthorize} />)
     expect(screen.getByRole('button', { name: 'Installation unavailable' })).toBeDisabled()
     rerender(<SourceList sources={sources} installationEnabled isBusy onAuthorize={onAuthorize} />)
-    expect(screen.getByRole('button', { name: /Authorize and apply/u })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Install source/u })).toBeDisabled()
   })
 
   it('shows an empty filtered state without hiding the filters', async () => {

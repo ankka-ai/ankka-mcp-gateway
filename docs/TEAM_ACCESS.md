@@ -1,16 +1,20 @@
-# Team access in V1
+# Team access
 
-V1 manages Team membership directly in Cloudflare. The gateway Team page is
-read-only: it can show the access snapshot saved with the installation and any
-retained legacy action, but it does not write Access policies.
+Team reads current Cloudflare membership and displays its observation time.
+With the [customer-owned management token](MANAGEMENT_TOKEN.md) configured,
+administrators save source assignments directly in the gateway. The token stays
+in your Cloudflare account. Administrator identities remain fixed, and new
+sources start denied to everyone until an explicit Team grant.
 
-This keeps the credential boundary simple:
+A missing credential leaves the saved snapshot available, clearly unverified.
+Provider failures or unexpected policy shapes block verified reads and writes.
+Refresh before editing after an external change; stale revisions are rejected.
+An interrupted save retains its exact proposal and write journal for explicit
+resume. Do not replace it with a different proposal or delete its state.
 
-- no permanent Cloudflare management credential is provisioned or required;
-- installer and later-operation OAuth grants remain temporary and
-  operation-scoped;
-- source-provider credentials remain in your Cloudflare account; and
-- changing Team membership does not send a token, policy, or roster to Ankka.
+The manual procedures below remain useful for provider-side inspection and
+session revocation. Historical canary observations are not proof that the new
+account-token flow has been qualified live.
 
 ## Revocation qualification
 
@@ -127,53 +131,22 @@ boundaries intact:
 6. Verify one intended identity and one denied identity with harmless read-only
    calls. Hiding a tool from a list is not enforcement proof.
 
-The gateway's saved Team snapshot is not a live Cloudflare policy read. Changes
-made in Cloudflare may not appear on the Team page, so Cloudflare remains the
-source of truth for V1 membership.
+The gateway checks membership at the displayed observation time. It cannot
+promise continuously fresh state or represent the effective permissions of an
+already-connected client.
 
 <a id="recovery-and-lifecycle-limits"></a>
 
-## Legacy preview recovery
+## Recovery and lifecycle limits
 
-Earlier preview source included an optional standing Team credential and local
-policy-write path. That path is retired; the V1 Worker rejects new Team writes.
+Keep original receipts and pending write journals. Resume only the exact
+recorded change after restoring the token or reconciling unexpected provider
+state. An ambiguous write is not undone by revoking its credential. Lifecycle
+floors continue to block incompatible rollback and legacy removal paths.
 
-If you tested the old preview:
-
-1. Revoke the old Team API token in Cloudflare. Removing a Worker secret does
-   not revoke the token.
-2. Remove the legacy Team-management secret binding from the active Worker.
-   Historical Worker versions may still contain the old binding, so revocation
-   is the authoritative removal of provider access.
-3. Apply only a reviewed forward release whose contract omits the binding. The
-   updater may recognize the legacy binding to remove it, but never reads or
-   inherits its value.
-4. Do not roll back into or out of a version carrying the retired binding.
-5. If a retained action shows an armed, partial, or uncertain policy write,
-   compare its journal with the actual Cloudflare policies and reconcile it
-   manually. Do not delete the journal or claim that revocation rolled the
-   policy back.
-
-A definitely unstarted retained proposal can still use the existing guarded
-cancel path. Any action with possible provider writes continues to block
-automatic teardown and incompatible rollback until a separately reviewed
-recovery path exists.
-
-## Future Team editor options
-
-A future editor has two realistic paths under Cloudflare's current model:
-
-1. Revisit resource-scoped member OAuth if Cloudflare fixes the beta gap for
-   individual reusable-policy API requests. The canary must prove positive and
-   negative access for the exact policy and every endpoint used.
-2. Offer an explicit enterprise opt-in account token with **Access: Policies
-   Write**, guarded by exact application-level ownership checks while clearly
-   accepting that Cloudflare itself does not isolate the token to Ankka
-   policies.
-
-The second option must not become the default. It would be account-wide standing
-authority, not an exact-policy credential, even if the Worker promises to touch
-only receipt-owned resources.
+The retired `ANKKA_TEAM_MANAGEMENT_TOKEN` binding is not reused. Revoke any old
+preview token and remove its binding. See [Upgrade boundary](TEAM_UPGRADE.md)
+for the new contract and fresh-install requirement.
 
 <a id="revocation-and-acceptance"></a>
 

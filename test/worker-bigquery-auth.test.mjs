@@ -85,7 +85,7 @@ test('BigQuery public discovery is OAuth protected and never approves its connec
     const managed = await (await request('/api/sources', 'GET')).json();
     const expectedRefusal = managed.installationEnabled === true
       ? { schemaVersion: 1, error: BLOCK }
-      : { schemaVersion: 1, error: 'source_addition_paused', retryable: false };
+      : { schemaVersion: 1, error: 'source_google_shared_oauth_unsupported' };
     const before = structuredClone(storage.writes);
     const discoveredCalls = calls.length;
     for (const authMode of ['none', 'oauth']) {
@@ -110,7 +110,7 @@ test('BigQuery legacy drafts cannot start a Cloudflare authorization or provider
       const managed = await (await request('/api/sources', 'GET')).json();
       const expectedRefusal = managed.installationEnabled === true
         ? { schemaVersion: 1, error: BLOCK }
-        : { schemaVersion: 1, error: 'source_addition_paused', retryable: false };
+        : { schemaVersion: 1, error: 'management_credential_required' };
       const before = structuredClone(storage.writes);
       const response = await request('/api/source-actions', 'POST', {
         schemaVersion: 1, revision: 1, sourceId: source.id,

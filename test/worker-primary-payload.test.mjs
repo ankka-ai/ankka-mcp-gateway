@@ -888,7 +888,7 @@ test('team inspection requires an administrator and V1 rejects policy preparatio
     assert.ok(body.members.every((person) => canonicalJson(person.sourceIds) === canonicalJson([body.sources[0].id])));
     assert.equal(body.sources[0].status, 'installed');
     assert.equal(body.editingEnabled, false);
-    assert.equal(body.editingDisabledReason, 'managed_in_cloudflare');
+    assert.equal(body.editingDisabledReason, 'management_credential_missing');
     assert.equal(body.managementCredentialConfigured, false);
     assert.equal(body.pendingAction, null);
     assert.equal(body.proposedMembers, null);
@@ -902,7 +902,7 @@ test('team inspection requires an administrator and V1 rejects policy preparatio
       body: JSON.stringify({ schemaVersion: 1, expectedRevision: body.revision, members: body.members, editingEnabled: true }),
     }), { ...env, TEAM_ACCESS_ENABLED: 'true' });
     assert.equal(save.status, 409);
-    assert.equal((await save.json()).error, 'team_editing_managed_in_cloudflare');
+    assert.equal((await save.json()).error, 'team_action_conflict');
     assert.equal((await worker.fetch(new Request('https://other.example.com/api/team', { headers }), env)).status, 503);
     assert.equal((await worker.fetch(new Request('https://manage.example.com/api/team', { method: 'DELETE', headers }), env)).status, 405);
     assert.equal((await worker.fetch(new Request(`https://manage.example.com/api/team-actions/action_${'A'.repeat(32)}`, { headers }), env)).status, 404);
@@ -1746,7 +1746,7 @@ test('management API preserves bounded discovery, draft capacity and shared oper
     assert.equal(initial.status, 200);
     const initialSources = await initial.json();
     assert.equal(initialSources.revision, 1);
-    assert.equal(initialSources.applyMode, 'oauth_per_action');
+    assert.equal(initialSources.applyMode, 'account_token');
     assert.deepEqual(initialSources.sources.map(({ status, url }) => ({ status, url })), [{
       status: 'installed', url: 'https://source.example.net/mcp',
     }]);
@@ -1790,8 +1790,8 @@ test('management API preserves bounded discovery, draft capacity and shared oper
     }), env);
     assert.equal(saved.status, 200);
     let currentSources = await saved.json();
-    assert.equal(currentSources.installationEnabled, true);
-    assert.equal(initialSources.installationEnabled, true);
+    assert.equal(currentSources.installationEnabled, false);
+    assert.equal(initialSources.installationEnabled, false);
     assert.equal(mcpRequests.length, expectedCatalogueCursors.length * 2);
     assert.deepEqual(catalogueCursors, [...expectedCatalogueCursors, ...expectedCatalogueCursors]);
 
@@ -1804,7 +1804,7 @@ test('management API preserves bounded discovery, draft capacity and shared oper
       }), env);
       assert.equal(prepared.status, path === '/api/source-actions' ? 409 : 404);
       assert.deepEqual(await prepared.json(), path === '/api/source-actions'
-        ? { schemaVersion: 1, error: 'source_action_conflict', reason: 'draft_changed' }
+        ? { schemaVersion: 1, error: 'management_credential_required' }
         : { schemaVersion: 1, error: 'source_action_not_found' });
     }
     assert.equal(cloudflare.requests.length, sourceMutationStart);
@@ -1919,7 +1919,7 @@ test('management API preserves bounded discovery, draft capacity and shared oper
     ), env);
     assert.equal(maximumSavedResponse.status, 200);
     currentSources = await maximumSavedResponse.json();
-    assert.equal(currentSources.installationEnabled, true);
+    assert.equal(currentSources.installationEnabled, false);
     assert.deepEqual(maximumCursors, [...expectedMaximumCursors, ...expectedMaximumCursors]);
 
     for (const [url, error] of [

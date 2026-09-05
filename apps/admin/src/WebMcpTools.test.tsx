@@ -98,7 +98,7 @@ describe('WebMcpTools', () => {
     expect(result.ok).toBe(!uncertain)
     expect(await screen.findByText('Saved by an agent')).toBeVisible()
     expect(screen.queryByText('No sources yet')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Install source' })).toBeEnabled()
     expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })

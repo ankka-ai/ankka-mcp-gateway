@@ -42,11 +42,13 @@ discarded.
 Revocation is a provider operation and may be unconfirmed. Discarding a local
 copy does not prove provider-side revocation.
 
-V1 has no permanent Cloudflare management credential. Team membership and
-source audiences are managed directly in Cloudflare; the gateway does not
-accept a standing API token for Team policy writes. Installer OAuth grants,
-source credentials, and inbound Access tokens cannot be repurposed for that
-work.
+Routine source installation and Team policy management use the optional
+`ANKKA_MANAGEMENT_TOKEN` secret in the customer's Worker. The administrator
+creates this account-owned credential and enters it directly in Cloudflare;
+Ankka-hosted infrastructure never receives it. It is used only with fixed
+Cloudflare API operations and is never persisted in Durable Object records or
+returned to the browser. Deployment, updates, DNS, teardown and upstream
+credentials retain separate authority. See [Management token](MANAGEMENT_TOKEN.md).
 
 Cloudflare support confirmed that account-owned and user-owned API tokens can
 scope resources only at User, Account, or Zone level. **Access: Policies
@@ -54,8 +56,7 @@ Write** on one account therefore authorizes every Access policy in that account;
 it cannot be restricted to one reusable Ankka policy. Per-policy Access Policy
 Admin scoping belongs to the human/member IAM model, whose resource-scoped OAuth
 path currently has a beta gap for individual policy API requests. See
-[Team access](TEAM_ACCESS.md) for the V1 manual workflow and the two future
-options that remain under consideration.
+[Team access](TEAM_ACCESS.md) for policy and existing-session limitations.
 
 ## Authorization
 
@@ -87,13 +88,14 @@ The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
 store Cloudflare OAuth grants or upstream tokens.
 
-The Team page is read-only in V1. It can show the gateway's saved snapshot and
-any retained legacy proposal, but changes made directly in Cloudflare are not
-projected back into that snapshot. The Worker rejects new Team policy-write
-requests and does not read a standing management credential. A definitely
-unstarted legacy proposal may still be canceled through its existing guarded
-path; uncertain writes retain their evidence for manual reconciliation rather
-than being called a rollback.
+The Team page reads receipt-owned policies live and records an observation time.
+A changed live audience advances the local revision before a new proposal can
+be saved. Writes verify the exact owned application, sole policy, audience and
+Portal mapping, then persist a send journal before each provider write. An
+ambiguous response retains the exact proposal for recovery; it is not a rollback.
+An unavailable or unrecognized live policy graph is never labeled verified.
+Policy membership does not guarantee effective access or immediate revocation
+of previously issued sessions.
 
 The default-deny source-onboarding candidate creates each new source with one
 exact deny-Everyone policy and verifies the complete policy list before Portal

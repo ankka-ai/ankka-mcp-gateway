@@ -141,7 +141,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
         },
         team: {
           editingEnabled: team.editingEnabled, editingDisabledReason: team.editingDisabledReason,
-          management: 'cloudflare_dashboard', revision: team.revision, pendingAction: team.pendingAction,
+          management: team.editingEnabled ? 'customer_gateway' : 'cloudflare_dashboard', revision: team.revision, pendingAction: team.pendingAction,
         },
         runtimeActions: { authorization: 'fresh_cloudflare_oauth', statusTool: 'get_gateway_runtime_action' },
         sourceAuthenticationManagement: { available: false, reason: 'not_supported_by_gateway_api' },
@@ -154,7 +154,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       { type: 'object', additionalProperties: false, properties: { url: { type: 'string', format: 'uri', maxLength: 2048 } }, required: ['url'] },
       v.strictObject({ url: v.pipe(v.string(), v.maxLength(2048), v.url()) }),
       { ...readOnly, openWorldHint: true, untrustedContentHint: true }, ({ url }) => api.discoverSource(url)),
-    tool('get_gateway_team', 'Read the saved Team roster, fixed administrators, installed-source selections, revision, and any recorded proposal. Saved state is not a fresh live Access check.', noInput, empty, readOnly, () => api.getTeam()),
+    tool('get_gateway_team', 'Read Team policy membership, fixed administrators, revision, observation time and any recorded proposal. A non-null observedAt identifies the live policy read; a null value is an unverified saved snapshot. This does not guarantee effective access or revoke existing sessions.', noInput, empty, readOnly, () => api.getTeam()),
     tool('get_gateway_team_action', 'Read a recorded Team action. Partial/unknown outcomes are not a rollback; inspect get_gateway_team before exact recovery.', actionInput, actionSchema, readOnly, ({ actionId }) => api.getTeamAction(actionId)),
     tool('cancel_gateway_team_action', 'Cancel only a recorded, explicitly cancelable zero-write Team proposal. Does not undo policy writes or restore old access.', actionInput, actionSchema, mutation, async ({ actionId }) => {
       const action = await api.getTeamAction(actionId)
@@ -215,7 +215,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       if (!current.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
       return api.saveSourceDraft(current.revision, source)
     }))
-    tools.push(tool('apply_mcp_source', 'Prepare a one-time OAuth handoff for an exact saved source draft only when no recorded action blocks it. Use list_mcp_source_actions after slow consent or a lost response; do not retry or recover the grant. Installation starts denied to everyone; operator connection and an explicit Team grant are separate steps. Before the first provider write, installation blocks older-runtime rollback; preparation alone does not. Finish or recover this action before gateway removal. Return the authorization URL to the user; never approve it for them or request their token.', {
+    tools.push(tool('apply_mcp_source', 'Install an exact saved source draft using the credential stored in this gateway, only when no recorded action blocks it. Use list_mcp_source_actions after a lost response; never blindly replay a write. Installation starts denied to everyone; operator connection and an explicit Team grant are separate steps. Before the first provider write, installation blocks older-runtime rollback; preparation alone does not. Finish or recover this action before gateway removal. Upstream provider consent remains a separate user action. Never request or handle the management token.', {
       type: 'object', additionalProperties: false, required: ['sourceId'], properties: { sourceId: { type: 'string', pattern: SOURCE_ID } },
     }, v.strictObject({ sourceId: v.pipe(v.string(), v.regex(new RegExp(SOURCE_ID, 'u'))) }), mutation, async ({ sourceId }) => {
       const current = await api.getSources()
@@ -230,7 +230,8 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
           sourceActions.actions.some((action) => action.actionId === blocking.actionId && action.state === 'recovery_required') ? 'recovery_required' : 'source_pending',
         action: blocking,
       })
-      return handoff(api, () => api.prepareSourceAction(current.revision, sourceId))
+      const result = await api.prepareSourceAction(current.revision, sourceId)
+      return result.status === 'succeeded' ? result : handoff(api, async () => result)
     }))
   }
   return tools
