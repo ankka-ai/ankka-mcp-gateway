@@ -15,16 +15,23 @@ enforces the exact versions on every pull request.
 nvm install   # or: fnm install / mise install
 nvm use
 npm ci
-npm run check
+npm run check:fast
 ```
 
 Use `npm ci` for normal setup and verification. Use `npm install` only when
 intentionally changing dependencies, and commit the manifest and lockfile
 changes together.
 
-While iterating, `npm run check:fast` runs the lint, typecheck, public
-boundary, and unit-test subset in well under a minute. `npm run check` is the
-full release gate and matches what continuous integration runs.
+Use `npm run check:code` for lint and root typecheck feedback. Run focused
+workspace tests for the behavior you change, then `npm run check:fast` before
+opening a pull request. The fast gate checks every app's types, builds the
+admin and adapters, runs their tests and the core tests, and checks the public
+boundary. It omits the installer deployment builds and installer test suite.
+
+CI runs the full `npm run check` gate in parallel and must pass before merge.
+Run it locally when diagnosing a CI failure or preparing a release; ordinary
+pull requests do not need a second full local run. A passing check only applies
+to the source it checked. See [Operations](docs/OPERATIONS.md) for commands.
 
 For local interface work, run:
 
@@ -80,7 +87,7 @@ or existing document paths. Those are compatibility contracts, not labels.
 - Record transferred or vendored material in [ORIGINS.md](ORIGINS.md) and
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Before opening a pull request, run `npm run check` from a clean checkout and
+Before opening a pull request, run `npm run check:fast` and focused tests, and
 describe any effect on credential custody, authorization, telemetry, updates,
 rollback, or removal.
 
@@ -91,3 +98,11 @@ separate CLA or DCO process at this time.
 
 For security reports, follow [SECURITY.md](SECURITY.md) instead of opening a
 public issue.
+
+## Updating deployment tooling
+
+When bumping Wrangler, restate its version, lockfile path, and tool-file
+locations in `apps/installer/scripts/generate-reviewed-canary.mjs` and its test.
+Keep the esbuild pin aligned with Wrangler's bundled esbuild. These pins bind
+the reviewed deployment artifacts to the toolchain; they are not general
+requirements for routine product edits.
