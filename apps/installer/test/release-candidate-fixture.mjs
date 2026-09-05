@@ -71,6 +71,8 @@ export async function releaseCandidateCheckout(files = FIXTURE_PAYLOAD) {
   await writeFile(path.join(installerRoot, 'tsconfig.json'), JSON.stringify({
     compilerOptions: { target: 'ES2022', module: 'ESNext' },
   }));
+  await writeFile(path.join(installerSourceRoot, 'constants.ts'),
+    "export const PUBLIC_ORIGIN = 'https://deploy.ankka.ai';\n");
   await writeFile(path.join(installerSourceRoot, 'customer-gateway-entrypoint.ts'), `
     import runtime, { AdminState } from '../../../payload/worker/index.js';
     export { AdminState };
@@ -78,10 +80,12 @@ export async function releaseCandidateCheckout(files = FIXTURE_PAYLOAD) {
   `);
   await writeFile(path.join(installerSourceRoot, 'customer-gateway-bootstrap-entrypoint.ts'), `
     import { AdminState as RuntimeAdminState } from '../../../payload/worker/index.js';
+    import { PUBLIC_ORIGIN } from './constants';
     declare const __ANKKA_FINAL_RUNTIME_SOURCE__: string;
     export class AdminState extends RuntimeAdminState {}
     export default {
-      fetch() {
+      fetch(request, env) {
+        if (env.ANKKA_INSTALLER_ORIGIN !== PUBLIC_ORIGIN) return new Response(null, { status: 503 });
         return new Response(String(__ANKKA_FINAL_RUNTIME_SOURCE__.length));
       },
     };

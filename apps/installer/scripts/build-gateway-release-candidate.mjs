@@ -258,6 +258,15 @@ function customerWorkerOriginPlugin(sourceRoot, controlPlaneOrigin, workerSource
   return Object.freeze({
     name: 'ankka-customer-worker-origin',
     setup(build) {
+      build.onLoad({ filter: /apps\/installer\/src\/constants\.ts$/ }, async (args) => {
+        const expected = path.join(sourceRoot, 'apps', 'installer', 'src', 'constants.ts');
+        if (path.resolve(args.path) !== expected) fail('worker_control_plane_origin_anchor_invalid');
+        const source = await readFile(expected, 'utf8');
+        const declaration = "export const PUBLIC_ORIGIN = 'https://deploy.ankka.ai';";
+        if (source.split(declaration).length !== 2) fail('worker_control_plane_origin_anchor_invalid');
+        return { contents: source.replace(declaration,
+          `export const PUBLIC_ORIGIN = ${JSON.stringify(controlPlaneOrigin)};`), loader: 'ts' };
+      });
       build.onLoad({ filter: /cloudflare-code-relay\.ts$/ }, async (args) => {
         const expected = path.join(sourceRoot, 'apps', 'installer', 'src', 'cloudflare-code-relay.ts');
         if (path.resolve(args.path) !== expected) fail('worker_control_plane_origin_anchor_invalid');

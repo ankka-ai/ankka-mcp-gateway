@@ -1,6 +1,7 @@
 import { createHash, generateKeyPairSync } from 'node:crypto';
 import { readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
@@ -137,6 +138,13 @@ describe('build-gateway-release-candidate', () => {
       const outputRoot = await writeReleaseCandidate(candidate, checkout.output);
       expect((await readFile(path.join(outputRoot, 'payload/worker/index.js'), 'utf8')))
         .toBe(worker.bytes.toString('utf8'));
+      const bootstrapPath = path.join(checkout.sandbox, 'bootstrap.mjs');
+      const bootstrapBytes = candidate.files.find(({ record }) => record.path === 'payload/worker-bootstrap/index.js').bytes;
+      await writeFile(bootstrapPath, bootstrapBytes);
+      const { default: bootstrap } = await import(pathToFileURL(bootstrapPath).href);
+      const request = new Request('https://shell.example.com/__ankka/install/status');
+      expect(bootstrap.fetch(request, { ANKKA_INSTALLER_ORIGIN: isolatedOrigin }).status).toBe(200);
+      expect(bootstrap.fetch(request, { ANKKA_INSTALLER_ORIGIN: 'https://deploy.ankka.ai' }).status).toBe(503);
     } finally {
       await checkout.cleanup();
     }
