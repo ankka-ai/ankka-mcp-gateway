@@ -150,6 +150,8 @@ test('generated admin distribution carries the project and complete production d
   const expectedPackages = [];
   for (const [relative, value] of Object.entries(lock.packages)) {
     if (!relative.startsWith('node_modules/') || value.dev === true || value.link === true) continue;
+    if (value.optional === true && (Array.isArray(value.os) || Array.isArray(value.cpu)) &&
+        /(?:^|\/)node_modules\/(?:@typescript\/typescript-[^/]+|lightningcss-[^/]+|fsevents)$/u.test(relative)) continue;
     let manifest;
     try {
       manifest = JSON.parse(await readFile(new URL(`../${relative}/package.json`, import.meta.url), 'utf8'));
