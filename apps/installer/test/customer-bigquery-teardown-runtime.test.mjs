@@ -50,7 +50,10 @@ async function fixture(run, { stopAfter, knownPending = false, portalPending = f
     return { async fetch(request) {
       const invocation = { name, count: 0 };
       invocationStack.push(invocation);
-      try { return await instances.get(name).fetch(request); }
+      try {
+        if (!instances.has(name)) gateway.env.ADMIN_STATE.get(name);
+        return await instances.get(name).fetch(request);
+      }
       finally {
         invocationStack.pop(); invocationCounts.push(invocation);
         expect(invocation.count, name).toBeLessThanOrEqual(50);
@@ -128,11 +131,44 @@ async function fixture(run, { stopAfter, knownPending = false, portalPending = f
     expect(action.status, await applied.clone().text()).toBe(expected);
     if (action.status === 'succeeded') expect(applied.status).toBe(200);
     }
-    await run({ ...gateway, storage, bridge, bridges, runtime, teardown, invocationCounts, sourceAction: action });
+    await run({ ...gateway, storage, bridge, bridges, runtime, teardown, invocationCounts, sourceAction: action, restart: () => instances.clear() });
   });
 }
 
 describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
+  for (const applied of [false, true]) it(`verifies Access DELETE 202 before recording absence (${applied})`, async () => fixture(async (test) => {
+    let accepted = false;
+    test.provider.intercept(({ record, state }) => {
+      if (accepted || record.method !== 'DELETE' || !record.pathname.includes('/policies/')) return;
+      accepted = true;
+      if (applied) {
+        const parent = record.pathname.split('/').at(-3), id = record.pathname.split('/').at(-1);
+        state.policies.set(parent, state.policies.get(parent).filter((policy) => policy.id !== id));
+      }
+      return Response.json({ success: true, result: null }, { status: 202 });
+    });
+    const first = await test.teardown();
+    const response = await first.send('apply');
+    expect(accepted).toBe(true);
+    if (applied) {
+      expect(response.status, await response.clone().text()).toBe(200);
+      expect(test.provider.liveResourceCount()).toBe(0);
+    } else {
+      expect(response.status).toBe(409);
+      const root = test.objects.get(`v1:${test.readyReceipt.installationId}`).storage.snapshot();
+      expect(root.teardown.pending.phase).toBe('submitted');
+      const deletes = test.provider.deletes().length;
+      test.restart();
+      expect((await first.send('apply')).status).toBe(409);
+      expect(test.provider.deletes()).toHaveLength(deletes);
+      expect((await first.send('settle')).status).toBe(200);
+      test.provider.intercept(undefined);
+      const fresh = await test.teardown('v');
+      expect((await fresh.send('apply', 'w'.repeat(22))).status).toBe(200);
+      expect(test.provider.liveResourceCount()).toBe(0);
+    }
+  }));
+
   for (const count of [2, 32]) it(`removes ${count} bridges and their ordinary sources within each invocation budget`, async () => {
     await fixture(async (test) => {
       const action = await test.teardown();
@@ -176,7 +212,7 @@ describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
     expect(Math.max(...test.invocationCounts.slice(before).map((value) => value.count))).toBeLessThanOrEqual(40);
   }));
   for (const applied of [false, true]) for (let lostDelete = 0; lostDelete < 7; lostDelete++) {
-    it(`recovers bounded ordinary-source deletion ${lostDelete + 1} after a ${applied ? 'completed' : 'unapplied'} lost response`, async () => fixture(async (test) => {
+    it(`recovers after runtime restart at ordinary-source deletion ${lostDelete + 1} after a ${applied ? 'completed' : 'unapplied'} lost response`, async () => fixture(async (test) => {
       let deletes = 0;
       test.provider.intercept(({ record, state }) => {
         if (record.method !== 'DELETE' || deletes++ !== lostDelete) return;
@@ -200,7 +236,10 @@ describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
         expect((await first.send('apply')).status).toBe(409);
         expect(test.provider.deletes()).toHaveLength(before);
       }
+      // Lose all runtime instances, retaining only durable storage and provider state.
+      test.restart();
       expect((await first.send('settle')).status).toBe(200);
+      test.restart();
       test.provider.intercept(undefined);
       const fresh = await test.teardown('v');
       expect(fresh.prepared.status).toBe(200);

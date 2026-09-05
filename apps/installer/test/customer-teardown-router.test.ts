@@ -98,6 +98,41 @@ function fixture(options: Options = {}) {
 }
 
 describe('gateway-local teardown authorization', () => {
+  it.each([
+    [{ scope: `${SCOPES} workers-scripts.write` }, 'authorization'],
+    [{ accountRefused: true }, 'account_access'],
+    [{ applyFails: true }, 'removal'],
+    [{ lostPass: true }, 'removal'],
+    [{ wrongCompletion: true }, 'removal'],
+    [{ passes: 4, noProgress: true }, 'no_progress'],
+    [{ passes: 4, expireAfterPass: true }, 'expired'],
+    [{ passes: 1000 }, 'pass_limit'],
+    [{ revokeFails: true }, 'revocation'],
+  ] as const)('reports a bounded failure stage for %j', async (options, reason) => {
+    const f = fixture(options); await f.start(); const response = await f.callback();
+    const location = new URL(response.headers.get('location') ?? '');
+    expect(location.searchParams.get('reason')).toBe(reason);
+    const page = await f.router.fetch(new Request(location));
+    expect(page.status).toBe(200);
+    const html = await page.text();
+    expect(html).not.toContain('Removal needs fresh authorization');
+    for (const secret of [ACCESS_TOKEN, KEY, claim.actorEmail, config.accountId, 'synthetic lost pass response']) {
+      expect(location.href + html).not.toContain(secret);
+    }
+    expect(f.signatures()).toBe(0);
+  });
+  it('does not reflect unrecognized failure details and keeps old recovery links working', async () => {
+    const f = fixture();
+    for (const query of ['?result=recovery_required', '?result=recovery_required&reason=%3Cscript%3Eprivate-detail%3C/script%3E']) {
+      const response = await f.router.fetch(new Request(`${ORIGIN}${CUSTOMER_TEARDOWN_PATH}${query}`));
+      expect(response.status).toBe(200);
+      const html = await response.text();
+      expect(html).toContain('Removal stopped. Return to Settings');
+      expect(html).not.toContain('private-detail');
+    }
+    expect(f.events).toEqual([]);
+  });
+
   it('uses bounded signed commands with one request ID, then revokes before handoff', async () => {
     const f = fixture({ passes: 160 });
     await f.start(); await f.callback();
