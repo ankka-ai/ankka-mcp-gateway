@@ -167,6 +167,69 @@ async function fixture(run, { stopAfter, knownPending = false, portalPending = f
 }
 
 describe('BigQuery cleanup in the gateway dependency-removal phase', () => {
+  for (const scenario of [
+    { name: 'pre-delete GET 403', operation: 'read', status: 403, category: 'provider_auth', pending: null },
+    { name: 'DELETE 403', operation: 'delete', status: 403, category: 'provider_auth', pending: 'not_applied' },
+    { name: 'DELETE 500', operation: 'delete', status: 500, category: 'provider_server_error', pending: 'send_armed' },
+    { name: 'post-delete GET 429', operation: 'read', status: 429, category: 'provider_rate_limited', pending: 'submitted', afterDelete: true },
+    { name: 'DELETE transport failure', operation: 'delete', status: null, category: 'transport_failed', pending: 'send_armed' },
+    { name: 'DELETE malformed 200', operation: 'delete', status: 200, category: 'response_invalid', pending: 'send_armed' },
+  ]) it(`diagnoses Portal ${scenario.name} without changing its recovery boundary`, async () => fixture(async (test) => {
+    const rootStorage = test.objects.get(`v1:${test.readyReceipt.installationId}`).storage;
+    const portalId = test.provider.state.portal.id;
+    const portalPath = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals/${portalId}`;
+    const privateBodyMarker = 'synthetic-provider-private-resource-identifier';
+    let portalDeleteSent = false;
+    test.provider.intercept(({ record }) => {
+      if (record.pathname !== portalPath || rootStorage.snapshot()?.teardown?.removedKeys.length !== 3) return;
+      if (record.method === 'DELETE') portalDeleteSent = true;
+      if (record.method.toLowerCase() !== (scenario.operation === 'read' ? 'get' : 'delete') ||
+          (scenario.afterDelete && !portalDeleteSent)) return;
+      if (scenario.status === null) throw new Error(`${privateBodyMarker} ${grant.accessToken}`);
+      return Response.json({ success: false, result: null,
+        errors: [{ code: 12345, message: `${privateBodyMarker} ${grant.accessToken}`, id: privateBodyMarker }],
+      }, { status: scenario.status });
+    });
+    const action = await test.teardown();
+    expect(action.prepared.status).toBe(200);
+    const response = await action.send('apply');
+    expect(response.status).toBe(409);
+    const result = await response.json();
+    expect(result.failure).toEqual({ phase: scenario.afterDelete ? 'root_verify' : 'root_remove',
+      resourceKind: 'portal', category: scenario.category,
+      providerOperation: scenario.operation, providerHttpStatus: scenario.status });
+    const root = rootStorage.snapshot();
+    expect(root.teardown.removedKeys).toHaveLength(3);
+    if (scenario.pending === null) expect(root.teardown.pending).toBeNull();
+    else expect(root.teardown.pending).toMatchObject({ phase: scenario.pending });
+    expect(test.provider.deletes().filter((request) => request.pathname === portalPath)).toHaveLength(scenario.pending === null ? 0 : 1);
+    expect(test.bridge.deletions).toEqual([]);
+    const retained = JSON.stringify([result, test.storage.writes, rootStorage.writes]);
+    expect(retained).not.toContain(privateBodyMarker);
+    expect(retained).not.toContain(grant.accessToken);
+    expect(JSON.stringify(result.failure)).not.toContain(portalId);
+    expect((await action.send('settle')).status).toBe(200);
+    test.provider.intercept(undefined);
+    const fresh = await test.teardown('v');
+    expect(fresh.prepared.status).toBe(200);
+    const completed = await fresh.send('apply', 'w'.repeat(22));
+    expect(completed.status, await completed.clone().text()).toBe(200);
+    expect(test.provider.liveResourceCount()).toBe(0);
+    expect(test.bridge.deletions).toEqual(['domain', 'settings', 'app']);
+  }));
+  it('identifies a rejected provider catalogue read as list without sending a delete', async () => fixture(async (test) => {
+    const path = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/portals`;
+    test.provider.intercept(({ record }) => {
+      if (record.method === 'GET' && record.pathname === path) return Response.json({ success: false }, { status: 403 });
+    });
+    const action = await test.teardown();
+    const response = await action.send('apply');
+    expect(response.status).toBe(409);
+    expect((await response.json()).failure).toEqual({ phase: 'root_preflight', resourceKind: 'dependency_graph',
+      category: 'provider_auth', providerOperation: 'list', providerHttpStatus: 403 });
+    expect(test.provider.deletes()).toEqual([]);
+    expect(test.bridge.deletions).toEqual([]);
+  }));
   it('accepts observed Access DELETE 202 responses only after verifying every resource is absent', async () => fixture(async (test) => {
     const sourceApplication = [...test.provider.state.apps.values()].find((app) => app.type === 'mcp');
     const sourcePolicy = test.provider.state.policies.get(sourceApplication.id)[0];

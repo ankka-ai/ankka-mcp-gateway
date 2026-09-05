@@ -124,12 +124,16 @@ no expiry alarm deletes them while removal may still need to resume.
 
 The gateway callback keeps the existing `recovery_required` result and adds a
 fixed diagnostic to the current customer-local removal attempt. The recovery
-page displays it as `phase / resourceKind / category`. These three fields are
-strict allowlists defined in
+page displays `phase / resourceKind / category`, with the provider operation
+and HTTP status when available. The operation is limited to `read`, `list`, or
+`delete`; the status is a bounded HTTP integer or null when no response is
+available. Existing three-field diagnostics remain readable. The contracts are
+defined in
 [`customer-teardown-failure.ts`](../apps/installer/src/customer-teardown-failure.ts).
 They distinguish authorization, account verification, root and bridge
 preflight/removal/verification, revocation, settlement, and handoff failures.
-Categories distinguish provider authorization or availability failures,
+Categories distinguish provider authorization, rate limits, server errors,
+transport failures, and other availability failures,
 rejected or invalid responses, ownership mismatches, unconfirmed absence,
 interruption, expiry, and bounded-progress limits.
 
@@ -204,6 +208,30 @@ the next is consistent with the reported state. It remains an explanation of
 the historical report, not a recovered trace of that installation. The narrow
 probe does not qualify managed BigQuery removal, the browser callback, or the
 hosted finalizer, and does not establish every Portal's partial-state behavior.
+
+A subsequent fresh installation of signed `v0.1.60`, source commit
+`4255bb5a2cbc1c3826ba934ed0c63f71b4374618`, completed Add BigQuery,
+source authentication, Portal attachment, and an operator-only source policy
+change preserving its identity and marker. A fresh client discovered the
+expected direct and Code Mode tool surfaces; both executed `SELECT 1`
+successfully, and anonymous requests were denied.
+
+Automatic removal still failed. The first callback reported
+`root_remove / portal / provider_unavailable`; fresh-consent recovery reported
+`root_remove / portal / provider_auth`. A further attempt with all other
+installer consent flows paused repeated the authorization failure. Independent
+reads confirmed that the Portal DNS record and Access policy/application were
+absent while the Portal, source registration, source Access resources, bridge,
+and management resources remained. A bounded Portal detail read returned HTTP
+200 with a valid success envelope, matching ownership fields, and its expected
+source mapping. The second removal phase was not reached. The partial
+installation and its journal were preserved.
+
+The deployed three-field diagnostic does not distinguish the pre-delete Portal
+GET from its DELETE, nor expose the exact HTTP status. It therefore does not
+establish a deletion-order defect or the cause of the authorization failure.
+The added operation/status fields address that evidence gap; they have not yet
+been qualified on a live deployment. Automatic removal remains unqualified.
 
 Use fresh disposable installations for this bounded checklist. No active
 shared gateway is a disposable test fixture. Keep all private locators,

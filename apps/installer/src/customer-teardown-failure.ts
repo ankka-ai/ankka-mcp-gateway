@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 
-/** Fixed, customer-local removal diagnostics; never include provider data or identifiers. */
+/** Bounded, customer-local removal diagnostics; never include provider bodies or identifiers. */
 export const CUSTOMER_TEARDOWN_FAILURE_PHASES = [
   'authorization', 'account_check', 'apply', 'root_preflight', 'root_remove', 'root_verify',
   'bridge_preflight', 'bridge_remove', 'bridge_verify', 'revocation', 'settlement', 'handoff',
@@ -12,13 +12,17 @@ export const CUSTOMER_TEARDOWN_FAILURE_RESOURCE_KINDS = [
 ] as const;
 export const CUSTOMER_TEARDOWN_FAILURE_CATEGORIES = [
   'authorization_denied', 'authorization_failed', 'provider_auth', 'provider_rejected', 'provider_unavailable',
+  'provider_rate_limited', 'provider_server_error', 'transport_failed',
   'response_invalid', 'ownership_mismatch', 'state_invalid', 'absence_unconfirmed', 'operation_interrupted',
   'expired', 'no_progress', 'pass_limit', 'revocation_unconfirmed', 'settlement_failed', 'handoff_failed',
 ] as const;
+export const CUSTOMER_TEARDOWN_PROVIDER_OPERATIONS = ['read', 'list', 'delete'] as const;
 export const customerTeardownFailureSchema = v.strictObject({
   phase: v.picklist(CUSTOMER_TEARDOWN_FAILURE_PHASES),
   resourceKind: v.picklist(CUSTOMER_TEARDOWN_FAILURE_RESOURCE_KINDS),
   category: v.picklist(CUSTOMER_TEARDOWN_FAILURE_CATEGORIES),
+  providerOperation: v.optional(v.picklist(CUSTOMER_TEARDOWN_PROVIDER_OPERATIONS)),
+  providerHttpStatus: v.optional(v.nullable(v.pipe(v.number(), v.safeInteger(), v.minValue(100), v.maxValue(599)))),
 });
 export type CustomerTeardownFailure = v.InferOutput<typeof customerTeardownFailureSchema>;
 export function parseCustomerTeardownFailure<Input>(input: Input): CustomerTeardownFailure | null {

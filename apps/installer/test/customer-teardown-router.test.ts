@@ -25,7 +25,8 @@ const completion = { schemaVersion: 1, actionId: claim.actionId, installationId:
   removedResourceCount: 7, readyReceiptChecksum: `sha256:${'e'.repeat(64)}`, dependencyResourcesHash: `sha256:${'f'.repeat(64)}` };
 type Options = { scope?: string; accountRefused?: boolean; refresh?: boolean; revokeFails?: boolean; applyFails?: boolean; wrongCompletion?: boolean; relayFails?: boolean;
   passes?: number; noProgress?: boolean; expireAfterPass?: boolean; lostPass?: boolean; settleFails?: boolean; handoffFails?: boolean;
-  applyFailure?: { phase: string; resourceKind: string; category: string; detail?: string }; oversizedApplyResponse?: boolean;
+  applyFailure?: { phase: string; resourceKind: string; category: string; detail?: string;
+    providerOperation?: unknown; providerHttpStatus?: unknown }; oversizedApplyResponse?: boolean;
   beforeHandoff?: () => Promise<void> };
 function fixture(options: Options = {}) {
   let at = NOW, stored: CustomerTeardownAttempt | null = null, state = '', cookie = '', signatures = 0;
@@ -134,16 +135,43 @@ describe('gateway-local teardown authorization', () => {
     expect(f.current()?.failure).toBeUndefined();
     await f.callback(); expect(f.signatures()).toBe(1);
   });
+  for (const failure of [
+    { phase: 'root_remove', resourceKind: 'portal', category: 'provider_server_error', providerOperation: 'delete', providerHttpStatus: 502 },
+    { phase: 'root_verify', resourceKind: 'portal', category: 'provider_rate_limited', providerOperation: 'read', providerHttpStatus: 429 },
+    { phase: 'root_preflight', resourceKind: 'dependency_graph', category: 'transport_failed', providerOperation: 'list', providerHttpStatus: null },
+  ] satisfies CustomerTeardownFailure[]) it(`retains bounded ${failure.providerOperation} provider evidence and clears it on fresh consent`, async () => {
+    const f = fixture({ applyFails: true, applyFailure: failure });
+    await f.start(); const response = await f.callback();
+    expect(response.headers.get('location')).toContain('result=recovery_required');
+    expect(f.current()?.failure).toEqual(failure);
+    const page = await f.router.fetch(new Request(`${ORIGIN}${CUSTOMER_TEARDOWN_PATH}?result=recovery_required`));
+    const html = await page.text();
+    expect(html).toContain(`${failure.phase} / ${failure.resourceKind} / ${failure.category} / ${failure.providerOperation} / ${failure.providerHttpStatus === null ? 'HTTP response unavailable' : `HTTP ${failure.providerHttpStatus}`}`);
+    expect(html).not.toContain(ACCESS_TOKEN);
+    expect(f.revoked).toEqual([ACCESS_TOKEN]); expect(f.signatures()).toBe(0);
+    expect(f.durableWrites.join('')).not.toContain(ACCESS_TOKEN);
+    f.options.applyFails = false; await f.start();
+    expect(f.current()?.failure).toBeUndefined();
+    await f.callback(); expect(f.signatures()).toBe(1);
+  });
   for (const applyFailure of [
     { phase: ACCESS_TOKEN, resourceKind: 'portal', category: 'ownership_mismatch' },
     { phase: 'root_remove', resourceKind: config.accountId, category: 'ownership_mismatch' },
     { phase: 'root_remove', resourceKind: 'portal', category: ACCESS_TOKEN },
     { phase: 'root_remove', resourceKind: 'portal', category: 'ownership_mismatch', detail: ACCESS_TOKEN },
+    { phase: 'root_remove', resourceKind: 'portal', category: 'provider_auth', providerOperation: ACCESS_TOKEN },
+    { phase: 'root_remove', resourceKind: 'portal', category: 'provider_auth', providerHttpStatus: ACCESS_TOKEN },
+    { phase: 'root_remove', resourceKind: 'portal', category: 'provider_auth', providerOperation: '<script>alert(1)</script>' },
+    { phase: 'root_remove', resourceKind: 'portal', category: 'provider_auth', providerHttpStatus: 600 },
   ]) it('rejects unbounded or extra failure fields without storing provider content', async () => {
     expect(parseCustomerTeardownFailure(applyFailure)).toBeNull();
     const f = fixture({ applyFails: true, applyFailure }); await f.start(); await f.callback();
     expect(f.current()?.failure).toEqual({ phase: 'apply', resourceKind: 'dependency_graph', category: 'response_invalid' });
     expect(f.durableWrites.join('')).not.toContain(ACCESS_TOKEN);
+    const page = await f.router.fetch(new Request(`${ORIGIN}${CUSTOMER_TEARDOWN_PATH}?result=recovery_required`));
+    const html = await page.text();
+    expect(html).not.toContain(ACCESS_TOKEN); expect(html).not.toContain('<script>alert(1)</script>');
+    expect(f.revoked).toEqual([ACCESS_TOKEN]);
   });
   for (const [options, failure] of [
     [{ scope: `${SCOPES} workers-scripts.write` }, { phase: 'authorization', resourceKind: 'none', category: 'authorization_failed' }],
