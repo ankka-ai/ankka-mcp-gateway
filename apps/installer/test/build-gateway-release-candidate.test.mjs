@@ -283,12 +283,12 @@ describe('build-gateway-release-candidate', () => {
     }
   }, 30_000);
 
-  it('binds the running candidate builder and signer loader to the stated source commit', async () => {
+  it.each(['build-gateway-release-candidate.mjs', 'compiled-relay-origin.mjs'])('binds %s to the stated source commit', async (tool) => {
     const checkout = await publicCheckout();
     try {
       const builder = path.join(
         checkout.source,
-        'apps/installer/scripts/build-gateway-release-candidate.mjs',
+        `apps/installer/scripts/${tool}`,
       );
       await writeFile(builder, '// different committed release builder\n');
       git(checkout.source, 'add', builder);

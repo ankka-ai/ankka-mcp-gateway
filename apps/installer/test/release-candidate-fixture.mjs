@@ -50,6 +50,7 @@ export async function releaseCandidateCheckout(files = FIXTURE_PAYLOAD) {
   for (const relative of [
     'apps/installer/scripts/build-gateway-release-candidate.mjs',
     'apps/installer/scripts/sign-gateway-release.mjs',
+    'apps/installer/scripts/compiled-relay-origin.mjs',
   ]) {
     const target = path.join(source, ...relative.split('/'));
     await mkdir(path.dirname(target), { recursive: true });
