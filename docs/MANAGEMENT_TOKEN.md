@@ -120,8 +120,42 @@ validation error. The repeat used the fixture's actual advertised tool and
 passed with unchanged permissions. Both attempts left no recorded resources.
 The test token was revoked after qualification.
 
-This check exercised real API endpoints directly. It did not deploy the new
-Worker, exercise browser-to-gateway operations, or prove secret inheritance
-through a live signed update. Those end-to-end checks, live secret replacement,
-and ambiguous-write recovery remain release qualification work. Local tests
-cover these implementation paths separately; they do not replace that evidence.
+This first check exercised real API endpoints directly. The deployed checks
+below provide separate evidence for the browser-to-gateway flow. Neither API
+fixtures nor a direct endpoint check establish signed-update behavior.
+
+### Deployed gateway validation
+
+A fresh disposable gateway was installed from signed canary `gateway-v0.1.62`,
+built reproducibly from public commit
+`7e2b5cd06a26886226b0abacbea023ec5ee3a1e6`.
+
+- The final runtime reached Ready. Before secret setup, source installation
+  and Team mutations were disabled.
+- The scoped account token was entered directly as the customer Worker's
+  encrypted `ANKKA_MANAGEMENT_TOKEN` secret. Settings verified the token and
+  current owned Team policies.
+- The dashboard inspected the synthetic fixture's single read-only tool, saved
+  a draft, and installed the source without an OAuth redirect. The gateway
+  reported installation verified.
+- The Team editor assigned a synthetic member to the source and verified the
+  change. Independent provider reads confirmed membership in both source and
+  Portal policies.
+- A direct edit removed that synthetic source membership. Saving an older
+  dashboard draft failed closed on policy drift. The recorded change was
+  cancelled before any gateway write, and a fresh read advanced the revision
+  and reflected the external removal.
+- Removing the synthetic Team member through the dashboard was verified;
+  provider reads confirmed its absence from both policies and the source's
+  restored deny-Everyone audience.
+- Removing the management secret disabled Team mutations while preserving saved
+  state. The same test secret was then restored directly to the Worker.
+
+The original bootstrap progress page did not automatically open the management
+page during this run; opening the reviewed management address reached the Ready
+dashboard. This observation is separate from management-token operation.
+
+Live signed-update inheritance, subsequent cleanup, and final token revocation
+remain pending for this deployed run. Restoring the same secret does not prove
+rotation to a different token. Ambiguous-write recovery remains covered by the
+local fault-injection tests rather than this live run.

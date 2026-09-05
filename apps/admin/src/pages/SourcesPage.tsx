@@ -375,7 +375,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <div className="flex flex-col justify-between gap-4 border-b border-kumo-line pb-5 sm:flex-row sm:items-start">
             <div>
               <h2 id="add-source-title" className="text-base font-semibold text-subheading">Add an MCP source</h2>
-              <p className="mt-1 max-w-[65ch] text-sm leading-6 text-kumo-subtle">Choose allowed tools. New sources start with nobody assigned; grant access in Cloudflare Access. Do not enter credentials here.</p>
+              <p className="mt-1 max-w-[65ch] text-sm leading-6 text-kumo-subtle">Choose allowed tools. New sources start with nobody assigned; grant access in Team. Do not enter credentials here.</p>
             </div>
             <StatusPill tone="attention">Exact tools only</StatusPill>
           </div>
@@ -595,7 +595,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <div className="empty-card">
             <div className="flex size-12 items-center justify-center rounded-2xl bg-kumo-tint text-kumo-subtle"><Database size={23} /></div>
             <h2 className="mt-4 text-base font-semibold text-kumo-strong">No sources yet</h2>
-            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : 'Source installation will be available in a compatible gateway release.'}</p>
+            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : 'Configure your Cloudflare management credential in Settings to enable source installation.'}</p>
             <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={() => setShowForm(true)}><Plus size={16} weight="bold" /> Add your first source</Button>
           </div>
         ) : (
