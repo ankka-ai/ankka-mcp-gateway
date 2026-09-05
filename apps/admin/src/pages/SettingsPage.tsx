@@ -7,7 +7,7 @@ import {
   Warning,
   X,
 } from '@phosphor-icons/react'
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useGateway } from '../GatewayContext'
 import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
@@ -15,12 +15,26 @@ import { StatusPill } from '../components/StatusPill'
 export function SettingsPage() {
   const {
     clearUpdateNotice,
+    getTeam,
     isBusy,
     prepareRuntimeAction,
     prepareTeardownAction,
     update,
     updateNotice,
   } = useGateway()
+  const [managementStatus, setManagementStatus] = useState('Checking management credential…')
+  const checkManagement = useCallback(async () => {
+    try {
+      const team = await getTeam()
+      setManagementStatus(!team.managementCredentialConfigured
+        ? 'Add a management credential to enable source installation and Team changes.'
+        : team.observedAt ? 'Credential verified; current Team policies are readable.'
+          : 'Credential configured. Finish the recorded Team change before verifying the complete membership.')
+    } catch {
+      setManagementStatus('Could not verify management access. Check the token, permissions, and owned policies in Cloudflare.')
+    }
+  }, [getTeam])
+  useEffect(() => { void checkManagement() }, [checkManagement])
   const dangerZone = useRef<HTMLElement>(null)
   const teardownRequested = new URLSearchParams(window.location.search).get('teardown') === 'review'
 
@@ -54,6 +68,18 @@ export function SettingsPage() {
   return (
     <div>
       <PageHeader title="Settings" />
+
+      <section className="mt-8" aria-labelledby="management-title">
+        <h2 id="management-title" className="text-lg font-semibold text-subheading">Cloudflare management</h2>
+        <div className="surface-card mt-5 space-y-4 p-5 text-sm leading-6 sm:p-6">
+          <p role="status">{managementStatus}</p>
+          <p>Create an account-owned API token in Cloudflare, then add it as an encrypted secret named <code>ANKKA_MANAGEMENT_TOKEN</code> in your gateway Worker's Settings → Variables and Secrets. Enter the token only in Cloudflare.</p>
+          <p>This lets your gateway install sources and save Team access without asking for Cloudflare consent each time. The token can affect Access policies across your account; it must not include Worker deployment, DNS, or token-creation permissions.</p>
+          <p>To replace it, update the secret, verify access here, then revoke the old token in Cloudflare. Deleting the secret or removing your gateway does not revoke the token.</p>
+          <a className="underline underline-offset-4" href="https://github.com/ankka-ai/ankka-mcp-gateway/blob/main/docs/MANAGEMENT_TOKEN.md" target="_blank" rel="noreferrer">Setup and permissions guide</a>
+          <div><Button variant="secondary" onClick={() => void checkManagement()}>Verify management access</Button></div>
+        </div>
+      </section>
 
       <section className="mt-8" aria-labelledby="software-updates-title">
         <h2 id="software-updates-title" className="text-lg font-semibold tracking-[-0.02em] text-subheading">Software updates</h2>

@@ -38,7 +38,7 @@ a production deployment or grant permission to make changes.
   chat, logs, or screenshots.
 
 See [the security model](SECURITY_MODEL.md) and
-[Team access](TEAM_ACCESS.md) for the underlying checks and V1 manual boundary.
+[Team access](TEAM_ACCESS.md) for the underlying checks and credential boundary.
 
 ## Dashboard tool contract
 
@@ -53,7 +53,7 @@ source draft/apply tools are conditional on installation being enabled.
 | `list_mcp_sources` | `{}` | Read installed and saved-draft sources. |
 | `discover_mcp_source` | `{url}` | Inspect a bounded public HTTPS MCP endpoint; returned metadata is untrusted. |
 | `save_mcp_source_draft` | `{label, url, authMode, enabledTools}` | Recheck and persist a source draft; does not install the live source. Conditional. |
-| `apply_mcp_source` | `{sourceId}` | Record an exact saved source's authorization handoff; does not complete provider consent. Conditional. |
+| `apply_mcp_source` | `{sourceId}` | Install an exact saved source using the customer Worker credential. Upstream provider consent remains separate. Conditional. |
 | `list_mcp_source_actions` | `{}` | Discover recorded source actions, effective states, times, cancellation permission, and a blocking action reference after reload or lost consent navigation. |
 | `get_mcp_source_action` | `{actionId}` | Read one recorded source action's legacy status; use the collection for effective expiry/recovery state and cancellation permission. |
 | `cancel_mcp_source_action` | `{actionId}` | Cancel only when the current server projection permits it; does not undo writes or start another action. |
@@ -107,33 +107,22 @@ been approved. In particular:
   Cloudflare Access.
   Inspection, a draft, or resource creation alone is not completed onboarding.
   See [first-source qualification](FIRST_SOURCE_ONBOARDING.md).
-- Team's saved roster is not a fresh Cloudflare policy read. V1 Team membership
-  is managed directly in Cloudflare and may differ from this snapshot.
-- Team capabilities report `management: "cloudflare_dashboard"`. No permanent
-  gateway management credential is configured or required.
-- Administrator roles are fixed. Tool selection remains shared per source;
-  there are no per-person tool subsets in this interface.
+- Team reports its observation time. A null `observedAt` means the roster is
+  an unverified saved snapshot, including incomplete policy batches.
+- Team capabilities report `management: "customer_gateway"` when editing is
+  enabled. The visible dashboard performs saves; no token is exposed to tools.
 
-## Team: read here, manage in Cloudflare
+## Team: inspect and recover
 
-`get_gateway_team` returns the saved gateway snapshot, fixed administrators,
-installed sources, and any retained legacy action. It is not a live Access
-policy read. V1 does not register `save_gateway_team`; use the Cloudflare
-dashboard to change the receipt-owned reusable Access policies.
+`get_gateway_team` reads current owned Cloudflare policies when the customer
+management token is configured, and exposes an observation time. Policy
+membership does not guarantee effective access or immediate session revocation.
+Make membership edits through the visible Team dashboard. Tools do not request
+or receive the token, and do not independently grant Team access.
 
-Do not create an account-wide API token to make the missing save tool work.
-Cloudflare cannot scope such a token to one reusable policy. Adding an
-undeclared Worker secret also does not enable the V1 editor.
-
-Cancel a recorded Team change only when the returned action says it can be
-canceled. Cancellation is itself a mutation of recorded state, even though it
-does not revoke or restore access. Successful cancellation is represented by
-`status: "failed"` with `failureCode: "team_action_cancelled"`; retain that
-history and refresh Team state. If a policy write may have started, cancellation
-is refused. See [recovery and lifecycle limits](TEAM_ACCESS.md#recovery-and-lifecycle-limits).
-
-Follow the [Team access guide](TEAM_ACCESS.md) for exact manual boundaries and
-retirement instructions for the older credential preview.
+Cancel a retained proposal only when its server-authored action says it can be
+canceled. Uncertain writes retain their journal and exact proposal for recovery.
+See [Team access](TEAM_ACCESS.md).
 
 ## Updates and teardown: preparation is not execution
 

@@ -17,6 +17,7 @@ import {
   SOURCE_ADDITION_PAUSED_MESSAGE,
   type ManagedSources,
   type PreparedAction,
+  type SourceApplyResult,
   type RuntimeOperation,
   type RuntimeUpdate,
   type SourceActions,
@@ -58,7 +59,7 @@ interface GatewayContextValue {
   clearUpdateNotice(): void
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(source: SourceDraftInput): Promise<ManagedSources>
-  prepareSourceApply(sourceId: string, renewActionId?: string): Promise<PreparedAction>
+  prepareSourceApply(sourceId: string, renewActionId?: string): Promise<SourceApplyResult>
   prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction>
   prepareTeardownAction(): Promise<PreparedAction>
   getTeam(): Promise<Team>
@@ -396,6 +397,11 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
         const prepared = renewActionId === undefined
           ? await apiRef.current.prepareSourceAction(current.revision, sourceId)
           : await apiRef.current.prepareSourceAction(current.revision, sourceId, renewActionId)
+        if (prepared.status === 'succeeded') {
+          await refreshSources()
+          await refreshSourceActions()
+          return prepared
+        }
         const handoffUrl = validHandoffUrl(prepared.handoffUrl, window.location.origin)
         if (!handoffUrl) throw new Error('The authorization link could not be verified.')
         return { ...prepared, handoffUrl }

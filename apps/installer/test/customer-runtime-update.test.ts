@@ -183,6 +183,7 @@ function envelope(result: BoundaryValue, status = 200): Response {
 
 function providerFake(release: SignedRelease, options: {
   readonly currentRelease?: string;
+  readonly managementBinding?: { name: string; type: string };
   readonly controlPlane?: (request: Request) => Promise<Response>;
 } = {}): ProviderFake {
   const requests: Recorded[] = [];
@@ -237,6 +238,7 @@ function providerFake(release: SignedRelease, options: {
         bindings: [
           { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
           { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'secret_text' },
+          ...(options.managementBinding ? [options.managementBinding] : []),
           { name: 'ASSETS', type: 'assets' },
           ...Object.entries(bindings).map(([name, text]) => ({ name, type: 'plain_text', text })),
         ],
@@ -433,9 +435,9 @@ describe('gateway-local runtime update', () => {
     expect(await file.text()).toBe(retained.workerSource);
   });
 
-  it('verifies the exact bundle against its own update key, hands over, then replaces itself with inherited secrets', async () => {
+  it.each([false, true])('preserves only the declared secret bindings across updates (management configured: %s)', async (configured) => {
     const release = await signedRelease();
-    const fake = providerFake(release);
+    const fake = providerFake(release, configured ? { managementBinding: { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' } } : {});
     const commands: CustomerRuntimeControlCommand[] = [];
     const handovers: string[] = [];
     const result = await runCustomerRuntimeUpdate(input(fake, release, commands, handovers));
@@ -474,7 +476,8 @@ describe('gateway-local runtime update', () => {
     });
     expect(bindingsByName.get('ANKKA_INSTALL_ID')).toEqual({ name: 'ANKKA_INSTALL_ID', type: 'plain_text', text: `acg-${'c'.repeat(24)}` });
     expect(bindingsByName.has('ANKKA_BOOTSTRAP_NONCE')).toBe(false);
-    expect(metadata.bindings).toHaveLength(19);
+    expect(metadata.bindings).toHaveLength(configured ? 20 : 19);
+    expect(bindingsByName.get('ANKKA_MANAGEMENT_TOKEN')).toEqual(configured ? { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'inherit', version_id: 'latest' } : undefined);
     const module = upload.form.get('index.js');
     if (!(module instanceof Blob)) throw new Error('module missing');
     expect(await module.text()).toBe(release.workerSource);
@@ -514,6 +517,23 @@ describe('gateway-local runtime update', () => {
         command: 'fail', failureCode: `runtime_${stage}_${code}`, recoveryRequired: false,
       });
     }
+  });
+
+  it.each([
+    { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'plain_text' },
+    { name: 'OTHER_TOKEN', type: 'secret_text' },
+    { name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'secret_text' },
+  ])('rejects a plaintext or unreviewed management binding: $name ($type)', async (managementBinding) => {
+    const release = await signedRelease();
+    const fake = providerFake(release, { managementBinding });
+    const commands: CustomerRuntimeControlCommand[] = [];
+    const handovers: string[] = [];
+    await expect(runCustomerRuntimeUpdate(input(fake, release, commands, handovers))).rejects.toMatchObject({
+      code: 'provider_rejected', stage: 'current_read',
+    });
+    expect(handovers).toEqual([]);
+    expect(fake.events).not.toContain('asset-session');
+    expect(fake.events).not.toContain('script-upload');
   });
 
   it('reports an unknown upload without failing the journal it already handed over', async () => {

@@ -110,6 +110,7 @@ export const APPROVED_CLOUDFLARE_CONTRACT = Object.freeze({
   publicBindings: Object.freeze({
     secrets: Object.freeze([
       Object.freeze({ lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' }),
+      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_MANAGEMENT_TOKEN' }),
     ]),
     variables: Object.freeze([
       'ADMIN_EMAILS',

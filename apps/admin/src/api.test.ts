@@ -21,6 +21,12 @@ describe('HttpGatewayAdminApi', () => {
     updatedAt: '2026-08-29T00:00:00.000Z',
   } as const
 
+  it('accepts direct source completion without a consent URL', async () => {
+    const completed = { schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z' }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(completed)))
+    await expect(new HttpGatewayAdminApi().prepareSourceAction(4, 'source-test')).resolves.toEqual(completed)
+  })
+
   it('renews an exact source action through its same-origin endpoint', async () => {
     const actionId = `action_${'a'.repeat(32)}`
     const prepared = { schemaVersion: 1, actionId, status: 'authorization_required',
@@ -368,8 +374,8 @@ describe('HttpGatewayAdminApi', () => {
       ['team_action_recovery_required', 'Some access policies may already have changed'],
       ['team_policy_drift', 'Cloudflare access policies no longer match'],
       ['team_editing_managed_in_cloudflare', 'managed directly in Cloudflare'],
-      ['team_management_credential_missing', 'legacy Team action cannot continue'],
-      ['team_management_credential_invalid', 'legacy Team action cannot continue'],
+      ['team_management_credential_missing', 'Configure your gateway management token'],
+      ['team_management_credential_invalid', 'Check its permissions'],
       ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable'],
     ] as const) {
       vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: code, detail: 'private provider detail' }, { status: 409 })))

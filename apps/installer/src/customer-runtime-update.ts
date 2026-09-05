@@ -194,6 +194,7 @@ interface CurrentRuntime {
   readonly workerId: string;
   readonly versionId: string;
   readonly bindings: GatewayWorkerPlainTextBindings;
+  readonly managementCredentialConfigured: boolean;
 }
 
 const finalVersionSchema = v.looseObject({
@@ -210,13 +211,13 @@ const plainTextBindingSchema = v.strictObject({
 
 /**
  * The final runtime's exact binding set: the object namespace, the assets,
- * the ownership wrap-key secret, and the sixteen plain-text bindings. The
- * shared parser knows the bootstrap shape without the secret; an update
- * starts from the version that already carries it and inherits it forward.
+ * the ownership wrap-key secret, sixteen plain-text bindings, and optionally
+ * the customer management secret. Updates inherit secrets without reading
+ * their values; plaintext substitutes and unknown bindings are rejected.
  */
 function parseFinalRuntimeBindings(value: BoundaryValue): GatewayWorkerPlainTextBindings | null {
   const parsed = v.safeParse(finalVersionSchema, value);
-  if (!parsed.success || parsed.output.bindings.length !== EXACT_PLAIN_TEXT_BINDINGS.length + 3 ||
+  if (!parsed.success || ![EXACT_PLAIN_TEXT_BINDINGS.length + 3, EXACT_PLAIN_TEXT_BINDINGS.length + 4].includes(parsed.output.bindings.length) ||
       Object.hasOwn(parsed.output, 'migrations') || Object.hasOwn(parsed.output, 'migration_tag')) return null;
   const byName = new Map<string, BoundaryObject>();
   for (const binding of parsed.output.bindings) {
@@ -227,6 +228,9 @@ function parseFinalRuntimeBindings(value: BoundaryValue): GatewayWorkerPlainText
   const admin = byName.get('ADMIN_STATE');
   const assets = byName.get('ASSETS');
   const wrapKey = byName.get('ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY');
+  const managementToken = byName.get('ANKKA_MANAGEMENT_TOKEN');
+  if ((managementToken !== undefined && managementToken.type !== 'secret_text') ||
+      byName.size !== EXACT_PLAIN_TEXT_BINDINGS.length + 3 + (managementToken === undefined ? 0 : 1)) return null;
   if (admin?.type !== 'durable_object_namespace' || admin.class_name !== 'AdminState' ||
       assets?.type !== 'assets' || wrapKey?.type !== 'secret_text') return null;
   const text = (name: GatewayWorkerPlainTextBindingName): string | null => {
@@ -298,7 +302,9 @@ async function readCurrentRuntime(input: CustomerRuntimeUpdateInput): Promise<Cu
       bindings.ANKKA_GATEWAY_RELEASE === input.target.release) {
     fail('provider_rejected', 'current_read');
   }
-  return Object.freeze({ workerId: worker.id, versionId: active.versionId, bindings });
+  const parsedVersion = v.parse(finalVersionSchema, version);
+  const managementCredentialConfigured = parsedVersion.bindings.some((binding) => binding.name === 'ANKKA_MANAGEMENT_TOKEN');
+  return Object.freeze({ workerId: worker.id, versionId: active.versionId, bindings, managementCredentialConfigured });
 }
 
 async function controlPlaneBytes(
@@ -439,8 +445,10 @@ function uploadMetadata(
   prepared: PreparedVerifiedWorkerRelease,
   completionJwt: string,
   target: CustomerRuntimeUpdateTarget,
+  managementCredentialConfigured: boolean,
 ): BoundaryObject {
-  const inherited = ['ADMIN_STATE', 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY'].map((name) => Object.freeze({
+  const inherited = ['ADMIN_STATE', 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY',
+    ...(managementCredentialConfigured ? ['ANKKA_MANAGEMENT_TOKEN'] : [])].map((name) => Object.freeze({
     name,
     type: 'inherit' as const,
     version_id: 'latest',
@@ -482,9 +490,10 @@ async function uploadScript(
   input: CustomerRuntimeUpdateInput,
   prepared: PreparedVerifiedWorkerRelease,
   completionJwt: string,
+  managementCredentialConfigured: boolean,
 ): Promise<void> {
   const form = new FormData();
-  form.append('metadata', new Blob([canonicalJson(uploadMetadata(prepared, completionJwt, input.target))], {
+  form.append('metadata', new Blob([canonicalJson(uploadMetadata(prepared, completionJwt, input.target, managementCredentialConfigured))], {
     type: 'application/json',
   }), 'metadata.json');
   for (const module of prepared.modules) {
@@ -585,7 +594,7 @@ export async function runCustomerRuntimeUpdate(
     }
     // From here on this object may restart on the new version at any moment.
     uploaded = true;
-    await uploadScript(input, prepared, completionJwt);
+    await uploadScript(input, prepared, completionJwt, current.managementCredentialConfigured);
     return Object.freeze({ status: 'uploaded', fromVersionId: current.versionId });
   } catch (error) {
     const failure = error instanceof CustomerRuntimeUpdateError

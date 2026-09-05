@@ -110,7 +110,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                           loading={isBusy}
                           onClick={() => onAuthorize(source.id)}
                         >
-                          {installationEnabled ? 'Authorize and apply' : 'Installation unavailable'}
+                          {installationEnabled ? 'Install source' : 'Installation unavailable'}
                         </Button>
                       </div>
                     )}

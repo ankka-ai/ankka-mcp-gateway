@@ -425,6 +425,13 @@ describe('source pause and current state', () => {
     expect(api.getStatus).not.toHaveBeenCalled()
   })
 
+  it('reports direct source completion without prompting for consent', async () => {
+    const { api, call, sources } = fixture()
+    api.getSources.mockResolvedValue({ ...sources, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
+    api.prepareSourceAction.mockResolvedValue({ schemaVersion: 1, actionId, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z' })
+    expect(await call('apply_mcp_source', { sourceId })).toMatchObject({ ok: true, result: { actionId, status: 'succeeded' } })
+  })
+
   it('uses the fresh source revision for a draft and never changes the live Portal directly', async () => {
     const { api, call, sources } = fixture()
     api.getSources.mockResolvedValue({ ...sources, revision: 12 })
