@@ -178,3 +178,47 @@ Revocation was checked after cleanup, not during a recorded gateway write.
 Ambiguous-write recovery remains covered by local fault-injection tests rather
 than this live run. These remaining scenarios and the teardown failure prevent
 this report from claiming the entire live qualification procedure passed.
+
+## Diagnosing interrupted qualification
+
+Record management operations, signed update, and cleanup as separate outcomes.
+A passing source or Team test does not establish successful cleanup. An API-token
+update harness does not establish browser consent or durable handover behavior.
+
+The gateway removal callback reports a fixed failure stage on its recovery page:
+authorization, account access, resource removal, stalled progress, expiry,
+per-attempt limit, or grant revocation. These labels describe the stage reached,
+not a provider root cause. Raw provider errors, credentials, and resource IDs
+are never included. Old recovery links still show a generic recovery message.
+
+For resource-removal or stalled-progress failures, inspect the receipt-bound
+saved state before retrying. An interrupted attempt can already have deleted
+resources. Reuse the existing resume path and ownership checks; do not start a
+second installation to recover the first. For expiry or a per-attempt limit,
+review removal again to continue under a fresh operation-scoped grant.
+
+Run `npm run validate:lifecycle` for the fixed offline qualification sequence:
+installation checkpoints, source and Team operations, signed release discovery
+and runtime update, then interrupted dependency and root removal. It builds the
+admin fixture once, stops at the first failed stage, and reports later stages as
+not run. `--help` describes its scope; additional arguments are rejected.
+
+Recovery regressions discard runtime instances after both applied and unapplied
+lost deletion responses, then reload durable state, settle the old attempt, and
+resume under a fresh grant. They check resource absence and prevent repeated
+successful deletes. These are synthetic provider tests, not evidence that a
+particular Cloudflare cleanup failure has been repaired.
+
+The live installation and update harnesses are not chained by this command:
+their in-process journals and substituted handover callbacks do not establish
+a deployed lifecycle. Live qualification still requires a disposable target,
+prepared signed releases, real durable handover, provider read-back, and
+receipt-bound cleanup. Report that separately from this offline result.
+
+
+Access application and policy DELETE responses with HTTP 202 now leave a
+submitted deletion boundary. Only a subsequent read confirming absence records
+successful removal. If the resource is still present, the attempt stops;
+restarting the runtime does not resend that deletion under the same grant.
+Fresh authorization rechecks ownership and can resume. This change is limited
+to Access teardown and does not broaden accepted create/update responses.

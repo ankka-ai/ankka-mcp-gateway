@@ -4236,7 +4236,11 @@ async function teardownApplicationChildrenMatch(root, resource, authority, token
 
 async function teardownResourceDelete(root, resource, token) {
   const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE' });
-  if (response.status === 'ok') return 'submitted';
+  // Access may accept deletion asynchronously. Acceptance is not absence:
+  // the caller still verifies the exact resource before recording removal.
+  const accessResource = ['source_access_application', 'portal_access_application',
+    'source_access_policy', 'portal_access_policy'].includes(resource.kind);
+  if (response.status === 'ok' || (accessResource && response.status === 'blocked' && response.httpStatus === 202)) return 'submitted';
   return response.status;
 }
 
