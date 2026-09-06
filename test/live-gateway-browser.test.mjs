@@ -25,6 +25,10 @@ test('bootstrap navigation requires the generated Worker identity and an exact w
   const workerName = `ankka-gateway-${installId}`;
   const provision = { installId, workerName, bootstrapOrigin: `https://${workerName}.synthetic.workers.dev` };
   assert.equal(validateLiveBootstrapOrigin(provision), provision.bootstrapOrigin);
+  assert.equal(validateLiveBootstrapOrigin({ ...provision, bootstrapOrigin: `${provision.bootstrapOrigin}/` }), provision.bootstrapOrigin);
+  for (const suffix of ['/path/', '//', '/?query=1', '/#fragment']) {
+    assert.throws(() => validateLiveBootstrapOrigin({ ...provision, bootstrapOrigin: provision.bootstrapOrigin + suffix }), { code: 'origin_invalid' });
+  }
   for (const changed of [
     { workerName: 'foreign-worker' },
     { bootstrapOrigin: 'https://foreign.example.com' },

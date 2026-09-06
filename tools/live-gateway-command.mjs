@@ -18,7 +18,7 @@ const schema = v.strictObject({
   schemaVersion: v.literal(1), accountId: v.pipe(text, v.regex(/^[a-f0-9]{32}$/u)), zoneId: v.pipe(text, v.regex(/^[a-f0-9]{32}$/u)),
   installerOrigin: text, managementOrigin: text,
   installerA: text, installerB: text, journal: text, releaseA: identity, releaseB: identity,
-  browserProfile: v.optional(text),
+  browserProfile: v.optional(text), browserConnection: v.optional(v.literal('chrome')),
   basics: v.strictObject({ gatewayName: text, zoneName: text, managementHostname: text, portalHostname: text,
     adminEmail: v.pipe(text, v.email()), additionalAdminEmails: v.tuple([]) }),
   source: v.strictObject({ url: text, tool: text }),
@@ -42,6 +42,7 @@ export function validateLiveLifecycleConfig(input) {
   const result = v.safeParse(schema, input);
   requireCondition(result.success, 'live_config_invalid');
   const config = result.output;
+  requireCondition(!(config.browserProfile && config.browserConnection), 'browser_connection_invalid');
   validateLiveBrowserOrigin(config.installerOrigin); validateLiveBrowserOrigin(config.managementOrigin);
   const installer = new URL(config.installerOrigin).hostname;
   const management = new URL(config.managementOrigin).hostname;

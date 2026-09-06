@@ -49,6 +49,14 @@ The private config has these fields:
   everyday browser profile. Close that test window before the command opens it.
   A profile retains application sessions; it does not guarantee that Google will
   allow new sign-ins from an automated browser.
+- Optional `browserConnection`: `"chrome"` attaches to already running Chrome
+  through its built-in remote debugging setting. This is mutually exclusive with
+  `browserProfile`. Enable it explicitly at `chrome://inspect/#remote-debugging`
+  and approve Chrome's connection prompt. The runner waits up to two minutes for this approval. It grants browser-session access, so use
+  it only for a trusted local runner. The runner opens and closes only its new test
+  tab, preserves existing tabs and the context, and disconnects on exit. Disable
+  debugging after the test if you enabled it only for this run. It does not copy
+  your profile or export stored cookies.
 
 Provide the already-authorized operator token through `CLOUDFLARE_API_TOKEN`.
 It is used for isolated installer deployment and direct Cloudflare read-back.
@@ -63,8 +71,9 @@ authenticate the Cloudflare dashboard or grant permission to deploy, update, or
 remove infrastructure. If Google blocks dashboard login in this browser, stop:
 the Access check can pass while the full consent flow remains blocked. Do not
 disable browser security or count that check as a successful live lifecycle.
-The command does not attach to your everyday
-browser, export cookies, or save browser traces. A configured profile retains login
+By default, the command uses a separate test browser. Only the explicit
+`browserConnection` option attaches to your existing Chrome session. Neither
+mode exports cookies or saves browser traces. A configured profile retains login
 sessions locally; protect it and remove it when qualification is finished. When prompted, install and
 activate the management secret directly in Cloudflare. No consent is expected
 for the synthetic source installation or the grant and removal of

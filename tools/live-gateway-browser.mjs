@@ -1,4 +1,5 @@
 import { chromium } from 'playwright-core';
+import * as v from 'valibot';
 import { createLiveGatewayAccess, LiveGatewayAccessError } from './live-gateway-access.mjs';
 
 const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
@@ -33,7 +34,10 @@ export function validateLiveBootstrapOrigin(provision) {
       provision.workerName !== `ankka-gateway-${provision.installId}`) {
     throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
   }
-  const origin = validateLiveBrowserOrigin(provision.bootstrapOrigin);
+  // The installer publishes its bootstrap base URL with a root slash.
+  // Normalize only that documented form; paths, queries and fragments stay invalid.
+  const base = provision.bootstrapOrigin;
+  const origin = validateLiveBrowserOrigin(v.is(v.string(), base) && base.endsWith('/') ? base.slice(0, -1) : base);
   const labels = new URL(origin).hostname.split('.');
   if (labels.length !== 4 || labels[0] !== provision.workerName ||
       !/^[a-z0-9-]{1,63}$/u.test(labels[1]) || labels.slice(2).join('.') !== 'workers.dev') {
@@ -50,14 +54,20 @@ export function validateLiveHandoff(value, origin, path) {
   return url.href;
 }
 
-/** Own ephemeral browser. No CDP attachment, cookies exported, traces or HAR files. */
-export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, headless = false, notify }) {
+/** An explicitly authorized Chrome connection borrows its context and owns only
+ * a new tab. Never close that context or export browser storage, traces or HAR. */
+export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify }) {
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
   const accessCancellation = new AbortController();
   const installAccess = createLiveGatewayAccess({ origins, email: basics.adminEmail, notify, signal: accessCancellation.signal });
   const authenticated = new Set();
-  const browser = browserProfile ? null : await chromium.launch({ channel: 'chrome', headless, chromiumSandbox: true });
-  const context = browserProfile
+  if (browserConnection !== undefined && (browserConnection !== 'chrome' || browserProfile)) {
+    throw new LiveGatewayBrowserError('browser_connection_invalid');
+  }
+  const borrowed = browserConnection === 'chrome';
+  const browser = borrowed ? await chromium.connectOverCDP('chrome', { noDefaults: true, timeout: 120_000 }) :
+    browserProfile ? null : await chromium.launch({ channel: 'chrome', headless, chromiumSandbox: true });
+  const context = borrowed ? browser.contexts()[0] : browserProfile
     ? await chromium.launchPersistentContext(browserProfile, {
       channel: 'chrome', headless, chromiumSandbox: true, acceptDownloads: false, serviceWorkers: 'block',
       // A manually authenticated Chrome profile uses the real OS keychain.
@@ -65,7 +75,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       ignoreDefaultArgs: ['--use-mock-keychain', '--password-store=basic'],
     })
     : await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
-  const page = context.pages()[0] ?? await context.newPage();
+  const page = borrowed ? await context.newPage() : context.pages()[0] ?? await context.newPage();
   page.setDefaultTimeout(30_000);
   let interrupted = false;
   let interruptionArmed = false;
@@ -222,6 +232,10 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       });
     },
     interruptionObserved: () => interrupted,
-    async close() { accessCancellation.abort(); await context.close(); await browser?.close(); },
+    async close() {
+      accessCancellation.abort();
+      try { if (borrowed) await page.close(); else await context.close(); }
+      finally { await browser?.close(); } // CDP close disconnects; it does not quit Chrome.
+    },
   };
 }

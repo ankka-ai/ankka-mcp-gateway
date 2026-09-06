@@ -27,8 +27,8 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
     (value) => ['handed_off', 'failed', 'cleanup_required'].includes(value?.session?.phase));
   requireCondition(installed.session.phase === 'handed_off', 'bootstrap_not_completed');
   const provision = installed.session.provision;
-  const bootstrapOrigin = browser.adoptBootstrap(provision);
   await checkpoint({ stage: 'installation', status: 'shell_installed', provision });
+  const bootstrapOrigin = browser.adoptBootstrap(provision);
   await provider.assertWorker(provision);
   // The real installer page consumes its one-time handoff. Do not race it.
   await browser.waitFor(() => browser.request(bootstrapOrigin, '/__ankka/install/setup'),
