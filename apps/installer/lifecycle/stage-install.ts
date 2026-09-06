@@ -22,7 +22,7 @@ import {
   provisionHostedStage1WithOperatorCredential,
   type HostedStage1Provision,
 } from '../src/hosted-stage1-bootstrap';
-import { buildStaticDeployPlan, parseDeploySelection, parseStaticDeployPlan, type StaticDeployPlan } from '../src/schema';
+import { buildStaticDeployPlan, parseDeploySelection, parseStaticDeployPlan, withDeployServiceAccess, type StaticDeployPlan } from '../src/schema';
 import { inventoryDeploymentCredential } from '../../../tools/lifecycle-credentials.mjs';
 import {
   installationSecretsSchema,
@@ -61,7 +61,7 @@ const installRecordSchema = v.looseObject({
 });
 
 function selection(context: LifecycleContext) {
-  return parseDeploySelection({
+  const base = parseDeploySelection({
     schemaVersion: 1,
     basics: {
       gatewayName: context.job.target.gatewayName,
@@ -73,6 +73,9 @@ function selection(context: LifecycleContext) {
     },
     firstSource: null,
   });
+  // A job that names a service credential opts the gateway into that one identity; the hosted installer never does.
+  const service = context.job.credentials.service;
+  return service === undefined ? base : withDeployServiceAccess(base, { clientId: service.clientId, tokenId: service.tokenId });
 }
 
 export async function installedPlan(context: LifecycleContext): Promise<StaticDeployPlan> {

@@ -10,10 +10,11 @@ export const ROOT_TEST = Object.freeze({
   accountId: '1'.repeat(32), zoneId: '2'.repeat(32), workerId: '3'.repeat(32), namespaceId: '4'.repeat(32),
   workerName: 'ankka-gateway-removal-fixture', hostname: 'manage.example.com',
   installId: `acg-${'5'.repeat(24)}`, applicationId: '6'.repeat(32), policyId: '7'.repeat(32), domainId: '8'.repeat(32),
-  now: 1_800_000_000_000,
+  servicePolicyId: 'a'.repeat(32), now: 1_800_000_000_000,
 });
 
-export async function gatewayTeardownFixture() {
+/** `servicePolicy` declares the receipt-owned Service Auth policy of an installation that opted into a service identity. */
+export async function gatewayTeardownFixture({ servicePolicy = false } = {}) {
   const root = ROOT_TEST;
   const runtime = await sourceActionRuntimeFixture({ ...root, actorEmail: 'admin@example.com',
     managementHostname: root.hostname, workersSubdomain: 'customer' });
@@ -46,6 +47,10 @@ export async function gatewayTeardownFixture() {
       applicationName: `Fixture management [${root.installId}]`, applicationAud: 'fixture-management-audience',
       policyId: root.policyId, policyName: `Fixture administrators [${root.installId}]`, domainId: root.domainId },
   };
+  if (servicePolicy) {
+    statement.management = { ...statement.management, servicePolicyId: root.servicePolicyId,
+      servicePolicyName: `Fixture automation [${root.installId}]` };
+  }
   const sign = async (value: GatewayTeardownStatement) => {
     const serialized = canonicalJson(value);
     return canonicalJson({ schemaVersion: 1, purpose: 'gateway_teardown_handoff_envelope',

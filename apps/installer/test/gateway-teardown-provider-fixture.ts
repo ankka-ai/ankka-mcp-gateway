@@ -13,8 +13,8 @@ export const TOKEN = 'synthetic-removal-grant';
 const VERSION = '11111111-1111-4111-8111-111111111111';
 const PREVIOUS = '22222222-2222-4222-8222-222222222222';
 
-export async function gatewayRootProviderFixture() {
-  const data = await gatewayTeardownFixture();
+export async function gatewayRootProviderFixture({ servicePolicy = false } = {}) {
+  const data = await gatewayTeardownFixture({ servicePolicy });
   const root = ROOT_TEST;
   let job = consumeGatewayTeardownCallback({
     job: authorizeGatewayTeardownJob({ job: data.job, attemptId: ATTEMPT, ...HASHES, now: root.now }),
@@ -30,6 +30,8 @@ export async function gatewayRootProviderFixture() {
     aud: data.statement.management.applicationAud, type: 'self_hosted', domain: String(root.hostname) };
   const policy = { id: root.policyId, name: data.statement.management.policyName, decision: 'allow', precedence: 1,
     include: [{ email: { email: 'changed-admin@example.com' } }], exclude: [], require: [] };
+  const service = servicePolicy ? { id: root.servicePolicyId, name: data.statement.management.servicePolicyName ?? '', decision: 'non_identity',
+    precedence: 2, include: [{ service_token: { token_id: 'b'.repeat(32) } }], exclude: [], require: [] } : null;
   let foreignPolicy = false;
   let sharedNamespace = false;
   let sharedService = false;
@@ -79,7 +81,7 @@ export async function gatewayRootProviderFixture() {
       if (path === `${base}/workers/domains`) return ok([...(live.domain ? [domain] : []), ...(extraDomain ? [{ ...domain, id: 'other-domain', hostname: 'other.example.com' }] : [])]);
       if (path === `${base}/workers/domains/${root.domainId}`) return live.domain ? ok(domain) : absent();
       if (path === app) return live.application ? ok(application) : absent();
-      if (path === `${app}/policies`) return ok([...(live.policy ? [policy] : []), ...(foreignPolicy ? [{ ...policy, id: 'foreign-policy' }] : [])]);
+      if (path === `${app}/policies`) return ok([...(live.policy ? [policy] : []), ...(service !== null && live.application ? [service] : []), ...(foreignPolicy ? [{ ...policy, id: 'foreign-policy' }] : [])]);
       if (path === `${app}/policies/${root.policyId}`) return live.policy ? ok(policy) : absent();
       if (path === `${base}/workers/scripts/${root.workerName}/deployments`) {
         // The deployment listing can still show the previous version after the namespace listing dropped the class.

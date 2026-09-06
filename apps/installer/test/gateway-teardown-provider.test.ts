@@ -86,6 +86,18 @@ describe('fixed hosted gateway root removal', () => {
     expect(test.mutations).toEqual([]);
   });
 
+  it('removes the root beside a declared Service Auth policy, which leaves with the application, and still refuses a foreign one', async () => {
+    const test = await fixture({ servicePolicy: true });
+    expect((await test.run()).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    const foreign = await fixture({ servicePolicy: true }); foreign.drift('policy');
+    await expect(foreign.run()).rejects.toMatchObject({ code: 'foreign_dependency' });
+    expect(foreign.mutations).toEqual([]);
+    // Without a declaration, a second policy of any shape is foreign.
+    const undeclared = await fixture(); undeclared.drift('policy');
+    await expect(undeclared.run()).rejects.toMatchObject({ code: 'foreign_dependency' });
+  });
+
   it('rejects tampered retirement bytes before any provider mutation', async () => {
     const test = await fixture();
     const bundle = Object.freeze({ ...test.bundle, payload: Object.freeze(test.bundle.payload.map((entry) => entry === test.retirement

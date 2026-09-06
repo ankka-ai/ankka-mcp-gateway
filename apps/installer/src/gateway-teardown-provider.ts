@@ -40,6 +40,14 @@ const policySchema = v.looseObject({
   approval_required: v.optional(v.literal(false)), isolation_required: v.optional(v.literal(false)),
   purpose_justification_required: v.optional(v.literal(false)),
 });
+/** The receipt-owned Service Auth policy an opted-in installation declares: one service token, no identity. */
+const servicePolicySchema = v.looseObject({
+  id: v.string(), name: v.string(), decision: v.literal('non_identity'), precedence: v.literal(2),
+  include: v.pipe(v.array(v.strictObject({ service_token: v.strictObject({ token_id: v.string() }) })), v.length(1)),
+  require: v.pipe(v.array(boundaryValueSchema), v.length(0)), exclude: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+  approval_required: v.optional(v.literal(false)), isolation_required: v.optional(v.literal(false)),
+  purpose_justification_required: v.optional(v.literal(false)),
+});
 const bindingSchema = v.looseObject({ type: v.string(), name: v.string(), namespace_id: v.optional(v.string()), script_name: v.optional(v.string()), service: v.optional(v.string()), class_name: v.optional(v.string()) });
 const settingsSchema = v.looseObject({ bindings: v.array(bindingSchema) });
 const deploymentsSchema = v.looseObject({ deployments: v.array(v.looseObject({
@@ -228,14 +236,21 @@ async function managementPresent(call: Call): Promise<{ application: boolean; po
       result.output.aud !== expected.applicationAud || result.output.domain !== expected.hostname ||
       result.output.destinations?.some((destination) => destination.uri !== expected.hostname) ||
       result.output.self_hosted_domains?.some((domain) => domain !== expected.hostname)) fail('application_read', 'identity_mismatch');
+  // The application carries the administrators' policy and, when the handoff declares one, the receipt-owned
+  // Service Auth policy; the latter is removed with the application, never on its own. Anything else is foreign.
   const policies = await list(call, 'policy_list', applicationUrl(call, '/policies'));
-  if (policies.length > 1) fail('policy_list', 'foreign_dependency');
-  for (const item of policies) {
-    const policy = v.safeParse(policySchema, item);
-    if (!policy.success || policy.output.id !== expected.policyId || policy.output.name !== expected.policyName) fail('policy_list', 'foreign_dependency');
-  }
+  const declaredId = (item: BoundaryValue): string | null => {
+    const admin = v.safeParse(policySchema, item);
+    if (admin.success) return admin.output.id === expected.policyId && admin.output.name === expected.policyName ? admin.output.id : null;
+    const service = v.safeParse(servicePolicySchema, item);
+    if (!service.success || expected.servicePolicyId === undefined) return null;
+    return service.output.id === expected.servicePolicyId && service.output.name === expected.servicePolicyName ? service.output.id : null;
+  };
+  const declaredIds = policies.map(declaredId);
+  if (declaredIds.some((id) => id === null) || new Set(declaredIds).size !== declaredIds.length) fail('policy_list', 'foreign_dependency');
+  const listed = declaredIds.includes(expected.policyId);
   const byId = await request(call, 'policy_read', applicationUrl(call, `/policies/${expected.policyId}`), {}, true);
-  if (byId.absent !== (policies.length === 0)) fail('policy_read', 'identity_mismatch');
+  if (byId.absent === listed) fail('policy_read', 'identity_mismatch');
   if (!byId.absent) {
     const policy = v.safeParse(policySchema, byId.value);
     if (!policy.success || policy.output.id !== expected.policyId || policy.output.name !== expected.policyName) fail('policy_read', 'identity_mismatch');
