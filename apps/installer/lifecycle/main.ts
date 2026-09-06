@@ -57,6 +57,21 @@ const STAGES: Readonly<Record<LifecycleStage, (context: LifecycleContext) => Pro
 
 const VERIFYING_STAGES: ReadonlySet<LifecycleStage> = new Set(['verify', 'verify-absent']);
 
+/** Production errors carry fixed codes and secret-free reasons; those, and only those, become the stage's diagnostic. */
+const thrownSchema = v.looseObject({
+  name: v.optional(v.string()),
+  code: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,79}$/u))),
+  reason: v.optional(v.nullable(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,159}$/u)))),
+});
+type Thrown = v.InferOutput<typeof thrownSchema>;
+interface StageOutcome { readonly status: 'failed' | 'blocked'; readonly code: string; readonly detail: string | null }
+
+function unexpectedOutcome(thrown: Thrown | null): StageOutcome {
+  const name = thrown?.name ?? 'error';
+  if (thrown?.code !== undefined) return { status: 'failed', code: thrown.code, detail: thrown.reason ? `${name}:${thrown.reason}` : name };
+  return { status: 'failed', code: 'unexpected_failure', detail: thrown === null ? null : name };
+}
+
 function families(stage: LifecycleStage): ReadonlySet<RunnerEndpointFamily> {
   const authority = STAGE_AUTHORITY[stage];
   const admitted = new Set(stageFamilies({
@@ -145,7 +160,7 @@ async function runStage(stage: LifecycleStage, jobPath: string, runDirectory: st
   } catch (error) {
     const outcome = error instanceof LifecycleStageError ? { status: error.status, code: error.code, detail: error.detail }
       : error instanceof LifecycleTransportError ? { status: error.code === 'job_cancelled' ? 'blocked' as const : 'failed' as const, code: error.code, detail: error.detail }
-        : { status: 'failed' as const, code: 'unexpected_failure', detail: error instanceof Error ? error.name : null };
+        : unexpectedOutcome(v.safeParse(thrownSchema, error).success ? v.parse(thrownSchema, error) : null);
     await record.stage(stage, outcome);
     process.stdout.write(`${JSON.stringify({ stage, ...outcome })}\n`);
     return outcome.status === 'blocked' ? 2 : 1;
