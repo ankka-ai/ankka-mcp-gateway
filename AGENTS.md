@@ -63,6 +63,12 @@ they are explicitly documented as non-secret.
 - Keep existing protocol fields, configuration values, routes, and published
   document paths stable when changing copy.
 
+## Brand presentation
+
+- Use the existing Ankka wordmark prominently, large and centered, with a vertical
+  gradient fading to transparent at the bottom. Preserve the original vector
+  letterforms; this is the Ankka brand treatment.
+
 ## Development
 
 - Keep the dependency graph small.

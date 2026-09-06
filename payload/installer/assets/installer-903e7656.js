@@ -443,7 +443,7 @@ function renderReview() {
   ]);
   const expiry = byId('plan-expiry');
   expiry.textContent = plan
-    ? `This review plan performs no writes. It stays valid until ${formatWhen(plan.expiresAt)} and is refreshed automatically when you connect.`
+    ? `Plan valid until ${formatWhen(plan.expiresAt)}. Refreshes automatically.`
     : 'Prepare your initial Gateway deployment to continue.';
   byId('connect-cloudflare').hidden = !plan;
   byId('review-missing').hidden = Boolean(plan);
@@ -468,10 +468,10 @@ function renderDeploy() {
     : '';
   byId('deploy-title').textContent = state.authorizationKind === 'cleanup'
     ? 'Approve the removal in Cloudflare'
-    : 'Approve the first step in Cloudflare';
+    : 'Continue in Cloudflare';
   byId('deploy-lede').textContent = state.authorizationKind === 'cleanup'
     ? 'Cloudflare will ask for one temporary permission to edit Workers. Ankka uses it once to remove exactly the incomplete Gateway shell it installed earlier, then revokes it.'
-    : 'Choose one Cloudflare account and approve temporary permissions to edit Workers and read domains. Ankka deploys the initial Worker and discovers your domains, then revokes the grant before handing you over.';
+    : 'Approve Workers editing and domain reading for one account. Access is revoked after deployment.';
 }
 
 function renderResult() {
@@ -852,4 +852,543 @@ for (const event of ['pageshow', 'focus']) {
     showNotice(apiErrorMessage(error, 'The installer could not start.'), 'error');
     render();
   }
+})();
+
+// A local, decorative field: no input tracking, network calls, or stored state.
+(() => {
+  const canvas = document.querySelector('.ambient-field');
+  const context = canvas?.getContext('2d');
+  if (!context) return;
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+  let width = 0;
+  let height = 0;
+  let frame = 0;
+  let lastTime = 0;
+  let phase = 0;
+
+  // These are original studies of processes, not reproductions of artworks.
+  let study = document.documentElement.dataset.artwork ?? 'kuro-fault';
+
+  function weave() {
+    const step = width < 600 ? 13 : 17;
+    for (let row = -1; row < height / step + 1; row += 1) {
+      for (let column = -1; column < width / step + 1; column += 1) {
+        // A twill weave: each weft passes over three warp threads, then under one.
+        const over = ((column + row) % 4 + 4) % 4 !== 0;
+        const tension = Math.sin(row * 0.08 + phase * 0.4) * Math.sin(column * 0.11) * 2;
+        const x = column * step + tension;
+        const y = row * step;
+        context.strokeStyle = over ? 'rgba(205,205,205,0.12)' : 'rgba(205,205,205,0.055)';
+        context.lineWidth = 1;
+        for (let thread = -2; thread <= 2; thread += 1) {
+          context.beginPath();
+          if (over) {
+            context.moveTo(x - step / 2 + 1, y + thread * 1.3);
+            context.quadraticCurveTo(x, y + thread * 1.3 + tension * 0.3, x + step / 2 - 1, y + thread * 1.3);
+          } else {
+            context.moveTo(x + thread * 1.3, y - step / 2 + 1);
+            context.lineTo(x + thread * 1.3, y + step / 2 - 1);
+          }
+          context.stroke();
+        }
+      }
+    }
+  }
+
+  function brush() {
+    // Each pass retains its own pressure and dry-brush gaps. Passes accumulate
+    // slowly, as a plotting tool revisits a surface with imperfect registration.
+    const span = 180;
+    for (let band = -1; band < height / span + 1; band += 1) {
+      for (let pass = 0; pass < 40; pass += 1) {
+        const seed = Math.sin(pass * 127.1 + band * 311.7) * 43758.5453;
+        const grain = seed - Math.floor(seed);
+        const deposit = 0.35 + 0.65 * (0.5 + Math.sin(phase * 0.5 - pass * 0.045 + band) * 0.5);
+        context.strokeStyle = `rgba(205,205,205,${(0.025 + grain * 0.065) * deposit})`;
+        context.lineWidth = 0.7 + grain * 2;
+        context.beginPath();
+        const start = -width * 0.15 + grain * 28;
+        const end = width * 1.15 - grain * 40;
+        for (let point = 0; point <= 70; point += 1) {
+          const x = start + (end - start) * point / 70;
+          const u = x / width;
+          const y = band * span + pass * 2.6 + Math.sin(u * 4.3 + band * 1.7) * 65
+            + Math.sin(u * 13 + pass * 0.15) * grain * 5;
+          if (point === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        }
+        context.stroke();
+      }
+    }
+  }
+
+  function layers() {
+    // Three transparent drawings use the same geometry, with independent
+    // registration. Their overlaps create forms absent from any single layer.
+    const scale = Math.max(width, height) * 0.56;
+    for (let layer = 0; layer < 3; layer += 1) {
+      const shiftX = Math.sin(phase * 0.35 + layer * 2.1) * 15;
+      const shiftY = Math.cos(phase * 0.3 + layer * 2.1) * 15;
+      context.strokeStyle = 'rgba(205,205,205,0.075)';
+      context.lineWidth = 0.65;
+      for (let contour = 0; contour < 50; contour += 1) {
+        const fraction = contour / 49;
+        context.beginPath();
+        for (let point = 0; point <= 120; point += 1) {
+          const angle = point / 120 * Math.PI * 2;
+          const radius = 0.23 + fraction * 0.68 + Math.cos(angle * 3 + fraction * 2) * 0.12;
+          const x = width * 0.5 + Math.cos(angle) * radius * scale + shiftX;
+          const y = height * 0.5 + Math.sin(angle) * radius * scale + shiftY;
+          if (point === 0) context.moveTo(x, y);
+          else context.lineTo(x, y);
+        }
+        context.stroke();
+      }
+    }
+  }
+
+  function random(index) {
+    const value = Math.sin(index * 127.1 + 43.7) * 43758.5453;
+    return value - Math.floor(value);
+  }
+
+  function confluence() {
+    // Independent fragments share an orientation only inside a moving field.
+    const time = phase * 0.35;
+    for (let i = 0; i < 260; i += 1) {
+      const x = ((random(i) + time * (0.012 + random(i + 700) * 0.01)) % 1) * width;
+      const y = random(i + 300) * height + Math.sin(time + i) * 8;
+      const field = Math.exp(-Math.pow((x / width - 0.5 - Math.sin(time) * 0.17) / 0.24, 2));
+      const angle = (random(i + 900) - 0.5) * Math.PI * (1 - field);
+      context.save();
+      context.translate(x, y);
+      context.rotate(angle);
+      context.fillStyle = `rgba(210,210,210,${0.045 + field * 0.11})`;
+      context.fillRect(-4, -1, 5 + random(i + 1200) * 15, 1 + random(i + 1600) * 3);
+      context.restore();
+    }
+  }
+
+  function eclipse() {
+    // Large offset apertures overlap: the negative spaces make the composition.
+    for (let i = 0; i < 5; i += 1) {
+      const size = Math.max(width, height) * (0.28 + i * 0.045);
+      const x = width * (0.18 + i * 0.17) + Math.sin(phase * 0.25 + i) * 24;
+      const y = height * (0.2 + (i % 3) * 0.32);
+      context.save();
+      context.translate(x, y);
+      context.rotate(i * 0.7 + Math.sin(phase * 0.2) * 0.06);
+      context.beginPath();
+      context.ellipse(0, 0, size, size * 0.65, 0, 0, Math.PI * 2);
+      context.ellipse(size * 0.13, 0, size * 0.88, size * 0.58, 0, 0, Math.PI * 2);
+      context.fillStyle = 'rgba(200,200,200,0.065)';
+      context.fill('evenodd');
+      context.restore();
+    }
+  }
+
+  function resonance() {
+    // Two near-identical spatial frequencies produce a much larger beat pattern.
+    const step = 9;
+    for (let y = 0; y < height; y += step) {
+      for (let x = 0; x < width; x += step) {
+        const a = Math.hypot(x - width * 0.25, y - height * 0.35);
+        const b = Math.hypot(x - width * 0.72, y - height * 0.62);
+        const beat = Math.sin(a * 0.038 + phase * 0.5) * Math.sin(b * 0.039 - phase * 0.4);
+        const strength = Math.pow(Math.max(0, beat), 2);
+        if (strength < 0.08) continue;
+        context.fillStyle = `rgba(210,210,210,${strength * 0.18})`;
+        context.beginPath();
+        context.arc(x, y, 0.5 + strength * 1.4, 0, Math.PI * 2);
+        context.fill();
+      }
+    }
+  }
+
+  function palimpsest() {
+    // Incomplete, overlapping impressions never resolve into readable symbols.
+    const cell = 110;
+    for (let row = -1; row < height / cell; row += 1) {
+      for (let column = -1; column < width / cell; column += 1) {
+        const seed = (row + 30) * 97 + column;
+        for (let layer = 0; layer < 3; layer += 1) {
+          const x = column * cell + random(seed) * 25 + layer * 3;
+          const y = row * cell + random(seed + 100) * 30;
+          const alpha = 0.02 + (0.5 + Math.sin(phase * 0.35 + seed + layer) * 0.5) * 0.035;
+          context.strokeStyle = `rgba(205,205,205,${alpha})`;
+          context.lineWidth = 7 - layer * 2;
+          context.beginPath();
+          context.moveTo(x, y + 65);
+          context.lineTo(x + 15, y);
+          context.lineTo(x + 65, y + random(seed + 200) * 45);
+          if (random(seed + 300) > 0.5) context.lineTo(x + 50, y + 70);
+          context.stroke();
+        }
+      }
+    }
+  }
+
+  function silt() {
+    // A granular field records smooth pressure changes as density, not trajectories.
+    for (let i = 0; i < 6500; i += 1) {
+      const x = random(i) * width;
+      const y = random(i + 9000) * height;
+      const u = x / Math.max(width, 1);
+      const v = y / Math.max(height, 1);
+      const pressure = Math.sin(v * 15 + Math.sin(u * 6 + phase * 0.25) * 2.4);
+      const density = Math.pow(0.5 + pressure * 0.5, 4);
+      context.fillStyle = `rgba(215,215,215,${density * 0.19})`;
+      context.fillRect(x, y, 0.7 + random(i + 18000) * 1.3, 0.8);
+    }
+  }
+
+  function vellum() {
+    // Broad translucent cut-paper shapes reveal a third shape at each overlap.
+    for (let i = 0; i < 8; i += 1) {
+      const y = (i - 1) * height / 5;
+      const lift = Math.sin(phase * 0.23 + i * 1.1) * height * 0.025;
+      context.beginPath();
+      context.moveTo(-20, y);
+      context.bezierCurveTo(width * 0.28, y - 100 + lift, width * 0.6, y + 180, width + 20, y + 35);
+      context.lineTo(width + 20, y + 95);
+      context.bezierCurveTo(width * 0.6, y + 255, width * 0.28, y - 45 + lift, -20, y + 145);
+      context.closePath();
+      context.fillStyle = 'rgba(205,205,205,0.038)';
+      context.fill();
+    }
+  }
+
+  function ikeda() {
+    const step = 7;
+    for (let y = 0; y < height; y += step) {
+      const band = Math.floor(y / 90);
+      for (let x = 0; x < width; x += step * 2) {
+        const n = Math.floor(x / (step * 2)) + Math.floor(y / step) * 199;
+        const pulse = 0.5 + 0.5 * Math.sin(phase * 2 - band * 0.8);
+        if (random(n + band * 701) < 0.45) continue;
+        context.fillStyle = `rgba(225,225,225,${0.025 + pulse * 0.09})`;
+        context.fillRect(x, y, band % 3 === 0 ? 9 : 2, 2 + random(n + 3) * 3);
+      }
+    }
+  }
+
+  function nicolai() {
+    for (let panel = 0; panel < 4; panel += 1) {
+      context.save();
+      context.beginPath(); context.rect(panel * width / 4, 0, width / 4, height); context.clip();
+      for (let layer = 0; layer < 2; layer += 1) {
+        context.save(); context.translate((panel + 0.5) * width / 4, height / 2);
+        context.rotate((layer ? -1 : 1) * (0.025 + Math.sin(phase * 0.4 + panel) * 0.045));
+        context.fillStyle = 'rgba(220,220,220,0.055)';
+        for (let x = -width; x < width; x += 6 + panel) context.fillRect(x + layer * Math.sin(phase) * 5, -height, 1, height * 2);
+        context.restore();
+      }
+      context.restore();
+    }
+  }
+
+  function kurokawa() {
+    for (let i = 0; i < 7000; i += 1) {
+      const u = random(i * 3), v = random(i * 3 + 1);
+      const fold = Math.sin(u * 17 + phase * 0.35) * Math.cos(v * 11 - phase * 0.2);
+      const x = u * width + fold * 50;
+      const y = v * height + Math.sin(u * 8 + v * 5) * 70;
+      const density = Math.pow(Math.max(0, Math.cos(v * 14 + u * 9 + fold * 2)), 5);
+      context.fillStyle = `rgba(225,225,225,${density * 0.28})`;
+      context.fillRect(x, y, 0.8 + random(i + 100) * 2.2, i % 31 === 0 ? 15 : 1);
+    }
+  }
+
+  function quayola() {
+    const step = 95;
+    const point = (x, y) => [x * step + Math.sin(y * 2.3 + x * 4.1 + phase * 0.2) * 30, y * step + Math.cos(x * 2 + y * 3.7) * 35];
+    for (let y = -1; y < height / step + 1; y += 1) for (let x = -1; x < width / step + 1; x += 1) {
+      const a = point(x, y), b = point(x + 1, y), c = point(x, y + 1), d = point(x + 1, y + 1);
+      for (const triangle of [[a,b,c],[b,d,c]]) {
+        context.beginPath(); triangle.forEach(([px,py], index) => index ? context.lineTo(px,py) : context.moveTo(px,py)); context.closePath();
+        const value = 0.018 + 0.08 * (0.5 + 0.5 * Math.sin(x * 1.9 + y * 0.7 + phase * 0.25));
+        context.fillStyle = `rgba(215,215,215,${value})`; context.fill();
+        context.strokeStyle = 'rgba(210,210,210,0.05)'; context.lineWidth = 0.6; context.stroke();
+      }
+    }
+  }
+
+  function reas() {
+    const elements = Array.from({length: 75}, (_, i) => {
+      const angle = random(i + 81) * Math.PI * 2 + phase * 0.15;
+      return {x: ((random(i * 3) * width + Math.cos(angle) * phase * 35) % width + width) % width, y: ((random(i * 3 + 1) * height + Math.sin(angle) * phase * 35) % height + height) % height, dx: Math.cos(angle) * 65, dy: Math.sin(angle) * 65};
+    });
+    for (let i = 0; i < elements.length; i += 1) for (let j = i + 1; j < elements.length; j += 1) {
+      const a = elements[i], b = elements[j], distance = Math.hypot(a.x-b.x,a.y-b.y);
+      if (distance > 150) continue;
+      context.beginPath(); context.moveTo(a.x-a.dx,a.y-a.dy); context.lineTo(a.x+a.dx,a.y+a.dy); context.lineTo(b.x+b.dx,b.y+b.dy); context.lineTo(b.x-b.dx,b.y-b.dy); context.closePath();
+      context.fillStyle = `rgba(210,210,210,${(1-distance/150)*0.09})`; context.fill();
+    }
+  }
+
+  function lia() {
+    for (let group = 0; group < 6; group += 1) {
+      context.save(); context.translate(width * (group % 3 + 0.5) / 3, height * (Math.floor(group / 3) + 0.5) / 2);
+      context.rotate(phase * 0.025 * (group % 2 ? 1 : -1));
+      for (let ring = 0; ring < 48; ring += 1) {
+        context.beginPath();
+        for (let i = 0; i <= 160; i += 1) {
+          const t = i / 160 * Math.PI * 2;
+          const r = 12 + ring * 3.5 + Math.sin(t * 3 + ring * 0.09 + phase * 0.3) * ring * 1.1;
+          const x = Math.cos(t) * r, y = Math.sin(t) * r;
+          if (i) context.lineTo(x,y); else context.moveTo(x,y);
+        }
+        context.strokeStyle = 'rgba(215,215,215,0.095)'; context.lineWidth = 0.65; context.stroke();
+      }
+      context.restore();
+    }
+  }
+
+  function akten() {
+    for (let i = 0; i < 220; i += 1) {
+      const x = i / 219 * width;
+      const frequency = 1 + i * 0.004;
+      const y = height / 2 + Math.sin(phase * frequency + i * 0.065) * height * 0.34;
+      context.beginPath(); context.ellipse(x,y,2.5,10 + 10 * (0.5 + Math.cos(i * 0.08 + phase) * 0.5),0,0,Math.PI*2);
+      context.fillStyle = 'rgba(225,225,225,0.18)'; context.fill();
+      for(let echo=1;echo<5;echo+=1) {
+        context.beginPath(); context.arc(x,y + Math.sin(i * 0.025 + phase) * echo * 22,1.2,0,Math.PI*2); context.fillStyle = `rgba(215,215,215,${0.065/echo})`;context.fill();
+      }
+    }
+  }
+
+  function lemercier() {
+    for (let row = -10; row < height / 8 + 12; row += 1) {
+      context.beginPath();
+      for (let x = -10; x <= width + 10; x += 7) {
+        const u = x / width;
+        const ridge = Math.pow(Math.abs(Math.sin(u * 7 + row * 0.025)), 5) * 95;
+        const y = row * 8 - ridge * Math.sin(row * 0.035 + phase * 0.13) + Math.sin(u * 23 + row * 0.1) * 9;
+        if (x === -10) context.moveTo(x,y); else context.lineTo(x,y);
+      }
+      context.strokeStyle = 'rgba(210,210,210,0.095)'; context.lineWidth = 0.6; context.stroke();
+    }
+  }
+
+  function giger() {
+    for (let column = -1; column < width / 230 + 1; column += 1) {
+      const spine = column * 230 + 115;
+      for (let row = -2; row < height / 23 + 2; row += 1) {
+        const y = row * 23 + Math.sin(phase * 0.22 + column) * 8;
+        const spread = 80 + Math.sin(row * 0.12 + column) * 25;
+        for (const side of [-1,1]) {
+          context.beginPath(); context.moveTo(spine + side * 8,y);
+          context.bezierCurveTo(spine + side * spread * 0.5,y - 38,spine + side * spread,y - 30,spine + side * (spread + 18),y + 34);
+          context.strokeStyle = 'rgba(180,180,180,0.055)'; context.lineWidth=9;context.stroke();
+          context.strokeStyle = 'rgba(225,225,225,0.10)';context.lineWidth=1;context.stroke();
+        }
+        context.fillStyle='rgba(210,210,210,0.10)';context.fillRect(spine-3,y-4,6,10);
+      }
+    }
+  }
+
+  function mead() {
+    for (let band = -1; band < 7; band += 1) {
+      const y = band * height / 5 + Math.sin(phase * 0.18) * 8;
+      for (let cell = -1; cell < width / 190 + 1; cell += 1) {
+        const x = cell * 190 + (band % 2) * 75;
+        const length = 140 + random(cell + band * 30) * 65;
+        context.beginPath();context.moveTo(x,y);context.lineTo(x+length,y);context.lineTo(x+length-48,y+60);context.lineTo(x-28,y+60);context.closePath();
+        context.fillStyle='rgba(210,210,210,0.045)';context.fill();
+        context.strokeStyle='rgba(215,215,215,0.10)';context.lineWidth=0.7;context.stroke();
+        for(let detail=0;detail<7;detail+=1){context.fillStyle='rgba(225,225,225,0.07)';context.fillRect(x+12+detail*12,y+13,6,2);}
+        context.fillStyle='rgba(225,225,225,0.085)';context.fillRect(x+10,y+44,length-70,1);
+      }
+    }
+  }
+
+  // Original 2D studies of material, fragmentation and temporal composition.
+  // Geometry is sampled once: every grain belongs to a persistent fragment.
+  const kuroCache = new Map();
+  let kuroSamples = null;
+  const ease = (value) => {
+    const t = Math.max(0, Math.min(1, value));
+    return t * t * (3 - 2 * t);
+  };
+  function grainNoise(x, y) {
+    const ix = Math.floor(x), iy = Math.floor(y);
+    const tx = ease(x - ix), ty = ease(y - iy);
+    const a = random(ix * 127.1 + iy * 311.7);
+    const b = random((ix + 1) * 127.1 + iy * 311.7);
+    const c = random(ix * 127.1 + (iy + 1) * 311.7);
+    const d = random((ix + 1) * 127.1 + (iy + 1) * 311.7);
+    return (a + (b - a) * tx) * (1 - ty) + (c + (d - c) * tx) * ty;
+  }
+  function materialNoise(x, y) {
+    return grainNoise(x, y) * 0.55 + grainNoise(x * 2.13, y * 2.13) * 0.28 + grainNoise(x * 5.17, y * 5.17) * 0.17;
+  }
+  function kuroGeometry(kind) {
+    if (kuroCache.has(kind)) return kuroCache.get(kind);
+    const groups = Array.from({ length: 40 }, () => Array.from({ length: 7 }, () => []));
+    if (!kuroSamples) {
+      const count = Math.min(76000, Math.round(width * height / 10));
+      kuroSamples = new Float32Array(count * 4);
+      for (let i = 0; i < count; i += 1) {
+        const u = random(i * 3.13 + 27), v = random(i * 4.71 + 109);
+        kuroSamples.set([u, v, materialNoise(u * 7, v * 8), materialNoise(u * 42, v * 37)], i * 4);
+      }
+    }
+    for (let i = 0; i < kuroSamples.length / 4; i += 1) {
+      const [u, v, coarse, fine] = kuroSamples.subarray(i * 4, i * 4 + 4);
+      let density, group;
+      if (kind === 'fault') {
+        const ridge = v - (0.10 + u * 0.73 + Math.sin(u * 9) * 0.10);
+        const ridge2 = v - (0.78 - u * 0.38);
+        const body = Math.exp(-Math.pow(ridge / (0.10 + coarse * 0.13), 2));
+        const counter = Math.exp(-Math.pow(ridge2 / 0.08, 2)) * 0.38;
+        const veins = Math.pow(Math.abs(Math.sin(v * 110 + u * 24 + coarse * 12)), 7);
+        density = Math.max(body, counter) * (0.12 + fine * 0.55 + veins * 0.52);
+        group = Math.min(39, Math.floor(v * 20) * 2 + (u > 0.55 ? 1 : 0));
+      } else if (kind === 'assemblage') {
+        const xx = u * 5, yy = v * 4;
+        const cell = Math.floor(xx) + Math.floor(yy) * 5;
+        const fx = xx % 1, fy = yy % 1;
+        const edge = Math.min(fx, 1 - fx, fy, 1 - fy);
+        const manmade = Math.exp(-edge * 30) * 0.7 + (Math.sin(fx * 68) > 0.85 ? 0.22 : 0.02);
+        const organic = Math.pow(Math.max(0, 1 - Math.abs(coarse - 0.52) * 5), 4) * fine;
+        const mix = random(cell + 49);
+        density = (mix > 0.45 ? organic : manmade * (0.3 + fine)) * (0.35 + coarse);
+        group = Math.min(39, Math.floor(v * 8) * 5 + Math.floor(u * 5));
+      } else if (kind === 'fold') {
+        const axis = 0.24 + u * 0.46;
+        const d = v - axis;
+        const membrane = Math.exp(-Math.pow(d / (0.23 + 0.07 * Math.sin(u * 11)), 2));
+        const veins = Math.pow(Math.abs(Math.sin(d * 100 + coarse * 18)), 9);
+        density = membrane * (veins * 0.72 + fine * 0.36) * (0.35 + coarse);
+        group = Math.min(39, Math.floor(u * 10) * 4 + Math.floor(v * 4));
+      } else {
+        const column = Math.min(4, Math.floor(u * 5));
+        const local = (u * 5) % 1;
+        const edge = Math.pow(Math.sin(local * Math.PI), 0.6);
+        const relief = Math.exp(-Math.pow((v - 0.5 - Math.sin(local * 6 + column) * 0.16) / 0.34, 2));
+        density = edge * relief * (fine * 0.48 + Math.pow(Math.abs(Math.sin(v * 87 + coarse * 12)), 8) * 0.58);
+        group = column * 8 + Math.min(7, Math.floor(v * 8));
+      }
+      if (density < 0.09 || random(i * 9.7 + 7) > density * 1.5) continue;
+      const tone = Math.min(6, Math.floor(density * 8));
+      const size = 0.55 + random(i + 811) * 0.95;
+      const grainWidth = kind === 'assemblage' && tone > 2 ? 2 + fine * 5 : size;
+      const grainHeight = kind === 'quintet' && i % 5 === 0 ? 2.5 : size;
+      groups[group][tone].push(u * width, v * height, grainWidth, i % 97 === 0 ? 4 + fine * 9 : grainHeight);
+    }
+    const paths = kind === 'fold' ? null : groups.map(tones => tones.map(points => {
+      const path = new Path2D();
+      for (let p = 0; p < points.length; p += 4) path.rect(points[p], points[p + 1], points[p + 2], points[p + 3]);
+      return path;
+    }));
+    const geometry = { groups, paths };
+    kuroCache.set(kind, geometry);
+    return geometry;
+  }
+  // A slow score: establish / displace / suspend / re-form. Staggered fragments
+  // share the same event, so movement reads as one material changing state.
+  function kuroEnvelope(time, delay = 0) {
+    const t = ((time - delay) % 38 + 38) % 38;
+    return ease((t - 9) / 5) * (1 - ease((t - 23) / 9));
+  }
+  function kuroStudy(kind) {
+    const { groups, paths } = kuroGeometry(kind);
+    const time = phase / 0.085;
+    for (let g = 0; g < groups.length; g += 1) {
+      const column = kind === 'quintet' ? Math.floor(g / 8) : g % 5;
+      const delay = kind === 'quintet' ? [0, 2.2, 5.6, 3.8, 7.4][column] : random(g + 30) * 3;
+      const event = kuroEnvelope(time + 8, delay);
+      const breath = Math.sin(time * 0.11 + g * 0.18);
+      let dx = 0, dy = 0, sx = 1, sy = 1;
+      if (kind === 'fault') {
+        dx = (random(g + 62) - 0.5) * width * 0.085 * event;
+        dy = (random(g + 93) - 0.5) * 24 * event + breath * 1.5;
+      } else if (kind === 'assemblage') {
+        dx = (column - 2) * event * 11;
+        dy = (random(g + 21) - 0.5) * event * 76;
+        sx = 1 - event * 0.045;
+      } else if (kind === 'fold') {
+        sy = 1 - event * 0.70;
+        dx = breath * 3;
+        dy = (g % 4 - 1.5) * event * 12;
+      } else {
+        dy = event * Math.sin(column * 1.7 + 0.4) * height * 0.10;
+        sy = 1 - event * 0.16;
+      }
+      context.save();
+      context.translate(width / 2 + dx, height / 2 + dy);
+      context.scale(sx, sy);
+      context.translate(-width / 2, -height / 2);
+      for (let tone = 0; tone < 7; tone += 1) {
+        const alpha = (0.075 + tone * 0.054) * (1 - event * 0.12);
+        context.fillStyle = `rgba(226,226,226,${alpha})`;
+        if (paths) {
+          context.fill(paths[g][tone]);
+          continue;
+        }
+        const points = groups[g][tone];
+        for (let p = 0; p < points.length; p += 4) {
+          let y = points[p + 1];
+          if (kind === 'fold') y += Math.sin(points[p] / width * 8 + time * 0.13) * event * 35;
+          context.fillRect(points[p], y, points[p + 2], points[p + 3]);
+        }
+      }
+      context.restore();
+    }
+  }
+
+  const studies = { 'kuro-fault': () => kuroStudy('fault'), 'kuro-assemblage': () => kuroStudy('assemblage'), 'kuro-fold': () => kuroStudy('fold'), 'kuro-quintet': () => kuroStudy('quintet'), ikeda, nicolai, kurokawa, quayola, reas, lia, akten, lemercier, giger, mead, anna: weave, licia: brush, iskra: layers, confluence, eclipse, resonance, palimpsest, silt, vellum };
+
+  function draw() {
+    context.clearRect(0, 0, width, height);
+    (studies[study] ?? confluence)();
+  }
+
+  window.addEventListener('ankka:artwork', () => {
+    const selected = document.documentElement.dataset.artwork;
+    if (!Object.hasOwn(studies, selected)) return;
+    study = selected;
+    phase = 0;
+    sync();
+  });
+
+  function animate(time) {
+    frame = 0;
+    if (document.hidden || reducedMotion.matches) return;
+    if (time - lastTime >= 1000 / 30) {
+      phase += Math.min(time - lastTime, 50) * 0.000085;
+      lastTime = time;
+      draw();
+    }
+    frame = window.requestAnimationFrame(animate);
+  }
+
+  function sync() {
+    window.cancelAnimationFrame(frame);
+    frame = 0;
+    lastTime = performance.now();
+    draw();
+    if (!document.hidden && !reducedMotion.matches) frame = window.requestAnimationFrame(animate);
+  }
+
+  function resize() {
+    kuroCache.clear();
+    kuroSamples = null;
+    width = window.innerWidth;
+    height = window.innerHeight;
+    const ratio = Math.min(window.devicePixelRatio || 1, 1.5);
+    canvas.width = Math.round(width * ratio);
+    canvas.height = Math.round(height * ratio);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    sync();
+  }
+
+  let resizeTimer = 0;
+  window.addEventListener('resize', () => {
+    window.clearTimeout(resizeTimer);
+    resizeTimer = window.setTimeout(resize, 120);
+  });
+  document.addEventListener('visibilitychange', sync);
+  reducedMotion.addEventListener('change', sync);
+  resize();
 })();
