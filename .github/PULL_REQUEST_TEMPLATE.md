@@ -4,7 +4,7 @@ Describe the public contract or behavior changed and why.
 
 ## Release-boundary checklist
 
-- [ ] `npm run check` passes.
+- [ ] `npm run check:fast` and focused tests pass locally; the required CI `check` must pass before merge.
 - [ ] Tests use synthetic data only.
 - [ ] No credential, private data, private hostname, provider locator, generated release, signing material, or deployment authority is included.
 - [ ] New dependencies or transferred material are recorded in `ORIGINS.md` and `THIRD_PARTY_NOTICES.md` when applicable.

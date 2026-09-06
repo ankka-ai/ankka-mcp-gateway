@@ -74,7 +74,8 @@ publish a client/provider compatibility claim from local fixtures alone.
 
 ## Contribute or investigate
 
-Use [Contributing](../CONTRIBUTING.md) for pinned toolchain and test commands,
+Use [Operations](OPERATIONS.md) for daily checks and release stages,
+[Contributing](../CONTRIBUTING.md) for pinned toolchain and test commands,
 the [changelog](../CHANGELOG.md) for repository changes, and the
 [synthetic MCP fixture](../fixtures/synthetic-mcp/README.md) for repeatable,
 credential-free tests. The [governance roadmap](GOVERNANCE_ROADMAP.md) describes
