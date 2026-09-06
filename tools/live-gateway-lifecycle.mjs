@@ -7,7 +7,7 @@ function requireCondition(value, code) {
   if (!value) throw new LiveLifecycleError(code);
 }
 const terminalAction = (value) => ['succeeded', 'failed', 'recovery_required'].includes(value?.status);
-const exactRelease = (value, expected) => value?.release === expected.release && value.artifactSha256 === expected.artifactSha256;
+const exactRelease = (value, expected) => value?.release === expected.release && value.artifactSha256 === `sha256:${expected.artifactSha256}`;
 
 /** Each write is preceded by a private checkpoint. Never retry an unknown write.
  * OAuth is reviewed in the runner's own browser; routine management uses the
@@ -56,7 +56,7 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   await publishB();
   await browser.waitFor(() => management('/api/update'), (value) => exactRelease(value?.available, config.releaseB));
   const update = await management('/api/update-actions', { method: 'POST', body: {
-    schemaVersion: 1, operation: 'update', expectedTarget: config.releaseB,
+    schemaVersion: 1, operation: 'update', expectedTarget: { ...config.releaseB, artifactSha256: `sha256:${config.releaseB.artifactSha256}` },
   } });
   requireCondition(/^action_[A-Za-z0-9_-]{32}$/u.test(update?.actionId), 'update_action_invalid');
   await checkpoint({ stage: 'update', status: 'recorded', actionId: update.actionId });
@@ -67,7 +67,7 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   const team = await management('/api/team');
   requireCondition(sources.applyMode === 'account_token' && sources.sources?.some((item) =>
     item.id === source.sourceId && item.status === 'installed') && team.managementCredentialConfigured === true &&
-    team.editingEnabled === true && team.members?.length === 0, 'update_did_not_preserve_management');
+    team.editingEnabled === true && JSON.stringify(team.members) === JSON.stringify(source.baselineMembers), 'update_did_not_preserve_management');
   await checkpoint({ stage: 'update', status: 'passed' });
 
   await checkpoint({ stage: 'interrupted_removal', status: 'started' });

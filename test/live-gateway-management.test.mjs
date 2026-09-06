@@ -2,15 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { qualifyLiveGatewayManagement } from '../tools/live-gateway-management.mjs';
 
-function fixture({ applyMode = 'account_token', loseApply = false, unverifiedTeam = false, oauthApply = false } = {}) {
+function fixture({ applyMode = 'account_token', loseApply = false, unverifiedTeam = false, oauthApply = false, baseline = [], adminEmails = [] } = {}) {
   const calls = [], checkpoints = [];
   const actionId = `action_${'A'.repeat(32)}`;
   const source = { url: 'https://synthetic.example.com/mcp', tool: 'synthetic_status' };
-  let sources = [], members = [], revision = 0;
+  let sources = [], members = baseline, revision = 0;
   const request = async (path, options = {}) => {
     calls.push({ path, ...options });
     if (path === '/api/team') return { schemaVersion: 1, editingEnabled: true, managementCredentialConfigured: true,
-      observedAt: unverifiedTeam ? null : '2026-09-01T00:00:00.000Z', revision, members };
+      adminEmails, observedAt: unverifiedTeam ? null : '2026-09-01T00:00:00.000Z', revision, members };
     if (path === '/api/sources/discover') return { status: 'discovered', authentication: 'none', endpoint: source.url, tools: [{ name: source.tool }] };
     if (path === '/api/sources') {
       if (options.method === 'PUT') sources = [{ id: 'synthetic', status: 'draft', ...options.body.source }];
@@ -62,4 +62,18 @@ test('an OAuth handoff cannot satisfy token-managed source qualification', async
   await assert.rejects(f.run(), { code: 'source_action_not_completed_without_oauth' });
   assert.equal(f.checkpoints.at(-1).status, 'recorded');
   assert.equal(f.calls.some((call) => call.path === '/api/team-actions'), false);
+});
+
+ test('fresh administrator-only membership is retained and unrelated members stop the run', async () => {
+  const admin = { email: 'admin@example.com', sourceIds: [] };
+  const f = fixture({ baseline: [admin], adminEmails: [admin.email] });
+  await f.run();
+  const writes = f.calls.filter(call => call.path === '/api/team-actions');
+  assert.deepEqual(writes.at(-1).body.members, [admin]);
+  assert.equal(writes[0].body.members[0], admin);
+  for (const member of [{ email: 'other@example.com', sourceIds: [] }, { ...admin, sourceIds: ['existing'] }]) {
+    const unsafe = fixture({ baseline: [member], adminEmails: [admin.email] });
+    await assert.rejects(unsafe.run(), { code: 'fresh_team_required' });
+    assert.equal(unsafe.calls.some(call => call.method), false);
+  }
 });

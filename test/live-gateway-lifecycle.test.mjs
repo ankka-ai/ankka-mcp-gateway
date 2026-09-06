@@ -70,7 +70,8 @@ test('complete orchestration proves token management, distinct update, lost call
   const installId = `acg-${'1'.repeat(24)}`;
   const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.synthetic.workers.dev` };
   const actionId = `action_${'A'.repeat(32)}`;
-  let current = config.releaseA, available = null, sources = [], members = [], revision = 0;
+  const runtimeIdentity = (release) => ({ ...release, artifactSha256: `sha256:${release.artifactSha256}` });
+  let current = runtimeIdentity(config.releaseA), available = null, sources = [], members = [], revision = 0;
   let interrupted = false, removed = false, consentCount = 0;
   const receipt = 'synthetic-signed-removal-receipt';
   const browser = {
@@ -98,6 +99,7 @@ test('complete orchestration proves token management, distinct update, lost call
       }
       if (path === '/api/status') return { schemaVersion: 1 };
       if (path === '/api/update') return { current, available };
+      if (path === '/api/update-actions') assert.deepEqual(options.body.expectedTarget, runtimeIdentity(config.releaseB));
       if (path === '/api/update-actions' || path === '/api/teardown-actions') return { actionId, handoffUrl: 'synthetic-handoff' };
       if (path.startsWith('/api/update-actions/') || path.startsWith('/api/teardown-actions/')) return { status: 'succeeded' };
       if (path === '/api/team') return { schemaVersion: 1, editingEnabled: true, managementCredentialConfigured: true,
@@ -112,14 +114,14 @@ test('complete orchestration proves token management, distinct update, lost call
       if (path === '/api/team-actions') { members = options.body.members; revision += 1; return { action: { actionId, status: 'succeeded' } }; }
       throw new Error('unexpected_request');
     },
-    continueHandoff: async (_url, kind) => { if (kind === 'update') current = config.releaseB; else interrupted = true; },
+    continueHandoff: async (_url, kind) => { if (kind === 'update') current = runtimeIdentity(config.releaseB); else interrupted = true; },
     loseNextTeardownCallbackResponse: async () => evidence.push('interruption_armed'),
     interruptionObserved: () => interrupted,
     clearRemovalSession: async () => evidence.push('removal_cookie_cleared'),
   };
   await qualifyLiveGatewayLifecycle({ config, browser, notify: () => {},
     checkpoint: async (event) => events.push(event),
-    publishB: async () => { available = config.releaseB; evidence.push('release_b_activated'); },
+    publishB: async () => { available = runtimeIdentity(config.releaseB); evidence.push('release_b_activated'); },
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
