@@ -52,16 +52,16 @@ export function validateLiveHandoff(value, origin, path) {
 /** Own ephemeral browser. No CDP attachment, cookies exported, traces or HAR files. */
 export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, browserProfile, notify }) {
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
-  const browser = browserProfile ? null : await chromium.launch({ channel: 'chrome', headless: false });
+  const browser = browserProfile ? null : await chromium.launch({ channel: 'chrome', headless: false, chromiumSandbox: true });
   const context = browserProfile
     ? await chromium.launchPersistentContext(browserProfile, {
-      channel: 'chrome', headless: false, acceptDownloads: false, serviceWorkers: 'block',
+      channel: 'chrome', headless: false, chromiumSandbox: true, acceptDownloads: false, serviceWorkers: 'block',
       // A manually authenticated Chrome profile uses the real OS keychain.
       // Mock/basic stores cannot decrypt that profile's existing login cookies.
       ignoreDefaultArgs: ['--use-mock-keychain', '--password-store=basic'],
     })
     : await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
-  const page = await context.newPage();
+  const page = context.pages()[0] ?? await context.newPage();
   page.setDefaultTimeout(30_000);
   let interrupted = false;
   let interruptionArmed = false;
@@ -74,7 +74,18 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     if ((!origins.includes(target.origin) && !consent) || target.username || target.password) {
       throw new LiveGatewayBrowserError('navigation_outside_lifecycle');
     }
-    try { await page.goto(target.href, { waitUntil: 'domcontentloaded' }); }
+    try {
+      await page.bringToFront();
+      await page.goto(target.href, { waitUntil: 'domcontentloaded' });
+      await page.bringToFront();
+      if (page.url() === 'about:blank') throw new Error();
+      const visibleOrigin = new URL(page.url()).origin;
+      const location = visibleOrigin === installerOrigin ? 'isolated installer' :
+        visibleOrigin === managementOrigin ? 'test gateway' :
+        visibleOrigin === 'https://accounts.google.com' ? 'Google sign-in' :
+        visibleOrigin === 'https://dash.cloudflare.com' ? 'Cloudflare sign-in or consent' : 'external sign-in';
+      notify(`Active test tab: ${location}.`);
+    }
     catch { throw new LiveGatewayBrowserError('navigation_failed'); }
   }
 
