@@ -58,6 +58,34 @@ describe('fixed hosted gateway root removal', () => {
     expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
   });
 
+  it('allows bounded deployment-list propagation after the namespace listing drops the class', async () => {
+    const test = await fixture(); test.lag('deployment');
+    expect((await test.run()).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+  });
+
+  it('leaves an unsettled retirement pending for a fresh consent instead of judging the stale version foreign', async () => {
+    const test = await fixture(); test.lag('deployment', 100);
+    await expect(test.run()).rejects.toMatchObject({ stage: 'retire_namespace', code: 'absence_not_proven' });
+    expect(test.current().pendingStep).toBe('retire_namespace');
+    expect(test.mutations).toEqual(['retire_namespace']);
+    test.lag('deployment', 0); test.renew();
+    expect((await test.run(NEXT_ATTEMPT)).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+  });
+
+  it('accepts the inherited secrets on the retirement version and refuses any other binding on it', async () => {
+    const test = await fixture(); test.foreignVersionBinding();
+    await expect(test.run()).rejects.toMatchObject({ stage: 'retire_namespace', code: 'absence_not_proven' });
+    expect(test.mutations).toEqual(['retire_namespace']);
+  });
+
+  it('still refuses a foreign active version outside a settling window', async () => {
+    const test = await fixture(); test.live.namespace = false; test.live.retired = true; test.lag('deployment', 100);
+    await expect(test.run()).rejects.toMatchObject({ stage: 'retirement_version', code: 'identity_mismatch' });
+    expect(test.mutations).toEqual([]);
+  });
+
   it('rejects tampered retirement bytes before any provider mutation', async () => {
     const test = await fixture();
     const bundle = Object.freeze({ ...test.bundle, payload: Object.freeze(test.bundle.payload.map((entry) => entry === test.retirement
