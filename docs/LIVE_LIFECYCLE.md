@@ -1,5 +1,10 @@
 # Live lifecycle validation
 
+This command is the customer-path layer: browser onboarding, real OAuth
+consent, the deployed Durable Object's handovers and the hosted removal job.
+Unattended development runs use the [lifecycle runner](AGENT_LIFECYCLE.md)
+instead; neither replaces the other's evidence.
+
 The live command creates and removes a disposable gateway. It requires a prepared,
 published pair of distinct signed releases and an isolated installer. It does not
 use production signing keys or prepare accounts, billing, OAuth clients, or token

@@ -17,7 +17,7 @@ import {
   verifyWorkerBootstrapSubdomain,
   type CloudflareManagementTransport,
 } from './cloudflare-management-surface';
-import { discoverHostedAccountZones, ensureHostedWorkersSubdomain, setupZonesSchema } from './hosted-account-setup';
+import { discoverHostedAccountZones, ensureHostedWorkersSubdomain, setupZonesSchema, type SetupZone } from './hosted-account-setup';
 import { PUBLIC_ORIGIN } from './constants';
 import {
   createCustomerBootstrapCapability,
@@ -27,6 +27,7 @@ import {
 import {
   deployCustomerBootstrapWorker,
   type CustomerBootstrapPlainBindings,
+  type CustomerBootstrapWorkerDeployment,
 } from './customer-bootstrap-worker-deployment';
 import {
   CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH,
@@ -38,6 +39,9 @@ import { base64UrlEncode, sha256Hex } from './crypto';
 import { DeployError } from './errors';
 import {
   executeHostedBootstrapGrant,
+  executeHostedBootstrapWithOperatorCredential,
+  type HostedBootstrapExecutionResult,
+  type OperatorManagedCredential,
 } from './hosted-bootstrap-grant';
 import { type BoundedRead, fetchBoundedText } from './http';
 import type { CloudflareOauthConfig, FetchTransport } from './oauth';
@@ -88,7 +92,7 @@ const provisionSchema = v.strictObject({
   bootstrapOrigin: v.pipe(v.string(), v.url()),
   bootstrapCallback: v.pipe(v.string(), v.url()),
   deployment: deploymentSchema,
-  grantRevocation: v.literal('confirmed'),
+  grantRevocation: v.picklist(['confirmed', 'operator-managed']),
   handoff: v.pipe(v.string(), v.minLength(1), v.maxLength(8_192)),
   installId: v.pipe(v.string(), v.regex(INSTALL_ID)),
   plan: v.strictObject({
@@ -243,14 +247,7 @@ export function expectedCustomerBootstrapBindings(input: {
   });
 }
 
-/**
- * Runs the exact account-wide Worker bootstrap while the narrow grant is in
- * callback-local memory. The returned value exists only after revocation.
- */
-export async function provisionHostedStage1(input: {
-  readonly code: string;
-  readonly verifier: string;
-  readonly oauth: CloudflareOauthConfig;
+export interface ProvisionHostedStage1Input {
   readonly transport: FetchTransport;
   readonly bundle: VerifiedReleaseBundle;
   readonly plan: HostedDeployPlan;
@@ -263,7 +260,50 @@ export async function provisionHostedStage1(input: {
   readonly wait?: (milliseconds: number) => Promise<void>;
   /** Test seam only; production always uses the fixed reviewed provider primitives. */
   readonly provider?: HostedStage1Provider;
+}
+
+interface Stage1Deployment {
+  readonly availableZones: readonly SetupZone[] | undefined;
+  readonly bootstrapCallback: string;
+  readonly bootstrapOrigin: string;
+  readonly deployment: CustomerBootstrapWorkerDeployment;
+  readonly handoff: string;
+  readonly workersSubdomain: string;
+}
+
+type Stage1Executor = (
+  deploy: (grant: { readonly accessToken: string; readonly accountId: string }) => Promise<Stage1Deployment>,
+) => Promise<HostedBootstrapExecutionResult<Stage1Deployment>>;
+
+/**
+ * Runs the exact account-wide Worker bootstrap while the narrow grant is in
+ * callback-local memory. The returned value exists only after revocation.
+ */
+export async function provisionHostedStage1(input: ProvisionHostedStage1Input & {
+  readonly code: string;
+  readonly verifier: string;
+  readonly oauth: CloudflareOauthConfig;
 }): Promise<HostedStage1Provision> {
+  return provisionStage1(input, (deploy) => executeHostedBootstrapGrant({
+    code: input.code, verifier: input.verifier, config: input.oauth, transport: input.transport, deploy,
+  }));
+}
+
+/**
+ * The operator-controlled external runner deploys the same exact Stage 1
+ * Worker with its operator-managed credential. Nothing is exchanged or
+ * revoked; the provision records `operator-managed` so a hosted session can
+ * never adopt it as a revoked grant.
+ */
+export async function provisionHostedStage1WithOperatorCredential(input: ProvisionHostedStage1Input & {
+  readonly credential: OperatorManagedCredential;
+}): Promise<HostedStage1Provision> {
+  return provisionStage1(input, (deploy) => executeHostedBootstrapWithOperatorCredential({
+    credential: input.credential, transport: input.transport, deploy,
+  }));
+}
+
+async function provisionStage1(input: ProvisionHostedStage1Input, execute: Stage1Executor): Promise<HostedStage1Provision> {
   const startedAt = input.now();
   if (!Number.isSafeInteger(startedAt) || startedAt < 0 ||
       !CLIENT_ID.test(input.customerOauthClientId) ||
@@ -284,12 +324,7 @@ export async function provisionHostedStage1(input: {
   const fixedTransport = managementTransport(input.transport);
   const provider = input.provider ?? DEFAULT_PROVIDER;
 
-  const result = await executeHostedBootstrapGrant({
-    code: input.code,
-    verifier: input.verifier,
-    config: input.oauth,
-    transport: input.transport,
-    deploy: async ({ accessToken, accountId }) => {
+  const result = await execute(async ({ accessToken, accountId }) => {
       const availableZones = isBootstrapPlan(plan)
         ? await discoverHostedAccountZones({ accessToken, accountId, transport: input.transport }) : undefined;
       const workersSubdomain = isBootstrapPlan(plan)
@@ -378,7 +413,6 @@ export async function provisionHostedStage1(input: {
         handoff,
         workersSubdomain: workersSubdomain.subdomain,
       });
-    },
   });
 
   return parseHostedStage1Provision({

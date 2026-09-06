@@ -31,7 +31,13 @@ const statementSchema = v.strictObject({
   expiresAt: time,
   readyReceiptChecksum: digest,
   dependencyResourcesHash: digest,
-  customerGrantRevocation: v.literal('confirmed'),
+  /**
+   * `confirmed`: the gateway revoked its request-local uninstall grant.
+   * `operator-managed`: the external runner removed the dependencies with an
+   * operator-managed credential that no operation revokes. The hosted
+   * finalizer imports only `confirmed` statements.
+   */
+  customerGrantRevocation: v.picklist(['confirmed', 'operator-managed']),
   priorGrantRevocationUnconfirmed: v.boolean(),
   dependentResourcesAbsent: v.literal(true),
   management: v.strictObject({
@@ -110,7 +116,7 @@ export async function createGatewayTeardownHandoff(input: {
   readonly readyReceiptChecksum: string;
   readonly dependencyResourcesHash: string;
   readonly now: number;
-  readonly customerGrantRevocation: 'confirmed';
+  readonly customerGrantRevocation: 'confirmed' | 'operator-managed';
   readonly priorGrantRevocationUnconfirmed?: boolean;
 }): Promise<string> {
   const certificate = await verifyCloudflareGatewayOwnershipCertificate({ certificate: input.certificate, ...input.trust });

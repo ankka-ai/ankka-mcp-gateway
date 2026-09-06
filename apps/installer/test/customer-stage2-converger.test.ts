@@ -852,6 +852,15 @@ describe('gateway teardown handoff from a real installation journal', () => {
     await expect(verifyGatewayTeardownHandoff({ handoff: canonicalJson(tampered), trust: input.trust, now: input.now })).rejects.toThrow();
   });
 
+  it('signs an operator-managed statement that verifies but never claims a revoked grant', async () => {
+    const { input } = await installed();
+    const encoded = await createGatewayTeardownHandoff({ ...input, customerGrantRevocation: 'operator-managed' });
+    const verified = await verifyGatewayTeardownHandoff({ handoff: encoded, trust: input.trust, now: input.now });
+    expect(verified.statement.customerGrantRevocation).toBe('operator-managed');
+    expect(verified.statement.dependentResourcesAbsent).toBe(true);
+    expect(encoded).not.toContain(ACCESS_TOKEN);
+  });
+
   it('refuses an unrelated receipt, incomplete management action, foreign root, or wrong signing key', async () => {
     const { input } = await installed();
     await expect(createGatewayTeardownHandoff({ ...input, readyReceiptChecksum: `sha256:${'0'.repeat(64)}` })).rejects.toThrow();

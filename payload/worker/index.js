@@ -1106,7 +1106,7 @@ async function discoverMcpTools(value) {
   }
 }
 
-async function inspectMcpSource(value) {
+export async function inspectMcpSource(value) {
   const endpoint = publicMcpUrl(value);
   if (!endpoint) throw new SourceDiscoveryError(400, 'source_url_invalid');
   // Google's public catalogue does not make its operations unauthenticated.
@@ -1135,7 +1135,7 @@ function bigQueryConnectionBlock(endpoint) {
     : null;
 }
 
-async function verifyManagedSource(source) {
+export async function verifyManagedSource(source) {
   const connectionBlock = bigQueryConnectionBlock(publicMcpUrl(source.url));
   if (connectionBlock) throw new SourceDiscoveryError(409, connectionBlock);
   const inspected = await inspectMcpSource(source.url);
@@ -3011,7 +3011,7 @@ async function prepareSourceAction(storage, input) {
   return action;
 }
 
-async function managedSourceHash(source) {
+export async function managedSourceHash(source) {
   return sha256({
     id: source.id,
     label: source.label,

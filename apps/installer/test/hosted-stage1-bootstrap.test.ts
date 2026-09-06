@@ -489,3 +489,38 @@ describe('hosted Stage 1 coordinator', () => {
     })).rejects.toMatchObject({ code: 'bootstrap_not_ready', status: 503, reason: 'readiness_transport_failed' });
   });
 });
+
+describe('Stage 1 with the operator-managed credential', () => {
+  it('provisions the same exact shell without an OAuth exchange or revocation', async () => {
+    const { provisionHostedStage1WithOperatorCredential } = await import('../src/hosted-stage1-bootstrap');
+    const bundle = await releaseBundle();
+    const selection = parseDeploySelection({
+      schemaVersion: 1,
+      basics: {
+        gatewayName: 'Example Gateway', zoneName: 'example.com', adminEmail: 'owner@example.com',
+        additionalAdminEmails: [], managementHostname: 'manage.example.com', portalHostname: 'mcp.example.com',
+      },
+      firstSource: null,
+    });
+    const plan = await buildStaticDeployPlan(selection, bundle.manifest, NOW + 20 * 60_000);
+    const secrets = await createHostedStage1Secrets({ now: NOW });
+    // SAFETY: Ed25519 generateKey always yields a key pair; the union only exists for symmetric algorithms.
+    const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;
+    const publicKey = base64UrlEncode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey)));
+    const events: string[] = [];
+    const provision = await provisionHostedStage1WithOperatorCredential({
+      credential: { kind: 'operator-managed', accessToken: ACCESS_TOKEN },
+      transport: oauthTransport(events),
+      bundle, plan, secrets,
+      customerOauthClientId: CUSTOMER_CLIENT_ID, issuerKeyId: ISSUER_KEY_ID, issuerPublicKey: publicKey, issuerPrivateKey: keys.privateKey,
+      now: () => NOW + 1, provider: provider(events),
+    });
+    expect(provision.grantRevocation).toBe('operator-managed');
+    expect(provision.deployment.workerName).toMatch(/^ankka-gateway-.*acg-[a-f0-9]{24}$/u);
+    expect(provision.installId).toBe(plan.managementOwnershipMarker);
+    expect(events).not.toContain('token-exchange');
+    expect(events).not.toContain('revoke');
+    expect(events).toContain('worker-deploy');
+    expect(JSON.stringify(provision)).not.toContain(ACCESS_TOKEN);
+  });
+});

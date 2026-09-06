@@ -1,5 +1,5 @@
 import * as v from 'valibot';
-import { validateLiveBootstrapOrigin } from './live-gateway-browser.mjs';
+import { validateLiveBootstrapOrigin } from './live-gateway-origin.mjs';
 import { LiveLifecycleError } from './live-gateway-lifecycle.mjs';
 
 function requireCondition(value, code) { if (!value) throw new LiveLifecycleError(code); }

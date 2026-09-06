@@ -318,3 +318,52 @@ describe('hosted Stage 1 bootstrap grant', () => {
     expect(result).toMatchObject({ accountId: ACCOUNT_ID, grantRevocation: 'confirmed' });
   });
 });
+
+describe('operator-managed credential for the fixed bootstrap executor', () => {
+  it('runs the same executor with no exchange and no revocation, and says so in the result', async () => {
+    const { executeHostedBootstrapWithOperatorCredential } = await import('../src/hosted-bootstrap-grant');
+    const requests: string[] = [];
+    const result = await executeHostedBootstrapWithOperatorCredential({
+      credential: { kind: 'operator-managed', accessToken: ACCESS_TOKEN },
+      transport: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(new URL(request.url).pathname);
+        if (request.url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
+          expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
+          return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
+        }
+        throw new Error('unexpected request');
+      },
+      deploy: async ({ accessToken, accountId }) => {
+        expect(accessToken).toBe(ACCESS_TOKEN);
+        expect(accountId).toBe(ACCOUNT_ID);
+        return Object.freeze({ workerName: 'ankka-gateway-test' });
+      },
+    });
+    expect(result).toEqual({ accountId: ACCOUNT_ID, deployment: { workerName: 'ankka-gateway-test' }, grantRevocation: 'operator-managed' });
+    expect(requests).toEqual(['/client/v4/accounts']);
+    expect(JSON.stringify(result)).not.toContain(ACCESS_TOKEN);
+  });
+
+  it('refuses a malformed operator credential before any provider read', async () => {
+    const { executeHostedBootstrapWithOperatorCredential } = await import('../src/hosted-bootstrap-grant');
+    let requests = 0;
+    await expect(executeHostedBootstrapWithOperatorCredential({
+      credential: { kind: 'operator-managed', accessToken: 'short' },
+      transport: async () => { requests += 1; throw new Error('unexpected'); },
+      deploy: async () => { throw new Error('unexpected'); },
+    })).rejects.toMatchObject({ code: 'oauth_grant_invalid', reason: 'operator_credential_invalid' });
+    expect(requests).toBe(0);
+  });
+
+  it('still binds the credential to one account and never deploys on an ambiguous listing', async () => {
+    const { executeHostedBootstrapWithOperatorCredential } = await import('../src/hosted-bootstrap-grant');
+    let deployed = false;
+    await expect(executeHostedBootstrapWithOperatorCredential({
+      credential: { kind: 'operator-managed', accessToken: ACCESS_TOKEN },
+      transport: async () => json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }, { id: '2'.repeat(32) }] }),
+      deploy: async () => { deployed = true; return Object.freeze({}); },
+    })).rejects.toMatchObject({ code: 'target_account_ambiguous' });
+    expect(deployed).toBe(false);
+  });
+});

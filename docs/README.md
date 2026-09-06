@@ -36,6 +36,16 @@ installed release; a document or fixture is not a compatibility certification.
 - [Source access groups](SOURCE_ACCESS_GROUPS.md): per-source audience
   boundaries and what the dashboard exposes.
 
+## Develop and qualify
+
+- [Fast local Worker feedback](LOCAL_RUNTIME.md): production state code in
+  workerd with real SQLite, no credentials.
+- [Agent-operable lifecycle runner](AGENT_LIFECYCLE.md): unattended
+  disposable gateway runs with operator-managed credentials, interruption and
+  recovery, and the coverage they do not claim.
+- [Live lifecycle validation](LIVE_LIFECYCLE.md): the browser, OAuth and
+  signed-release qualification layer.
+
 ## Review trust and privacy
 
 - [Security model](SECURITY_MODEL.md): provider credentials, authorization,

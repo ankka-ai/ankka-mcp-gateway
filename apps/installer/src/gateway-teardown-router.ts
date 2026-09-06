@@ -102,7 +102,9 @@ export function createGatewayTeardownRouter(config: {
     const port = portFor(jobId);
     let job = await port.read();
     if (job === null) {
-      await verifyGatewayTeardownHandoff({ handoff: body.handoff, trust: config.trust, now: dependencies.now() });
+      const offered = await verifyGatewayTeardownHandoff({ handoff: body.handoff, trust: config.trust, now: dependencies.now() });
+      // A runner-signed handoff belongs to the operator's own record; the hosted finalizer never adopts it.
+      if (offered.statement.customerGrantRevocation !== 'confirmed') throw new Error('teardown_handoff_conflict');
       const bundle = await dependencies.loadBundle(config.release);
       const retirement = bundle.manifest.components.workerRetirement.files[0];
       if (retirement?.path !== 'payload/worker-retirement/index.js') throw new Error('retirement_missing');

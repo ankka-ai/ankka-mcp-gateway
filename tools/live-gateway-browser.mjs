@@ -1,49 +1,17 @@
 import { chromium } from 'playwright-core';
-import * as v from 'valibot';
 import { createLiveGatewayAccess, LiveGatewayAccessError } from './live-gateway-access.mjs';
+import { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
+
+export { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
 
 const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
 const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth\/start)$/u;
 const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
 
-export class LiveGatewayBrowserError extends Error {
-  constructor(code, status = null) {
-    super(code);
-    this.code = code;
-    this.status = status;
-  }
-}
-
-export function validateLiveBrowserOrigin(value) {
-  let url;
-  try { url = new URL(value); } catch { throw new LiveGatewayBrowserError('origin_invalid'); }
-  if (url.protocol !== 'https:' || url.origin !== value || url.username || url.password) {
-    throw new LiveGatewayBrowserError('origin_invalid');
-  }
-  return url.origin;
-}
-
 export function validateLiveBrowserRequest(origins, origin, path, method) {
   if (!origins.includes(origin) || !(API_PATH.test(path) || BOOTSTRAP_PATH.test(path)) || !METHODS.has(method)) {
     throw new LiveGatewayBrowserError('request_outside_lifecycle');
   }
-}
-
-export function validateLiveBootstrapOrigin(provision) {
-  if (!/^acg-[a-f0-9]{24}$/u.test(provision?.installId) ||
-      provision.workerName !== `ankka-gateway-${provision.installId}`) {
-    throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
-  }
-  // The installer publishes its bootstrap base URL with a root slash.
-  // Normalize only that documented form; paths, queries and fragments stay invalid.
-  const base = provision.bootstrapOrigin;
-  const origin = validateLiveBrowserOrigin(v.is(v.string(), base) && base.endsWith('/') ? base.slice(0, -1) : base);
-  const labels = new URL(origin).hostname.split('.');
-  if (labels.length !== 4 || labels[0] !== provision.workerName ||
-      !/^[a-z0-9-]{1,63}$/u.test(labels[1]) || labels.slice(2).join('.') !== 'workers.dev') {
-    throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
-  }
-  return origin;
 }
 
 export function validateLiveHandoff(value, origin, path) {

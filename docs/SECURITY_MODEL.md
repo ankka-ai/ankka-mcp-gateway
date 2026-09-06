@@ -50,6 +50,15 @@ Cloudflare API operations and is never persisted in Durable Object records or
 returned to the browser. Deployment, updates, DNS, teardown and upstream
 credentials retain separate authority. See [Management token](MANAGEMENT_TOKEN.md).
 
+An operator-controlled external runner executes the same fixed lifecycle
+operations for disposable development gateways with an operator-managed
+credential. The operation authority catalogue declares that lifecycle
+separately: the credential lives in the operator's store, is never exchanged,
+persisted or revoked by an operation, and never enters a gateway or an
+Ankka-hosted service. Its runner records and signed removal handoffs are its
+own; the hosted finalizer refuses a handoff that did not come from a revoked
+gateway grant. See [the runner guide](AGENT_LIFECYCLE.md).
+
 Cloudflare support confirmed that account-owned and user-owned API tokens can
 scope resources only at User, Account, or Zone level. **Access: Policies
 Write** on one account therefore authorizes every Access policy in that account;
@@ -188,8 +197,10 @@ guarantee does not claim that those providers process no metadata.
 - Read-only tool policy depends on both gateway configuration and upstream
   enforcement.
 - Worker rollback does not roll back Durable Object data.
-- Automatic teardown is unavailable after a potentially applied Team policy
-  write or new-profile source creation. Revoking a retired preview token or
-  restoring the original roster does not clear the recorded restriction.
+- Automatic teardown is unavailable while a source, Team, update or removal
+  action is unsettled, and for installations whose Team state was written
+  under the retired legacy policy profile. The current receipt-owned executor
+  accepts changed policy audiences. Revoking a retired preview token or
+  restoring the original roster does not clear a recorded legacy restriction.
 - Provider APIs can return ambiguous outcomes; the system stops for recovery
   instead of claiming success.
