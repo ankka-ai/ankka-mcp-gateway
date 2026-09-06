@@ -31,6 +31,8 @@ const MANAGEMENT_ORIGIN = 'https://manage.example.com';
 const SYNTHETIC_GRANT = 'synthetic-legacy-installer-grant-never-store';
 const API_APPS = `/client/v4/zones/${ZONE_ID}/access/apps`;
 const NEW_SOURCE_URL = 'https://catalog.example.net/mcp';
+const SERVICE_CLIENT = `${'c'.repeat(32)}.access`;
+const OTHER_CLIENT = `${'d'.repeat(32)}.access`;
 
 function envelope(result, status = 200) {
   return Response.json({ success: status >= 200 && status < 300, errors: [], messages: [], result }, { status });
@@ -106,6 +108,23 @@ async function fixture(run, claimInput) {
       'cf-access-jwt-assertion': `${unsigned}.${Buffer.from(signed).toString('base64url')}`,
       'content-type': 'application/json', origin: MANAGEMENT_ORIGIN,
     };
+  }
+  /** A service-token assertion: no email claim, no identity header, the exact client identity in `common_name`. */
+  async function serviceHeaders({ clientId = SERVICE_CLIENT, aud = gateway.env.CF_ACCESS_AUD, email, identityHeader } = {}) {
+    const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
+    const now = Math.floor(Date.now() / 1000);
+    const claims = { iss: gateway.env.CF_ACCESS_ISSUER, aud: [aud], type: 'app', common_name: clientId, sub: '', nbf: now - 1, exp: now + 300 };
+    if (email !== undefined) claims.email = email;
+    const unsigned = `${encode({ alg: 'RS256', kid, typ: 'JWT' })}.${encode(claims)}`;
+    const signed = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', keys.privateKey, new TextEncoder().encode(unsigned));
+    const result = { 'cf-access-jwt-assertion': `${unsigned}.${Buffer.from(signed).toString('base64url')}`, 'content-type': 'application/json', origin: MANAGEMENT_ORIGIN };
+    if (identityHeader !== undefined) result['cf-access-authenticated-user-email'] = identityHeader;
+    return result;
+  }
+  async function serviceApi(path, { method = 'GET', body, token = {} } = {}) {
+    const init = { method, headers: await serviceHeaders(token) };
+    if (body !== undefined) init.body = canonicalJson(body);
+    return worker.fetch(new Request(`${MANAGEMENT_ORIGIN}${path}`, init), gateway.env);
   }
   async function api(path, { method = 'GET', body, email = ADMIN, extraHeaders = {}, currentTeardown = false } = {}) {
     const init = {
@@ -211,7 +230,7 @@ async function fixture(run, claimInput) {
     }
     return provider.fetch(request);
   };
-  return withProviderFetch(network, () => run({ ...gateway, api, view, draft, apply, teardown, currentTeardown,
+  return withProviderFetch(network, () => run({ ...gateway, api, serviceApi, view, draft, apply, teardown, currentTeardown,
     headers, managementStorage,
     onSourceRequest(hook) { sourceRequestHook = hook; },
     reloadManagement() { instances.delete('v1:management'); },
@@ -1639,3 +1658,77 @@ test('new source applies with the account token, stays default-deny and exposes 
     assert.doesNotMatch(JSON.stringify([...await object.storage.list()]), /synthetic-account-management-token/);
   }
 }));
+
+test('the configured service identity performs the management exercise over the protected routes and is denied everywhere else', async () => {
+  await fixture(async (gateway) => {
+    gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+    const status = await gateway.serviceApi('/api/status');
+    assert.equal(status.status, 200, await status.clone().text());
+    assert.equal((await gateway.serviceApi('/api/update')).status, 200);
+    const discovered = await gateway.serviceApi('/api/sources/discover', { method: 'POST', body: { url: NEW_SOURCE_URL } });
+    assert.equal(discovered.status, 200, await discovered.clone().text());
+    const current = await (await gateway.serviceApi('/api/sources')).json();
+    const saved = await gateway.serviceApi('/api/sources', { method: 'PUT', body: {
+      schemaVersion: 1, revision: current.revision,
+      source: { label: 'Automation source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+    } });
+    assert.equal(saved.status, 200, await saved.clone().text());
+    const drafted = (await saved.json());
+    const draft = drafted.sources.find((source) => source.url === NEW_SOURCE_URL);
+    const applied = await gateway.serviceApi('/api/source-actions', { method: 'POST', body: { schemaVersion: 1, revision: drafted.revision, sourceId: draft.id } });
+    assert.equal(applied.status, 200, await applied.clone().text());
+    const action = await applied.json();
+    assert.equal(action.status, 'succeeded');
+    const readBack = await (await gateway.serviceApi(`/api/source-actions/${action.actionId}`)).json();
+    assert.equal(readBack.actorKind, 'service');
+    assert.equal(readBack.status, 'succeeded');
+    const listed = await (await gateway.serviceApi('/api/source-actions')).json();
+    assert.equal(listed.actions.find((entry) => entry.actionId === action.actionId).actorKind, 'service');
+    const team = await (await gateway.serviceApi('/api/team')).json();
+    assert.equal(team.schemaVersion, 1);
+    const granted = await gateway.serviceApi('/api/team-actions', { method: 'POST', body: {
+      schemaVersion: 1, expectedRevision: team.revision,
+      members: [...team.members, { email: NEW_PERSON, sourceIds: [draft.id] }],
+    } });
+    assert.equal(granted.status, 200, await granted.clone().text());
+    const grant = await granted.json();
+    assert.equal(grant.action.status, 'succeeded');
+    assert.equal(grant.action.actorKind, 'service');
+    const after = await (await gateway.serviceApi('/api/team')).json();
+    assert.ok(after.members.some((member) => member.email === NEW_PERSON && member.sourceIds.includes(draft.id)));
+    // Default deny: update and teardown action creation and source action cancellation stay human.
+    for (const [path, method, body] of [
+      ['/api/update-actions', 'POST', { schemaVersion: 1 }], ['/api/teardown-actions', 'POST', { schemaVersion: 1 }],
+      [`/api/source-actions/${action.actionId}`, 'DELETE', undefined], ['/api/update-actions/action_' + 'A'.repeat(32), 'GET', undefined],
+    ]) {
+      const denied = await gateway.serviceApi(path, { method, body });
+      assert.equal(denied.status, 403, `${method} ${path}`);
+      assert.equal((await denied.json()).error, 'service_operation_denied');
+    }
+    // A human administrator still acts on those routes.
+    assert.notEqual((await gateway.api('/api/update-actions/action_' + 'A'.repeat(32))).status, 403);
+  });
+});
+
+test('service tokens are refused for an unapproved identity, a wrong audience, a mixed identity, and when no identity is configured', async () => {
+  await fixture(async (gateway) => {
+    gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+    const refused = async (token, label) => {
+      const response = await gateway.serviceApi('/api/status', { token });
+      assert.equal(response.status, 401, label);
+      assert.equal((await response.json()).error, 'access_required', label);
+    };
+    await refused({ clientId: OTHER_CLIENT }, 'unapproved identity');
+    await refused({ aud: 'another-application-audience' }, 'wrong audience');
+    await refused({ identityHeader: ADMIN }, 'identity header on a service token');
+    await refused({ email: ADMIN }, 'email claim without identity header');
+    await refused({ email: NEW_PERSON, identityHeader: NEW_PERSON }, 'email claim for a non-administrator');
+    delete gateway.env.ANKKA_SERVICE_CLIENT_ID;
+    await refused({}, 'service access not configured');
+    assert.equal((await gateway.api('/api/status')).status, 200, 'administrators unaffected');
+    // A malformed opt-in fails closed for everyone rather than widening access.
+    gateway.env.ANKKA_SERVICE_CLIENT_ID = 'not-a-client-id';
+    assert.equal((await gateway.serviceApi('/api/status')).status, 401);
+    assert.equal((await gateway.api('/api/status')).status, 401);
+  });
+});

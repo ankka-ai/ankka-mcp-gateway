@@ -93,6 +93,21 @@ and the Worker independently verifies the Access JWT issuer, audience,
 signature, expiry, verified email, and deployment administrator allowlist.
 Cross-origin API requests are rejected.
 
+A gateway can additionally accept exactly one machine identity: the Access
+service token whose client id its deployment configuration opted into. The
+hosted installer never opts in, so customer installations accept only
+administrators. The Worker verifies a service token exactly like an
+administrator's token and then authorizes the exact `common_name` claim
+(`type: app` appears on both kinds of token and distinguishes nothing): a
+token with an email claim is an administrator or nothing, and a token without
+one must carry no identity header and the configured client id. The service
+identity acts only within a fixed method-and-route allowlist (status and
+update reads, source discovery, draft and apply, Team read and save); update
+and teardown action creation and source action cancellation are denied to it,
+as is every other route. Action records name it `service:<client id>` and
+public views expose the actor kind. A malformed opt-in fails closed for every
+caller rather than widening access.
+
 The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
 store Cloudflare OAuth grants or upstream tokens.
