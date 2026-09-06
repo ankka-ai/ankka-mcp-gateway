@@ -1,7 +1,8 @@
-import { defineConfig } from 'vitest/config';
+import { configDefaults, defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
+    exclude: [...configDefaults.exclude, 'test-runtime/**'],
     environment: 'node',
     globals: true,
     // Cryptographic state-machine tests and real Git/Wrangler subprocesses

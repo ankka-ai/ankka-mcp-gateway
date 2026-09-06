@@ -18,5 +18,5 @@
     "skipLibCheck": true,
     "useUnknownInCatchVariables": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "test-runtime/**/*.ts"]
 }

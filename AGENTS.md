@@ -71,6 +71,10 @@ they are explicitly documented as non-secret.
 
 ## Development
 
+- Use `npm run test:runtime` for bootstrap state, SQLite, and crypto runtime
+  changes. `npm run dev:runtime` prints a synthetic localhost fixture and its
+  inspection API; query traces before adding temporary logs. Read
+  `docs/LOCAL_RUNTIME.md` for the local/provider/deployed test boundaries.
 - Keep the dependency graph small.
 - Record the origin and license of any transferred or vendored material in
   `ORIGINS.md` and `THIRD_PARTY_NOTICES.md`.
