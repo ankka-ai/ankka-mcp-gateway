@@ -16,7 +16,7 @@ import type { LifecycleRecord } from '../../../tools/lifecycle-record.mjs';
  * sent, and the interruption hook terminates the process abruptly right
  * after a chosen mutation was answered and before any journal records it.
  */
-export type RunnerEndpointFamily = CloudflareApiEndpointFamily | 'account-analytics';
+export type RunnerEndpointFamily = CloudflareApiEndpointFamily | 'account-analytics' | 'account-tokens-verify';
 
 export class LifecycleTransportError extends Error {
   constructor(readonly code: 'endpoint_family_refused' | 'origin_refused' | 'job_cancelled', readonly detail: string | null = null) {
@@ -28,6 +28,7 @@ export class LifecycleTransportError extends Error {
 const ACCOUNT = /^\/client\/v4\/accounts\/[a-f0-9]{32}/u;
 const ZONE = /^\/client\/v4\/zones\/[a-f0-9]{32}/u;
 const CLASSIFIERS: readonly (readonly [RegExp, RunnerEndpointFamily])[] = [
+  [/^\/client\/v4\/accounts\/[a-f0-9]{32}\/tokens\/verify(?:\?|$)/u, 'account-tokens-verify'],
   [/^\/client\/v4\/accounts(?:\?|$)/u, 'accounts-list'],
   [/^\/client\/v4\/zones(?:\?|$)/u, 'zones-list'],
   [/^\/client\/v4\/zones\/[a-f0-9]{32}(?:\?|$)/u, 'zones-list'],
@@ -44,7 +45,8 @@ const CLASSIFIERS: readonly (readonly [RegExp, RunnerEndpointFamily])[] = [
   [/\/access\/identity_providers(?:\/|\?|$)/u, 'access-identity-providers'],
   [/\/access\/ai-controls\/mcp\/servers(?:\/|\?|$)/u, 'mcp-servers'],
   [/\/access\/ai-controls\/mcp\/portals(?:\/|\?|$)/u, 'mcp-portals'],
-  [/\/access\/apps\/[^/]+\/policies(?:\/|\?|$)/u, 'access-policies'],
+  // Application-attached policies belong to the application family, as the catalogue's source operations expect; reusable policies are their own family.
+  [/\/access\/apps\/[^/]+\/policies(?:\/|\?|$)/u, 'access-applications'],
   [/\/access\/policies(?:\/|\?|$)/u, 'access-policies'],
   [/\/access\/apps(?:\/|\?|$)/u, 'access-applications'],
 ];
@@ -63,6 +65,7 @@ export function stageFamilies(input: {
   readonly operations: readonly ExternalRunnerOperation[];
   readonly provisioning: boolean;
   readonly diagnostics: boolean;
+  readonly tokenVerification: boolean;
 }): ReadonlySet<RunnerEndpointFamily> {
   const families = new Set<RunnerEndpointFamily>();
   for (const operation of input.operations) {
@@ -72,6 +75,7 @@ export function stageFamilies(input: {
     for (const family of EXTERNAL_RUNNER_MANAGEMENT_CREDENTIAL_PROVISIONING.endpointFamilies) families.add(family);
   }
   if (input.diagnostics) families.add('account-analytics');
+  if (input.tokenVerification) families.add('account-tokens-verify');
   return families;
 }
 

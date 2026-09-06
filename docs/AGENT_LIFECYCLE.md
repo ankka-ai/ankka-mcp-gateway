@@ -52,7 +52,7 @@ gateway's limited management credential.
 | --- | --- | --- |
 | `preflight` | Read-only credential inventory, release pair validation, fresh-target check | families readable, releases distinct |
 | `bootstrap` | Hosted Stage 1 (`provisionHostedStage1WithOperatorCredential`), readiness handoff, ownership acceptance | shell Worker deployed, ownership state accepted |
-| `converge` | Stage 2 converger with the release payload in-process, one pass per chunk checkpoint | provider calls per pass (bounded to 45), handover armed |
+| `converge` | Stage 2 converger with the checkout payload in-process, one pass per chunk checkpoint; the signed release bundle is what it uploads | provider calls per pass (bounded to 45), handover armed |
 | `verify` | Provider read-back of the final runtime and the management object | `workers.dev` disabled, final bindings, management state served |
 | `manage` | Management token installed as the Worker secret; the same source and Team exercise the browser runner performs, over the payload's management object | source installed default-deny, synthetic member granted and removed, inventory captured |
 | `update` | The gateway's updater with release B served from the local publish directory | release B active, management secret inherited |
@@ -92,7 +92,10 @@ live in the runner's record, because only code running inside the deployed
 Durable Object could write its storage and the only credential entry into
 the deployed shell is its OAuth callback. Consequently the deployed
 management routes of a runner-installed gateway answer "unavailable", and the
-runner exercises the management code in-process instead.
+runner exercises the management code in-process instead. That in-process
+Durable Object code is the checkout's hand-authored `payload/worker/index.js`,
+the file every release bundles; the deployed Worker runs the signed release
+bundle, so the two differ by whatever `main` changed since that release.
 
 Coverage that stays outside the runner, by design:
 

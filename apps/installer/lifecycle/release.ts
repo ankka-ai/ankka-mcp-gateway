@@ -1,6 +1,5 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
 import * as v from 'valibot';
 
 import { PinnedR2ReleaseBundleProvider, type R2ReleaseReadBucket, type R2ReleaseReadObject } from '../src/r2-release-provider';
@@ -24,9 +23,8 @@ export interface LoadedRelease {
   readonly publishDirectory: string;
   readonly bundle: VerifiedReleaseBundle;
   readonly parsed: ParsedVerifiedReleaseBundle;
-  /** Exact bytes of the final runtime module, for the converger's upload and the in-process payload. */
+  /** Exact bytes of the final runtime module the converger and the updater deploy. */
   readonly finalRuntimeSource: string;
-  readonly payloadUrl: string;
 }
 
 function localBucket(publishDirectory: string): R2ReleaseReadBucket {
@@ -60,10 +58,7 @@ export async function loadLocalRelease(reference: { readonly publishDirectory: s
   const parsed = parseVerifiedReleaseBundle(bundle);
   const workerKey = `ankka-mcp-gateway/releases/${pin.channel}/${pin.release}/payload/worker/index.js`;
   const finalRuntimeSource = readFileSync(join(publishDirectory, 'objects', workerKey), 'utf8');
-  return Object.freeze({
-    pin, publishDirectory, bundle, parsed, finalRuntimeSource,
-    payloadUrl: pathToFileURL(join(publishDirectory, 'objects', workerKey)).href,
-  });
+  return Object.freeze({ pin, publishDirectory, bundle, parsed, finalRuntimeSource });
 }
 
 const EXACT_RELEASE_ROUTE = /^\/api\/releases\/(canary|stable)\/by-id\/(gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))\/([a-f0-9]{64})(?:\/files\/(payload\/[A-Za-z0-9][A-Za-z0-9._/-]{0,200}))?$/u;

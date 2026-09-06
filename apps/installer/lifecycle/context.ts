@@ -46,9 +46,12 @@ export interface LifecycleContext {
   readonly now: () => number;
   readonly notify: (line: string) => void;
   release(which: 'a' | 'b'): Promise<LoadedRelease>;
-  payload(which: 'a' | 'b'): Promise<PayloadModule>;
-  /** The checked-out payload's pure helpers (discovery, draft validation); Durable Object routes use the installed release. */
-  checkoutPayload(): Promise<PayloadModule>;
+  /** The checkout's hand-authored gateway payload, the file every release bundles; its Durable Object code runs in-process here. */
+  payload(): Promise<PayloadModule>;
+  /** Read-only transport for the credential inventory; every operation goes through `transport`. */
+  readonly probeTransport: (input: string, init: RequestInit) => Promise<Response>;
+  /** Admits one more origin for the current stage, such as the shell's readiness route once its address is known. */
+  allowOrigin(origin: string, methods: readonly string[]): void;
   readInstallationSecrets(): Promise<InstallationSecrets | null>;
   writeInstallationSecrets(value: InstallationSecrets): Promise<void>;
 }

@@ -41,8 +41,10 @@ describe('lifecycle transport guard', () => {
       [`${ACCOUNT}/workers/assets/upload?base64=true`, 'workers-assets'],
       [`${ACCOUNT}/access/organizations`, 'access-organization'],
       [`${ACCOUNT}/access/identity_providers`, 'access-identity-providers'],
-      [`${ACCOUNT}/access/apps/app/policies/policy`, 'access-policies'],
+      [`${ACCOUNT}/access/apps/app/policies/policy`, 'access-applications'],
+      [`${ZONE}/access/apps/app/policies`, 'access-applications'],
       [`${ACCOUNT}/access/policies`, 'access-policies'],
+      [`${ACCOUNT}/tokens/verify`, 'account-tokens-verify'],
       [`${ACCOUNT}/access/ai-controls/mcp/servers`, 'mcp-servers'],
       [`${ACCOUNT}/access/ai-controls/mcp/portals/x`, 'mcp-portals'],
       ['https://api.cloudflare.com/client/v4/graphql', 'account-analytics'],
@@ -54,20 +56,22 @@ describe('lifecycle transport guard', () => {
   });
 
   it('derives stage families from the fixed operations plus runner-only reads', () => {
-    const install = stageFamilies({ operations: ['install'], provisioning: false, diagnostics: false });
+    const install = stageFamilies({ operations: ['install'], provisioning: false, diagnostics: false, tokenVerification: false });
     expect(install.has('mcp-portals')).toBe(true);
     expect(install.has('dns-records')).toBe(true);
     expect(install.has('account-analytics')).toBe(false);
-    const upgrade = stageFamilies({ operations: ['upgrade'], provisioning: true, diagnostics: true });
+    expect(install.has('account-tokens-verify')).toBe(false);
+    const upgrade = stageFamilies({ operations: ['upgrade'], provisioning: true, diagnostics: true, tokenVerification: true });
     expect(upgrade.has('workers-scripts')).toBe(true);
     expect(upgrade.has('account-analytics')).toBe(true);
+    expect(upgrade.has('account-tokens-verify')).toBe(true);
     expect(upgrade.has('mcp-portals')).toBe(false);
   });
 
   it('forwards admitted calls with a path-free trace, refuses other families and origins', async () => {
     const seen: string[] = [];
     const { transport } = createGuardedTransport({
-      record, families: stageFamilies({ operations: ['upgrade'], provisioning: false, diagnostics: false }),
+      record, families: stageFamilies({ operations: ['upgrade'], provisioning: false, diagnostics: false, tokenVerification: false }),
       origins: new Map([['https://source.example.net', new Set(['GET'])]]),
       local: async () => null, interruptAfter: null,
       realFetch: async (input, init) => { seen.push(new Request(input, init).url); return new Response('{}', { status: 200 }); },
@@ -94,7 +98,7 @@ describe('lifecycle transport guard', () => {
       await writeFile(join(cancelDirectory, 'cancel'), 'now\n', { mode: 0o600 });
       let mutations = 0;
       const { transport } = createGuardedTransport({
-        record: cancelled, families: stageFamilies({ operations: ['upgrade'], provisioning: false, diagnostics: false }),
+        record: cancelled, families: stageFamilies({ operations: ['upgrade'], provisioning: false, diagnostics: false, tokenVerification: false }),
         origins: new Map(), local: async () => null, interruptAfter: null,
         realFetch: async (input, init) => { if (new Request(input, init).method !== 'GET') mutations += 1; return new Response('{}'); },
         terminate: () => { throw new Error('terminate must not run'); },
@@ -108,7 +112,7 @@ describe('lifecycle transport guard', () => {
   it('terminates abruptly right after the chosen mutating response, before the caller sees it', async () => {
     let terminated = 0;
     const { transport, mutations } = createGuardedTransport({
-      record, families: stageFamilies({ operations: ['upgrade'], provisioning: false, diagnostics: false }),
+      record, families: stageFamilies({ operations: ['upgrade'], provisioning: false, diagnostics: false, tokenVerification: false }),
       origins: new Map(), local: async () => null, interruptAfter: 2,
       realFetch: async () => new Response('{}', { status: 200 }),
       terminate: () => { terminated += 1; throw new LifecycleTransportError('origin_refused', 'terminated'); },
@@ -128,7 +132,7 @@ describe('lifecycle transport guard', () => {
     });
     const release: LoadedRelease = {
       pin: { ...fixture.identity }, publishDirectory: '/private/publish', bundle: fixture.bundle,
-      parsed: parseVerifiedReleaseBundle(fixture.bundle), finalRuntimeSource: '', payloadUrl: 'file:///private/publish/index.js',
+      parsed: parseVerifiedReleaseBundle(fixture.bundle), finalRuntimeSource: '',
     };
     const origin = fixture.bundle.manifest.controlPlaneOrigin;
     const exact = `${origin}/api/releases/${fixture.bundle.channel}/by-id/${fixture.bundle.manifest.release}/${fixture.bundle.manifest.artifact.treeSha256}`;

@@ -1,4 +1,5 @@
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import * as v from 'valibot';
 
 import type { BoundaryValue } from '../src/boundary';
@@ -28,9 +29,12 @@ const stageSchema = v.picklist(['preflight', 'bootstrap', 'converge', 'verify', 
 
 interface StageAuthority {
   readonly operations: readonly ExternalRunnerOperation[];
+  /** Gateway operations the payload's management code executes in-process with the management credential. */
   readonly gatewayOperations?: readonly ('source-add' | 'source-update' | 'source-remove')[];
   readonly provisioning?: boolean;
   readonly diagnostics?: boolean;
+  /** The payload verifies the management credential against the account token endpoint before it uses it. */
+  readonly tokenVerification?: boolean;
 }
 
 const STAGE_AUTHORITY: Readonly<Record<LifecycleStage, StageAuthority>> = Object.freeze({
@@ -38,9 +42,9 @@ const STAGE_AUTHORITY: Readonly<Record<LifecycleStage, StageAuthority>> = Object
   bootstrap: { operations: ['bootstrap'] },
   converge: { operations: ['install'] },
   verify: { operations: ['install'] },
-  manage: { operations: [], gatewayOperations: ['source-add', 'source-update', 'source-remove'], provisioning: true },
+  manage: { operations: ['install'], gatewayOperations: ['source-add', 'source-update', 'source-remove'], provisioning: true, tokenVerification: true },
   update: { operations: ['upgrade'] },
-  'remove-dependencies': { operations: ['uninstall'] },
+  'remove-dependencies': { operations: ['uninstall'], tokenVerification: true },
   'remove-root': { operations: ['gateway-root-finalize'] },
   'verify-absent': { operations: ['uninstall', 'gateway-root-finalize', 'install'] },
 });
@@ -57,6 +61,7 @@ function families(stage: LifecycleStage): ReadonlySet<RunnerEndpointFamily> {
   const authority = STAGE_AUTHORITY[stage];
   const admitted = new Set(stageFamilies({
     operations: authority.operations, provisioning: authority.provisioning === true, diagnostics: authority.diagnostics === true,
+    tokenVerification: authority.tokenVerification === true,
   }));
   for (const operation of authority.gatewayOperations ?? []) {
     for (const family of fixedCloudflareOperationAuthority(operation).endpointFamilies) admitted.add(family);
@@ -76,7 +81,7 @@ async function runStage(stage: LifecycleStage, jobPath: string, runDirectory: st
   const realFetch = globalThis.fetch;
   const releases = new Map<'a' | 'b', Promise<LoadedRelease>>();
   const loaded: LoadedRelease[] = [];
-  const payloads = new Map<string, Promise<PayloadModule>>();
+  let payloadModule: Promise<PayloadModule> | undefined;
   const origins = new Map<string, ReadonlySet<string>>([[new URL(job.source.url).origin, new Set(['GET', 'POST'])]]);
   const guarded = createGuardedTransport({
     record, families: families(stage), origins, interruptAfter, realFetch,
@@ -97,10 +102,10 @@ async function runStage(stage: LifecycleStage, jobPath: string, runDirectory: st
     }
     return pending;
   };
-  const payload = (url: string): Promise<PayloadModule> => {
-    let pending = payloads.get(url);
-    if (pending === undefined) { pending = importPayloadModule(url); payloads.set(url, pending); }
-    return pending;
+  // The parent runs every stage from the repository root; the hand-authored payload is loaded from there.
+  const payload = (): Promise<PayloadModule> => {
+    payloadModule ??= importPayloadModule(pathToFileURL(resolve(process.cwd(), 'payload/worker/index.js')).href);
+    return payloadModule;
   };
   const context: LifecycleContext = {
     job, hostnames, record,
@@ -118,8 +123,9 @@ async function runStage(stage: LifecycleStage, jobPath: string, runDirectory: st
     now: Date.now,
     notify: (line) => { process.stdout.write(`${line}\n`); },
     release,
-    payload: async (which) => payload((await release(which)).payloadUrl),
-    checkoutPayload: () => payload(new URL('../../../payload/worker/index.js', import.meta.url).href),
+    payload,
+    probeTransport: (input, init) => realFetch(input, init),
+    allowOrigin: (origin, methods) => { origins.set(origin, new Set(methods)); },
     readInstallationSecrets: async () => {
       const value = await readInstallationSecrets(runDirectory);
       if (value === null) return null;

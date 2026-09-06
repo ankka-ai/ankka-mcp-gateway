@@ -6,7 +6,7 @@ import { randomBase64Url, sha256Hex } from '../src/crypto';
 import { operationSignature } from '../src/customer-operation-secrets';
 import { LiveManagementQualificationError, qualifyLiveGatewayManagement, type LiveManagementRequest } from '../../../tools/live-gateway-management.mjs';
 import { installedProvision, providerJson } from './stage-install';
-import { activeWorkerRelease, gatewayEnvironmentBindings, installedRelease } from './stage-update';
+import { activeWorkerRelease, gatewayEnvironmentBindings } from './stage-update';
 import {
   payloadEnvironment, readRecordValue, requireStage, LifecycleStageError,
   type DurableObjectStandIn, type LifecycleContext, type ManagedSourceLike, type PayloadModule,
@@ -170,9 +170,8 @@ export async function manageStage(context: LifecycleContext): Promise<BoundaryVa
   const token = context.credentials.managementToken;
   if (token === null) throw new LifecycleStageError('management_credential_unavailable', 'blocked');
   const install = readRecordValue(context.record.state.install, manageRecordSchema, 'install_record_invalid');
-  const which = installedRelease(context);
-  const payload = await context.payload(which);
-  const helpers = await context.checkoutPayload();
+  const payload = await context.payload();
+  const helpers = payload;
   const environment = payloadEnvironment(payload, context.record, { ...await gatewayEnvironmentBindings(context), ANKKA_MANAGEMENT_TOKEN: token });
   const management = new payload.AdminState({ storage: context.record.storage('object:v1:management') }, environment);
   const request = inProcessManagementApi({ context, helpers, management, actorEmail: context.job.target.adminEmail, managementToken: token });

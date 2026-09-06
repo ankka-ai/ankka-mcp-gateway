@@ -126,7 +126,7 @@ async function shellBindings(context: LifecycleContext, plan: StaticDeployPlan, 
 export async function preflightStage(context: LifecycleContext): Promise<BoundaryValue> {
   const inventory = await inventoryDeploymentCredential({
     token: context.credentials.deploymentToken, accountId: context.job.target.accountId, zoneId: context.job.target.zoneId,
-    transport: (input, init) => context.transport(input, init),
+    transport: context.probeTransport,
   });
   const denied = inventory.families.filter((family) => family.outcome !== 'readable').map((family) => `${family.family}:${family.outcome}`);
   if (inventory.identity.status === null) throw new LifecycleStageError('deployment_credential_rejected', 'blocked');
@@ -178,6 +178,7 @@ export async function bootstrapStage(context: LifecycleContext): Promise<Boundar
   } else {
     provision = parseHostedStage1Provision(install.provision);
   }
+  context.allowOrigin(new URL(provision.bootstrapOrigin).origin, ['GET']);
   if (install.handoffAccepted !== true) {
     if (secrets.capability.expiresAt <= context.now()) throw new LifecycleStageError('bootstrap_capability_expired', 'blocked');
     const started = context.now();
@@ -234,7 +235,7 @@ export async function convergeStage(context: LifecycleContext): Promise<Boundary
   const plan = await installedPlan(context);
   const provision = await installedProvision(context);
   const release = await context.release('a');
-  const payload = await context.payload('a');
+  const payload = await context.payload();
   const { expected, environment: shellEnvironment } = await shellBindings(context, plan, provision, secrets);
   const ownership = ownershipStorage(context.record.storage('ownership'));
   await readCustomerGatewayOwnershipState(ownership);
@@ -306,7 +307,7 @@ export async function verifyStage(context: LifecycleContext): Promise<BoundaryVa
   requireStage(install.converged === true, 'converge_not_completed');
   const provision = await installedProvision(context);
   const target = installedTarget(context);
-  const payload = await context.payload('a');
+  const payload = await context.payload();
   const bindings = installedBindings(context);
   await context.provider.assertWorker({ installId: provision.installId, workerName: provision.deployment.workerName, bootstrapOrigin: provision.bootstrapOrigin });
   const account = `/client/v4/accounts/${context.job.target.accountId}`;

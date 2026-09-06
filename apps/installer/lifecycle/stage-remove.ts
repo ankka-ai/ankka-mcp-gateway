@@ -94,8 +94,7 @@ export async function removeDependenciesStage(context: LifecycleContext): Promis
   const plan = await installedPlan(context);
   const secrets = await requireSecrets(context);
   const installationId = plan.managementOwnershipMarker;
-  const which = installedRelease(context);
-  const payload = await context.payload(which);
+  const payload = await context.payload();
   const bindings = await gatewayEnvironmentBindings(context);
   const environment = payloadEnvironment(payload, context.record, context.credentials.managementToken === null ? bindings : { ...bindings, ANKKA_MANAGEMENT_TOKEN: context.credentials.managementToken });
   const management = new payload.AdminState({ storage: context.record.storage('object:v1:management') }, environment);

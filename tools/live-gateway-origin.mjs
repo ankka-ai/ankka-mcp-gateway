@@ -19,8 +19,10 @@ export function validateLiveBrowserOrigin(value) {
 }
 
 export function validateLiveBootstrapOrigin(provision) {
+  // A bootstrap-plan shell is `ankka-gateway-<installId>`; a static plan adds the gateway's slug before the marker.
   if (!/^acg-[a-f0-9]{24}$/u.test(provision?.installId) ||
-      provision.workerName !== `ankka-gateway-${provision.installId}`) {
+      !/^ankka-gateway-(?:[a-z0-9-]+-)?acg-[a-f0-9]{24}$/u.test(provision.workerName ?? '') ||
+      !provision.workerName.endsWith(`-${provision.installId}`)) {
     throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
   }
   // The installer publishes its bootstrap base URL with a root slash.
