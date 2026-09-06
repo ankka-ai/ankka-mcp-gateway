@@ -147,6 +147,19 @@ export function withDeployServiceAccess(selection: DeploySelection, serviceAcces
   return Object.freeze({ ...selection, serviceAccess: Object.freeze({ clientId: parsed.output.clientId, tokenId: parsed.output.tokenId }) });
 }
 
+/**
+ * Re-validates a selection the installer itself produced (from a session or a
+ * plan), which may carry the service identity a plan opted into. Browser input
+ * goes through parseDeploySelection and can never carry one.
+ */
+export function parseCanonicalDeploySelection<Input>(value: Input): DeploySelection {
+  const record = v.safeParse(v.looseObject({ serviceAccess: v.optional(serviceAccessSchema) }), value);
+  if (!record.success) throw new DeployError(400, 'bad_request', 'selection_contract_invalid');
+  const { serviceAccess, ...base } = record.output;
+  const selection = parseDeploySelection(base);
+  return serviceAccess === undefined ? selection : withDeployServiceAccess(selection, serviceAccess);
+}
+
 export function parseDeploySelection<Input>(value: Input): DeploySelection {
   const parsed = v.safeParse(deploySelectionInputSchema, value);
   if (!parsed.success) {

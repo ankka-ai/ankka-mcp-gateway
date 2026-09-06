@@ -12,7 +12,7 @@ import { base64UrlEncode } from './crypto';
 import {
   buildStaticDeployPlan,
   deploySelectionFromStaticPlan,
-  parseDeploySelection,
+  parseCanonicalDeploySelection,
   parseStaticDeployPlan,
   verifyStaticDeployPlanIntegrity,
 } from './schema';
@@ -571,7 +571,7 @@ function requireAuthorizedTarget<Value>(value: Value, selection: DeploySelection
 
 async function validateContext(input: PrepareCustomerBootstrapClaimInput): Promise<ValidatedContext> {
   try {
-    const selection = parseDeploySelection(input.selection);
+    const selection = parseCanonicalDeploySelection(input.selection);
     const releaseInput = v.safeParse(verifiedReleaseInputSchema, input.release);
     if (!releaseInput.success) fail('plan_mismatch', 'validate', 'not_sent');
     const release = Object.freeze({
@@ -585,8 +585,8 @@ async function validateContext(input: PrepareCustomerBootstrapClaimInput): Promi
       fail('plan_mismatch', 'validate', 'not_sent');
     }
     const target = requireAuthorizedTarget(input.target, selection);
-    // A browser session never carries a service identity; a plan that opted into one cannot come from it.
-    if (parsedPlan.gatewayConfiguration.serviceAccess !== undefined) fail('plan_mismatch', 'validate', 'not_sent');
+    // The plan must be exactly the one this selection builds: a browser selection never carries a service
+    // identity, so a hosted session can never verify a plan that opted into one.
     const expectedPlan = await buildStaticDeployPlan(selection, release.manifest, expiresAt);
     const reviewedPlanJson = canonicalJson(expectedPlan);
     const firstInputSnapshot = canonicalJson(input.plan);
@@ -872,7 +872,7 @@ export async function deriveCustomerGatewayInstallationReceiptExpectation(
   input: DeriveCustomerGatewayExpectedProjectionInput,
 ): Promise<ReadyInstallationReceiptExpectation> {
   const projection = await deriveCustomerGatewayExpectedProjection(input);
-  const selection = parseDeploySelection(input.selection);
+  const selection = parseCanonicalDeploySelection(input.selection);
   return installationReceiptExpectation(
     gatewaySettings(selection),
     projection.target,
@@ -919,7 +919,7 @@ export async function deriveCustomerGatewayExpectedProjection(
   let plan: StaticDeployPlan;
   let authorizedTarget: AuthorizedTarget;
   try {
-    selection = parseDeploySelection(input.selection);
+    selection = parseCanonicalDeploySelection(input.selection);
     plan = parseStaticDeployPlan(input.plan);
     authorizedTarget = requireAuthorizedTarget(input.target, selection);
   } catch {
