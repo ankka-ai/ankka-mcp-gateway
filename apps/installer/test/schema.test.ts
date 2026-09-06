@@ -1,11 +1,14 @@
 import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
 import {
   assertSecretFree,
+  deploySelectionFromStaticPlan,
   forbiddenStoredKeyPath,
   buildStaticDeployPlan,
   parseDeploySelection,
   parseReleaseManifest,
   parseStaticDeployPlan,
+  verifyStaticDeployPlanIntegrity,
+  withDeployServiceAccess,
 } from '../src/schema';
 import { manifest, NOW, requiredFixture, selectionInput } from './fixtures';
 
@@ -260,5 +263,32 @@ describe('strict deployment contracts', () => {
     expect(() => assertSecretFree({ nonceHash: 'safe', signatureHash: 'safe' })).not.toThrow();
     expect(forbiddenStoredKeyPath({ record: { attempts: [{ bootstrapNonce: 'nope' }] } }))
       .toBe('record.attempts[0].bootstrapNonce');
+  });
+});
+
+describe('service access opt-in', () => {
+  const serviceAccess = { clientId: `${'c'.repeat(32)}.access`, tokenId: '12345678-1234-1234-1234-123456789abc' };
+
+  it('is never browser input, changes the plan identity, and round-trips through the plan', async () => {
+    expect(() => parseDeploySelection({ ...selectionInput, serviceAccess })).toThrow();
+    const selection = parseDeploySelection(selectionInput);
+    const plain = await buildStaticDeployPlan(selection, manifest, NOW + 600_000);
+    const opted = await buildStaticDeployPlan(withDeployServiceAccess(selection, serviceAccess), manifest, NOW + 600_000);
+    expect(plain.gatewayConfiguration.serviceAccess).toBeUndefined();
+    expect(plain.managementResources.some((resource) => resource.kind === 'management_service_policy')).toBe(false);
+    expect(opted.gatewayConfiguration.serviceAccess).toEqual(serviceAccess);
+    expect(opted.managementResources.find((resource) => resource.kind === 'management_service_policy')).toEqual({
+      kind: 'management_service_policy', key: 'management-service-policy',
+      name: `${selection.basics.gatewayName} automation [${opted.managementOwnershipMarker}]`, hostname: selection.basics.managementHostname,
+    });
+    expect(opted.planHash).not.toBe(plain.planHash);
+    expect(opted.managementOwnershipMarker).not.toBe(plain.managementOwnershipMarker);
+    expect(deploySelectionFromStaticPlan(opted).serviceAccess).toEqual(serviceAccess);
+    expect(await verifyStaticDeployPlanIntegrity(JSON.parse(JSON.stringify(opted)))).toEqual(opted);
+    expect(parseStaticDeployPlan(JSON.parse(JSON.stringify(opted))).gatewayConfiguration.serviceAccess).toEqual(serviceAccess);
+    for (const invalid of [{ ...serviceAccess, clientId: 'nope' }, { ...serviceAccess, tokenId: 'nope' }, { ...serviceAccess, extra: true }]) {
+      expect(() => withDeployServiceAccess(selection, invalid)).toThrow();
+    }
+    expect(() => withDeployServiceAccess(withDeployServiceAccess(selection, serviceAccess), serviceAccess)).toThrow();
   });
 });

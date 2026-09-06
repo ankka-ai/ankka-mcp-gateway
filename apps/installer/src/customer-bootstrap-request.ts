@@ -585,6 +585,8 @@ async function validateContext(input: PrepareCustomerBootstrapClaimInput): Promi
       fail('plan_mismatch', 'validate', 'not_sent');
     }
     const target = requireAuthorizedTarget(input.target, selection);
+    // A browser session never carries a service identity; a plan that opted into one cannot come from it.
+    if (parsedPlan.gatewayConfiguration.serviceAccess !== undefined) fail('plan_mismatch', 'validate', 'not_sent');
     const expectedPlan = await buildStaticDeployPlan(selection, release.manifest, expiresAt);
     const reviewedPlanJson = canonicalJson(expectedPlan);
     const firstInputSnapshot = canonicalJson(input.plan);
