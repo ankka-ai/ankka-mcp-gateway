@@ -57,6 +57,21 @@ or members. Authenticate once with `cloudflared access login --quiet --app
 <management-origin>` in your normal browser. The command only reads that cached
 session; it never starts interactive login.
 
+### As the service identity
+
+An isolated installer deployed with `ANKKA_SERVICE_ACCESS_CLIENT_ID` and
+`ANKKA_SERVICE_ACCESS_TOKEN_ID` opts every gateway it certifies into that one
+Access service identity (the live config's `serviceAccess` section supplies
+both, and the browser runner passes them as deployment variables; the hosted
+installer never carries them). A management config with the same
+`serviceAccess` section, holding the secret only by keychain or environment
+reference, runs the exercise over the deployed protected routes as that
+identity: no browser, no cached human session, no login. Before the exercise
+it proves the gateway refuses the update and teardown action routes, source
+action cancellation and update action reads to the service identity (`403`),
+and, when the section names a `foreign` service token, that an unapproved
+identity is refused (`401`). The journal records the actor as `service`.
+
 This mode uses the same management exercise as the full lifecycle: install the
 synthetic source, verify default deny, grant synthetic membership, then remove it.
 It leaves the source installed for subsequent product removal; it does not delete

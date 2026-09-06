@@ -137,6 +137,10 @@ bundle, so the two differ by whatever `main` changed since that release.
 
 Coverage that stays outside the runner, by design:
 
+- the deployed management routes as the service identity: proven against a
+  gateway installed through an isolated installer (browser consent once per
+  release) with the browser runner's service mode, see
+  [live lifecycle](LIVE_LIFECYCLE.md);
 - browser onboarding, real OAuth permissions and consent screens;
 - the deployed Durable Object's update handover and its hosted removal job;
 - restricted-user OAuth behaviour (an API-token run is not evidence for it);

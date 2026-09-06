@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createLiveGatewayApi } from '../tools/live-gateway-api.mjs';
+import { createLiveGatewayApi, createLiveGatewayServiceApi } from '../tools/live-gateway-api.mjs';
 import { summarizeLiveJournal, validateLiveManagementConfig } from '../tools/live-gateway-command.mjs';
 
 const origin = 'https://manage.example.com';
@@ -66,6 +66,13 @@ test('management config is independent of release artifacts, browser and infrast
   assert.deepEqual(validateLiveManagementConfig(config), config);
   assert.throws(() => validateLiveManagementConfig({ ...config, token: 'must-not-be-in-config' }));
   assert.throws(() => validateLiveManagementConfig({ ...config, managementOrigin: 'http://manage.example.com' }));
+  // The service identity enters the config by reference only: client and token ids are public, the secret stays in the store.
+  const serviceAccess = { clientId: `${'a'.repeat(32)}.access`, tokenId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    secret: { keychain: { service: 'ankka-lifecycle-runner', account: 'access-client-secret' } },
+    foreign: { clientId: `${'b'.repeat(32)}.access`, secret: { env: 'ANKKA_FOREIGN_SERVICE_SECRET' } } };
+  assert.deepEqual(validateLiveManagementConfig({ ...config, serviceAccess }), { ...config, serviceAccess });
+  assert.throws(() => validateLiveManagementConfig({ ...config, serviceAccess: { ...serviceAccess, secret: 'literal-secret-value-not-allowed' } }));
+  assert.throws(() => validateLiveManagementConfig({ ...config, serviceAccess: { ...serviceAccess, clientId: 'not-a-client-id' } }));
 });
 
 test('API passes and recovery receipts never imply full lifecycle qualification', () => {
@@ -88,4 +95,25 @@ test('Access preflight requires the provider identity and rejects an HTML login 
     const api = createLiveGatewayApi({ origin, email, run, transport: async () => response });
     await assert.rejects(api.checkAccess());
   }
+});
+
+test('service mode sends only the service-token headers, needs no cached session, and reports refusals as evidence', async () => {
+  const calls = [];
+  const clientId = `${'a'.repeat(32)}.access`;
+  const secret = 'b'.repeat(64);
+  const api = createLiveGatewayServiceApi({ origin, clientId, secret, transport: async (url, options) => {
+    calls.push({ url, options });
+    if (url.endsWith('/api/update-actions')) return new Response(JSON.stringify({ error: 'service_operation_denied' }), { status: 403, headers: { 'content-type': 'application/json' } });
+    return json({ schemaVersion: 1 });
+  } });
+  assert.deepEqual(await api.request('/api/team'), { schemaVersion: 1 });
+  assert.equal(calls[0].options.headers['cf-access-client-id'], clientId);
+  assert.equal(calls[0].options.headers['cf-access-client-secret'], secret);
+  assert.equal(calls[0].options.headers.cookie, undefined);
+  assert.equal(calls[0].options.headers.origin, origin);
+  assert.equal(await api.probe('/api/update-actions', { method: 'POST', body: { schemaVersion: 1 } }), 403);
+  assert.equal(await api.probe('/api/team'), 200);
+  await assert.rejects(api.request('/api/update-actions', { method: 'POST', body: {} }), { code: 'api_request_outside_qualification' });
+  assert.throws(() => createLiveGatewayServiceApi({ origin, clientId: 'bad', secret }), { code: 'service_credential_invalid' });
+  assert.throws(() => createLiveGatewayServiceApi({ origin, clientId, secret: 'short' }), { code: 'service_credential_invalid' });
 });

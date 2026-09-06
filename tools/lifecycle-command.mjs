@@ -8,8 +8,9 @@ import * as v from 'valibot';
 
 import { inventoryDeploymentCredential } from './lifecycle-credentials.mjs';
 import { LifecycleLockError } from './lifecycle-lock.mjs';
+import { OperatorCredentialError, resolveOperatorCredential } from './operator-credential.mjs';
 import {
-  LifecycleJobError, LIFECYCLE_STAGES, approvalDigest, assertLifecycleJobApproved, credentialReferenceLabel,
+  LifecycleJobError, LIFECYCLE_STAGES, approvalDigest, assertLifecycleJobApproved,
   readLifecycleJob, stagesForJob, writeLifecycleJobApproval,
 } from './lifecycle-job.mjs';
 import {
@@ -62,20 +63,11 @@ function parseArguments(args) {
 
 /** Reads one credential into memory from the operator's store; the value never enters argv, logs or the record. */
 async function resolveCredential(reference) {
-  if ('env' in reference) {
-    const value = process.env[reference.env];
-    requireCondition(v.is(v.pipe(v.string(), v.minLength(20)), value), 'credential_unavailable', credentialReferenceLabel(reference));
-    return value;
-  }
   try {
-    const { stdout } = await execute('security', ['find-generic-password', '-s', reference.keychain.service, '-a', reference.keychain.account, '-w'],
-      { encoding: 'utf8', timeout: 30_000, maxBuffer: 65_536 });
-    const value = stdout.trim();
-    requireCondition(value.length >= 20, 'credential_unavailable', credentialReferenceLabel(reference));
-    return value;
+    return await resolveOperatorCredential(reference);
   } catch (error) {
-    if (error instanceof LifecycleCommandError) throw error;
-    throw new LifecycleCommandError('credential_unavailable', credentialReferenceLabel(reference));
+    if (error instanceof OperatorCredentialError) throw new LifecycleCommandError(error.code, error.detail);
+    throw error;
   }
 }
 

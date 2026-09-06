@@ -7,7 +7,8 @@ import { spawn } from 'node:child_process';
 import * as v from 'valibot';
 import { validateGeneratedReviewedIsolatedCanaryDirectory } from '../apps/installer/scripts/generate-reviewed-canary.mjs';
 import { openLiveGatewayBrowser, validateLiveBrowserOrigin, LiveGatewayBrowserError } from './live-gateway-browser.mjs';
-import { createLiveGatewayApi, LiveGatewayApiError } from './live-gateway-api.mjs';
+import { createLiveGatewayApi, createLiveGatewayServiceApi, LiveGatewayApiError } from './live-gateway-api.mjs';
+import { resolveOperatorCredential } from './operator-credential.mjs';
 import { LiveGatewayAccessError } from './live-gateway-access.mjs';
 import { qualifyLiveGatewayManagement, LiveManagementQualificationError } from './live-gateway-management.mjs';
 import { createLiveGatewayProvider } from './live-gateway-provider.mjs';
@@ -16,6 +17,22 @@ import { qualifyLiveGatewayLifecycle, finishLiveGatewayRemoval, LiveLifecycleErr
 const root = fileURLToPath(new URL('../', import.meta.url));
 const text = v.pipe(v.string(), v.minLength(1));
 const identity = v.strictObject({ release: v.pipe(text, v.regex(/^gateway-v\d+\.\d+\.\d+$/u)), artifactSha256: v.pipe(text, v.regex(/^[a-f0-9]{64}$/u)) });
+const keychainName = v.pipe(text, v.regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u));
+const credentialReference = v.union([
+  v.strictObject({ keychain: v.strictObject({ service: keychainName, account: keychainName }) }),
+  v.strictObject({ env: v.pipe(text, v.regex(/^ANKKA_[A-Z0-9_]{2,60}$/u)) }),
+]);
+/**
+ * The service identity an isolated installer deployment opts its gateways into, and the credentials the
+ * management exercise uses as that identity. `foreign` names a second, unapproved service token whose
+ * refusal is part of the proof; the secret values stay in the operator's store.
+ */
+const serviceAccess = v.strictObject({
+  clientId: v.pipe(text, v.regex(/^[a-f0-9]{32}\.access$/u)),
+  tokenId: v.pipe(text, v.regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u)),
+  secret: credentialReference,
+  foreign: v.optional(v.strictObject({ clientId: v.pipe(text, v.regex(/^[a-f0-9]{32}\.access$/u)), secret: credentialReference })),
+});
 const schema = v.strictObject({
   schemaVersion: v.literal(1), accountId: v.pipe(text, v.regex(/^[a-f0-9]{32}$/u)), zoneId: v.pipe(text, v.regex(/^[a-f0-9]{32}$/u)),
   installerOrigin: text, managementOrigin: text,
@@ -24,6 +41,7 @@ const schema = v.strictObject({
   basics: v.strictObject({ gatewayName: text, zoneName: text, managementHostname: text, portalHostname: text,
     adminEmail: v.pipe(text, v.email()), additionalAdminEmails: v.tuple([]) }),
   source: v.strictObject({ url: text, tool: text }),
+  serviceAccess: v.optional(serviceAccess),
 });
 function requireCondition(value, code) { if (!value) throw new LiveLifecycleError(code); }
 
@@ -43,7 +61,7 @@ async function readPrivateJson(path) {
 export function validateLiveManagementConfig(input) {
   const result = v.safeParse(v.strictObject({
     schemaVersion: v.literal(1), managementOrigin: text, journal: text,
-    adminEmail: v.pipe(text, v.email()), source: schema.entries.source,
+    adminEmail: v.pipe(text, v.email()), source: schema.entries.source, serviceAccess: v.optional(serviceAccess),
   }), input);
   requireCondition(result.success, 'management_config_invalid');
   validateLiveBrowserOrigin(result.output.managementOrigin);
@@ -94,9 +112,15 @@ async function validateInstaller(config, directory, release) {
 
 async function deployInstaller(config, directory, release) {
   await validateInstaller(config, directory, release);
+  // The isolated installer opts its gateways into the configured service identity through its own deployment
+  // variables; the reviewed installer files stay untouched and the hosted installer never carries them.
+  const optIn = config.serviceAccess === undefined ? [] : [
+    '--var', `ANKKA_SERVICE_ACCESS_CLIENT_ID:${config.serviceAccess.clientId}`,
+    '--var', `ANKKA_SERVICE_ACCESS_TOKEN_ID:${config.serviceAccess.tokenId}`,
+  ];
   const status = await new Promise((resolveStatus) => {
     const child = spawn(process.execPath, [resolve(root, 'node_modules/wrangler/bin/wrangler.js'), 'deploy',
-      '--config', resolve(directory, 'wrangler.canary.toml')], {
+      '--config', resolve(directory, 'wrangler.canary.toml'), ...optIn], {
       cwd: directory, env: { ...process.env, WRANGLER_SEND_METRICS: 'false' }, stdio: 'ignore',
     });
     child.once('error', () => resolveStatus(-1)); child.once('exit', resolveStatus);
@@ -175,6 +199,31 @@ export async function runLiveLifecycleCommand(args) {
   }
   try {
     await checkpoint({ stage: recover ? 'recovery' : 'preflight', status: 'started' });
+    if (apiOnly && config.serviceAccess !== undefined) {
+      // The deployed protected routes as the service identity: no browser, no cached human session. Refusals of an
+      // unapproved identity and of operations outside the allowlist are proven before the exercise.
+      const service = config.serviceAccess;
+      const api = createLiveGatewayServiceApi({ origin: config.managementOrigin, clientId: service.clientId,
+        secret: await resolveOperatorCredential(service.secret), signal: cancellation.signal });
+      if (service.foreign !== undefined) {
+        const foreign = createLiveGatewayServiceApi({ origin: config.managementOrigin, clientId: service.foreign.clientId,
+          secret: await resolveOperatorCredential(service.foreign.secret), signal: cancellation.signal });
+        requireCondition(await foreign.probe('/api/status') === 401, 'service_foreign_identity_not_refused');
+        await checkpoint({ stage: 'service_rejection', status: 'foreign_identity_refused' });
+      }
+      for (const [path, method] of [['/api/update-actions', 'POST'], ['/api/teardown-actions', 'POST'],
+        [`/api/source-actions/action_${'A'.repeat(32)}`, 'DELETE'], [`/api/update-actions/action_${'A'.repeat(32)}`, 'GET']]) {
+        const status = await api.probe(path, method === 'GET' ? {} : { method, body: { schemaVersion: 1 } });
+        requireCondition(status === 403, 'service_operation_not_refused');
+      }
+      await checkpoint({ stage: 'service_rejection', status: 'operations_refused' });
+      requireCondition(await api.probe('/api/status') === 200, 'service_identity_not_admitted');
+      await checkpoint({ stage: 'access', status: 'passed', actor: 'service' });
+      await qualifyLiveGatewayManagement({ request: api.request, source: config.source, checkpoint });
+      await checkpoint({ stage: 'management_api', status: 'passed', actor: 'service' });
+      console.log('Management API checks passed as the service identity over the deployed routes. Synthetic source remains installed. Full lifecycle is not qualified.');
+      return 0;
+    }
     if (apiOnly) {
       const api = createLiveGatewayApi({ origin: config.managementOrigin, email: config.adminEmail, signal: cancellation.signal });
       await api.checkAccess();
