@@ -12,6 +12,23 @@ must have mode `0700`. Generated installer directories are validated against the
 review records before each deployment. Both must target the same isolated installer,
 account, signing public key, and zone. Production installer hosts are refused.
 
+Install `cloudflared`, then authenticate to the isolated installer once using
+`cloudflared access login --quiet --app <isolated-installer-origin>`. Complete this
+login in your normal browser. Before any deployment, check the cached session with
+`npm run validate:lifecycle:live -- --config /private/path/config.json --check-access`.
+This check uses a temporary browser, needs no operator token, and creates no journal
+or cloud resources. It does not qualify the lifecycle.
+
+The runner reads the cached Access token into memory and installs a secure,
+host-only `CF_Authorization` cookie in its own browser context. Browser navigation
+and API calls share that context, preserving the application's CSRF and callback
+cookies. It checks the configured administrator email and expiry locally;
+Cloudflare verifies the token's signature, audience and policy. Tokens never enter
+command arguments, logs, or the journal. Authentication failure stops before
+installer deployment. An expired cache requires another normal-browser login.
+For the new gateway, the first read redirected to Access can start a quiet
+`cloudflared` login in your normal browser. Writes are never retried for login.
+
 The private config has these fields:
 
 - `schemaVersion`: `1`.
@@ -29,9 +46,9 @@ The private config has these fields:
 - Optional `browserProfile`: an absolute, dedicated Chrome profile directory outside
   the checkout, mode `0700`. Its `.ankka-lifecycle-profile` marker contains
   `Dedicated Ankka lifecycle test browser` followed by a newline. Never select your
-  everyday browser profile. Sign into this profile in ordinary Chrome first, then
-  close that test window before the command opens it. This supports identity
-  providers that refuse interactive sign-in in automation-controlled browsers.
+  everyday browser profile. Close that test window before the command opens it.
+  A profile retains application sessions; it does not guarantee that Google will
+  allow new sign-ins from an automated browser.
 
 Provide the already-authorized operator token through `CLOUDFLARE_API_TOKEN`.
 It is used for isolated installer deployment and direct Cloudflare read-back.
@@ -40,8 +57,13 @@ token is entered directly as the installed gateway's encrypted
 `ANKKA_MANAGEMENT_TOKEN` secret in Cloudflare. The command never receives it.
 
 The command opens its own Chrome window, temporary unless a dedicated profile is
-configured. Complete login and review
-the real Cloudflare consent pages there. It does not attach to your everyday
+configured. Review the real Cloudflare consent pages there. Access login through
+`cloudflared` authenticates the protected installer and gateway; it does not
+authenticate the Cloudflare dashboard or grant permission to deploy, update, or
+remove infrastructure. If Google blocks dashboard login in this browser, stop:
+the Access check can pass while the full consent flow remains blocked. Do not
+disable browser security or count that check as a successful live lifecycle.
+The command does not attach to your everyday
 browser, export cookies, or save browser traces. A configured profile retains login
 sessions locally; protect it and remove it when qualification is finished. When prompted, install and
 activate the management secret directly in Cloudflare. No consent is expected

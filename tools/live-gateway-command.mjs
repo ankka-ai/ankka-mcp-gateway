@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import * as v from 'valibot';
 import { validateGeneratedReviewedIsolatedCanaryDirectory } from '../apps/installer/scripts/generate-reviewed-canary.mjs';
 import { openLiveGatewayBrowser, validateLiveBrowserOrigin, LiveGatewayBrowserError } from './live-gateway-browser.mjs';
+import { LiveGatewayAccessError } from './live-gateway-access.mjs';
 import { LiveManagementQualificationError } from './live-gateway-management.mjs';
 import { createLiveGatewayProvider } from './live-gateway-provider.mjs';
 import { qualifyLiveGatewayLifecycle, finishLiveGatewayRemoval, LiveLifecycleError } from './live-gateway-lifecycle.mjs';
@@ -78,11 +79,19 @@ async function deployInstaller(config, directory, release) {
 }
 
 export async function runLiveLifecycleCommand(args) {
-  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal]\nRequires a prepared, published isolated signed A/B pair, Chrome, and CLOUDFLARE_API_TOKEN.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nReview OAuth in the test browser. Add the management token directly in Cloudflare when prompted.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.';
+  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --check-access]\nRequires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access verifies the cached user session without deployment or a journal; no operator token is required.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.';
   if (args.length === 1 && args[0] === '--help') { console.log(help); return 0; }
-  requireCondition((args.length === 2 || args.length === 3 && args[2] === '--recover-removal') && args[0] === '--config', 'usage_invalid');
-  const recover = args.length === 3;
+  requireCondition((args.length === 2 || args.length === 3 && ['--recover-removal', '--check-access'].includes(args[2])) && args[0] === '--config', 'usage_invalid');
+  const recover = args[2] === '--recover-removal';
   const config = validateLiveLifecycleConfig(await readPrivateJson(args[1]));
+  if (args[2] === '--check-access') {
+    const probe = await openLiveGatewayBrowser({ ...config, browserProfile: undefined, headless: true, notify: console.log });
+    try {
+      await probe.login(config.installerOrigin);
+      console.log('Cached Access session verified. No deployment or lifecycle validation was performed.');
+      return 0;
+    } finally { await probe.close(); }
+  }
   if (config.browserProfile) {
     const profile = await outsideRepository(config.browserProfile);
     const profileStat = await lstat(profile);
@@ -122,6 +131,9 @@ export async function runLiveLifecycleCommand(args) {
   }
   try {
     await checkpoint({ stage: recover ? 'recovery' : 'preflight', status: 'started' });
+    browser = await openLiveGatewayBrowser({ ...config, notify: console.log });
+    await browser.login(config.installerOrigin);
+    await checkpoint({ stage: 'access', status: 'passed' });
     if (!recover) {
       const a = await validateInstaller(config, config.installerA, config.releaseA);
       const b = await validateInstaller(config, config.installerB, config.releaseB);
@@ -130,7 +142,6 @@ export async function runLiveLifecycleCommand(args) {
       await provider.assertFresh();
       await deployInstaller(config, config.installerA, config.releaseA);
     }
-    browser = await openLiveGatewayBrowser({ ...config, notify: console.log });
     if (recover) {
       const receipt = state.events.findLast((event) => event.stage === 'root_removal' && event.status === 'receipt_saved');
       const inventory = state.events.findLast((event) => event.stage === 'inventory' && event.status === 'passed')?.inventory;
@@ -144,7 +155,7 @@ export async function runLiveLifecycleCommand(args) {
       publishB: () => deployInstaller(config, config.installerB, config.releaseB) });
     return 0;
   } catch (error) {
-    const failureCode = error instanceof LiveLifecycleError || error instanceof LiveGatewayBrowserError ||
+    const failureCode = error instanceof LiveLifecycleError || error instanceof LiveGatewayBrowserError || error instanceof LiveGatewayAccessError ||
       error instanceof LiveManagementQualificationError ? error.code : 'unexpected_failure';
     await checkpoint({ stage: 'command', status: 'stopped', failureCode });
     console.error(`Failure reference: ${failureCode}`);
@@ -159,5 +170,9 @@ export async function runLiveLifecycleCommand(args) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try { process.exitCode = await runLiveLifecycleCommand(process.argv.slice(2)); }
-  catch { console.error('Live validation could not start. Check the config, private paths, credentials, and exclusive journal.'); process.exitCode = 1; }
+  catch (error) {
+    if (error instanceof LiveGatewayAccessError) console.error(`Access check stopped: ${error.code}. Use cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser, then rerun --check-access.`);
+    else console.error('Live validation could not start. Check the config, private paths, credentials, and exclusive journal.');
+    process.exitCode = 1;
+  }
 }

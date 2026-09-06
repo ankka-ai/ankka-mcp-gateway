@@ -1,4 +1,5 @@
 import { chromium } from 'playwright-core';
+import { createLiveGatewayAccess, LiveGatewayAccessError } from './live-gateway-access.mjs';
 
 const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
 const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth\/start)$/u;
@@ -50,12 +51,15 @@ export function validateLiveHandoff(value, origin, path) {
 }
 
 /** Own ephemeral browser. No CDP attachment, cookies exported, traces or HAR files. */
-export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, browserProfile, notify }) {
+export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, headless = false, notify }) {
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
-  const browser = browserProfile ? null : await chromium.launch({ channel: 'chrome', headless: false, chromiumSandbox: true });
+  const accessCancellation = new AbortController();
+  const installAccess = createLiveGatewayAccess({ origins, email: basics.adminEmail, notify, signal: accessCancellation.signal });
+  const authenticated = new Set();
+  const browser = browserProfile ? null : await chromium.launch({ channel: 'chrome', headless, chromiumSandbox: true });
   const context = browserProfile
     ? await chromium.launchPersistentContext(browserProfile, {
-      channel: 'chrome', headless: false, chromiumSandbox: true, acceptDownloads: false, serviceWorkers: 'block',
+      channel: 'chrome', headless, chromiumSandbox: true, acceptDownloads: false, serviceWorkers: 'block',
       // A manually authenticated Chrome profile uses the real OS keychain.
       // Mock/basic stores cannot decrypt that profile's existing login cookies.
       ignoreDefaultArgs: ['--use-mock-keychain', '--password-store=basic'],
@@ -89,8 +93,9 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     catch { throw new LiveGatewayBrowserError('navigation_failed'); }
   }
 
-  async function request(origin, path, { method = 'GET', body, csrfToken } = {}) {
+  async function request(origin, path, { method = 'GET', body, csrfToken } = {}, authenticate = true) {
     validateLiveBrowserRequest(origins, origin, path, method);
+    if (authenticated.has(origin)) await installAccess(context, origin);
     let response;
     try {
       const options = {
@@ -104,6 +109,20 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       if (csrfToken !== undefined) options.headers['x-csrf-token'] = csrfToken;
       response = await context.request.fetch(origin + path, options);
       const status = response.status();
+      // Only a rejected read can bootstrap Access for a newly installed gateway.
+      // Never repeat a write, and never forward a token across a redirect.
+      const location = response.headers().location;
+      if (authenticate && method === 'GET' && origin === managementOrigin &&
+          [302, 303].includes(status) && location &&
+          new URL(location, origin).hostname.endsWith('.cloudflareaccess.com')) {
+        await installAccess(context, origin, { allowLogin: true });
+        authenticated.add(origin);
+        await response.dispose(); response = null;
+        return await request(origin, path, { method, body, csrfToken }, false);
+      }
+      if (authenticated.has(origin) && [302, 303, 401, 403].includes(status)) {
+        throw new LiveGatewayAccessError('access_session_rejected');
+      }
       if (status !== 200) throw new LiveGatewayBrowserError('gateway_http_rejected', status);
       const bytes = await response.body();
       if (bytes.length > 512 * 1024) throw new LiveGatewayBrowserError('gateway_response_too_large');
@@ -112,7 +131,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       }
       return JSON.parse(bytes.toString('utf8'));
     } catch (error) {
-      if (error instanceof LiveGatewayBrowserError) throw error;
+      if (error instanceof LiveGatewayBrowserError || error instanceof LiveGatewayAccessError) throw error;
       throw new LiveGatewayBrowserError('gateway_request_failed');
     } finally { await response?.dispose(); }
   }
@@ -140,7 +159,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
 
   return {
     request, navigate, waitFor,
-    cancel() { cancelled = true; },
+    cancel() { cancelled = true; accessCancellation.abort(); },
     async clearRemovalSession() {
       await context.clearCookies({ name: '__Host-ankka_gateway_teardown', domain: new URL(installerOrigin).hostname });
     },
@@ -167,9 +186,11 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     },
     async login(origin) {
       if (!origins.includes(origin)) throw new LiveGatewayBrowserError('origin_invalid');
+      await installAccess(context, origin);
+      authenticated.add(origin);
       await navigate(origin);
       return waitFor(() => request(origin, origin === installerOrigin ? '/api/session' : '/api/status'),
-        (value) => value.schemaVersion === 1, { instruction: 'Complete login in the test browser if prompted.' });
+        (value) => value.schemaVersion === 1);
     },
     async consent(authorizationUrl, read, accepts) {
       const url = new URL(authorizationUrl);
@@ -201,6 +222,6 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       });
     },
     interruptionObserved: () => interrupted,
-    async close() { await context.close(); await browser?.close(); },
+    async close() { accessCancellation.abort(); await context.close(); await browser?.close(); },
   };
 }
