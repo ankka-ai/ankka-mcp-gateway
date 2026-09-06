@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Bundles production state/crypto code; SQLite and Web Crypto execute in workerd.
-export async function createRuntime({ storage = false, diagnostics = false } = {}) {
+export async function createRuntime({ storage = false, diagnostics = false, gateway = false } = {}) {
   const bundle = await build({
-    entryPoints: [fileURLToPath(new URL('./bootstrap-worker.ts', import.meta.url))],
+    entryPoints: [fileURLToPath(new URL(gateway ? './gateway-worker.ts' : './bootstrap-worker.ts', import.meta.url))],
     bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
     external: ['cloudflare:workers'],
   });
@@ -27,8 +27,8 @@ export async function createRuntime({ storage = false, diagnostics = false } = {
           mainModule: 'fixture.mjs',
           modules: { 'fixture.mjs': { type: 'esm', contents: bundle.outputFiles[0].text } },
         },
-        env: { STATE: { type: 'durable-object', workerName: 'ankka-synthetic-bootstrap', exportName: 'BootstrapFixture' } },
-        exports: { BootstrapFixture: { type: 'durable-object', storage: 'sqlite' } },
+        env: gateway ? { ADMIN_STATE: { type: 'durable-object', workerName: 'ankka-synthetic-bootstrap', exportName: 'AdminState' }, FAULT_STATE: { type: 'durable-object', workerName: 'ankka-synthetic-bootstrap', exportName: 'FaultState' } } : { STATE: { type: 'durable-object', workerName: 'ankka-synthetic-bootstrap', exportName: 'BootstrapFixture' } },
+        exports: gateway ? { AdminState: { type: 'durable-object', storage: 'sqlite' }, FaultState: { type: 'durable-object', storage: 'sqlite' } } : { BootstrapFixture: { type: 'durable-object', storage: 'sqlite' } },
       },
       dev: {
         // No credentials, remote bindings, .dev.vars, or real provider requests.

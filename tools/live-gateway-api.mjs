@@ -2,7 +2,7 @@ import * as v from 'valibot';
 import { createLiveGatewayAccess, LiveGatewayAccessError } from './live-gateway-access.mjs';
 
 export class LiveGatewayApiError extends Error {
-  constructor(code) { super(code); this.code = code; }
+  constructor(code, status = null) { super(code); this.code = code; this.status = status; }
 }
 
 const paths = {
@@ -41,7 +41,7 @@ export function createLiveGatewayApi({ origin, email, transport = fetch, run, si
       if (response.status !== 200) {
         await response.body?.cancel();
         if ([301, 302, 303, 307, 308, 401, 403].includes(response.status)) throw new LiveGatewayAccessError('access_session_rejected');
-        throw new LiveGatewayApiError('api_http_rejected');
+        throw new LiveGatewayApiError('api_http_rejected', response.status);
       }
       if (!response.headers.get('content-type')?.includes('application/json')) {
         await response.body?.cancel(); throw new LiveGatewayApiError('api_response_invalid');

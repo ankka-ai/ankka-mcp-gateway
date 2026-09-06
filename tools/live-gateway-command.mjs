@@ -1,3 +1,4 @@
+import { lifecycleFailureReport, checkSignedConfigurationEndpoint } from './live-gateway-diagnostics.mjs';
 import { readFile, realpath, lstat, open, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve, dirname, isAbsolute, relative } from 'node:path';
@@ -127,6 +128,8 @@ export async function runLiveLifecycleCommand(args) {
     await probe.checkAccess();
     if (args[2] === '--preflight') {
       await validateReleasePair(config);
+      const endpointFailure = await checkSignedConfigurationEndpoint(config.installerOrigin);
+      requireCondition(endpointFailure === null, endpointFailure);
       await createLiveGatewayProvider({ config, token: process.env.CLOUDFLARE_API_TOKEN }).assertFresh();
     }
     console.log('Read-only preflight passed. No browser, deployment, or lifecycle qualification. Cloudflare dashboard consent was not checked.');
@@ -198,6 +201,8 @@ export async function runLiveLifecycleCommand(args) {
       await checkpoint({ stage: 'installer_deployment', status: 'started' });
       await deployInstaller(config, config.installerA, config.releaseA);
       await checkpoint({ stage: 'installer_deployment', status: 'passed' });
+      const endpointFailure = await checkSignedConfigurationEndpoint(config.installerOrigin);
+      requireCondition(endpointFailure === null, endpointFailure);
     }
     if (recover) {
       const receipt = state.events.findLast((event) => event.stage === 'root_removal' && event.status === 'receipt_saved');
@@ -214,7 +219,9 @@ export async function runLiveLifecycleCommand(args) {
   } catch (error) {
     const failureCode = error instanceof LiveLifecycleError || error instanceof LiveGatewayBrowserError || error instanceof LiveGatewayAccessError || error instanceof LiveGatewayApiError ||
       error instanceof LiveManagementQualificationError ? error.code : 'unexpected_failure';
-    await checkpoint({ stage: 'command', status: 'stopped', failureCode });
+    const diagnostics = await lifecycleFailureReport({ events: state.events, failureCode, httpStatus: error.status, metrics: provider?.metrics });
+    await checkpoint({ stage: 'command', status: 'stopped', failureCode, diagnostics });
+    console.error(JSON.stringify(diagnostics));
     console.error(`Failure reference: ${failureCode}`);
     console.error('Live validation stopped. Keep the private journal and review the last recorded action before retrying. No automatic duplicate write or cleanup was attempted.');
     return 1;
@@ -229,6 +236,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try { process.exitCode = await runLiveLifecycleCommand(process.argv.slice(2)); }
   catch (error) {
     if (error instanceof LiveGatewayAccessError) console.error(`Access check stopped: ${error.code}. Use cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser, then rerun --check-access.`);
+    else if (error instanceof LiveLifecycleError) console.error(`Live validation could not start: ${error.code}.`);
     else console.error('Live validation could not start. Check the config, private paths, credentials, and exclusive journal.');
     process.exitCode = 1;
   }

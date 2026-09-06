@@ -146,3 +146,24 @@ lock. Journal replacements are atomic and synced. Keep the journal and receipt u
 cleanup is independently confirmed; they contain private configuration and resource
 references and must never be committed. The command leaves the prepared installer,
 relay, releases, and temporary setup tokens for separately authorized fixture cleanup.
+
+### Failed-run evidence
+
+A stopped run saves a `diagnostics` object beside its final journal event and
+prints the same compact report. It names the failed stage, the last recorded
+mutation stage, the fixed failure code, and whether a removal receipt exists.
+When a shell was recorded and the operator credential can query Workers
+analytics, it includes numeric request/error counts and CPU/memory quantiles
+from the preceding 30 minutes. Missing permissions, unavailable metrics, or a
+failed diagnostic request do not hide the original failure. No extra permission
+is required just to run the lifecycle.
+
+Reports omit raw provider error messages, request URLs, headers, cookies,
+credential values, account IDs, and resource IDs. Keep the full journal private:
+it remains the authority for exact action and receipt recovery. A report never
+retries an ambiguous write or authorizes broad cleanup.
+
+The preflight also sends an unsigned empty request to the installer's signed
+configuration endpoint. It must reach a JSON validation rejection. An Access
+login redirect is reported before a fresh shell is created; changing that Access
+rule remains an explicit operator action.

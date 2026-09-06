@@ -47,3 +47,21 @@ test('recovery inventory cannot change the configured provider account or normal
   }
   assert.equal(requests, 0);
 });
+
+test('failure metrics are bounded to the configured account and exact recorded Worker', async () => {
+  const installId = `acg-${'1'.repeat(24)}`;
+  const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.synthetic.workers.dev` };
+  const rows = [{ sum: { requests: 3, errors: 1 }, quantiles: { cpuTimeP99: 4 } }];
+  const provider = createLiveGatewayProvider({ config, token: 'synthetic-test-token', transport: async (url, options) => {
+    assert.equal(url, 'https://api.cloudflare.com/client/v4/graphql');
+    assert.equal(options.redirect, 'error');
+    const body = JSON.parse(options.body);
+    assert.equal(body.variables.accountTag, accountId);
+    assert.equal(body.variables.scriptName, provision.workerName);
+    assert.equal(Date.parse(body.variables.to) - Date.parse(body.variables.from), 30 * 60_000);
+    return Response.json({ data: { viewer: { accounts: [{ workersInvocationsAdaptive: rows }] } } });
+  } });
+  assert.deepEqual(await provider.metrics(provision), rows);
+  const denied = createLiveGatewayProvider({ config, token: 'synthetic-test-token', transport: async () => new Response('private', { status: 403 }) });
+  assert.equal(await denied.metrics(provision), null);
+});

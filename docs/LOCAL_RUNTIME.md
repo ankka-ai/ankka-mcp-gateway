@@ -71,3 +71,9 @@ into Explorer or use this fixture as a real installer.
 Cloudflare's [local tracing description](https://blog.cloudflare.com/local-tracing/)
 explains the diagnostic API. The harness uses the Miniflare API shipped in this
 repository's pinned toolchain, with a regression verifying that traces are queryable.
+
+The gateway runtime fixture also runs the production bootstrap entrypoint and
+its real AdminState Durable Object. It checks setup-page routing, unauthenticated
+configuration rejection and status initialization. A deliberately failing DO
+verifies that asynchronous dispatch failures produce safe JSON rather than an
+opaque platform HTML error. This still does not cover every final gateway route.
