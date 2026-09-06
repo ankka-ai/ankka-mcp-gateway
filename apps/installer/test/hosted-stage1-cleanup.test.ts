@@ -209,10 +209,12 @@ function json<Value>(value: Value, status = 200): Response {
   return Response.json({ success: true, errors: [], messages: [], result: value }, { status });
 }
 
-function page<Value>(items: readonly Value[]): Response {
+function page<Value>(items: readonly Value[], pageNumber = 1): Response {
+  const current = items.slice((pageNumber - 1) * 1000, pageNumber * 1000);
   return Response.json({
-    success: true, errors: [], messages: [], result: items,
-    result_info: { page: 1, per_page: 1000, count: items.length, total_count: items.length, total_pages: 1 },
+    // The live namespace API returns null collections and omits total_pages.
+    success: true, errors: null, messages: null, result: current,
+    result_info: { page: pageNumber, per_page: 1000, count: current.length, total_count: items.length },
   });
 }
 
@@ -259,7 +261,7 @@ function transportFor(account: FakeAccount): (input: RequestInfo | URL, init?: R
     }
     if (request.method === 'GET' && rest === '/workers/durable_objects/namespaces') {
       account.events.push('namespaces-read');
-      return page(account.namespaces);
+      return page(account.namespaces, Number(url.searchParams.get('page') ?? '1'));
     }
     if (rest.startsWith('/workers/scripts/') && rest.endsWith('/subdomain')) {
       if (request.method === 'POST') {
@@ -412,6 +414,17 @@ describe('hosted Stage 1 lost-cookie cleanup', () => {
     expect(f.account.subdomainEnabled).toBe(false);
     expect(f.account.namespaces.map((item) => item.script)).toEqual(['other-worker']);
     expect(f.waits).toEqual([]);
+  });
+
+  it('checks later namespace pages when Cloudflare omits total_pages', async () => {
+    const f = await fixture();
+    f.account.namespaces.unshift(...Array.from({ length: 1000 }, (_, index) => ({
+      id: index.toString(16).padStart(32, '0'), name: `other_${index}_Foo`,
+      script: `other-${index}`, class: 'Foo', use_sqlite: true,
+    })));
+    expect((await executeHostedStage1Cleanup(f.input)).grantRevocation).toBe('confirmed');
+    expect(f.account.namespaces).toHaveLength(1001);
+    expect(f.account.namespaces.some((item) => item.script === f.workerName)).toBe(false);
   });
 
   it('refuses before any mutation on account, identity, version, binding, or namespace mismatch and still revokes', async () => {
