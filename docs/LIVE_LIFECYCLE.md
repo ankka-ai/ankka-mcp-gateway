@@ -70,7 +70,10 @@ identity: no browser, no cached human session, no login. Before the exercise
 it proves the gateway refuses the update and teardown action routes, source
 action cancellation and update action reads to the service identity (`403`),
 and, when the section names a `foreign` service token, that an unapproved
-identity is refused (`401`). The journal records the actor as `service`.
+identity is refused before it reaches the gateway: the Access edge answers a
+service token no policy admits with a redirect to its login page (recorded by
+status, `302`; `401` and `403` also count). The journal records the actor as
+`service`.
 
 This mode uses the same management exercise as the full lifecycle: install the
 synthetic source, verify default deny, grant synthetic membership, then remove it.

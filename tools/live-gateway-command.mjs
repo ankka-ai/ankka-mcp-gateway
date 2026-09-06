@@ -208,16 +208,18 @@ export async function runLiveLifecycleCommand(args) {
       if (service.foreign !== undefined) {
         const foreign = createLiveGatewayServiceApi({ origin: config.managementOrigin, clientId: service.foreign.clientId,
           secret: await resolveOperatorCredential(service.foreign.secret), signal: cancellation.signal });
-        requireCondition(await foreign.probe('/api/status') === 401, 'service_foreign_identity_not_refused');
-        await checkpoint({ stage: 'service_rejection', status: 'foreign_identity_refused' });
+        // The Access edge refuses an identity no policy admits with a redirect to its login page (or 401/403).
+        const refusal = await foreign.probe('/api/status');
+        requireCondition([302, 401, 403].includes(refusal), 'service_foreign_identity_not_refused');
+        await checkpoint({ stage: 'service_rejection', status: 'foreign_identity_refused', httpStatus: refusal });
       }
+      requireCondition(await api.probe('/api/status') === 200, 'service_identity_not_admitted');
       for (const [path, method] of [['/api/update-actions', 'POST'], ['/api/teardown-actions', 'POST'],
         [`/api/source-actions/action_${'A'.repeat(32)}`, 'DELETE'], [`/api/update-actions/action_${'A'.repeat(32)}`, 'GET']]) {
         const status = await api.probe(path, method === 'GET' ? {} : { method, body: { schemaVersion: 1 } });
         requireCondition(status === 403, 'service_operation_not_refused');
       }
       await checkpoint({ stage: 'service_rejection', status: 'operations_refused' });
-      requireCondition(await api.probe('/api/status') === 200, 'service_identity_not_admitted');
       await checkpoint({ stage: 'access', status: 'passed', actor: 'service' });
       await qualifyLiveGatewayManagement({ request: api.request, source: config.source, checkpoint });
       await checkpoint({ stage: 'management_api', status: 'passed', actor: 'service' });

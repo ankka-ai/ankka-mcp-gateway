@@ -28,7 +28,7 @@ function requireOrigin(origin) {
 }
 
 /** One fixed-origin request path; `credentials` supplies the headers that carry the caller's identity. */
-function createRequest({ origin, transport, signal, credentials, allow = paths, rejected = () => false }) {
+function createRequest({ origin, transport, signal, credentials, allow = paths, rejected = () => false, redirect = 'error' }) {
   return async function request(path, { method = 'GET', body } = {}) {
     if (!allow[method]?.test(path) || method === 'GET' && body !== undefined) {
       throw new LiveGatewayApiError('api_request_outside_qualification');
@@ -36,7 +36,7 @@ function createRequest({ origin, transport, signal, credentials, allow = paths, 
     const identity = await credentials();
     try {
       const options = {
-        method, redirect: 'error', signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+        method, redirect, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
         headers: { origin, accept: 'application/json', ...identity },
       };
       if (body !== undefined) {
@@ -45,7 +45,7 @@ function createRequest({ origin, transport, signal, credentials, allow = paths, 
       }
       const response = await transport(origin + path, options);
       if (response.status !== 200) {
-        const outcome = rejected(response.status);
+        const outcome = rejected(response.status, response);
         await response.body?.cancel();
         if (outcome !== false) return outcome;
         if ([301, 302, 303, 307, 308, 401, 403].includes(response.status)) throw new LiveGatewayAccessError('access_session_rejected');
@@ -73,8 +73,9 @@ function createRequest({ origin, transport, signal, credentials, allow = paths, 
 /**
  * Fixed-origin checks as the Access service identity: the client id and secret
  * ride in the service-token headers, no cookie, no cached human session, no
- * login. `probe` returns the HTTP status of a request the gateway is expected
- * to refuse, so rejection is evidence rather than an error.
+ * login. `probe` returns the HTTP status of a request the gateway or the Access
+ * edge is expected to refuse (a redirect to the Access login page counts by its
+ * status), so rejection is evidence rather than an error.
  */
 export function createLiveGatewayServiceApi({ origin, clientId, secret, transport = fetch, signal }) {
   requireOrigin(origin);
@@ -82,8 +83,15 @@ export function createLiveGatewayServiceApi({ origin, clientId, secret, transpor
     throw new LiveGatewayApiError('service_credential_invalid');
   }
   const credentials = async () => ({ 'cf-access-client-id': clientId, 'cf-access-client-secret': secret });
-  const request = createRequest({ origin, transport, signal, credentials });
-  const probe = createRequest({ origin, transport, signal, credentials, allow: probePaths, rejected: (status) => ({ refused: status }) });
+  // Redirects are observed, never followed: the Access edge answers an identity it does not admit with a
+  // redirect to its login page, and that redirect is the refusal a probe records.
+  const request = createRequest({ origin, transport, signal, credentials, redirect: 'manual' });
+  const probe = createRequest({ origin, transport, signal, credentials, allow: probePaths, redirect: 'manual', rejected: (status, response) => {
+    if (status < 300 || status >= 400) return { refused: status };
+    let host = null;
+    try { host = new URL(response.headers.get('location') ?? '', origin).hostname; } catch { host = null; }
+    return host !== null && host.endsWith('.cloudflareaccess.com') ? { refused: status } : false;
+  } });
   return { request, async probe(path, options) {
     const outcome = await probe(path, options);
     return v.is(v.strictObject({ refused: v.number() }), outcome) ? outcome.refused : 200;

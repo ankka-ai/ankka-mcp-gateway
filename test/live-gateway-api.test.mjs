@@ -117,3 +117,23 @@ test('service mode sends only the service-token headers, needs no cached session
   assert.throws(() => createLiveGatewayServiceApi({ origin, clientId: 'bad', secret }), { code: 'service_credential_invalid' });
   assert.throws(() => createLiveGatewayServiceApi({ origin, clientId, secret: 'short' }), { code: 'service_credential_invalid' });
 });
+
+test('service mode observes an Access login redirect as refusal evidence and never follows it', async () => {
+  const clientId = `${'a'.repeat(32)}.access`;
+  const secret = 'b'.repeat(64);
+  const login = 'https://team.cloudflareaccess.com/cdn-cgi/access/login/manage.example.com?kid=x';
+  const calls = [];
+  const redirecting = (location) => createLiveGatewayServiceApi({ origin, clientId, secret, transport: async (url, options) => {
+    calls.push({ url, options });
+    return new Response(null, { status: 302, headers: { location } });
+  } });
+  const edge = redirecting(login);
+  // The identity is refused at the edge: the probe reports the redirect by status instead of erroring.
+  assert.equal(await edge.probe('/api/status'), 302);
+  assert.equal(calls.at(-1).options.redirect, 'manual');
+  // The exercise itself still treats any redirect as a rejected session.
+  await assert.rejects(edge.request('/api/team'), { code: 'access_session_rejected' });
+  // A redirect anywhere other than the Access login page is not refusal evidence.
+  await assert.rejects(redirecting('https://elsewhere.example.com/').probe('/api/status'), { code: 'access_session_rejected' });
+  await assert.rejects(redirecting('not a url').probe('/api/status'), { code: 'access_session_rejected' });
+});
