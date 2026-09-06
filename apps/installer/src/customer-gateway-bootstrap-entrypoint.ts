@@ -431,7 +431,7 @@ export default {
         request.method === 'POST' && (url.pathname === '/__ankka/install/configuration' || url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH ||
           url.pathname === CUSTOMER_INSTALL_OAUTH_START_PATH)
       )) return new Response(null, { status: 404, headers: secureHeaders('text/plain; charset=utf-8') });
-      return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
+      return await env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
     } catch {
       return unavailable();
     }

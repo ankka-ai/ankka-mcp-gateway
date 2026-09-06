@@ -16,8 +16,13 @@ Install `cloudflared`, then authenticate to the isolated installer once using
 `cloudflared access login --quiet --app <isolated-installer-origin>`. Complete this
 login in your normal browser. Before any deployment, check the cached session with
 `npm run validate:lifecycle:live -- --config /private/path/config.json --check-access`.
-This check uses a temporary browser, needs no operator token, and creates no journal
-or cloud resources. It does not qualify the lifecycle.
+This check uses HTTP and the cached Access identity; it opens no browser, needs no
+operator token, and creates no journal or cloud resources. It verifies the email
+returned by Cloudflare's same-origin `/cdn-cgi/access/get-identity` endpoint.
+It does not qualify the lifecycle or verify dashboard login. Use `--preflight`
+to additionally validate the signed release pair and read the target provider
+inventory with the operator token. These checks cannot prove that all future
+write permissions or consent steps will succeed.
 
 The runner reads the cached Access token into memory and installs a secure,
 host-only `CF_Authorization` cookie in its own browser context. Browser navigation
@@ -28,6 +33,48 @@ command arguments, logs, or the journal. Authentication failure stops before
 installer deployment. An expired cache requires another normal-browser login.
 For the new gateway, the first read redirected to Access can start a quiet
 `cloudflared` login in your normal browser. Writes are never retried for login.
+
+## Independent API checks
+
+Use local `npm run validate:lifecycle` during development. It needs no account,
+credentials, Chrome, or network. For source and Team changes, run the live management
+exercise independently on an already installed disposable gateway:
+
+```sh
+npm run validate:lifecycle:live -- --config /private/path/management.json --management-api
+```
+
+The minimal config contains `schemaVersion: 1`, `managementOrigin`, `adminEmail`,
+`journal`, and `source: { url, tool }`. The same private file and journal directory
+permissions apply. No signed releases, browser profile, or infrastructure token
+are needed. The gateway must already hold its management secret and have no sources
+or members. Authenticate once with `cloudflared access login --quiet --app
+<management-origin>` in your normal browser. The command only reads that cached
+session; it never starts interactive login.
+
+This mode uses the same management exercise as the full lifecycle: install the
+synthetic source, verify default deny, grant synthetic membership, then remove it.
+It leaves the source installed for subsequent product removal; it does not delete
+the gateway or automatically undo an uncertain write. Keep its private journal and
+use the existing product removal flow afterward. Do not run it against a gateway
+currently reserved for a fresh full lifecycle run.
+
+A management pass is recorded as `management_api`, with `qualified: false`.
+Installation, signed update, OAuth callbacks, and teardown recovery still use the
+full browser lifecycle below. There is no browserless full lifecycle qualification.
+
+Inspect either kind of journal without network access:
+
+```sh
+npm run validate:lifecycle:live -- --config /private/path/config.json --status
+```
+
+The summary includes scope, passed stages, the last stage, a fixed failure code,
+and whether a removal receipt is available. It omits configuration, credentials,
+and the receipt itself. A saved receipt supports `--recover-removal` with the full
+lifecycle config; earlier failures still require the recorded product recovery flow.
+
+## Full browser lifecycle
 
 The private config has these fields:
 
@@ -99,3 +146,24 @@ lock. Journal replacements are atomic and synced. Keep the journal and receipt u
 cleanup is independently confirmed; they contain private configuration and resource
 references and must never be committed. The command leaves the prepared installer,
 relay, releases, and temporary setup tokens for separately authorized fixture cleanup.
+
+### Failed-run evidence
+
+A stopped run saves a `diagnostics` object beside its final journal event and
+prints the same compact report. It names the failed stage, the last recorded
+mutation stage, the fixed failure code, and whether a removal receipt exists.
+When a shell was recorded and the operator credential can query Workers
+analytics, it includes numeric request/error counts and CPU/memory quantiles
+from the preceding 30 minutes. Missing permissions, unavailable metrics, or a
+failed diagnostic request do not hide the original failure. No extra permission
+is required just to run the lifecycle.
+
+Reports omit raw provider error messages, request URLs, headers, cookies,
+credential values, account IDs, and resource IDs. Keep the full journal private:
+it remains the authority for exact action and receipt recovery. A report never
+retries an ambiguous write or authorizes broad cleanup.
+
+The preflight also sends an unsigned empty request to the installer's signed
+configuration endpoint. It must reach a JSON validation rejection. An Access
+login redirect is reported before a fresh shell is created; changing that Access
+rule remains an explicit operator action.

@@ -77,6 +77,28 @@ export function createLiveGatewayProvider({ config, token, transport = fetch }) 
     }
   }
   return {
+    async metrics(provision) {
+      validateLiveBootstrapOrigin(provision);
+      const now = Date.now();
+      const to = new Date(now).toISOString();
+      const from = new Date(now - 30 * 60_000).toISOString();
+      const query = `query($accountTag:string!,$scriptName:string!,$from:Time!,$to:Time!){viewer{accounts(filter:{accountTag:$accountTag}){workersInvocationsAdaptive(limit:100,filter:{scriptName:$scriptName,datetime_geq:$from,datetime_leq:$to}){sum{requests errors subrequests}quantiles{cpuTimeP50 cpuTimeP99 memoryUsageBytesP99}}}}}`;
+      const response = await transport('https://api.cloudflare.com/client/v4/graphql', {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ query, variables: { accountTag: config.accountId, scriptName: provision.workerName, from, to } }),
+      });
+      if (!response.ok) { await response.body?.cancel(); return null; }
+      const reader = response.body.getReader(); const chunks = []; let size = 0;
+      for (;;) {
+        const item = await reader.read(); if (item.done) break;
+        size += item.value.length;
+        if (size > 128 * 1024) { await reader.cancel(); return null; }
+        chunks.push(item.value);
+      }
+      const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      return result.errors?.length ? null : result.data?.viewer?.accounts?.[0]?.workersInvocationsAdaptive;
+    },
     async assertFresh() {
       const target = (await read(zone)).result;
       requireCondition(target?.name === config.basics.zoneName && target.account?.id === config.accountId, 'zone_account_mismatch');
