@@ -3,6 +3,7 @@ import * as v from 'valibot';
 // provider errors, request URLs, headers, cookies, bodies, or resource IDs.
 const stages = new Set(['preflight', 'access', 'installer_deployment', 'installation', 'source_draft', 'source_apply',
   'team_grant', 'team_remove', 'inventory', 'update', 'interrupted_removal', 'dependency_removal', 'root_removal', 'recovery']);
+const mutations = new Set(['installer_deployment', 'installation', 'source_draft', 'source_apply', 'team_grant', 'team_remove', 'update', 'dependency_removal', 'root_removal']);
 const numeric = (value) => v.is(v.pipe(v.number(), v.finite(), v.minValue(0)), value) ? value : null;
 export function sanitizeRuntimeMetrics(rows) {
   if (!Array.isArray(rows) || rows.length > 100) return null;
@@ -14,7 +15,7 @@ export function sanitizeRuntimeMetrics(rows) {
 }
 export async function lifecycleFailureReport({ events, failureCode, httpStatus, metrics }) {
   const last = events.findLast((event) => stages.has(event.stage));
-  const pending = events.findLast((event) => stages.has(event.stage) && ['started', 'recorded', 'receipt_saved'].includes(event.status));
+  const pending = events.findLast((event) => mutations.has(event.stage) && ['started', 'recorded', 'receipt_saved'].includes(event.status));
   const provision = events.findLast((event) => event.provision)?.provision;
   let runtimeMetrics = null;
   if (metrics && provision) {

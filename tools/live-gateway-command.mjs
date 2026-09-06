@@ -219,7 +219,7 @@ export async function runLiveLifecycleCommand(args) {
   } catch (error) {
     const failureCode = error instanceof LiveLifecycleError || error instanceof LiveGatewayBrowserError || error instanceof LiveGatewayAccessError || error instanceof LiveGatewayApiError ||
       error instanceof LiveManagementQualificationError ? error.code : 'unexpected_failure';
-    const diagnostics = await lifecycleFailureReport({ events: state.events, failureCode, httpStatus: error.status, metrics: provider?.metrics });
+    const diagnostics = await lifecycleFailureReport({ events: state.events, failureCode, httpStatus: error?.status, metrics: provider?.metrics });
     await checkpoint({ stage: 'command', status: 'stopped', failureCode, diagnostics });
     console.error(JSON.stringify(diagnostics));
     console.error(`Failure reference: ${failureCode}`);
