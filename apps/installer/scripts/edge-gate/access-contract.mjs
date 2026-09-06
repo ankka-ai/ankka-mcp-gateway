@@ -166,12 +166,26 @@ function baseApplicationMatches(application, specification) {
   return isRecord(application) &&
     application.name === specification.name &&
     application.domain === specification.domain &&
-    noRules(application.destinations) &&
+    exactApplicationDestinations(application, specification.domain) &&
     application.type === 'self_hosted' &&
     application.app_launcher_visible === false &&
     application.enable_binding_cookie === false &&
     application.http_only_cookie_attribute === true &&
     application.options_preflight_bypass === false;
+}
+
+function exactApplicationDestinations(application, domain) {
+  const destinations = application.destinations;
+  const domains = application.self_hosted_domains;
+  const exactDestination = noRules(destinations) || (
+    Array.isArray(destinations) && destinations.length === 1 &&
+    isRecord(destinations[0]) && Object.keys(destinations[0]).length === 2 &&
+    destinations[0].type === 'public' && destinations[0].uri === domain
+  );
+  const exactDomains = noRules(domains) || (
+    Array.isArray(domains) && domains.length === 1 && domains[0] === domain
+  );
+  return exactDestination && exactDomains;
 }
 
 function noRules(value) {

@@ -240,7 +240,8 @@ async function verifyBehavior(fetchImpl, contract, runtimeMode) {
     ) fail('disabled_shell_not_verified');
     return 5;
   }
-  if (callback.status !== 400 || !exactErrorBody(callbackBody, 'session_invalid')) {
+  if (callback.status !== 400 || (!exactErrorBody(callbackBody, 'session_invalid') &&
+      !exactErrorBody(callbackBody, 'callback_invalid'))) {
     fail('callback_boundary_not_verified');
   }
   let availableReleaseCount = 0;

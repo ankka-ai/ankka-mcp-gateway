@@ -16,6 +16,7 @@ import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build as esbuildBuild, version as esbuildRuntimeVersion } from 'esbuild';
 import * as v from 'valibot';
+import { compileRelayOrigin } from './compiled-relay-origin.mjs';
 
 import {
   LIVE_INSTALLER_HOSTNAME,
@@ -478,6 +479,7 @@ function sourceInputRecords(snapshot, used) {
 }
 
 function compiledSourceContents(logicalPath, source, publicOrigin) {
+  if (logicalPath === '/src/cloudflare-code-relay.ts') return compileRelayOrigin(source.contents, publicOrigin);
   if (logicalPath !== '/src/constants.ts') return source.contents;
   const first = source.contents.indexOf(PUBLIC_ORIGIN_DECLARATION);
   if (

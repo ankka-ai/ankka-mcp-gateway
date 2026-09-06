@@ -209,10 +209,12 @@ function json<Value>(value: Value, status = 200): Response {
   return Response.json({ success: true, errors: [], messages: [], result: value }, { status });
 }
 
-function page<Value>(items: readonly Value[]): Response {
+function page<Value>(items: readonly Value[], pageNumber = 1): Response {
+  const current = items.slice((pageNumber - 1) * 1000, pageNumber * 1000);
   return Response.json({
-    success: true, errors: [], messages: [], result: items,
-    result_info: { page: 1, per_page: 1000, count: items.length, total_count: items.length, total_pages: 1 },
+    // The live namespace API returns null collections and omits total_pages.
+    success: true, errors: null, messages: null, result: current,
+    result_info: { page: pageNumber, per_page: 1000, count: current.length, total_count: items.length },
   });
 }
 
@@ -231,11 +233,11 @@ function transportFor(account: FakeAccount): (input: RequestInfo | URL, init?: R
       return new Response(null, { status: 200 });
     }
     if (path === '/client/v4/accounts') {
-      account.events.push('account-read');
-      return json([{ id: account.accountId }]);
+      throw new Error('Workers-only cleanup must not list accounts');
     }
     expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
     if (!path.startsWith(prefix)) return new Response(null, { status: 404 });
+    if (account.accountId !== ACCOUNT_ID) return Response.json({ success: false, errors: [], result: null }, { status: 403 });
     const rest = path.slice(prefix.length);
     const worker = account.worker;
     const name = account.workerName;
@@ -259,7 +261,7 @@ function transportFor(account: FakeAccount): (input: RequestInfo | URL, init?: R
     }
     if (request.method === 'GET' && rest === '/workers/durable_objects/namespaces') {
       account.events.push('namespaces-read');
-      return page(account.namespaces);
+      return page(account.namespaces, Number(url.searchParams.get('page') ?? '1'));
     }
     if (rest.startsWith('/workers/scripts/') && rest.endsWith('/subdomain')) {
       if (request.method === 'POST') {
@@ -400,7 +402,7 @@ describe('hosted Stage 1 lost-cookie cleanup', () => {
       verifiedAbsentAt: NOW + 100,
     });
     const events = f.account.events;
-    expect(events.slice(0, 2)).toEqual(['token-exchange', 'account-read']);
+    expect(events.slice(0, 2)).toEqual(['token-exchange', 'worker-read']);
     expect(events.at(-1)).toBe('revoke');
     const firstMutation = events.findIndex((event) => MUTATIONS.includes(event));
     expect(events.slice(0, firstMutation)).toEqual(expect.arrayContaining(['worker-read', 'deployments-read', 'version-read', 'namespaces-read']));
@@ -414,11 +416,22 @@ describe('hosted Stage 1 lost-cookie cleanup', () => {
     expect(f.waits).toEqual([]);
   });
 
+  it('checks later namespace pages when Cloudflare omits total_pages', async () => {
+    const f = await fixture();
+    f.account.namespaces.unshift(...Array.from({ length: 1000 }, (_, index) => ({
+      id: index.toString(16).padStart(32, '0'), name: `other_${index}_Foo`,
+      script: `other-${index}`, class: 'Foo', use_sqlite: true,
+    })));
+    expect((await executeHostedStage1Cleanup(f.input)).grantRevocation).toBe('confirmed');
+    expect(f.account.namespaces).toHaveLength(1001);
+    expect(f.account.namespaces.some((item) => item.script === f.workerName)).toBe(false);
+  });
+
   it('refuses before any mutation on account, identity, version, binding, or namespace mismatch and still revokes', async () => {
     const cases: readonly { name: string; code: string; mutate: (f: Awaited<ReturnType<typeof fixture>>) => void }[] = [
-      { name: 'account', code: 'account_mismatch', mutate: (f) => { f.account.accountId = 'f'.repeat(32); } },
+      { name: 'account', code: 'oauth_exchange_failed', mutate: (f) => { f.account.accountId = 'f'.repeat(32); } },
       { name: 'workerId', code: 'identity_mismatch', mutate: (f) => { if (f.account.worker) f.account.worker.id = 'f'.repeat(32); } },
-      { name: 'workerMissing', code: 'identity_mismatch', mutate: (f) => { f.account.worker = null; } },
+      { name: 'workerMissing', code: 'oauth_exchange_failed', mutate: (f) => { f.account.worker = null; } },
       { name: 'tags', code: 'identity_mismatch', mutate: (f) => { f.account.worker?.tags.push('ankka-stage1-live-canary'); } },
       { name: 'activeVersion', code: 'identity_mismatch', mutate: (f) => { f.account.activeVersionId = RETIREMENT_VERSION_ID; } },
       {

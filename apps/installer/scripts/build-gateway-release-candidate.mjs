@@ -26,6 +26,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { build as esbuildBuild, version as esbuildRuntimeVersion } from 'esbuild';
 import * as v from 'valibot';
+import { compileRelayOrigin } from './compiled-relay-origin.mjs';
 
 import {
   APPROVED_CLOUDFLARE_CONTRACT,
@@ -50,6 +51,7 @@ const SAFE_SEGMENT = /^[A-Za-z0-9._-]+$/u;
 const STRING_SCHEMA = v.string();
 const RELEASE_TOOL_PATHS = Object.freeze([
   'apps/installer/scripts/build-gateway-release-candidate.mjs',
+  'apps/installer/scripts/compiled-relay-origin.mjs',
   'apps/installer/scripts/sign-gateway-release.mjs',
 ]);
 const COMPONENTS = Object.freeze([
@@ -222,9 +224,7 @@ async function assertReleaseToolingMatchesSource(sourceRoot) {
     let running;
     let committed;
     try {
-      const runningUrl = relative.endsWith('/build-gateway-release-candidate.mjs')
-        ? import.meta.url
-        : new URL('./sign-gateway-release.mjs', import.meta.url);
+      const runningUrl = new URL(`./${path.basename(relative)}`, import.meta.url);
       [running, committed] = await Promise.all([
         readFile(fileURLToPath(runningUrl)),
         readFile(path.join(sourceRoot, ...relative.split('/'))),
@@ -258,6 +258,20 @@ function customerWorkerOriginPlugin(sourceRoot, controlPlaneOrigin, workerSource
   return Object.freeze({
     name: 'ankka-customer-worker-origin',
     setup(build) {
+      build.onLoad({ filter: /apps\/installer\/src\/constants\.ts$/ }, async (args) => {
+        const expected = path.join(sourceRoot, 'apps', 'installer', 'src', 'constants.ts');
+        if (path.resolve(args.path) !== expected) fail('worker_control_plane_origin_anchor_invalid');
+        const source = await readFile(expected, 'utf8');
+        const declaration = "export const PUBLIC_ORIGIN = 'https://deploy.ankka.ai';";
+        if (source.split(declaration).length !== 2) fail('worker_control_plane_origin_anchor_invalid');
+        return { contents: source.replace(declaration,
+          `export const PUBLIC_ORIGIN = ${JSON.stringify(controlPlaneOrigin)};`), loader: 'ts' };
+      });
+      build.onLoad({ filter: /cloudflare-code-relay\.ts$/ }, async (args) => {
+        const expected = path.join(sourceRoot, 'apps', 'installer', 'src', 'cloudflare-code-relay.ts');
+        if (path.resolve(args.path) !== expected) fail('worker_control_plane_origin_anchor_invalid');
+        return { contents: compileRelayOrigin(await readFile(expected, 'utf8'), controlPlaneOrigin), loader: 'ts' };
+      });
       build.onLoad({ filter: /payload\/worker\/index\.js$/ }, async (args) => {
         if (path.resolve(args.path) !== payloadPath) fail('worker_control_plane_origin_anchor_invalid');
         return {

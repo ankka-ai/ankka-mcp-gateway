@@ -648,10 +648,13 @@ export function createTwoStageDeployRuntime(
     const session = await requireSession(request, context);
     await requireMutation(request, context, session);
     const start = await session.client.authorizeCleanup();
+    // The Durable Object starts this window after the request context was made.
+    // Validate against the current clock, not the earlier request timestamp.
+    const cookieNow = now();
     const sealed = await sealHostedStage1Cookie(
       context.config.DEPLOY_SESSION_ENCRYPTION_KEY,
       bootstrapCookieFor(start.next, start, null),
-      context.now,
+      cookieNow,
     );
     const authorizationUrl = buildHostedBootstrapAuthorizationUrl({
       kind: 'cleanup',
@@ -664,7 +667,7 @@ export function createTwoStageDeployRuntime(
       authorizationUrl,
       expiresAt: start.expiresAt,
       session: publicHostedStage1Session(start.next),
-    }, 200, [bootstrapCookie(sealed, Math.ceil((start.expiresAt - context.now) / 1_000))]);
+    }, 200, [bootstrapCookie(sealed, Math.ceil((start.expiresAt - cookieNow) / 1_000))]);
   }
 
   async function openCookie(request: Request, context: RuntimeContext): Promise<SealedBootstrapCookie> {

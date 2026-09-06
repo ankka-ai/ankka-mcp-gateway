@@ -13,6 +13,7 @@ import { OAUTH_EXCHANGE_URL } from './constants';
 import {
   CustomerCloudflareGrantError,
   resolveSingleAuthorizedCloudflareAccount,
+  verifyCustomerCloudflareGrantAccountAccess,
 } from './customer-cloudflare-grant';
 import { DeployError } from './errors';
 import { readBoundedText } from './http';
@@ -76,13 +77,15 @@ function accountReadError<Thrown>(error: Thrown): DeployError {
 }
 
 export async function executeHostedBootstrapGrant<Deployment>(input: {
-  readonly kind?: 'bootstrap' | 'cleanup';
   readonly code: string;
   readonly verifier: string;
   readonly config: CloudflareOauthConfig;
   readonly transport: FetchTransport;
   readonly deploy: (input: { readonly accessToken: string; readonly accountId: string }) => Promise<Deployment>;
-}): Promise<HostedBootstrapExecutionResult<Deployment>> {
+} & ({ readonly kind?: 'bootstrap' } | {
+  readonly kind: 'cleanup';
+  readonly target: { readonly accountId: string; readonly workerName: string };
+})): Promise<HostedBootstrapExecutionResult<Deployment>> {
   let refreshTokenReturned = false;
   const inspectingTransport: FetchTransport = async (request, init) => {
     const response = await input.transport(request, init);
@@ -115,10 +118,15 @@ export async function executeHostedBootstrapGrant<Deployment>(input: {
     const result = await grant.withAccessToken(async (accessToken) => {
       let accountId: string;
       try {
-        accountId = await resolveSingleAuthorizedCloudflareAccount({
-          accessToken,
-          transport: input.transport,
-        });
+        if (input.kind === 'cleanup') {
+          accountId = input.target.accountId;
+          await verifyCustomerCloudflareGrantAccountAccess({
+            accessToken, expectedAccountId: accountId, workerName: input.target.workerName,
+            operation: 'uninstall-finalize', transport: input.transport,
+          });
+        } else {
+          accountId = await resolveSingleAuthorizedCloudflareAccount({ accessToken, transport: input.transport });
+        }
       } catch (error) {
         throw accountReadError(error);
       }

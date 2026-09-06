@@ -4,10 +4,10 @@ import { OAUTH_EXCHANGE_URL } from './constants';
 import { readBoundedText } from './http';
 
 import { exactOperationScopes } from './cloudflare-operation-authority';
-import { resolveSingleAuthorizedCloudflareAccount } from './customer-cloudflare-grant';
+import { verifyCustomerCloudflareGrantAccountAccess } from './customer-cloudflare-grant';
 import type { GatewayTeardownJobPort } from './gateway-teardown-durable-state';
 import type { GatewayTeardownTrust } from './gateway-teardown-handoff';
-import { settleGatewayTeardownAttempt } from './gateway-teardown-job';
+import { settleGatewayTeardownAttempt, verifyGatewayTeardownJobAuthority } from './gateway-teardown-job';
 import { executeGatewayRootRemoval, GatewayTeardownProviderError } from './gateway-teardown-provider';
 import { exchangeAuthorizationCode, type EphemeralCloudflareGrant, type CloudflareOauthConfig, type FetchTransport } from './oauth';
 import type { VerifiedReleaseBundle } from './release';
@@ -43,7 +43,12 @@ export async function executeGatewayTeardownGrant(input: {
     grant.assertUsable(exactOperationScopes('gateway-root-finalize'));
     if (refreshTokenReturned) throw new Error('teardown_grant_invalid');
     await grant.withAccessToken(async (accessToken) => {
-      const accountId = await resolveSingleAuthorizedCloudflareAccount({ accessToken, transport: input.transport });
+      const authority = await verifyGatewayTeardownJobAuthority({ job: current, trust: input.trust });
+      const accountId = authority.certificate.statement.accountId;
+      await verifyCustomerCloudflareGrantAccountAccess({
+        accessToken, expectedAccountId: accountId, workerName: authority.certificate.statement.worker.name,
+        operation: 'gateway-root-finalize', transport: input.transport,
+      });
       await executeGatewayRootRemoval({ ...input, accessToken, authorizedAccountId: accountId });
     });
   } catch (error) {

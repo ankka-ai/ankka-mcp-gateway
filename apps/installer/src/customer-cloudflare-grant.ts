@@ -392,7 +392,8 @@ export async function verifyCustomerCloudflareGrantAccount(input: {
 }
 
 /** Operations whose grant the gateway binds to the account it was installed in. */
-export type CustomerCloudflareGatewayOperation = 'source-add' | 'bigquery-add' | 'upgrade' | 'rollback' | 'uninstall';
+export type CustomerCloudflareGatewayOperation = 'source-add' | 'bigquery-add' | 'upgrade' | 'rollback' | 'uninstall' |
+  'uninstall-finalize' | 'gateway-root-finalize';
 
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 
@@ -406,6 +407,8 @@ const accountProbeEnvelopeSchema = v.looseObject({
 /** One small read of the expected account that the operation's own scope covers. */
 function accountProbePath(operation: CustomerCloudflareGatewayOperation, workerName: string): string {
   if (operation === 'source-add' || operation === 'bigquery-add' || operation === 'uninstall') return '/access/ai-controls/mcp/portals';
+  // Root removal must remain resumable after its last Worker deletion succeeded.
+  if (operation === 'gateway-root-finalize') return '/workers/scripts?per_page=1';
   return `/workers/workers/${encodeURIComponent(workerName)}`;
 }
 
