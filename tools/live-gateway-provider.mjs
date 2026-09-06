@@ -79,8 +79,9 @@ export function createLiveGatewayProvider({ config, token, transport = fetch }) 
   return {
     async metrics(provision) {
       validateLiveBootstrapOrigin(provision);
-      const to = new Date().toISOString();
-      const from = new Date(Date.now() - 30 * 60_000).toISOString();
+      const now = Date.now();
+      const to = new Date(now).toISOString();
+      const from = new Date(now - 30 * 60_000).toISOString();
       const query = `query($accountTag:string!,$scriptName:string!,$from:Time!,$to:Time!){viewer{accounts(filter:{accountTag:$accountTag}){workersInvocationsAdaptive(limit:100,filter:{scriptName:$scriptName,datetime_geq:$from,datetime_leq:$to}){sum{requests errors subrequests}quantiles{cpuTimeP50 cpuTimeP99 memoryUsageBytesP99}}}}}`;
       const response = await transport('https://api.cloudflare.com/client/v4/graphql', {
         method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
