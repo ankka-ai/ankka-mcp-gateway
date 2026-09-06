@@ -64,9 +64,9 @@
     "validate": "node src/cli.ts"
   },
   "devDependencies": {
-    "@oxlint/plugins": "1.80.0",
+    "@oxlint/plugins": "1.81.0",
     "@types/node": "22.20.1",
-    "oxlint": "1.80.0",
+    "oxlint": "1.81.0",
     "playwright-core": "1.63.0",
     "typescript": "7.0.2"
   },
