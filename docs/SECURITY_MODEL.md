@@ -108,6 +108,15 @@ as is every other route. Action records name it `service:<client id>` and
 public views expose the actor kind. A malformed opt-in fails closed for every
 caller rather than widening access.
 
+The opt-in is part of the plan's identity (ownership marker and plan hash).
+It reaches the runtime as one optional binding and the Access application as
+one more receipt-owned policy: a Service Auth policy that admits exactly the
+named service token and no identity, created and verified by Stage 2 like the
+administrators' policy and stated in the signed teardown handoff. The hosted
+finalizer accepts exactly the policies the handoff declares; the Service Auth
+policy leaves with the management application, and any other policy stays
+foreign and stops removal.
+
 The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
 store Cloudflare OAuth grants or upstream tokens.
