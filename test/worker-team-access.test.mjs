@@ -1664,6 +1664,8 @@ test('the configured service identity performs the management exercise over the 
     gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
     const status = await gateway.serviceApi('/api/status');
     assert.equal(status.status, 200, await status.clone().text());
+    assert.deepEqual((await status.json()).serviceIdentity, { clientId: SERVICE_CLIENT });
+    assert.equal((await (await gateway.api('/api/status')).json()).serviceIdentity.clientId, SERVICE_CLIENT);
     assert.equal((await gateway.serviceApi('/api/update')).status, 200);
     const discovered = await gateway.serviceApi('/api/sources/discover', { method: 'POST', body: { url: NEW_SOURCE_URL } });
     assert.equal(discovered.status, 200, await discovered.clone().text());
@@ -1725,7 +1727,9 @@ test('service tokens are refused for an unapproved identity, a wrong audience, a
     await refused({ email: NEW_PERSON, identityHeader: NEW_PERSON }, 'email claim for a non-administrator');
     delete gateway.env.ANKKA_SERVICE_CLIENT_ID;
     await refused({}, 'service access not configured');
-    assert.equal((await gateway.api('/api/status')).status, 200, 'administrators unaffected');
+    const unconfigured = await gateway.api('/api/status');
+    assert.equal(unconfigured.status, 200, 'administrators unaffected');
+    assert.equal((await unconfigured.json()).serviceIdentity, null);
     // A malformed opt-in fails closed for everyone rather than widening access.
     gateway.env.ANKKA_SERVICE_CLIENT_ID = 'not-a-client-id';
     assert.equal((await gateway.serviceApi('/api/status')).status, 401);

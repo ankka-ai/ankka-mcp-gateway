@@ -5373,8 +5373,10 @@ async function handleStatus(request, env) {
     if (response.status !== 200) return response;
     let status;
     try { status = await response.json(); } catch { status = null; }
+    // The one machine identity this gateway admits, so an operator can see the opt-in without reading bindings.
+    const serviceClientId = accessConfiguration(env)?.serviceClientId ?? null;
     return isRecord(status)
-      ? fixedJson(200, { ...status, controlPlaneOrigin: CONTROL_PLANE_ORIGIN })
+      ? fixedJson(200, { ...status, controlPlaneOrigin: CONTROL_PLANE_ORIGIN, serviceIdentity: serviceClientId === null ? null : { clientId: serviceClientId } })
       : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   } catch {
     return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
