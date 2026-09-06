@@ -169,6 +169,7 @@ function deterministicRandomBytes(): (length: number) => Uint8Array {
 class FakeNamespace implements TwoStageDeploySessionNamespace {
   readonly objects = new Map<string, TwoStageDeploySession>();
   readonly states = new Map<string, FakeTwoStageState>();
+  beforeFetch: ((request: Request) => void) | undefined;
 
   constructor(private readonly clock: () => number, private readonly randomBytes: (length: number) => Uint8Array) {}
 
@@ -192,7 +193,10 @@ class FakeNamespace implements TwoStageDeploySessionNamespace {
       this.objects.set(name, object);
     }
     const bound = object;
-    return { fetch: (request: Request) => bound.fetch(request) };
+    return { fetch: (request: Request) => {
+      this.beforeFetch?.(request);
+      return bound.fetch(request);
+    } };
   }
 }
 
@@ -682,7 +686,7 @@ describe('clean hosted two-stage runtime', () => {
     expect(h.events).toEqual([]);
   });
 
-  it('turns a rejected customer read-back into cleanup and runs the cleanup approval through the same callback', async () => {
+  it.each([0, 75])('completes cleanup when Durable Object authorization starts %i ms after the request', async (delay) => {
     const h = await harness();
     const { browser, state } = await authorized(h);
     expect((await callback(h, browser, `code=${AUTHORIZATION_CODE}&state=${state}`)).status).toBe(303);
@@ -701,6 +705,9 @@ describe('clean hosted two-stage runtime', () => {
     expect((await mutate(h, browser, 'POST', '/api/bootstrap', {})).status).toBe(409);
     expect((await mutate(h, browser, 'POST', '/api/session/new', {})).status).toBe(409);
 
+    h.namespace.beforeFetch = (request) => {
+      if (new URL(request.url).pathname === '/cleanup/authorize') h.clock.now += delay;
+    };
     const cleanup = await mutate(h, browser, 'POST', '/api/cleanup', {});
     expect(cleanup.status).toBe(200);
     const cleanupBody = await parsed(cleanup, bootstrapResponseSchema);
