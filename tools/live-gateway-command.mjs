@@ -6,8 +6,9 @@ import { spawn } from 'node:child_process';
 import * as v from 'valibot';
 import { validateGeneratedReviewedIsolatedCanaryDirectory } from '../apps/installer/scripts/generate-reviewed-canary.mjs';
 import { openLiveGatewayBrowser, validateLiveBrowserOrigin, LiveGatewayBrowserError } from './live-gateway-browser.mjs';
+import { createLiveGatewayApi, LiveGatewayApiError } from './live-gateway-api.mjs';
 import { LiveGatewayAccessError } from './live-gateway-access.mjs';
-import { LiveManagementQualificationError } from './live-gateway-management.mjs';
+import { qualifyLiveGatewayManagement, LiveManagementQualificationError } from './live-gateway-management.mjs';
 import { createLiveGatewayProvider } from './live-gateway-provider.mjs';
 import { qualifyLiveGatewayLifecycle, finishLiveGatewayRemoval, LiveLifecycleError } from './live-gateway-lifecycle.mjs';
 
@@ -36,6 +37,29 @@ async function readPrivateJson(path) {
   const stat = await lstat(path);
   requireCondition(stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o077) === 0 && stat.size < 2 * 1024 * 1024, 'private_file_required');
   return JSON.parse(await readFile(path, 'utf8'));
+}
+
+export function validateLiveManagementConfig(input) {
+  const result = v.safeParse(v.strictObject({
+    schemaVersion: v.literal(1), managementOrigin: text, journal: text,
+    adminEmail: v.pipe(text, v.email()), source: schema.entries.source,
+  }), input);
+  requireCondition(result.success, 'management_config_invalid');
+  validateLiveBrowserOrigin(result.output.managementOrigin);
+  return result.output;
+}
+
+export function summarizeLiveJournal(state) {
+  requireCondition(state?.schemaVersion === 1 && Array.isArray(state.events), 'journal_invalid');
+  const passed = [...new Set(state.events.filter((event) => event.status === 'passed').map((event) => event.stage))];
+  return {
+    scope: state.scope ?? 'browser_lifecycle',
+    qualified: (state.scope ?? 'browser_lifecycle') === 'browser_lifecycle' && state.qualified === true && passed.includes('lifecycle'),
+    passed,
+    lastStage: state.events.findLast((event) => event.stage !== 'command')?.stage ?? null,
+    failureCode: state.events.findLast((event) => event.status === 'stopped')?.failureCode ?? null,
+    removalReceiptAvailable: state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
+  };
 }
 
 export function validateLiveLifecycleConfig(input) {
@@ -79,19 +103,34 @@ async function deployInstaller(config, directory, release) {
   requireCondition(status === 0, 'isolated_installer_deploy_failed');
 }
 
+async function validateReleasePair(config) {
+  const a = await validateInstaller(config, config.installerA, config.releaseA);
+  const b = await validateInstaller(config, config.installerB, config.releaseB);
+  requireCondition(a.pin.keyId === b.pin.keyId && a.pin.publicKey === b.pin.publicKey &&
+    a.deploymentTarget.workerName === b.deploymentTarget.workerName, 'release_pair_trust_mismatch');
+}
+
 export async function runLiveLifecycleCommand(args) {
-  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --check-access]\nRequires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access verifies the cached user session without deployment or a journal; no operator token is required.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.';
+  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --check-access | --preflight | --management-api | --status]\nFull browser lifecycle requires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access checks cached installer Access over HTTP without Chrome, deployment, or a journal.\n--preflight also validates the release pair and provider inventory without deployment.\n--management-api uses a minimal management config and cached gateway Access; no Chrome or infrastructure token. It installs one synthetic source and grants/removes synthetic membership. The source remains for lifecycle teardown.\n--status reports private journal progress without network access. Neither API checks nor removal recovery qualify the full browser lifecycle.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.';
   if (args.length === 1 && args[0] === '--help') { console.log(help); return 0; }
-  requireCondition((args.length === 2 || args.length === 3 && ['--recover-removal', '--check-access'].includes(args[2])) && args[0] === '--config', 'usage_invalid');
+  requireCondition((args.length === 2 || args.length === 3 && ['--recover-removal', '--check-access', '--preflight', '--management-api', '--status'].includes(args[2])) && args[0] === '--config', 'usage_invalid');
   const recover = args[2] === '--recover-removal';
-  const config = validateLiveLifecycleConfig(await readPrivateJson(args[1]));
-  if (args[2] === '--check-access') {
-    const probe = await openLiveGatewayBrowser({ ...config, browserProfile: undefined, headless: true, notify: console.log });
-    try {
-      await probe.login(config.installerOrigin);
-      console.log('Cached Access session verified. No deployment or lifecycle validation was performed.');
-      return 0;
-    } finally { await probe.close(); }
+  const apiOnly = args[2] === '--management-api';
+  const input = await readPrivateJson(args[1]);
+  if (args[2] === '--status') {
+    console.log(JSON.stringify(summarizeLiveJournal(await readPrivateJson(input.journal)), null, 2));
+    return 0;
+  }
+  const config = apiOnly ? validateLiveManagementConfig(input) : validateLiveLifecycleConfig(input);
+  if (args[2] === '--check-access' || args[2] === '--preflight') {
+    const probe = createLiveGatewayApi({ origin: config.installerOrigin, email: config.basics.adminEmail });
+    await probe.checkAccess();
+    if (args[2] === '--preflight') {
+      await validateReleasePair(config);
+      await createLiveGatewayProvider({ config, token: process.env.CLOUDFLARE_API_TOKEN }).assertFresh();
+    }
+    console.log('Read-only preflight passed. No browser, deployment, or lifecycle qualification. Cloudflare dashboard consent was not checked.');
+    return 0;
   }
   if (config.browserProfile) {
     const profile = await outsideRepository(config.browserProfile);
@@ -100,12 +139,12 @@ export async function runLiveLifecycleCommand(args) {
       (await readFile(resolve(profile, '.ankka-lifecycle-profile'), 'utf8')) === 'Dedicated Ankka lifecycle test browser\n', 'dedicated_browser_profile_required');
   }
   const token = process.env.CLOUDFLARE_API_TOKEN;
-  requireCondition(v.is(text, token), 'operator_token_required');
+  if (!apiOnly) requireCondition(v.is(text, token), 'operator_token_required');
   const parent = await outsideRepository(dirname(config.journal));
   requireCondition(isAbsolute(config.journal) && (await lstat(parent)).isDirectory() &&
     ((await lstat(parent)).mode & 0o077) === 0, 'private_journal_directory_required');
-  const provider = createLiveGatewayProvider({ config, token });
-  let state = { schemaVersion: 1, config, events: [], qualified: false };
+  const provider = apiOnly ? null : createLiveGatewayProvider({ config, token });
+  let state = { schemaVersion: 1, config, scope: apiOnly ? 'management_api' : 'browser_lifecycle', events: [], qualified: false };
   if (recover) {
     state = await readPrivateJson(config.journal);
     requireCondition(JSON.stringify(state.config) === JSON.stringify(config) && Array.isArray(state.events), 'recovery_config_mismatch');
@@ -115,7 +154,8 @@ export async function runLiveLifecycleCommand(args) {
   await journal.close();
   const lock = await open(`${config.journal}.lock`, 'wx', 0o600);
   let browser;
-  const cancel = () => browser?.cancel();
+  const cancellation = new AbortController();
+  const cancel = () => { cancellation.abort(); browser?.cancel(); };
   process.once('SIGINT', cancel); process.once('SIGTERM', cancel);
   async function checkpoint(event) {
     state.events.push({ ...event, at: new Date().toISOString() });
@@ -132,16 +172,32 @@ export async function runLiveLifecycleCommand(args) {
   }
   try {
     await checkpoint({ stage: recover ? 'recovery' : 'preflight', status: 'started' });
+    if (apiOnly) {
+      const api = createLiveGatewayApi({ origin: config.managementOrigin, email: config.adminEmail, signal: cancellation.signal });
+      await api.checkAccess();
+      await checkpoint({ stage: 'access', status: 'passed' });
+      await qualifyLiveGatewayManagement({ request: api.request, source: config.source, checkpoint });
+      await checkpoint({ stage: 'management_api', status: 'passed' });
+      console.log('Management API checks passed. Synthetic source remains installed. Full lifecycle is not qualified.');
+      return 0;
+    }
+    // Validate local artifacts and provider reads before opening Chrome or deploying.
+    if (!recover) {
+      await validateReleasePair(config);
+      await provider.assertFresh();
+    } else {
+      requireCondition(state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved' && event.handoff) &&
+        state.events.some((event) => event.stage === 'inventory' && event.status === 'passed' && event.inventory), 'removal_receipt_required');
+    }
+    await createLiveGatewayApi({ origin: config.installerOrigin, email: config.basics.adminEmail, signal: cancellation.signal }).checkAccess();
+    await checkpoint({ stage: 'preflight', status: 'passed' });
     browser = await openLiveGatewayBrowser({ ...config, notify: console.log });
     await browser.login(config.installerOrigin);
     await checkpoint({ stage: 'access', status: 'passed' });
     if (!recover) {
-      const a = await validateInstaller(config, config.installerA, config.releaseA);
-      const b = await validateInstaller(config, config.installerB, config.releaseB);
-      requireCondition(a.pin.keyId === b.pin.keyId && a.pin.publicKey === b.pin.publicKey &&
-        a.deploymentTarget.workerName === b.deploymentTarget.workerName, 'release_pair_trust_mismatch');
-      await provider.assertFresh();
+      await checkpoint({ stage: 'installer_deployment', status: 'started' });
       await deployInstaller(config, config.installerA, config.releaseA);
+      await checkpoint({ stage: 'installer_deployment', status: 'passed' });
     }
     if (recover) {
       const receipt = state.events.findLast((event) => event.stage === 'root_removal' && event.status === 'receipt_saved');
@@ -156,7 +212,7 @@ export async function runLiveLifecycleCommand(args) {
       publishB: () => deployInstaller(config, config.installerB, config.releaseB) });
     return 0;
   } catch (error) {
-    const failureCode = error instanceof LiveLifecycleError || error instanceof LiveGatewayBrowserError || error instanceof LiveGatewayAccessError ||
+    const failureCode = error instanceof LiveLifecycleError || error instanceof LiveGatewayBrowserError || error instanceof LiveGatewayAccessError || error instanceof LiveGatewayApiError ||
       error instanceof LiveManagementQualificationError ? error.code : 'unexpected_failure';
     await checkpoint({ stage: 'command', status: 'stopped', failureCode });
     console.error(`Failure reference: ${failureCode}`);
