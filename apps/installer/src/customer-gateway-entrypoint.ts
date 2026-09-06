@@ -93,6 +93,7 @@ const envSchema = v.object({
   CLOUDFLARE_ZONE_NAME: v.pipe(v.string(), v.minLength(3), v.maxLength(253)),
   ZERO_TRUST_READY: v.literal('true'),
   ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY: v.pipe(v.string(), v.regex(TOKEN)),
+  ANKKA_SERVICE_CLIENT_ID: v.optional(v.pipe(v.string(), v.regex(/^[a-f0-9]{32}\.access$/u))),
 });
 
 const OPERATION_ATTEMPT_KEY = 'ankka-mcp-gateway/customer-operation-attempt/v1';

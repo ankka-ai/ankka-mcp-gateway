@@ -50,6 +50,10 @@ export const EXACT_PLAIN_TEXT_BINDINGS = Object.freeze([
   'CLOUDFLARE_ZONE_NAME',
   'ZERO_TRUST_READY',
 ] as const);
+/** Present only on a gateway whose deployment configuration opted into a service identity. */
+export const OPTIONAL_PLAIN_TEXT_BINDINGS = Object.freeze(['ANKKA_SERVICE_CLIENT_ID'] as const);
+export const PLAIN_TEXT_BINDING_NAMES = Object.freeze([...EXACT_PLAIN_TEXT_BINDINGS, ...OPTIONAL_PLAIN_TEXT_BINDINGS] as const);
+const SERVICE_CLIENT_ID_PATTERN = /^[a-f0-9]{32}\.access$/u;
 
 const MODULE_CONTENT_TYPES: Readonly<Record<string, string>> = Object.freeze({
   '.js': 'application/javascript+module',
@@ -122,6 +126,7 @@ const plainTextBindingsSchema = v.strictObject({
   CLOUDFLARE_ZONE_ID: safeBindingValueSchema,
   CLOUDFLARE_ZONE_NAME: safeBindingValueSchema,
   ZERO_TRUST_READY: safeBindingValueSchema,
+  ANKKA_SERVICE_CLIENT_ID: v.optional(safeBindingValueSchema),
 });
 const prepareReleaseInputSchema = v.object({
   accountId: accountIdSchema,
@@ -374,7 +379,7 @@ const returnedVersionBindingSchema = v.union([
   v.strictObject({ name: v.literal('ASSETS'), type: v.literal('assets') }),
   v.strictObject({ name: v.literal('ANKKA_BOOTSTRAP_NONCE'), type: v.literal('secret_text') }),
   v.strictObject({
-    name: v.picklist(EXACT_PLAIN_TEXT_BINDINGS),
+    name: v.picklist(PLAIN_TEXT_BINDING_NAMES),
     type: v.literal('plain_text'),
     text: v.string(),
   }),
@@ -445,9 +450,9 @@ const versionRecoveryRecordSchema = v.strictObject({
     byteLength: v.pipe(v.number(), v.safeInteger(), v.minValue(1), v.maxValue(MAX_FILE_BYTES)),
   })), v.minLength(1), v.maxLength(10_000)),
   plainTextBindingHashes: v.pipe(v.array(v.strictObject({
-    name: v.picklist(EXACT_PLAIN_TEXT_BINDINGS),
+    name: v.picklist(PLAIN_TEXT_BINDING_NAMES),
     valueSha256: sha256Schema,
-  })), v.length(EXACT_PLAIN_TEXT_BINDINGS.length)),
+  })), v.minLength(EXACT_PLAIN_TEXT_BINDINGS.length), v.maxLength(PLAIN_TEXT_BINDING_NAMES.length)),
   modules: v.pipe(v.array(v.strictObject({
     name: v.string(),
     contentType: v.string(),
@@ -468,7 +473,7 @@ const submitVersionBindingSchema = v.union([
     text: safeBootstrapNonceSchema,
   }),
   v.strictObject({
-    name: v.picklist(EXACT_PLAIN_TEXT_BINDINGS),
+    name: v.picklist(PLAIN_TEXT_BINDING_NAMES),
     type: v.literal('plain_text'),
     text: v.string(),
   }),
@@ -705,8 +710,9 @@ export interface VerifiedWorkerDirectUploadRelease {
   };
 }
 
-export type GatewayWorkerPlainTextBindingName = (typeof EXACT_PLAIN_TEXT_BINDINGS)[number];
-export type GatewayWorkerPlainTextBindings = Readonly<Record<GatewayWorkerPlainTextBindingName, string>>;
+export type GatewayWorkerPlainTextBindingName = (typeof PLAIN_TEXT_BINDING_NAMES)[number];
+export type GatewayWorkerPlainTextBindings = Readonly<Record<(typeof EXACT_PLAIN_TEXT_BINDINGS)[number], string>> &
+  { readonly ANKKA_SERVICE_CLIENT_ID?: string | undefined };
 
 export type CloudflareDirectUploadTransport = (request: Request) => Promise<Response>;
 
@@ -996,6 +1002,11 @@ async function prepareInput(
     if (!safeBindingValue(parsedInput.plainTextBindings[name])) {
       fail('invalid_input', 'validate', 'not_sent', progress);
     }
+  }
+  // The service identity binding exists only for a plan that opted in, and then names one Access service client.
+  const serviceClientId = parsedInput.plainTextBindings.ANKKA_SERVICE_CLIENT_ID;
+  if (serviceClientId !== undefined && (!safeBindingValue(serviceClientId) || !SERVICE_CLIENT_ID_PATTERN.test(serviceClientId))) {
+    fail('invalid_input', 'validate', 'not_sent', progress);
   }
   if (
     parsedInput.plainTextBindings.ANKKA_GATEWAY_RELEASE !== parsedInput.release.release ||
@@ -2043,8 +2054,9 @@ function versionBindings(
       { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
       { name: 'ASSETS', type: 'assets' },
     ];
-  for (const name of EXACT_PLAIN_TEXT_BINDINGS) {
-    bindings.push({ name, type: 'plain_text', text: prepared.plainTextBindings[name] });
+  for (const name of PLAIN_TEXT_BINDING_NAMES) {
+    const text = prepared.plainTextBindings[name];
+    if (text !== undefined) bindings.push({ name, type: 'plain_text', text });
   }
   if (phase === 'bootstrap') {
     bindings.push({ name: 'ANKKA_BOOTSTRAP_NONCE', type: 'secret_text', text: prepared.bootstrapNonce });
@@ -2329,10 +2341,11 @@ export async function prepareWorkerVersionRecoveryRecord(
     !Array.isArray(prepared.modules) ||
     !isRecord(prepared.plainTextBindings)
   ) fail('invalid_input', 'validate', 'not_sent', progress);
-  const plainTextBindingHashes = await Promise.all(EXACT_PLAIN_TEXT_BINDINGS.map(async (name) => Object.freeze({
-    name,
-    valueSha256: await sha256(prepared.plainTextBindings[name]),
-  })));
+  const plainTextBindingHashes: { readonly name: GatewayWorkerPlainTextBindingName; readonly valueSha256: string }[] = [];
+  for (const name of PLAIN_TEXT_BINDING_NAMES) {
+    const text = prepared.plainTextBindings[name];
+    if (v.is(v.string(), text)) plainTextBindingHashes.push(Object.freeze({ name, valueSha256: await sha256(text) }));
+  }
   const modules = await Promise.all(prepared.modules.map(async (module) => Object.freeze({
     name: module.name,
     contentType: module.contentType,
@@ -2484,7 +2497,7 @@ async function validVersionRecoveryRecord(recovery: WorkerVersionRecoveryRecord)
   }
   for (let index = 0; index < record.plainTextBindingHashes.length; index += 1) {
     const binding = record.plainTextBindingHashes.at(index);
-    const expectedName = EXACT_PLAIN_TEXT_BINDINGS.at(index);
+    const expectedName = PLAIN_TEXT_BINDING_NAMES.at(index);
     if (
       binding === undefined || expectedName === undefined || binding.name !== expectedName
     ) return false;

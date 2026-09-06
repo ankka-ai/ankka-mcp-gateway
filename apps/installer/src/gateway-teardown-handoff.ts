@@ -7,7 +7,7 @@ import {
 } from './cloudflare-gateway-ownership-proof';
 import { base64UrlDecode, base64UrlEncode, sha256Hex } from './crypto';
 import { deepFreezePlainData } from './plain-data';
-import { CUSTOMER_STAGE2_ACTION_ORDER, parseCustomerStage2Journal, type CustomerStage2Journal } from './customer-stage2-journal';
+import { customerStage2ActionSequence, parseCustomerStage2Journal, type CustomerStage2Journal } from './customer-stage2-journal';
 import { verifyStaticDeployPlanIntegrity, type StaticDeployPlan } from './schema';
 
 /** A separate purpose prevents a relay proof or the retired tombstone authorizing deletion. */
@@ -49,6 +49,8 @@ const statementSchema = v.strictObject({
     policyId: identifier,
     policyName: name,
     domainId: identifier,
+    servicePolicyId: v.optional(identifier),
+    servicePolicyName: v.optional(name),
   }),
 });
 const envelopeSchema = v.strictObject({
@@ -132,7 +134,7 @@ export async function createGatewayTeardownHandoff(input: {
   const resources = journal.actions.find((action) => action.name === 'gateway_resources');
   const resourcesLocator = v.parse(v.looseObject({ receiptChecksum: digest }), resources?.locator);
   if (resources?.phase !== 'verified' || resourcesLocator.receiptChecksum !== input.readyReceiptChecksum ||
-      journal.actions.length !== CUSTOMER_STAGE2_ACTION_ORDER.length || journal.actions.slice(0, -1).some((action) => action.phase !== 'verified') ||
+      journal.actions.length !== customerStage2ActionSequence(journal.actions).length || journal.actions.slice(0, -1).some((action) => action.phase !== 'verified') ||
       !['send_armed', 'submitted', 'verified'].includes(journal.actions.at(-1)?.phase ?? '')) invalid();
   const application = journal.actions.find((action) => action.name === 'management_access_application');
   const policy = journal.actions.find((action) => action.name === 'management_admin_policy');
@@ -144,6 +146,21 @@ export async function createGatewayTeardownHandoff(input: {
   const applicationResource = plan.managementResources.find((resource) => resource.kind === 'management_access_application');
   const policyResource = plan.managementResources.find((resource) => resource.kind === 'management_access_policy');
   if (applicationResource === undefined || policyResource === undefined) invalid();
+  // The receipt-owned Service Auth policy exists exactly when the plan opted into a service identity.
+  const servicePolicy = journal.actions.find((action) => action.name === 'management_service_policy');
+  const servicePolicyResource = plan.managementResources.find((resource) => resource.kind === 'management_service_policy');
+  if ((servicePolicy === undefined) !== (servicePolicyResource === undefined) ||
+      (servicePolicy !== undefined && servicePolicy.phase !== 'verified')) invalid();
+  const management: v.InferOutput<typeof statementSchema>['management'] = {
+    zoneId: journal.identity.zoneId, hostname: plan.gatewayConfiguration.managementHostname,
+    applicationId: applicationLocator.applicationId, applicationAud: applicationLocator.aud,
+    applicationName: applicationResource.name, policyId: policyLocator.policyId,
+    policyName: policyResource.name, domainId: domainLocator.domainId,
+  };
+  if (servicePolicy !== undefined && servicePolicyResource !== undefined) {
+    management.servicePolicyId = v.parse(v.strictObject({ policyId: identifier }), servicePolicy.locator).policyId;
+    management.servicePolicyName = servicePolicyResource.name;
+  }
   const statement = v.parse(statementSchema, {
     schemaVersion: 1, purpose: 'gateway_teardown_handoff',
     certificateSha256: certificate.certificateSha256,
@@ -153,12 +170,7 @@ export async function createGatewayTeardownHandoff(input: {
     dependencyResourcesHash: input.dependencyResourcesHash,
     customerGrantRevocation: input.customerGrantRevocation, dependentResourcesAbsent: true,
     priorGrantRevocationUnconfirmed: input.priorGrantRevocationUnconfirmed ?? false,
-    management: {
-      zoneId: journal.identity.zoneId, hostname: plan.gatewayConfiguration.managementHostname,
-      applicationId: applicationLocator.applicationId, applicationAud: applicationLocator.aud,
-      applicationName: applicationResource.name, policyId: policyLocator.policyId,
-      policyName: policyResource.name, domainId: domainLocator.domainId,
-    },
+    management,
   });
   matchCertificate(statement, certificate);
   const serialized = canonicalJson(statement);

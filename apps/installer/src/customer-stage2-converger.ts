@@ -573,7 +573,8 @@ function finalBindings(
   context: Context,
   application: ManagementAccessApplicationLocator,
 ): GatewayWorkerPlainTextBindings {
-  return Object.freeze({
+  const serviceAccess = context.plan.gatewayConfiguration.serviceAccess;
+  const required = {
     ADMIN_EMAILS: context.plan.managementAdminEmails.join(','),
     ANKKA_INSTALL_ID: context.journal.identity.installId,
     ANKKA_GATEWAY_RELEASE: context.plan.releaseId,
@@ -590,7 +591,9 @@ function finalBindings(
     CLOUDFLARE_ZONE_ID: context.target.zoneId,
     CLOUDFLARE_ZONE_NAME: context.target.zoneName,
     ZERO_TRUST_READY: 'true',
-  });
+  } as const;
+  // The service identity the plan opted into reaches the runtime as a binding; every other gateway has none.
+  return Object.freeze(serviceAccess === undefined ? required : { ...required, ANKKA_SERVICE_CLIENT_ID: serviceAccess.clientId });
 }
 
 function providerCall(context: Context) {

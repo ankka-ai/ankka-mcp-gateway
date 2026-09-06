@@ -8,6 +8,7 @@ import type {
 } from './customer-cloudflare-grant';
 import {
   EXACT_PLAIN_TEXT_BINDINGS,
+  OPTIONAL_PLAIN_TEXT_BINDINGS,
   type GatewayWorkerPlainTextBindings,
 } from './cloudflare-worker-direct-upload';
 import { readBoundedText, withDeadline } from './http';
@@ -135,11 +136,13 @@ function validToken(value: string): boolean {
 function validateInspection(input: CustomerWorkerFinalRuntimeInspectionInput): void {
   const bindingNames = Object.keys(input.bindings);
   const bindingValues = Object.values(input.bindings);
+  const required = new Set<string>(EXACT_PLAIN_TEXT_BINDINGS);
+  const optional = new Set<string>(OPTIONAL_PLAIN_TEXT_BINDINGS);
   if (!validToken(input.accessToken) || !ACCOUNT_ID.test(input.accountId) ||
       !WORKER_NAME.test(input.workerName) || !WORKER_ID.test(input.expectedWorkerId) ||
       !SOURCE_SHA256.test(input.finalRuntimeSha256) ||
-      bindingNames.length !== EXACT_PLAIN_TEXT_BINDINGS.length ||
       EXACT_PLAIN_TEXT_BINDINGS.some((name) => !Object.hasOwn(input.bindings, name)) ||
+      bindingNames.some((name) => !required.has(name) && !optional.has(name)) ||
       bindingValues.some((value) => !v.is(plainTextBindingValueSchema, value))) {
     fail('invalid', 'validate', 'not_sent');
   }

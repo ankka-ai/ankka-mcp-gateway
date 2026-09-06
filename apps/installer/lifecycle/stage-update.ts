@@ -3,7 +3,7 @@ import * as v from 'valibot';
 import type { BoundaryValue } from '../src/boundary';
 import { CustomerRuntimeUpdateError, runCustomerRuntimeUpdate } from '../src/customer-runtime-update';
 import { installedBindings, installedProvision, installedTarget, providerJson } from './stage-install';
-import { readRecordValue, requireStage, LifecycleStageError, type LifecycleContext, type PayloadBindingName } from './context';
+import { readRecordValue, requireStage, LifecycleStageError, type LifecycleContext, type PayloadBindings } from './context';
 
 /**
  * The gateway's own updater, run here with the operator-managed credential
@@ -43,7 +43,7 @@ export function installedRelease(context: LifecycleContext): 'a' | 'b' {
 }
 
 /** The final runtime's environment as the installed release runs it: recorded plain-text bindings, zone, and the active release identity. */
-export async function gatewayEnvironmentBindings(context: LifecycleContext): Promise<Partial<Record<PayloadBindingName, string>>> {
+export async function gatewayEnvironmentBindings(context: LifecycleContext): Promise<PayloadBindings> {
   const which = installedRelease(context);
   const release = await context.release(which);
   const target = installedTarget(context);

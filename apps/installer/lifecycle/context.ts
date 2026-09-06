@@ -94,7 +94,9 @@ export type PayloadBindingName =
   | GatewayWorkerPlainTextBindingName
   | 'CLOUDFLARE_ZONE_ID' | 'CLOUDFLARE_ZONE_NAME' | 'ZERO_TRUST_READY'
   | 'ANKKA_BOOTSTRAP_NONCE' | 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' | 'ANKKA_MANAGEMENT_TOKEN';
-export type PayloadEnvironment = Partial<Record<PayloadBindingName, string>> & { ADMIN_STATE?: DurableNamespaceStandIn };
+/** Plain-text bindings by name; the service identity binding is absent for a gateway that opted into none. */
+export type PayloadBindings = { readonly [Name in PayloadBindingName]?: string | undefined };
+export type PayloadEnvironment = PayloadBindings & { ADMIN_STATE?: DurableNamespaceStandIn };
 
 /** A saved source as the payload's draft and action routes see it; extra fields ride along untouched. */
 export interface ManagedSourceLike { readonly url: string; readonly [field: string]: BoundaryValue }
@@ -149,7 +151,7 @@ export function inProcessNamespace(payload: PayloadModule, record: LifecycleReco
 
 /** Composes a payload environment whose `ADMIN_STATE` re-enters the same in-process namespace. */
 export function payloadEnvironment(
-  payload: PayloadModule, record: LifecycleRecord, bindings: Partial<Record<PayloadBindingName, string>>,
+  payload: PayloadModule, record: LifecycleRecord, bindings: PayloadBindings,
 ): PayloadEnvironment {
   const environment: PayloadEnvironment = { ...bindings };
   environment.ADMIN_STATE = inProcessNamespace(payload, record, () => environment);

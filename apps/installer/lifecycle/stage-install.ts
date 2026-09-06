@@ -35,7 +35,7 @@ import {
   LifecycleStageError,
   type InstallationSecrets,
   type LifecycleContext,
-  type PayloadBindingName,
+  type PayloadBindings,
 } from './context';
 
 /**
@@ -93,11 +93,11 @@ export function installedTarget(context: LifecycleContext) {
   return install.target;
 }
 
-export function installedBindings(context: LifecycleContext): Partial<Record<PayloadBindingName, string>> {
+export function installedBindings(context: LifecycleContext): PayloadBindings {
   const install = readRecordValue(context.record.state.install, installRecordSchema, 'install_record_invalid');
   requireStage(install.bindings !== undefined, 'install_bindings_missing');
   // SAFETY: the converger recorded the final runtime's plain-text bindings by their fixed names.
-  return install.bindings as Partial<Record<PayloadBindingName, string>>;
+  return install.bindings as PayloadBindings;
 }
 
 async function requireSecrets(context: LifecycleContext): Promise<InstallationSecrets> {
