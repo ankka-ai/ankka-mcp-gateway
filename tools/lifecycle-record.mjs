@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { access, lstat, open, readFile, rename, realpath, unlink } from 'node:fs/promises';
+import { access, lstat, open, readFile, rename, realpath } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as v from 'valibot';
+
+import { acquireRunLock } from './lifecycle-lock.mjs';
 
 /**
  * The runner's durable execution state for one job: stage events and
@@ -51,16 +53,15 @@ async function atomicWrite(directory, name, text, mode = 0o600) {
 
 /**
  * `create` starts a fresh record and refuses an existing one; otherwise the
- * existing record is reopened. `holdLock` takes the exclusive run lock (the
- * parent process); a stage child opened under a parent's lock passes false.
+ * existing record is reopened. `holdLock` takes single-run ownership through
+ * the run lock (the parent process; see lifecycle-lock.mjs for liveness and
+ * takeover rules); a stage child opened under a parent's lock passes false.
  */
 export async function openLifecycleRecord(directory, { create = false, holdLock = true, jobId, targetDigest } = {}) {
   directory = await privateRunDirectory(directory);
   const path = join(directory, 'record.json');
   let lock = null;
-  if (holdLock) {
-    try { lock = await open(join(directory, 'run.lock'), 'wx', 0o600); } catch { throw new LifecycleRecordError('run_lock_held'); }
-  }
+  if (holdLock) lock = await acquireRunLock(directory);
   let state;
   try {
     if (create) {
@@ -77,7 +78,7 @@ export async function openLifecycleRecord(directory, { create = false, holdLock 
       if (targetDigest !== undefined) requireCondition(state.targetDigest === targetDigest, 'record_target_mismatch');
     }
   } catch (error) {
-    if (lock !== null) { await lock.close(); await unlink(join(directory, 'run.lock')); }
+    if (lock !== null) await lock.release();
     throw error;
   }
   async function save() { await atomicWrite(directory, 'record.json', JSON.stringify(state)); }
@@ -103,6 +104,8 @@ export async function openLifecycleRecord(directory, { create = false, holdLock 
   return {
     directory,
     get state() { return state; },
+    /** The run lock held by a parent process; null for a stage child. */
+    get lock() { return lock; },
     async event(stage, status, detail = {}) {
       const entry = { ...detail, stage, status, at: new Date().toISOString() };
       await write((current) => { current.events.push(entry); });
@@ -153,7 +156,7 @@ export async function openLifecycleRecord(directory, { create = false, holdLock 
       try { await access(join(directory, 'cancel')); return true; } catch { return false; }
     },
     async close() {
-      if (lock !== null) { await lock.close(); await unlink(join(directory, 'run.lock')); lock = null; }
+      if (lock !== null) { await lock.release(); lock = null; }
     },
   };
 }
@@ -162,8 +165,11 @@ export async function openLifecycleRecord(directory, { create = false, holdLock 
 export function summarizeLifecycleRecord(state) {
   const stages = Object.fromEntries(Object.entries(state.stages).map(([stage, result]) => [stage, { status: result.status, code: result.code ?? null, at: result.at }]));
   const failed = Object.entries(state.stages).find(([, result]) => ['failed', 'blocked', 'interrupted'].includes(result.status));
+  // The checkout that executed the stages, separate from the release identities the stages deployed.
+  const lastRun = [...state.events].reverse().find((event) => event.stage === 'command' && event.status === 'run');
   return {
     schemaVersion: 1, scope: state.scope, jobId: state.jobId, qualified: false,
+    executedSource: lastRun?.source ?? null,
     stages, lastEvent: state.events.at(-1) ? { stage: state.events.at(-1).stage, status: state.events.at(-1).status, at: state.events.at(-1).at } : null,
     failedStage: failed ? failed[0] : null, failureCode: failed ? failed[1].code ?? null : null,
     inventoryCaptured: state.inventory !== null,

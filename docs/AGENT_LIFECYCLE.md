@@ -60,6 +60,10 @@ gateway's limited management credential.
 | `remove-root` | The hosted finalizer's fixed root steps over a record-backed job under the `operator-managed` policy | five steps verified, job `removed` with `not_attempted` revocation |
 | `verify-absent` | Independent provider reads of every recorded resource | nothing owned remains; unrelated resources named |
 
+Every `run` records the checkout that executed it (`executedSource`: commit
+and whether the tree had uncommitted changes) separately from the release
+identities the stages deployed, which `preflight` and `update` record.
+
 Each stage runs in its own process over the shared record and exits with
 `passed`, `verified`, `failed` or `blocked`. `blocked` names a condition only
 the operator can change (an unapproved job, a missing or rejected credential,
@@ -90,6 +94,19 @@ provision, journal or trace). And a resumed `converge` first waits out the
 dead attempt's Stage 2 lease (at most five minutes): the journal lets a
 successor take the lease over only after expiry, and the run lock already
 proves the holder is gone.
+
+The parent process can die too. `run.lock` names the parent that owns the
+run and, once a stage child has registered, that child; a process counts as
+alive only if its pid exists on this host and started when the lock says it
+did, so a reused pid is a dead process. A new parent that meets a live owner
+stops with `run_lock_held`. If the owner is dead but its stage child is
+still running, the child still owns the run and the new parent stops with
+`run_child_active` naming the stage; the child finishes and records its
+result on its own. Only a lock whose owner and child are both dead is taken
+over, by atomic replacement that is then confirmed to be the taker's own;
+nothing removes a lock blindly, and a parent that finds its lock replaced
+stops with `run_lock_lost` without another write. A stage child runs only
+under its own live parent's lock.
 
 Re-entering `manage` continues from the management object's own journal. The
 existing draft is reused, an installed source is not applied again, and a

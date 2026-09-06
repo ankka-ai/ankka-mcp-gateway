@@ -1,4 +1,5 @@
 import type { BoundaryValue } from '../apps/installer/src/boundary';
+import type { RunLock } from './lifecycle-lock.mjs';
 
 export type LifecycleStageStatus = 'passed' | 'verified' | 'failed' | 'blocked' | 'interrupted' | 'not_run';
 export interface LifecycleStageResult { readonly status: LifecycleStageStatus; readonly code?: string | null; readonly detail?: BoundaryValue }
@@ -25,6 +26,7 @@ export interface DurableStorageStandIn {
 export interface LifecycleRecord {
   readonly directory: string;
   readonly state: LifecycleRecordState;
+  readonly lock: RunLock | null;
   event(stage: string, status: string, detail?: { readonly [key: string]: BoundaryValue }): Promise<void>;
   stage(stage: string, result: LifecycleStageResult): Promise<void>;
   set(section: 'install' | 'removal', key: string, value: BoundaryValue): Promise<void>;

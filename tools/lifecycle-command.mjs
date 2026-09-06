@@ -1,12 +1,13 @@
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { build } from 'esbuild';
 import * as v from 'valibot';
 
 import { inventoryDeploymentCredential } from './lifecycle-credentials.mjs';
+import { LifecycleLockError } from './lifecycle-lock.mjs';
 import {
   LifecycleJobError, LIFECYCLE_STAGES, approvalDigest, assertLifecycleJobApproved, credentialReferenceLabel,
   readLifecycleJob, stagesForJob, writeLifecycleJobApproval,
@@ -83,6 +84,12 @@ const STAGE_CREDENTIALS = Object.freeze({
 });
 
 async function bundleStageRunner() {
+  // The runner's own regressions substitute a stage script with the same argv contract; production runs bundle the real stages.
+  const substitute = process.env.ANKKA_LIFECYCLE_STAGE_BUNDLE;
+  if (substitute !== undefined) {
+    requireCondition(isAbsolute(substitute), 'usage_invalid', 'ANKKA_LIFECYCLE_STAGE_BUNDLE');
+    return substitute;
+  }
   const outfile = resolve(root, 'apps/installer/dist/lifecycle/main.mjs');
   await build({
     absWorkingDir: root, entryPoints: [resolve(root, 'apps/installer/lifecycle/main.ts')], outfile,
@@ -102,6 +109,15 @@ function runChild(bundle, stage, jobPath, runDirectory, env) {
 
 async function recordState(runDirectory) {
   return JSON.parse(await readFile(join(runDirectory, 'record.json'), 'utf8'));
+}
+
+/** The checkout whose stages execute, recorded apart from the release identities they deploy. */
+async function executedSource() {
+  try {
+    const { stdout: commit } = await execute('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000 });
+    const { stdout: changes } = await execute('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8', timeout: 10_000 });
+    return { commit: commit.trim(), dirty: changes.trim().length > 0 };
+  } catch { return { commit: null, dirty: null }; }
 }
 
 async function run(options) {
@@ -131,14 +147,18 @@ async function run(options) {
   const runDirectory = await privateRunDirectory(job.runDirectory);
   const record = await openLifecycleRecord(runDirectory, { create: !resume, holdLock: true, jobId: job.jobId, targetDigest });
   try {
-    await record.event('command', 'run', { stages: [...stages], resume });
+    await record.event('command', 'run', { stages: [...stages], resume, source: await executedSource() });
     const results = {};
     let stopped = null;
     for (const stage of stages) {
       if (await record.cancelRequested()) { stopped = { stage, code: 'job_cancelled' }; results[stage] = { status: 'blocked', code: 'job_cancelled' }; break; }
       const stageEnv = interrupt?.stage === stage ? { ...env, ANKKA_LIFECYCLE_INTERRUPT_AFTER: interrupt.count } : env;
+      // Ownership is proven before a child is started and before anything is written after it: a lock taken over
+      // by another parent stops this one without a further write.
+      await record.lock.assertOwner();
       process.stdout.write(`lifecycle: ${stage} started\n`);
       const exit = await runChild(bundle, stage, jobPath, runDirectory, stageEnv);
+      await record.lock.clearChild();
       const state = await recordState(runDirectory);
       let result = state.stages[stage] ?? null;
       if (exit.signal !== null || result === null) {
@@ -207,7 +227,7 @@ if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(
   try {
     process.exitCode = await runLifecycleCommand(process.argv.slice(2));
   } catch (error) {
-    if (error instanceof LifecycleCommandError || error instanceof LifecycleJobError || error instanceof LifecycleRecordError) {
+    if (error instanceof LifecycleCommandError || error instanceof LifecycleJobError || error instanceof LifecycleRecordError || error instanceof LifecycleLockError) {
       process.stderr.write(`lifecycle: ${error.code}${error.detail ? ` (${error.detail})` : ''}\n`);
     } else {
       process.stderr.write('lifecycle: could not start. Check the job file, private paths and credential references.\n');

@@ -5,6 +5,7 @@ import * as v from 'valibot';
 import type { BoundaryValue } from '../src/boundary';
 import { fixedCloudflareOperationAuthority, type ExternalRunnerOperation } from '../src/cloudflare-operation-authority';
 import { assertLifecycleJobApproved, lifecycleHostnames, readLifecycleJob, type LifecycleStage } from '../../../tools/lifecycle-job.mjs';
+import { registerRunLockChild } from '../../../tools/lifecycle-lock.mjs';
 import { openLifecycleRecord, readInstallationSecrets, writeInstallationSecrets } from '../../../tools/lifecycle-record.mjs';
 import { createLiveGatewayProvider } from '../../../tools/live-gateway-provider.mjs';
 import {
@@ -97,6 +98,8 @@ async function runStage(stage: LifecycleStage, jobPath: string, runDirectory: st
   if (!v.is(v.pipe(v.string(), v.minLength(20)), deploymentToken)) throw new LifecycleStageError('deployment_credential_unavailable', 'blocked');
   const interruptAfter = v.is(v.pipe(v.string(), v.regex(/^[1-9]\d{0,4}$/u)), process.env.ANKKA_LIFECYCLE_INTERRUPT_AFTER)
     ? Number(process.env.ANKKA_LIFECYCLE_INTERRUPT_AFTER) : null;
+  // Only the lock owner's own child runs a stage; the child names itself so a later parent can see it is still alive.
+  await registerRunLockChild(runDirectory, stage);
   const job = await readLifecycleJob(jobPath);
   const targetDigest = await assertLifecycleJobApproved(job);
   const record = await openLifecycleRecord(runDirectory, { holdLock: false, jobId: job.jobId, targetDigest });
