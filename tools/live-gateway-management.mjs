@@ -37,7 +37,8 @@ export async function qualifyLiveGatewayManagement({ request, source, checkpoint
     initial.installationEnabled === true && Number.isSafeInteger(initial.revision) &&
     Array.isArray(initial.sources) && initial.sources.length === 0, 'fresh_token_managed_gateway_required');
   const initialTeam = verifiedTeam(await request('/api/team'));
-  requireCondition(initialTeam.members.length === 0, 'fresh_team_required');
+  const baseline = initialTeam.members;
+  requireCondition(baseline.every((member) => initialTeam.adminEmails?.includes(member.email) && member.email !== SYNTHETIC_EMAIL && Array.isArray(member.sourceIds) && member.sourceIds.length === 0), 'fresh_team_required');
   const discovery = await request('/api/sources/discover', { method: 'POST', body: { url: source.url } });
   requireCondition(discovery?.status === 'discovered' && discovery.authentication === 'none' &&
     discovery.endpoint === source.url && Array.isArray(discovery.tools) &&
@@ -63,12 +64,12 @@ export async function qualifyLiveGatewayManagement({ request, source, checkpoint
   requireCondition(installed?.sources?.some((item) => item.id === draft.id && item.status === 'installed' &&
     item.enabledTools.length === 1 && item.enabledTools[0] === source.tool), 'source_install_readback_failed');
   const denyTeam = verifiedTeam(await request('/api/team'));
-  requireCondition(denyTeam.members.length === 0, 'source_not_default_deny');
+  requireCondition(membership(denyTeam.members) === membership(baseline), 'source_not_default_deny');
   await checkpoint({ stage: 'source_apply', status: 'passed', sourceId: draft.id, actionId: applied.actionId });
 
   for (const [stage, members] of [
-    ['team_grant', [{ email: SYNTHETIC_EMAIL, sourceIds: [draft.id] }]],
-    ['team_remove', []],
+    ['team_grant', [...baseline, { email: SYNTHETIC_EMAIL, sourceIds: [draft.id] }]],
+    ['team_remove', baseline],
   ]) {
     const before = verifiedTeam(await request('/api/team'));
     await checkpoint({ stage, status: 'started', sourceId: draft.id });
@@ -82,5 +83,5 @@ export async function qualifyLiveGatewayManagement({ request, source, checkpoint
     requireCondition(after.revision > before.revision && membership(after.members) === membership(members), 'team_policy_readback_failed');
     await checkpoint({ stage, status: 'passed', actionId: result.action.actionId });
   }
-  return { sourceId: draft.id, sourceActionId: applied.actionId };
+  return { sourceId: draft.id, sourceActionId: applied.actionId, baselineMembers: baseline };
 }

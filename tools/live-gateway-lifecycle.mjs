@@ -67,7 +67,7 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   const team = await management('/api/team');
   requireCondition(sources.applyMode === 'account_token' && sources.sources?.some((item) =>
     item.id === source.sourceId && item.status === 'installed') && team.managementCredentialConfigured === true &&
-    team.editingEnabled === true && team.members?.length === 0, 'update_did_not_preserve_management');
+    team.editingEnabled === true && JSON.stringify(team.members) === JSON.stringify(source.baselineMembers), 'update_did_not_preserve_management');
   await checkpoint({ stage: 'update', status: 'passed' });
 
   await checkpoint({ stage: 'interrupted_removal', status: 'started' });
