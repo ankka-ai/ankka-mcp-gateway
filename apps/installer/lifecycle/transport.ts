@@ -9,12 +9,17 @@ import type { FetchTransport } from '../src/oauth';
 import type { LifecycleRecord } from '../../../tools/lifecycle-record.mjs';
 
 /**
- * The runner's only path to the network. Provider calls are admitted by the
- * endpoint families of the fixed operations the current stage executes,
- * every call is traced (method, family, status, duration; never a path,
- * token or body), a cancelled job refuses the next mutation before it is
- * sent, and the interruption hook terminates the process abruptly right
- * after a chosen mutation was answered and before any journal records it.
+ * The runner's only path to the network. Provider mutations are admitted by
+ * the endpoint families of the fixed operations the current stage executes;
+ * reads of any classified family are admitted, because the production
+ * operations read back more than they write (the converger inspects the
+ * Durable Object namespace during adoption, for example) and a read under
+ * the operator's own credential changes nothing. Unknown paths and origins
+ * are refused. Every call is traced (method, family, status, duration; never
+ * a path, token or body), a cancelled job refuses the next mutation before
+ * it is sent, and the interruption hook terminates the process abruptly
+ * right after a chosen mutation was answered and before any journal records
+ * it.
  */
 export type RunnerEndpointFamily = CloudflareApiEndpointFamily | 'account-analytics' | 'account-tokens-verify';
 
@@ -36,6 +41,8 @@ const CLASSIFIERS: readonly (readonly [RegExp, RunnerEndpointFamily])[] = [
   [/\/workers\/subdomain(?:\?|$)/u, 'workers-subdomain'],
   [/\/workers\/scripts\/[^/]+\/subdomain(?:\?|$)/u, 'workers-subdomain'],
   [/\/workers\/domains(?:\/|\?|$)/u, 'workers-custom-domains'],
+  // Zone Workers routes are read only for custom-domain collision checks (`workers-routes.read`).
+  [/\/workers\/routes(?:\/|\?|$)/u, 'workers-custom-domains'],
   [/\/workers\/durable_objects\/namespaces(?:\/|\?|$)/u, 'workers-durable-object-namespaces'],
   [/\/workers\/assets\/|\/assets-upload-session(?:\?|$)/u, 'workers-assets'],
   [/\/workers\/(?:scripts|workers)\/[^/]+\/versions(?:\/|\?|$)/u, 'workers-versions'],
@@ -106,10 +113,11 @@ export function createGuardedTransport(options: GuardedTransportOptions): Guarde
     const url = new URL(request.url);
     if (url.origin === CLOUDFLARE_API_ORIGIN) {
       const family = endpointFamily(url);
-      if (family === null || !options.families.has(family)) {
+      const mutating = !READ_METHODS.has(request.method);
+      if (family === null || (mutating && !options.families.has(family))) {
+        await options.record.trace({ method: request.method, family: family ?? 'unknown', status: 'refused', ms: 0 });
         throw new LifecycleTransportError('endpoint_family_refused', family ?? 'unknown');
       }
-      const mutating = !READ_METHODS.has(request.method);
       if (mutating && await options.record.cancelRequested()) throw new LifecycleTransportError('job_cancelled');
       const started = performance.now();
       let response: Response;

@@ -8,7 +8,7 @@ import { LiveManagementQualificationError, qualifyLiveGatewayManagement, type Li
 import { installedProvision, providerJson } from './stage-install';
 import { activeWorkerRelease, gatewayEnvironmentBindings } from './stage-update';
 import {
-  payloadEnvironment, readRecordValue, requireStage, LifecycleStageError,
+  payloadEnvironment, readRecordValue, requireStage, wait, LifecycleStageError,
   type DurableObjectStandIn, type LifecycleContext, type ManagedSourceLike, type PayloadModule,
 } from './context';
 
@@ -34,7 +34,11 @@ const sourcesSchema = v.looseObject({
   revision: v.pipe(v.number(), v.safeInteger()),
   sources: v.array(v.pipe(managedSourceSchema, v.check((value) => v.is(v.string(), value.id) && v.is(v.string(), value.status), 'source identity required'))),
 });
-const snapshotSchema = v.looseObject({ blockingAction: v.optional(v.nullable(v.looseObject({ kind: v.string() }))) });
+const snapshotSchema = v.looseObject({
+  actions: v.array(v.looseObject({ actionId: v.string(), sourceId: v.string(), canRenew: v.boolean() })),
+  blockingAction: v.optional(v.nullable(v.looseObject({ kind: v.string(), actionId: v.string() }))),
+});
+const RENEWAL_PATH = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/renew$/u;
 const sourceActionInputSchema = v.strictObject({ schemaVersion: v.literal(1), revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)), sourceId: v.string() });
 const discoverInputSchema = v.strictObject({ url: v.string() });
 const errorSchema = v.looseObject({ error: v.optional(v.string()) });
@@ -71,7 +75,8 @@ async function installManagementCredential(context: LifecycleContext, workerName
     body: JSON.stringify({ name: MANAGEMENT_SECRET, text: token, type: 'secret_text' }),
   });
   await response.body?.cancel();
-  requireStage(response.status === 200, 'management_credential_install_rejected', String(response.status));
+  // The secrets endpoint answers 201 for a new secret and 200 for a replaced one.
+  requireStage(response.status === 200 || response.status === 201, 'management_credential_install_rejected', String(response.status));
   const after = await activeWorkerRelease(context, workerName);
   requireStage(after.secretNames.includes(MANAGEMENT_SECRET), 'management_credential_not_bound');
   await context.record.set('install', 'managementCredentialInstalled', true);
@@ -99,6 +104,40 @@ export function inProcessManagementApi(input: {
       throw new LifecycleStageError('source_verification_failed', 'failed', failure.success ? failure.output.code : null);
     }
   };
+  const snapshot = async (path: string) => v.parse(snapshotSchema, await readJson(await stub('/source-actions', { headers: { 'x-ankka-actor-email': actorEmail } }), path));
+  // The public prepare-and-apply handler, including its renewal form: a stopped action is renewed only when the
+  // management object itself marks it renewable and it is the action blocking this source; nothing is re-prepared.
+  const prepareAndApply = async (path: string, request: v.InferOutput<typeof sourceActionInputSchema>, renewActionId: string | null) => {
+    const current = await snapshot(path);
+    if (renewActionId === null) {
+      requireStage(current.blockingAction === undefined || current.blockingAction === null, 'source_action_conflict');
+    } else {
+      const action = current.actions.find((candidate) => candidate.actionId === renewActionId);
+      requireStage(action !== undefined && action.sourceId === request.sourceId && action.canRenew &&
+        current.blockingAction?.kind === 'source' && current.blockingAction.actionId === renewActionId, 'source_action_conflict');
+    }
+    const sources = v.parse(sourcesSchema, await readJson(await stub('/sources'), path));
+    const found = sources.sources.find((candidate) => candidate.id === request.sourceId);
+    requireStage(found !== undefined && sources.revision === request.revision && found.status === 'draft', 'source_draft_changed');
+    const source = managedSource(found);
+    await verifySource(source);
+    const now = context.now();
+    const expiresAt = now + ACTION_TTL_MS;
+    const actionId = renewActionId ?? `action_${randomBase64Url(24)}`;
+    const actionKey = randomBase64Url(32);
+    const prepared = await stub(renewActionId === null ? '/source-actions' : `/source-actions/${actionId}/renew`, { method: 'POST', ...json(canonicalJson({
+      schemaVersion: 1, actionId, sourceId: source.id, sourceRevision: sources.revision, actorEmail, issuedAt: now, expiresAt,
+      actionKeyHash: `sha256:${await sha256Hex(actionKey)}`, sourceHash: await helpers.managedSourceHash(source),
+    })) });
+    await readJson(prepared, `${path}:prepare`);
+    const claim = canonicalJson({ schemaVersion: 1, actionId, actionKey, actorEmail, accountId: context.job.target.accountId,
+      issuedAt: now, expiresAt, cloudflareAccessToken: input.managementToken });
+    const applied = await stub('/source-actions/apply', { method: 'POST', headers: {
+      'content-type': 'application/json', 'x-ankka-source-action-signature': await operationSignature(actionKey, claim),
+    }, body: claim });
+    await readJson(applied, `${path}:apply`);
+    return { schemaVersion: 1, actionId, status: 'succeeded', expiresAt: new Date(expiresAt).toISOString() };
+  };
   return async (path, options = {}) => {
     const method = options.method ?? 'GET';
     const body = options.body;
@@ -118,36 +157,15 @@ export function inProcessManagementApi(input: {
       };
       return discovered.connectionBlock === undefined ? result : { ...result, connectionBlock: discovered.connectionBlock };
     }
+    if (method === 'GET' && path === '/api/source-actions') return readJson(await stub('/source-actions', { headers: { 'x-ankka-actor-email': actorEmail } }), path);
     if (method === 'GET' && path.startsWith('/api/source-actions/')) {
       const actionId = path.slice('/api/source-actions/'.length);
       requireStage(ACTION_ID.test(actionId), 'source_action_id_invalid');
       return readJson(await stub(`/source-actions/${actionId}`, { headers: { 'x-ankka-actor-email': actorEmail } }), path);
     }
-    if (method === 'POST' && path === '/api/source-actions') {
-      const request = v.parse(sourceActionInputSchema, body);
-      const snapshot = v.parse(snapshotSchema, await readJson(await stub('/source-actions', { headers: { 'x-ankka-actor-email': actorEmail } }), path));
-      requireStage(snapshot.blockingAction === undefined || snapshot.blockingAction === null, 'source_action_conflict');
-      const sources = v.parse(sourcesSchema, await readJson(await stub('/sources'), path));
-      const found = sources.sources.find((candidate) => candidate.id === request.sourceId);
-      requireStage(found !== undefined && sources.revision === request.revision && found.status === 'draft', 'source_draft_changed');
-      const source = managedSource(found);
-      await verifySource(source);
-      const now = context.now();
-      const expiresAt = now + ACTION_TTL_MS;
-      const actionId = `action_${randomBase64Url(24)}`;
-      const actionKey = randomBase64Url(32);
-      const prepared = await stub('/source-actions', { method: 'POST', ...json(canonicalJson({
-        schemaVersion: 1, actionId, sourceId: source.id, sourceRevision: sources.revision, actorEmail, issuedAt: now, expiresAt,
-        actionKeyHash: `sha256:${await sha256Hex(actionKey)}`, sourceHash: await helpers.managedSourceHash(source),
-      })) });
-      await readJson(prepared, `${path}:prepare`);
-      const claim = canonicalJson({ schemaVersion: 1, actionId, actionKey, actorEmail, accountId: context.job.target.accountId,
-        issuedAt: now, expiresAt, cloudflareAccessToken: input.managementToken });
-      const applied = await stub('/source-actions/apply', { method: 'POST', headers: {
-        'content-type': 'application/json', 'x-ankka-source-action-signature': await operationSignature(actionKey, claim),
-      }, body: claim });
-      await readJson(applied, `${path}:apply`);
-      return { schemaVersion: 1, actionId, status: 'succeeded', expiresAt: new Date(expiresAt).toISOString() };
+    const renewActionId = RENEWAL_PATH.exec(path)?.[1] ?? null;
+    if (method === 'POST' && (path === '/api/source-actions' || renewActionId !== null)) {
+      return prepareAndApply(path, v.parse(sourceActionInputSchema, body), renewActionId);
     }
     if (method === 'GET' && path === '/api/team') return readJson(await stub('/team'), path);
     if (method === 'POST' && path === '/api/team-actions') {
@@ -179,7 +197,7 @@ export async function manageStage(context: LifecycleContext): Promise<BoundaryVa
     let result: Awaited<ReturnType<typeof qualifyLiveGatewayManagement>>;
     try {
       result = await qualifyLiveGatewayManagement({
-        request, source: context.job.source,
+        request, source: context.job.source, wait,
         checkpoint: async (event) => {
           const detail: { [field: string]: BoundaryValue } = {};
           if (event.sourceId !== undefined) detail.sourceId = event.sourceId;

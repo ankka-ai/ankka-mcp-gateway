@@ -106,7 +106,18 @@ export async function openLifecycleRecord(directory, { create = false, holdLock 
       const values = state.storage[namespace];
       return {
         async get(key) { return Object.hasOwn(values, key) ? structuredClone(values[key]) : undefined; },
-        async put(key, value) { values[key] = structuredClone(value); await save(); },
+        async list({ prefix = '', limit = 1000, startAfter = '' } = {}) {
+          return new Map(Object.entries(values).filter(([key]) => key.startsWith(prefix) && key > startAfter)
+            .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).slice(0, limit)
+            .map(([key, value]) => [key, structuredClone(value)]));
+        },
+        // Durable Object multi-key puts are atomic: every entry lands in one record write or none does.
+        async put(key, value) {
+          // oxlint-disable-next-line anti-slop/no-runtime-typeof -- Storage API overload boundary: string key/value or a multi-key entries object.
+          const entries = structuredClone(typeof key === 'string' ? [[key, value]] : Object.entries(key));
+          for (const [entryKey, owned] of entries) values[entryKey] = owned;
+          await save();
+        },
         snapshot() { return structuredClone(values); },
       };
     },

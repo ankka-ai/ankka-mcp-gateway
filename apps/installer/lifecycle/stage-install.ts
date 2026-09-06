@@ -173,7 +173,8 @@ export async function bootstrapStage(context: LifecycleContext): Promise<Boundar
       customerOauthClientId: secrets.publicClientId, issuerKeyId: secrets.issuer.keyId, issuerPublicKey: secrets.issuer.publicKey,
       issuerPrivateKey: privateKey, now: context.now,
     });
-    await context.record.set('install', 'provision', JSON.parse(canonicalJson(provision)));
+    // A static-plan provision carries an undefined zone list, which the strict canonical encoder refuses; the record needs plain JSON.
+    await context.record.set('install', 'provision', JSON.parse(JSON.stringify(provision)));
     await context.record.event('bootstrap', 'provisioned', { recovery: provision.deployment.recovery });
   } else {
     provision = parseHostedStage1Provision(install.provision);

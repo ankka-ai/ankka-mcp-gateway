@@ -62,13 +62,21 @@ const thrownSchema = v.looseObject({
   name: v.optional(v.string()),
   code: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,79}$/u))),
   reason: v.optional(v.nullable(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,159}$/u)))),
+  stage: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,79}$/u))),
+  outcome: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,39}$/u))),
 });
 type Thrown = v.InferOutput<typeof thrownSchema>;
 interface StageOutcome { readonly status: 'failed' | 'blocked'; readonly code: string; readonly detail: string | null }
 
 function unexpectedOutcome(thrown: Thrown | null): StageOutcome {
   const name = thrown?.name ?? 'error';
-  if (thrown?.code !== undefined) return { status: 'failed', code: thrown.code, detail: thrown.reason ? `${name}:${thrown.reason}` : name };
+  if (thrown?.code !== undefined) {
+    const parts = [name];
+    if (thrown.stage !== undefined) parts.push(thrown.stage);
+    if (thrown.outcome !== undefined) parts.push(thrown.outcome);
+    if (thrown.reason) parts.push(thrown.reason);
+    return { status: 'failed', code: thrown.code, detail: parts.join(':') };
+  }
   return { status: 'failed', code: 'unexpected_failure', detail: thrown === null ? null : name };
 }
 

@@ -83,6 +83,19 @@ Uncertain provider outcomes stay uncertain: a missing permission, an
 authentication failure or an ambiguous ownership read stops the stage instead
 of being read as absence.
 
+Re-entering `manage` continues from the management object's own journal. The
+existing draft is reused, an installed source is not applied again, and a
+source action that stopped after a provider write is renewed through the
+payload's renewal route, which re-enters the same reconciliation the gateway
+runs for a dashboard renewal: each recorded resource is verified by an exact
+read, and only the write the journal proves missing is sent. The gateway
+rotates the action key only after the stopped action's consent window has
+elapsed, so the stage waits for that window (at most ten minutes) before
+renewing. It reads the Team roster only after the source journal is
+reconciled, because the gateway withholds its team view while a stopped
+action leaves the Portal ahead of the committed ownership. A membership
+already in place is recorded as recovered rather than written again.
+
 ## What a runner-installed gateway is and is not
 
 The Worker, Durable Object namespace, Access applications and policies, MCP

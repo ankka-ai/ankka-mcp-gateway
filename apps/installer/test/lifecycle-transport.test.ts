@@ -33,6 +33,7 @@ describe('lifecycle transport guard', () => {
       [`${ACCOUNT}/workers/subdomain`, 'workers-subdomain'],
       [`${ACCOUNT}/workers/scripts/ankka-gateway-x/subdomain`, 'workers-subdomain'],
       [`${ACCOUNT}/workers/domains`, 'workers-custom-domains'],
+      [`${ZONE}/workers/routes`, 'workers-custom-domains'],
       [`${ACCOUNT}/workers/durable_objects/namespaces`, 'workers-durable-object-namespaces'],
       [`${ACCOUNT}/workers/scripts/ankka-gateway-x/versions/1`, 'workers-versions'],
       [`${ACCOUNT}/workers/scripts/ankka-gateway-x/deployments`, 'workers-deployments'],
@@ -68,7 +69,7 @@ describe('lifecycle transport guard', () => {
     expect(upgrade.has('mcp-portals')).toBe(false);
   });
 
-  it('forwards admitted calls with a path-free trace, refuses other families and origins', async () => {
+  it('forwards reads of any classified family, admits mutations only within the stage families, and refuses other origins', async () => {
     const seen: string[] = [];
     const { transport } = createGuardedTransport({
       record, families: stageFamilies({ operations: ['upgrade'], provisioning: false, diagnostics: false, tokenVerification: false }),
@@ -79,14 +80,19 @@ describe('lifecycle transport guard', () => {
     });
     const response = await transport(`${ACCOUNT}/workers/scripts/ankka-gateway-x/settings`, { method: 'GET' });
     expect(response.status).toBe(200);
-    await expect(transport(`${ACCOUNT}/access/ai-controls/mcp/portals`)).rejects.toMatchObject({ code: 'endpoint_family_refused', detail: 'mcp-portals' });
+    expect((await transport(`${ACCOUNT}/workers/durable_objects/namespaces`)).status).toBe(200);
+    await expect(transport(`${ACCOUNT}/access/ai-controls/mcp/portals`, { method: 'POST' })).rejects.toMatchObject({ code: 'endpoint_family_refused', detail: 'mcp-portals' });
+    await expect(transport(`${ACCOUNT}/workers/durable_objects/namespaces/x`, { method: 'DELETE' })).rejects.toMatchObject({ code: 'endpoint_family_refused', detail: 'workers-durable-object-namespaces' });
     await expect(transport('https://api.cloudflare.com/client/v4/user/tokens/verify')).rejects.toMatchObject({ code: 'endpoint_family_refused', detail: 'unknown' });
     await expect(transport('https://deploy.ankka.ai/api/session')).rejects.toMatchObject({ code: 'origin_refused' });
     await expect(transport('https://source.example.net/mcp', { method: 'POST' })).rejects.toMatchObject({ code: 'origin_refused' });
     expect((await transport('https://source.example.net/mcp')).status).toBe(200);
-    expect(seen).toEqual([`${ACCOUNT}/workers/scripts/ankka-gateway-x/settings`, 'https://source.example.net/mcp']);
-    const trace = record.state.trace.at(-1);
-    expect(trace).toEqual({ method: 'GET', family: 'workers-scripts', status: 200, ms: expect.any(Number) });
+    expect(seen).toEqual([`${ACCOUNT}/workers/scripts/ankka-gateway-x/settings`, `${ACCOUNT}/workers/durable_objects/namespaces`, 'https://source.example.net/mcp']);
+    expect(record.state.trace).toEqual(expect.arrayContaining([
+      { method: 'GET', family: 'workers-durable-object-namespaces', status: 200, ms: expect.any(Number) },
+      { method: 'POST', family: 'mcp-portals', status: 'refused', ms: 0 },
+      { method: 'GET', family: 'unknown', status: 'refused', ms: 0 },
+    ]));
     expect(JSON.stringify(record.state.trace)).not.toContain('ankka-gateway-x');
   });
 

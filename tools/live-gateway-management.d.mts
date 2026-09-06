@@ -8,4 +8,6 @@ export function qualifyLiveGatewayManagement(input: {
   readonly request: LiveManagementRequest;
   readonly source: { readonly url: string; readonly tool: string };
   readonly checkpoint: LiveManagementCheckpoint;
+  /** Sleeps until a stopped action's consent window has elapsed; without it such an action stops the exercise. */
+  readonly wait?: ((milliseconds: number) => Promise<void>) | null;
 }): Promise<{ readonly sourceId: string; readonly sourceActionId: string; readonly baselineMembers: readonly BoundaryValue[] }>;

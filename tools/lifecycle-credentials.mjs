@@ -51,6 +51,7 @@ export function deploymentCredentialFamilies({ accountId, zoneId }) {
     ['workers-scripts', 'GET', `${account}/workers/scripts?per_page=1`],
     ['workers-subdomain', 'GET', `${account}/workers/subdomain`],
     ['workers-custom-domains', 'GET', `${account}/workers/domains?per_page=1`],
+    ['workers-routes', 'GET', `${zone}/workers/routes`],
     ['workers-durable-object-namespaces', 'GET', `${account}/workers/durable_objects/namespaces?per_page=1`],
     ['access-organization', 'GET', `${account}/access/organizations`],
     ['access-applications-account', 'GET', `${account}/access/apps?per_page=1`],

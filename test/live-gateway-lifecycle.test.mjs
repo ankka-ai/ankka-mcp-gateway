@@ -109,6 +109,7 @@ test('complete orchestration proves token management, distinct update, lost call
         if (options.method === 'PUT') sources = [{ id: 'synthetic', status: 'draft', ...options.body.source }];
         return { schemaVersion: 1, applyMode: 'account_token', installationEnabled: true, revision: 1, sources };
       }
+      if (path === '/api/source-actions' && options.method === undefined) return { schemaVersion: 1, actions: [], blockingAction: null };
       if (path === '/api/source-actions') { sources[0].status = 'installed'; return { actionId, status: 'succeeded' }; }
       if (path.startsWith('/api/source-actions/')) return { sourceId: 'synthetic', status: 'succeeded' };
       if (path === '/api/team-actions') { members = options.body.members; revision += 1; return { action: { actionId, status: 'succeeded' } }; }

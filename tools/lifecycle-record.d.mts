@@ -17,7 +17,9 @@ export interface LifecycleRecordState {
 }
 export interface DurableStorageStandIn {
   get(key: string): Promise<BoundaryValue | undefined>;
+  list(options?: { readonly prefix?: string; readonly limit?: number; readonly startAfter?: string }): Promise<Map<string, BoundaryValue>>;
   put(key: string, value: BoundaryValue): Promise<void>;
+  put(entries: { readonly [key: string]: BoundaryValue }): Promise<void>;
   snapshot(): { readonly [key: string]: BoundaryValue };
 }
 export interface LifecycleRecord {

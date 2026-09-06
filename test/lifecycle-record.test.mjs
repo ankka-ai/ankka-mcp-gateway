@@ -22,6 +22,12 @@ test('the record persists every write atomically, holds one lock, and reopens wi
     await storage.put('ankka-mcp-gateway/management-control/v1', { installationId: 'acg-x' });
     assert.deepEqual(await storage.get('ankka-mcp-gateway/management-control/v1'), { installationId: 'acg-x' });
     assert.equal(await storage.get('missing'), undefined);
+    // The payload commits control, sources and the action journal in one multi-key put.
+    await storage.put({ 'ankka-mcp-gateway/management-sources/v1': { revision: 2 }, 'ankka-mcp-gateway/source-actions/v1': { revision: 3 } });
+    assert.deepEqual(await storage.get('ankka-mcp-gateway/source-actions/v1'), { revision: 3 });
+    assert.deepEqual([...(await storage.list({ prefix: 'ankka-mcp-gateway/management-' })).keys()],
+      ['ankka-mcp-gateway/management-control/v1', 'ankka-mcp-gateway/management-sources/v1']);
+    assert.equal(Object.hasOwn(storage.snapshot(), '[object Object]'), false);
     await child.event('converge', 'pass', { pass: 1 });
     await child.stage('converge', { status: 'passed', code: null, detail: { passes: 1 } });
     await child.set('removal', 'handoff', 'signed-handoff');
