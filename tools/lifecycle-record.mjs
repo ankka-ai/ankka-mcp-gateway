@@ -82,32 +82,52 @@ export async function openLifecycleRecord(directory, { create = false, holdLock 
   }
   async function save() { await atomicWrite(directory, 'record.json', JSON.stringify(state)); }
   if (create) await save();
+  // The parent process and one stage child at a time write the same record. Every write starts from the record as it
+  // is on disk and writes are serialized within a process, so no process can cover another's evidence with a stale copy.
+  let chain = Promise.resolve();
+  function serialized(work) {
+    const next = chain.then(work, work);
+    chain = next.then(() => undefined, () => undefined);
+    return next;
+  }
+  async function reload() {
+    let text;
+    try { text = await readFile(path, 'utf8'); } catch { return; }
+    const latest = JSON.parse(text);
+    requireCondition(v.is(recordSchema, latest) && latest.jobId === state.jobId && latest.targetDigest === state.targetDigest, 'record_invalid');
+    state = latest;
+  }
+  async function write(mutate) {
+    await serialized(async () => { await reload(); mutate(state); await save(); });
+  }
   return {
     directory,
     get state() { return state; },
     async event(stage, status, detail = {}) {
-      state.events.push({ ...detail, stage, status, at: new Date().toISOString() });
-      await save();
+      const entry = { ...detail, stage, status, at: new Date().toISOString() };
+      await write((current) => { current.events.push(entry); });
     },
     async stage(stage, result) {
       requireCondition(STAGE_STATUSES.includes(result.status), 'stage_status_invalid');
-      state.stages[stage] = { ...result, at: new Date().toISOString() };
-      await save();
+      const entry = { ...result, at: new Date().toISOString() };
+      await write((current) => { current.stages[stage] = entry; });
     },
     async set(section, key, value) {
       requireCondition(['install', 'removal'].includes(section), 'record_section_invalid');
-      state[section][key] = structuredClone(value);
-      await save();
+      const owned = structuredClone(value);
+      await write((current) => { current[section][key] = owned; });
     },
-    async setInventory(value) { state.inventory = structuredClone(value); await save(); },
-    /** Durable Object storage stand-in for one named object; get and put only, persisted before returning. */
+    async setInventory(value) {
+      const owned = structuredClone(value);
+      await write((current) => { current.inventory = owned; });
+    },
+    /** Durable Object storage stand-in for one named object; get, list and put only, persisted before returning. */
     storage(namespace) {
-      state.storage[namespace] ??= {};
-      const values = state.storage[namespace];
+      const values = () => (state.storage[namespace] ??= {});
       return {
-        async get(key) { return Object.hasOwn(values, key) ? structuredClone(values[key]) : undefined; },
+        async get(key) { const current = values(); return Object.hasOwn(current, key) ? structuredClone(current[key]) : undefined; },
         async list({ prefix = '', limit = 1000, startAfter = '' } = {}) {
-          return new Map(Object.entries(values).filter(([key]) => key.startsWith(prefix) && key > startAfter)
+          return new Map(Object.entries(values()).filter(([key]) => key.startsWith(prefix) && key > startAfter)
             .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)).slice(0, limit)
             .map(([key, value]) => [key, structuredClone(value)]));
         },
@@ -115,16 +135,19 @@ export async function openLifecycleRecord(directory, { create = false, holdLock 
         async put(key, value) {
           // oxlint-disable-next-line anti-slop/no-runtime-typeof -- Storage API overload boundary: string key/value or a multi-key entries object.
           const entries = structuredClone(typeof key === 'string' ? [[key, value]] : Object.entries(key));
-          for (const [entryKey, owned] of entries) values[entryKey] = owned;
-          await save();
+          await write((current) => {
+            const target = (current.storage[namespace] ??= {});
+            for (const [entryKey, owned] of entries) target[entryKey] = owned;
+          });
         },
-        snapshot() { return structuredClone(values); },
+        snapshot() { return structuredClone(values()); },
       };
     },
     async trace(entry) {
-      state.trace.push(entry);
-      if (state.trace.length > MAX_TRACE_ENTRIES) state.trace.splice(0, state.trace.length - MAX_TRACE_ENTRIES);
-      await save();
+      await write((current) => {
+        current.trace.push(entry);
+        if (current.trace.length > MAX_TRACE_ENTRIES) current.trace.splice(0, current.trace.length - MAX_TRACE_ENTRIES);
+      });
     },
     async cancelRequested() {
       try { await access(join(directory, 'cancel')); return true; } catch { return false; }

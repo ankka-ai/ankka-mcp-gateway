@@ -32,6 +32,16 @@ test('the record persists every write atomically, holds one lock, and reopens wi
     await child.stage('converge', { status: 'passed', code: null, detail: { passes: 1 } });
     await child.set('removal', 'handoff', 'signed-handoff');
     await child.trace({ method: 'GET', family: 'workers-scripts', status: 200, ms: 3 });
+    // The parent writes after a child died: its own copy is stale, the child's evidence must survive the write.
+    await parent.stage('converge', { status: 'interrupted', code: 'process_sigkill' });
+    await Promise.all([child.event('converge', 'a'), child.event('converge', 'b'), storage.put('k', 1)]);
+    const clobberCheck = JSON.parse(await readFile(join(directory, 'record.json'), 'utf8'));
+    assert.equal(clobberCheck.stages.converge.status, 'interrupted');
+    assert.deepEqual(clobberCheck.events.map((event) => event.status), ['pass', 'a', 'b']);
+    assert.equal(clobberCheck.trace.length, 1);
+    assert.equal(clobberCheck.removal.handoff, 'signed-handoff');
+    assert.equal(clobberCheck.storage['object:v1:management'].k, 1);
+    await child.stage('converge', { status: 'passed', code: null, detail: { passes: 1 } });
     const onDisk = JSON.parse(await readFile(join(directory, 'record.json'), 'utf8'));
     assert.equal(onDisk.storage['object:v1:management']['ankka-mcp-gateway/management-control/v1'].installationId, 'acg-x');
     assert.equal(onDisk.stages.converge.status, 'passed');

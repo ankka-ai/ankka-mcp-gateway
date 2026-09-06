@@ -83,6 +83,14 @@ Uncertain provider outcomes stay uncertain: a missing permission, an
 authentication failure or an ambiguous ownership read stops the stage instead
 of being read as absence.
 
+Two rules keep the killed process's evidence intact. Every record write
+starts from the record as it is on disk, so the parent's own note that a
+stage died can never cover what the stage had already written (its
+provision, journal or trace). And a resumed `converge` first waits out the
+dead attempt's Stage 2 lease (at most five minutes): the journal lets a
+successor take the lease over only after expiry, and the run lock already
+proves the holder is gone.
+
 Re-entering `manage` continues from the management object's own journal. The
 existing draft is reused, an installed source is not applied again, and a
 source action that stopped after a provider write is renewed through the

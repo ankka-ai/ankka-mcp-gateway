@@ -12,6 +12,8 @@ import {
 } from '../src/customer-gateway-ownership-state';
 import { CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH } from '../src/customer-install-paths';
 import { CUSTOMER_STAGE2_CHUNK_CHECKPOINTS, convergeCustomerStage2, CustomerStage2ConvergerError } from '../src/customer-stage2-converger';
+import type { CustomerStage2JournalPort } from '../src/customer-stage2-durable-state';
+import { CustomerStage2JournalError } from '../src/customer-stage2-journal';
 import {
   completeHostedStage1Handoff,
   createHostedStage1Secrets,
@@ -228,6 +230,25 @@ export async function bootstrapStage(context: LifecycleContext): Promise<Boundar
   return { installId: plan.managementOwnershipMarker, workerName: provision.deployment.workerName, recovery: provision.deployment.recovery };
 }
 
+/** The Stage 2 lease term; a dead attempt's lease can only be taken over after it. */
+const STAGE2_LEASE_TTL_MS = 5 * 60_000;
+
+/**
+ * An interrupted attempt leaves its lease in the journal, and the journal's
+ * contract lets a successor take it over only after expiry. The run lock
+ * already proves the holder is gone, so the stage waits out the remainder
+ * instead of reporting a conflict.
+ */
+async function waitOutAbandonedLease(context: LifecycleContext, port: CustomerStage2JournalPort): Promise<void> {
+  const current = await port.read();
+  if (current === null || current.completedAt !== null || current.lease === null) return;
+  const remaining = current.lease.expiresAt - context.now();
+  if (remaining <= 0) return;
+  requireStage(remaining <= STAGE2_LEASE_TTL_MS, 'stage2_lease_invalid');
+  await context.record.event('converge', 'lease_wait', { seconds: Math.ceil(remaining / 1000) });
+  await wait(remaining + 1000);
+}
+
 export async function convergeStage(context: LifecycleContext): Promise<BoundaryValue> {
   const install = readRecordValue(context.record.state.install, installRecordSchema, 'install_record_invalid');
   requireStage(install.handoffAccepted === true, 'bootstrap_not_completed');
@@ -241,6 +262,7 @@ export async function convergeStage(context: LifecycleContext): Promise<Boundary
   const ownership = ownershipStorage(context.record.storage('ownership'));
   await readCustomerGatewayOwnershipState(ownership);
   const journal = recordJournalPort(context.record);
+  await waitOutAbandonedLease(context, journal);
   const attemptId = `attempt_${base64UrlEncode(crypto.getRandomValues(new Uint8Array(18)))}`;
   const passes: number[] = [];
   let result: Awaited<ReturnType<typeof convergeCustomerStage2>>;
@@ -289,6 +311,7 @@ export async function convergeStage(context: LifecycleContext): Promise<Boundary
         const status = error.code === 'journal_conflict' ? 'blocked' : 'failed';
         throw new LifecycleStageError(`converge_${error.code}`, status, error.reason);
       }
+      if (error instanceof CustomerStage2JournalError) throw new LifecycleStageError(`converge_journal_${error.code}`, error.code === 'conflict' ? 'blocked' : 'failed');
       throw error;
     }
     const calls = context.record.state.trace.length - callsBefore;
