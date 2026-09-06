@@ -34,6 +34,11 @@ npm run dev:ui
 
 The local studio uses synthetic data and does not contact Cloudflare.
 
+For Worker state and runtime changes, use `npm run test:runtime`. For an
+interactive synthetic Worker with agent-readable local traces, use
+`npm run dev:runtime`. See [Fast local Worker feedback](docs/LOCAL_RUNTIME.md)
+for coverage, inspection commands, and when to run the existing live checks.
+
 ## JavaScript and TypeScript boundary
 
 Application and library source is TypeScript. The JavaScript under `payload/`
