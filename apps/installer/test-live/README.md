@@ -1,5 +1,57 @@
 # Live harnesses
 
+For the normal provider integration loop, use the root command:
+
+```sh
+npm run test:live -- --config /private/provider-test.json
+```
+
+Read `ANKKA_LIVE_TOKEN` from your credential store into the process environment.
+The config is a mode-0600 JSON file outside the checkout:
+
+```json
+{
+  "schemaVersion": 1,
+  "accountId": "<test account id>",
+  "zoneId": "<test zone id>",
+  "zoneName": "test.example.com",
+  "adminEmail": "operator@example.com",
+  "manifest": "/private/candidate/manifest.json",
+  "runDirectory": "/private/new-provider-run"
+}
+```
+
+Use a new run directory each time; its parent must exist. The command selects
+only `provider-cycle.live.ts`. It creates disposable Portal, Access and DNS
+resources through the current production bootstrap code, verifies the ready
+receipt, then uses the production uninstall payload to verify removal. The
+operator token needs the same provider permissions as the existing Stage 2
+harness. It does not need interactive OAuth or a browser profile.
+
+Console diagnostics contain method, API family, HTTP status and duration.
+Exact receipts and storage checkpoints remain in a private mode-0700 directory;
+never commit or upload that directory. No token is written to the record.
+After a cleanup failure, retry the recorded cleanup with:
+
+```sh
+npm run test:live -- --config /private/provider-test.json --cleanup
+```
+
+A partial installation without a ready receipt requires inspection of the
+private checkpoints; the command does not guess ownership or delete resources
+by name. A killed process leaves `run.lock`: confirm the original process has
+stopped before removing that lock to recover. Never start a fresh run over an
+existing record.
+
+This is a provider API test with a local storage stand-in. It does **not**
+validate Worker deployment, Durable Object persistence, signed updates, browser
+login or OAuth consent, and it never marks the full lifecycle qualified. Use
+`validate:lifecycle:live` for the separately documented deployed checks. Keep
+focused local tests as the fastest default; run this when changing provider
+behavior. It is deliberately excluded from ordinary CI.
+
+## Specialized harnesses
+
 Real Cloudflare calls against a dedicated test account. Never part of
 `npm run check`; run one explicitly from `apps/installer`:
 
@@ -8,7 +60,7 @@ ANKKA_LIVE_TOKEN=<api token, read from a keychain into this process only> \
 ANKKA_LIVE_ACCOUNT_ID=<account id> ANKKA_LIVE_ZONE_ID=<zone id> \
 ANKKA_LIVE_ZONE_NAME=<zone> ANKKA_LIVE_ADMIN_EMAIL=<admin email> \
 ANKKA_LIVE_PREFIX=harness1 ANKKA_LIVE_MANIFEST=<candidate manifest.json> \
-npx vitest run --config vitest.live.config.ts
+npx vitest run --config vitest.live.config.ts test-live/stage2-bootstrap.live.ts
 ```
 
 `stage2-bootstrap.live.ts` builds a real plan for `mcp<prefix>.<zone>`, runs

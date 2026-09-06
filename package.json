@@ -61,7 +61,8 @@
     "test:core": "node --test test/*.test.mjs",
     "test:payload": "npm run build:admin && node --test test/release-payload-layout.test.mjs test/worker-primary-payload.test.mjs test/worker-uninstall-payload.test.mjs",
     "typecheck": "tsc --noEmit",
-    "validate": "node src/cli.ts"
+    "validate": "node src/cli.ts",
+    "test:live": "node tools/provider-cycle-command.mjs"
   },
   "devDependencies": {
     "@oxlint/plugins": "1.80.0",
