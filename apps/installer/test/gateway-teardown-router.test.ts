@@ -56,7 +56,10 @@ async function fixture() {
         return Response.json(returnsRefresh ? { ...value, refresh_token: 'synthetic-refresh-token' } : value);
       }
       if (url.href === OAUTH_REVOKE_URL) { revoked += 1; return new Response('', { status: revokeFails ? 503 : 200 }); }
-      if (url.pathname === '/client/v4/accounts') return Response.json({ success: true, errors: [], messages: [], result: [{ id: wrongAccount ? 'f'.repeat(32) : ROOT_TEST.accountId }] });
+      if (url.pathname === '/client/v4/accounts') throw new Error('Final removal must not list accounts');
+      if (wrongAccount && url.pathname.startsWith(`/client/v4/accounts/${ROOT_TEST.accountId}/`)) {
+        return Response.json({ success: false, errors: [], result: null }, { status: 403 });
+      }
       return provider.transport(request);
     },
   });

@@ -445,6 +445,7 @@ export async function executeHostedStage1Cleanup(input: HostedStage1CleanupInput
   try {
     result = await executeHostedBootstrapGrant({
       kind: 'cleanup',
+      target: { accountId: root.provision.accountId, workerName: root.provision.deployment.workerName },
       code: input.code,
       verifier: input.verifier,
       config: input.oauth,

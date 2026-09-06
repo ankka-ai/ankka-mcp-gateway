@@ -231,11 +231,11 @@ function transportFor(account: FakeAccount): (input: RequestInfo | URL, init?: R
       return new Response(null, { status: 200 });
     }
     if (path === '/client/v4/accounts') {
-      account.events.push('account-read');
-      return json([{ id: account.accountId }]);
+      throw new Error('Workers-only cleanup must not list accounts');
     }
     expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
     if (!path.startsWith(prefix)) return new Response(null, { status: 404 });
+    if (account.accountId !== ACCOUNT_ID) return Response.json({ success: false, errors: [], result: null }, { status: 403 });
     const rest = path.slice(prefix.length);
     const worker = account.worker;
     const name = account.workerName;
@@ -400,7 +400,7 @@ describe('hosted Stage 1 lost-cookie cleanup', () => {
       verifiedAbsentAt: NOW + 100,
     });
     const events = f.account.events;
-    expect(events.slice(0, 2)).toEqual(['token-exchange', 'account-read']);
+    expect(events.slice(0, 2)).toEqual(['token-exchange', 'worker-read']);
     expect(events.at(-1)).toBe('revoke');
     const firstMutation = events.findIndex((event) => MUTATIONS.includes(event));
     expect(events.slice(0, firstMutation)).toEqual(expect.arrayContaining(['worker-read', 'deployments-read', 'version-read', 'namespaces-read']));
@@ -416,9 +416,9 @@ describe('hosted Stage 1 lost-cookie cleanup', () => {
 
   it('refuses before any mutation on account, identity, version, binding, or namespace mismatch and still revokes', async () => {
     const cases: readonly { name: string; code: string; mutate: (f: Awaited<ReturnType<typeof fixture>>) => void }[] = [
-      { name: 'account', code: 'account_mismatch', mutate: (f) => { f.account.accountId = 'f'.repeat(32); } },
+      { name: 'account', code: 'oauth_exchange_failed', mutate: (f) => { f.account.accountId = 'f'.repeat(32); } },
       { name: 'workerId', code: 'identity_mismatch', mutate: (f) => { if (f.account.worker) f.account.worker.id = 'f'.repeat(32); } },
-      { name: 'workerMissing', code: 'identity_mismatch', mutate: (f) => { f.account.worker = null; } },
+      { name: 'workerMissing', code: 'oauth_exchange_failed', mutate: (f) => { f.account.worker = null; } },
       { name: 'tags', code: 'identity_mismatch', mutate: (f) => { f.account.worker?.tags.push('ankka-stage1-live-canary'); } },
       { name: 'activeVersion', code: 'identity_mismatch', mutate: (f) => { f.account.activeVersionId = RETIREMENT_VERSION_ID; } },
       {
