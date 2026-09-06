@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
 
 import { decodeWorkerModuleBase64 } from '../src/worker-module-base64';
@@ -26,6 +27,19 @@ describe('canonical Worker module base64', () => {
     const bytes = decodeWorkerModuleBase64(btoa('a'.repeat(size)), size);
     expect(bytes?.byteLength).toBe(size);
     expect(bytes?.every((byte) => byte === 97)).toBe(true);
+  });
+
+  it('decodes the maximum module in a process with a 64 MiB JavaScript heap', () => {
+    const moduleUrl = new URL('../src/worker-module-base64.ts', import.meta.url).href;
+    const script = `
+      import { decodeWorkerModuleBase64 } from ${JSON.stringify(moduleUrl)};
+      const size = 8 * 1024 * 1024;
+      const bytes = decodeWorkerModuleBase64(btoa('a'.repeat(size)), size);
+      if (bytes?.length !== size || !bytes.every(byte => byte === 97)) process.exit(1);
+    `;
+    expect(() => execFileSync(process.execPath, [
+      '--max-old-space-size=64', '--experimental-strip-types', '--input-type=module', '-e', script,
+    ], { timeout: 30_000, stdio: 'pipe' })).not.toThrow();
   });
 
   it('rejects byte and encoded length overflow, including within a padded quartet', () => {
