@@ -1,6 +1,7 @@
 import { chromium } from 'playwright-core';
 
-const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
+const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
+const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth\/start)$/u;
 const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
 
 export class LiveGatewayBrowserError extends Error {
@@ -21,21 +22,51 @@ export function validateLiveBrowserOrigin(value) {
 }
 
 export function validateLiveBrowserRequest(origins, origin, path, method) {
-  if (!origins.includes(origin) || !API_PATH.test(path) || !METHODS.has(method)) {
+  if (!origins.includes(origin) || !(API_PATH.test(path) || BOOTSTRAP_PATH.test(path)) || !METHODS.has(method)) {
     throw new LiveGatewayBrowserError('request_outside_lifecycle');
   }
 }
 
+export function validateLiveBootstrapOrigin(provision) {
+  if (!/^acg-[a-f0-9]{24}$/u.test(provision?.installId) ||
+      provision.workerName !== `ankka-gateway-${provision.installId}`) {
+    throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
+  }
+  const origin = validateLiveBrowserOrigin(provision.bootstrapOrigin);
+  const labels = new URL(origin).hostname.split('.');
+  if (labels.length !== 4 || labels[0] !== provision.workerName ||
+      !/^[a-z0-9-]{1,63}$/u.test(labels[1]) || labels.slice(2).join('.') !== 'workers.dev') {
+    throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
+  }
+  return origin;
+}
+
+export function validateLiveHandoff(value, origin, path) {
+  let url;
+  try { url = new URL(value); } catch { throw new LiveGatewayBrowserError('handoff_invalid'); }
+  if (url.origin !== origin || url.pathname !== path || url.search || url.username || url.password ||
+      !/^#[A-Za-z0-9_-]{40,65536}$/u.test(url.hash)) throw new LiveGatewayBrowserError('handoff_invalid');
+  return url.href;
+}
+
 /** Own ephemeral browser. No CDP attachment, cookies exported, traces or HAR files. */
-export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, notify }) {
+export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, browserProfile, notify }) {
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
-  const browser = await chromium.launch({ channel: 'chrome', headless: false });
-  const context = await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
+  const browser = browserProfile ? null : await chromium.launch({ channel: 'chrome', headless: false });
+  const context = browserProfile
+    ? await chromium.launchPersistentContext(browserProfile, {
+      channel: 'chrome', headless: false, acceptDownloads: false, serviceWorkers: 'block',
+      // A manually authenticated Chrome profile uses the real OS keychain.
+      // Mock/basic stores cannot decrypt that profile's existing login cookies.
+      ignoreDefaultArgs: ['--use-mock-keychain', '--password-store=basic'],
+    })
+    : await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
   const page = await context.newPage();
   page.setDefaultTimeout(30_000);
   let interrupted = false;
   let interruptionArmed = false;
   let interruptionError = null;
+  let cancelled = false;
 
   async function navigate(url) {
     const target = new URL(url);
@@ -78,7 +109,9 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   async function waitFor(read, accepts, { seconds = 600, instruction } = {}) {
     if (instruction) notify(instruction);
     const deadline = Date.now() + seconds * 1000;
+    let lastNotice = '';
     while (Date.now() < deadline) {
+      if (cancelled) throw new LiveGatewayBrowserError('validation_cancelled');
       if (interruptionError) throw interruptionError;
       try {
         const value = await read();
@@ -86,6 +119,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       } catch (error) {
         if (!(error instanceof LiveGatewayBrowserError) ||
             !['gateway_http_rejected', 'gateway_request_failed', 'gateway_response_invalid'].includes(error.code)) throw error;
+        const notice = `Waiting for the test browser: ${error.code}${error.status === null ? '' : ` (${error.status})`}.`;
+        if (notice !== lastNotice) { notify(notice); lastNotice = notice; }
       }
       await new Promise((resolve) => setTimeout(resolve, 1500));
     }
@@ -94,6 +129,31 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
 
   return {
     request, navigate, waitFor,
+    cancel() { cancelled = true; },
+    async clearRemovalSession() {
+      await context.clearCookies({ name: '__Host-ankka_gateway_teardown', domain: new URL(installerOrigin).hostname });
+    },
+    adoptBootstrap(provision) {
+      const origin = validateLiveBootstrapOrigin(provision);
+      if (!origins.includes(origin)) origins.push(origin);
+      return origin;
+    },
+    async continueHandoff(value, kind) {
+      const path = kind === 'teardown' ? '/__ankka/operation/teardown' : '/__ankka/operation';
+      await navigate(validateLiveHandoff(value, managementOrigin, path));
+      if (kind === 'teardown') {
+        try { await page.getByRole('button', { name: 'Authorize removal in Cloudflare', exact: true }).click(); }
+        catch { throw new LiveGatewayBrowserError('teardown_review_failed'); }
+      }
+      notify('Review and approve the test operation in Cloudflare. The runner will verify its recorded result.');
+    },
+    async continueBootstrap(value, provision) {
+      const origin = validateLiveBootstrapOrigin(provision);
+      if (!origins.includes(origin)) throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
+      await navigate(validateLiveHandoff(value, origin, '/__ankka/install'));
+      return waitFor(() => request(origin, '/__ankka/install/setup'),
+        (value) => Array.isArray(value.availableZones));
+    },
     async login(origin) {
       if (!origins.includes(origin)) throw new LiveGatewayBrowserError('origin_invalid');
       await navigate(origin);
@@ -119,6 +179,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
         try {
           response = await route.fetch({ maxRedirects: 0, timeout: 180_000 });
           if (response.status() !== 303) throw new LiveGatewayBrowserError('interruption_callback_incomplete');
+          // A redirect to an error/recovery page is not completed dependency removal.
+          validateLiveHandoff(response.headers().location, installerOrigin, '/teardown');
           interrupted = true;
           await route.abort('failed');
         } catch {
@@ -128,6 +190,6 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       });
     },
     interruptionObserved: () => interrupted,
-    async close() { await context.close(); await browser.close(); },
+    async close() { await context.close(); await browser?.close(); },
   };
 }

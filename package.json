@@ -40,6 +40,7 @@
     "canary:fixture:serve": "node fixtures/synthetic-mcp/server.mjs --host 127.0.0.1 --port 9610",
     "canary:fixture:test": "node --test test/synthetic-mcp.test.mjs",
     "validate:lifecycle": "node scripts/validate-lifecycle.mjs",
+    "validate:lifecycle:live": "node tools/live-gateway-command.mjs",
     "canary:lifecycle": "node src/canary-lifecycle-cli.ts",
     "canary:live": "node tools/live-portal-canary.mjs",
     "canary:runtime-probe": "node tools/runtime-probe-canary.mjs",

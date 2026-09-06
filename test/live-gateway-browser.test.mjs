@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { validateLiveBrowserOrigin, validateLiveBrowserRequest } from '../tools/live-gateway-browser.mjs';
+import { validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 
 test('live browser API requests are confined to exact configured origins and lifecycle routes', () => {
   const origin = 'https://manage.example.com';
@@ -18,4 +18,28 @@ test('live browser API requests are confined to exact configured origins and lif
   for (const value of ['http://manage.example.com', 'https://user:secret@manage.example.com', `${origin}/path`, `${origin}?secret`]) {
     assert.throws(() => validateLiveBrowserOrigin(value), { code: 'origin_invalid' });
   }
+});
+
+test('bootstrap navigation requires the generated Worker identity and an exact workers.dev origin', () => {
+  const installId = `acg-${'1'.repeat(24)}`;
+  const workerName = `ankka-gateway-${installId}`;
+  const provision = { installId, workerName, bootstrapOrigin: `https://${workerName}.synthetic.workers.dev` };
+  assert.equal(validateLiveBootstrapOrigin(provision), provision.bootstrapOrigin);
+  for (const changed of [
+    { workerName: 'foreign-worker' },
+    { bootstrapOrigin: 'https://foreign.example.com' },
+    { bootstrapOrigin: `${provision.bootstrapOrigin}.example.com` },
+    { installId: `acg-${'2'.repeat(24)}` },
+  ]) assert.throws(() => validateLiveBootstrapOrigin({ ...provision, ...changed }), { code: 'bootstrap_identity_invalid' });
+});
+
+test('a lost callback counts only after the exact hosted completion handoff', () => {
+  const origin = 'https://installer.example.com';
+  const fragment = 'A'.repeat(48);
+  assert.equal(validateLiveHandoff(`${origin}/teardown#${fragment}`, origin, '/teardown'), `${origin}/teardown#${fragment}`);
+  for (const value of [
+    `${origin}/teardown?result=recovery_required`, `${origin}/teardown`,
+    `https://foreign.example.com/teardown#${fragment}`, `${origin}/result#${fragment}`,
+    `${origin}/teardown?credential=hidden#${fragment}`,
+  ]) assert.throws(() => validateLiveHandoff(value, origin, '/teardown'), { code: 'handoff_invalid' });
 });

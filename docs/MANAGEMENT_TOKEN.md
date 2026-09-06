@@ -215,6 +215,12 @@ a deployed lifecycle. Live qualification still requires a disposable target,
 prepared signed releases, real durable handover, provider read-back, and
 receipt-bound cleanup. Report that separately from this offline result.
 
+`npm run validate:lifecycle:live -- --help` describes the separate interactive
+live command. It uses an isolated signed release pair and its own Chrome session,
+then checks installation, token-managed source and Team changes, signed update,
+lost-callback recovery, receipt import, and provider-confirmed removal. See
+[Live lifecycle validation](LIVE_LIFECYCLE.md) for preparation and recovery.
+
 
 Access application and policy DELETE responses with HTTP 202 now leave a
 submitted deletion boundary. Only a subsequent read confirming absence records
