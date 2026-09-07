@@ -274,7 +274,7 @@ export async function convergeStage(context: LifecycleContext): Promise<Boundary
     try {
       result = await convergeCustomerStage2({
         accessToken: context.credentials.deploymentToken, attemptId, storage: ownership, journal,
-        runtime: { updateChannel: release.bundle.channel === 'stable' ? 'stable' : 'canary', updateKeyId: release.bundle.keyId, updatePublicKey: release.bundle.publicKey },
+        runtime: { controlPlaneOrigin: release.bundle.manifest.controlPlaneOrigin, updateChannel: release.bundle.channel === 'stable' ? 'stable' : 'canary', updateKeyId: release.bundle.keyId, updatePublicKey: release.bundle.publicKey },
         bootstrap: { nonce: secrets.bootstrapNonce, expectedBindings: expected },
         finalRuntimeSource: release.finalRuntimeSource,
         payload: {

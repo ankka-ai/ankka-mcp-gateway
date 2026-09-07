@@ -18,7 +18,6 @@ import {
   type CloudflareManagementTransport,
 } from './cloudflare-management-surface';
 import { discoverHostedAccountZones, ensureHostedWorkersSubdomain, setupZonesSchema, type SetupZone } from './hosted-account-setup';
-import { PUBLIC_ORIGIN } from './constants';
 import {
   createCustomerBootstrapCapability,
   type BootstrapRandomBytes,
@@ -232,7 +231,9 @@ export function expectedCustomerBootstrapBindings(input: {
     ANKKA_GATEWAY_RELEASE: input.plan.releaseId,
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${input.plan.releaseArtifactSha256}`,
     ANKKA_INSTALL_ID: input.plan.managementOwnershipMarker,
-    ANKKA_INSTALLER_ORIGIN: PUBLIC_ORIGIN,
+    // The shell is bound to the control plane that served its release; the hosted installer accepts only
+    // releases whose control-plane origin is its own, so this equals PUBLIC_ORIGIN there.
+    ANKKA_INSTALLER_ORIGIN: input.release.manifest.controlPlaneOrigin,
     ANKKA_MANAGEMENT_HOSTNAME: isBootstrapPlan(input.plan) ? new URL(input.bootstrapCallback).hostname : input.plan.gatewayConfiguration.managementHostname,
     ANKKA_PLAN_HASH: input.plan.planHash,
     ANKKA_PLAN_ID: input.plan.planId,

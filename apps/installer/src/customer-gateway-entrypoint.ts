@@ -1,4 +1,5 @@
 import * as v from 'valibot';
+import { PUBLIC_ORIGIN } from './constants';
 import { createBigQuerySetup } from './customer-bigquery-setup';
 import { bigQuerySetupAvailable } from './customer-bigquery-deployment';
 import { createBigQueryTeardown } from './customer-bigquery-teardown';
@@ -307,6 +308,7 @@ export class AdminState extends RuntimeAdminState {
       storage: this.finalState.storage,
       journal: new CustomerStage2DurableStatePort(this.finalState.storage),
       runtime: {
+        controlPlaneOrigin: PUBLIC_ORIGIN,
         updateChannel: config.ANKKA_UPDATE_CHANNEL,
         updateKeyId: config.ANKKA_UPDATE_KEY_ID,
         updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,

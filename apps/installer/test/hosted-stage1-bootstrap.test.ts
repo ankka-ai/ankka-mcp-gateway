@@ -12,9 +12,11 @@ import { base64UrlDecode, base64UrlEncode } from '../src/crypto';
 import {
   completeHostedStage1Handoff,
   createHostedStage1Secrets,
+  expectedCustomerBootstrapBindings,
   provisionHostedStage1,
   type HostedStage1Provider,
 } from '../src/hosted-stage1-bootstrap';
+import { parseVerifiedReleaseBundle } from '../src/verified-release-bundle';
 import type { VerifiedReleaseBundle, VerifiedReleasePayloadBlob } from '../src/release';
 import {
   APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
@@ -524,3 +526,25 @@ describe('Stage 1 with the operator-managed credential', () => {
     expect(JSON.stringify(provision)).not.toContain(ACCESS_TOKEN);
   });
 });
+
+test('the shell is bound to the control-plane origin of the release that produced it, not to a compiled constant', async () => {
+  const bundle = await releaseBundle();
+  const parsed = parseVerifiedReleaseBundle(bundle);
+  const isolated = { ...parsed, manifest: { ...parsed.manifest, controlPlaneOrigin: 'https://installer.example.net' } };
+  const selection = parseDeploySelection({
+    schemaVersion: 1,
+    basics: { gatewayName: 'Example Gateway', zoneName: 'example.com', adminEmail: 'owner@example.com', additionalAdminEmails: [],
+      managementHostname: 'manage.example.com', portalHostname: 'mcp.example.com' },
+    firstSource: null,
+  });
+  const plan = await buildStaticDeployPlan(selection, bundle.manifest, NOW + 20 * 60_000);
+  const secrets = await createHostedStage1Secrets({ now: NOW });
+  const input = {
+    accountId: ACCOUNT_ID, bootstrapCallback: 'https://ankka-gateway-example.tenant.workers.dev/__ankka/install/oauth/callback',
+    customerOauthClientId: 'c'.repeat(32), issuerKeyId: 'issuer-v1', issuerPublicKey: 'A'.repeat(43),
+    plan, capability: secrets.capability, workerName: 'ankka-gateway-example',
+  };
+  expect(expectedCustomerBootstrapBindings({ ...input, release: isolated }).ANKKA_INSTALLER_ORIGIN).toBe('https://installer.example.net');
+  expect(expectedCustomerBootstrapBindings({ ...input, release: parsed }).ANKKA_INSTALLER_ORIGIN).toBe('https://deploy.ankka.ai');
+});
+

@@ -83,7 +83,6 @@ import {
   type CustomerWorkerActiveRelease,
 } from './customer-worker-self-update';
 import { sha256Hex } from './crypto';
-import { PUBLIC_ORIGIN } from './constants';
 import type { GatewayWorkerPlainTextBindings } from './cloudflare-worker-direct-upload';
 import { isPlainDataTree } from './plain-data';
 import {
@@ -143,6 +142,8 @@ export interface CustomerStage2BootstrapRuntime {
 }
 
 export interface CustomerStage2RuntimeIdentity {
+  /** The control-plane origin the bootstrap shell was bound to: the release manifest's, never a compiled constant. */
+  readonly controlPlaneOrigin: string;
   readonly updateChannel: 'canary' | 'stable';
   readonly updateKeyId: string;
   readonly updatePublicKey: string;
@@ -524,7 +525,7 @@ async function adoptOwnership(input: CustomerStage2ConvergerInput): Promise<Read
     ANKKA_GATEWAY_RELEASE: plan.releaseId,
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${plan.releaseArtifactSha256}`,
     ANKKA_INSTALL_ID: plan.managementOwnershipMarker,
-    ANKKA_INSTALLER_ORIGIN: PUBLIC_ORIGIN,
+    ANKKA_INSTALLER_ORIGIN: input.runtime.controlPlaneOrigin,
     ANKKA_MANAGEMENT_HOSTNAME: plan.bootstrapIdentity === undefined ? plan.gatewayConfiguration.managementHostname : new URL(state.trust.bootstrapCallback).hostname,
     ANKKA_PLAN_HASH: plan.bootstrapIdentity?.planHash ?? plan.planHash,
     ANKKA_PLAN_ID: plan.bootstrapIdentity?.planId ?? plan.planId,

@@ -561,6 +561,7 @@ async function fixture(fault: CustomerStage2ActionName | null = null, workerSetu
     storage,
     journal,
     runtime: {
+      controlPlaneOrigin: 'https://deploy.ankka.ai',
       updateChannel: 'stable',
       updateKeyId: UPDATE_KEY_ID,
       updatePublicKey: UPDATE_PUBLIC_KEY,

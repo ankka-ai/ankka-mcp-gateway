@@ -191,6 +191,7 @@ export class AdminState extends RuntimeAdminState {
       storage: this.bootstrapState.storage,
       journal: new CustomerStage2DurableStatePort(this.bootstrapState.storage),
       runtime: {
+        controlPlaneOrigin: config.ANKKA_INSTALLER_ORIGIN,
         updateChannel: config.ANKKA_UPDATE_CHANNEL,
         updateKeyId: config.ANKKA_UPDATE_KEY_ID,
         updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,
