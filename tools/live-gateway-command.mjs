@@ -308,9 +308,13 @@ export async function runLiveLifecycleCommand(args) {
           const action = await management(`/api/teardown-actions/${removal.actionId}`);
           if (action?.status === 'succeeded') {
             await provider.assertDependenciesAbsent(inventory);
-            await checkpoint({ stage: 'interrupted_removal', status: 'passed', recoveredActionId: removal.actionId });
+            await checkpoint({ stage: 'interrupted_removal', status: 'passed', actionId: removal.actionId });
             phase = 'root';
-          } else requireCondition(action?.status !== undefined && action.status !== 'succeeded', 'resume_point_unsupported');
+          } else if (action?.status === 'recovery_required') {
+            // The gateway cut the dependency removal short and keeps its durable completion for a fresh consent.
+            await checkpoint({ stage: 'interrupted_removal', status: 'recovery_required', actionId: removal.actionId, failureCode: action.failureCode ?? null });
+            phase = 'root';
+          } else requireCondition(action?.status !== undefined, 'resume_point_unsupported');
         }
         await checkpoint({ stage: 'resume', status: 'removal', phase });
         await removeLiveGateway({ config, browser, provider, inventory, checkpoint, phase });

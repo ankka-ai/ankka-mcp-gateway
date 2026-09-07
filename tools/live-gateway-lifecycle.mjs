@@ -119,11 +119,20 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
     await checkpoint({ stage: 'interrupted_removal', status: 'started' });
     await browser.loseNextTeardownCallbackResponse();
     const first = await beginRemoval(management, browser, checkpoint);
-    await browser.waitFor(async () => ({ interrupted: browser.interruptionObserved() }), (value) => value.interrupted);
-    const firstAction = await management(`/api/teardown-actions/${first.actionId}`);
-    requireCondition(firstAction.status === 'succeeded', 'interrupted_removal_not_completed');
-    await provider.assertDependenciesAbsent(inventory);
-    await checkpoint({ stage: 'interrupted_removal', status: 'passed' });
+    // The interruption is observed either at the browser (the lost callback response) or on the gateway, whose
+    // action ends in recovery_required when its completion was cut short; both leave a durable completion for a
+    // fresh consent to recover.
+    const outcome = await browser.waitFor(async () => browser.interruptionObserved()
+      ? { interrupted: true, action: await management(`/api/teardown-actions/${first.actionId}`) }
+      : { interrupted: false, action: await management(`/api/teardown-actions/${first.actionId}`) },
+    (value) => value.interrupted || ['succeeded', 'recovery_required', 'failed'].includes(value.action?.status));
+    if (outcome.action?.status === 'succeeded') {
+      await provider.assertDependenciesAbsent(inventory);
+      await checkpoint({ stage: 'interrupted_removal', status: 'passed', actionId: first.actionId });
+    } else {
+      requireCondition(outcome.action?.status === 'recovery_required', 'interrupted_removal_not_completed');
+      await checkpoint({ stage: 'interrupted_removal', status: 'recovery_required', actionId: first.actionId, failureCode: outcome.action.failureCode ?? null });
+    }
   }
   // Fresh consent must recover the durable completion without recreating anything.
   await beginRemoval(management, browser, checkpoint);
