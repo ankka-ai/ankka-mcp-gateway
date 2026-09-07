@@ -159,8 +159,10 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
     await checkpoint({ stage: 'dependency_removal', status: outcome.action.status, actionId: action.actionId, failureCode: outcome.action.failureCode ?? null });
   }
   requireCondition(receipt !== null, 'removal_receipt_unavailable');
-  requireCondition(receipt.hostname === config.basics.managementHostname && receipt.revocationUnconfirmed === false, 'removal_receipt_invalid');
-  await checkpoint({ stage: 'root_removal', status: 'receipt_saved', handoff: receipt.handoff });
+  requireCondition(receipt.hostname === config.basics.managementHostname, 'removal_receipt_invalid');
+  // A receipt that carries the gateway's unconfirmed-revocation warning is saved with the warning recorded: the root
+  // removal still runs and is verified, and the run then stops as root_removal_revocation_unconfirmed, never a pass.
+  await checkpoint({ stage: 'root_removal', status: 'receipt_saved', handoff: receipt.handoff, revocationUnconfirmed: receipt.revocationUnconfirmed === true });
   await browser.clearRemovalSession();
   await installer('/api/teardown/import', { method: 'POST', body: { handoff: receipt.handoff } });
   const recovered = await installer('/api/teardown');

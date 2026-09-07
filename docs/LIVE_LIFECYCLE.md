@@ -193,6 +193,11 @@ config and `--recover-removal`. Recovery does not turn an incomplete lifecycle r
 into a passing lifecycle result. Before a receipt exists, use the product's existing
 setup/removal recovery flow and the recorded action references.
 
+A receipt the gateway hands over with its unconfirmed-revocation warning is
+saved with that warning recorded; the root removal still runs and is verified,
+and the run then stops as `root_removal_revocation_unconfirmed` rather than
+passing. A receipt for a different hostname is refused.
+
 An exclusive `.lock` file protects the journal while the command runs. If the
 process is forcibly terminated, verify that it has exited before removing its stale
 lock. Journal replacements are atomic and synced. Keep the journal and receipt until

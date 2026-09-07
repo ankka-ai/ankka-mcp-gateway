@@ -160,6 +160,7 @@ test('complete orchestration proves token management, distinct update, lost call
   assert.deepEqual(evidence, ['release_b_activated', 'service_identity_proven', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
+  assert.equal(events.find((event) => event.status === 'receipt_saved').revocationUnconfirmed, false);
 });
 
 test('an attached browser holding a handed-off installer session gets a fresh draft through the installer; a provisioning one stops', async () => {
@@ -269,5 +270,27 @@ test('the removal half starts with the interrupted sequence, or with the root re
     assert.deepEqual(calls, phase === 'interrupted'
       ? ['interrupted_removal:started', 'arm', 'dependency_removal:started', '/api/teardown-actions']
       : ['dependency_removal:started', '/api/teardown-actions']);
+  }
+});
+
+test('a receipt handed over with the unconfirmed-revocation warning is saved with the warning; a foreign hostname is refused', async () => {
+  const { removeLiveGateway } = await import('../tools/live-gateway-lifecycle.mjs');
+  for (const [hostname, revocationUnconfirmed, expected] of [[config.basics.managementHostname, true, 'saved'], ['other.example.com', false, 'removal_receipt_invalid']]) {
+    const events = [];
+    const browser = {
+      waitFor: async (read, accepts) => { const value = await read(); assert.ok(accepts(value)); return value; },
+      continueHandoff: async () => {}, clearRemovalSession: async () => { throw new Error('stop_here'); },
+      request: async (origin, path) => origin === config.installerOrigin && path === '/api/teardown'
+        ? { canAuthorize: true, hostname, handoff: 'private-receipt', revocationUnconfirmed }
+        : path === '/api/teardown-actions' ? { actionId: `action_${'A'.repeat(32)}`, handoffUrl: 'synthetic' } : { status: 'succeeded' },
+    };
+    const run = removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => events.push(event), phase: 'root' });
+    if (expected === 'saved') {
+      await assert.rejects(run, /stop_here/u);
+      assert.deepEqual(events.at(-1), { stage: 'root_removal', status: 'receipt_saved', handoff: 'private-receipt', revocationUnconfirmed: true });
+    } else {
+      await assert.rejects(run, { code: 'removal_receipt_invalid' });
+      assert.ok(!events.some((event) => event.status === 'receipt_saved'));
+    }
   }
 });

@@ -323,7 +323,9 @@ export async function runLiveLifecycleCommand(args) {
         // interrupted removal starts over; a succeeded one already removed the dependencies and only the root remains.
         const inventory = state.events.findLast((event) => event.stage === 'inventory' && event.status === 'passed')?.inventory;
         requireCondition(inventory, 'inventory_required');
-        const proved = state.events.some((event) => event.stage === 'interrupted_removal' && event.status === 'passed');
+        // The interruption is proven once it was observed, whether the cut action succeeded or ended in recovery_required;
+        // a later action the journal recorded but never consented to does not send the run through a second interruption.
+        const proved = state.events.some((event) => event.stage === 'interrupted_removal' && ['passed', 'recovery_required'].includes(event.status));
         const removal = state.events.findLast((event) => event.stage === 'dependency_removal' && event.status === 'recorded');
         let phase = 'interrupted';
         if (proved) phase = 'root';
