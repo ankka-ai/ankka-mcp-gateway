@@ -1,22 +1,29 @@
 import { promises as dns } from 'node:dns';
 
 /**
- * Whether a hostname resolves when asked directly at the configured DNS servers (and Cloudflare's resolver as a
- * fallback), bypassing the operating system's cache. The first system lookup of a hostname whose record is seconds
- * old can return a negative answer that the system caches for the zone's negative TTL; asking the servers directly
- * neither consults nor pollutes that cache.
+ * Whether a hostname resolves when asked directly at every configured DNS server, bypassing the operating system's
+ * cache; Cloudflare's resolver stands in only when none is configured. The first system lookup of a hostname whose
+ * record is seconds old can return a negative answer that the system caches for the zone's negative TTL, and the
+ * system asks its configured servers, so all of them must answer before the first lookup is risked: one public
+ * resolver answering while a local forwarder still does not was enough to cache the absence for half an hour.
+ * Asking the servers directly neither consults nor pollutes that cache.
  */
 export async function hostnameResolvesDirectly(hostname, { servers = dns.getServers(), resolver = createResolver } = {}) {
-  const candidates = [...new Set([...servers.filter((server) => !server.startsWith('fd') && !server.includes('%')), '1.1.1.1'])];
+  const configured = [...new Set(servers.filter((server) => !server.startsWith('fd') && !server.includes('%')))];
+  const candidates = configured.length > 0 ? configured : ['1.1.1.1'];
   for (const server of candidates) {
-    const resolve = resolver(server);
-    for (const type of ['A', 'AAAA']) {
-      try {
-        const answers = await resolve(hostname, type);
-        if (Array.isArray(answers) && answers.length > 0) return true;
-      } catch {
-        // NXDOMAIN, timeout or an unreachable server: try the next type or server.
-      }
+    if (!await answers(resolver(server), hostname)) return false;
+  }
+  return true;
+}
+
+async function answers(resolve, hostname) {
+  for (const type of ['A', 'AAAA']) {
+    try {
+      const records = await resolve(hostname, type);
+      if (Array.isArray(records) && records.length > 0) return true;
+    } catch {
+      // NXDOMAIN, timeout or an unreachable server: try the next type.
     }
   }
   return false;
