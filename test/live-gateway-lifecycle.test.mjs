@@ -170,7 +170,7 @@ test('the Stage 2 consent holds the management origin and waits for the provider
       ready = true;
       const value = await read(); assert.ok(accepts(value)); return value;
     },
-    request: async (origin, path, options = {}) => {
+    request: async (origin, path) => {
       if (origin === config.installerOrigin) {
         if (path === '/api/plan') return { session: { plan: { releaseId: config.releaseA.release } } };
         if (path === '/api/bootstrap') return { authorizationUrl: 'https://dash.cloudflare.com/oauth2/auth?synthetic' };
