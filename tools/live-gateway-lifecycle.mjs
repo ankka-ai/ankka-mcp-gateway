@@ -1,4 +1,5 @@
 import { qualifyLiveGatewayManagement } from './live-gateway-management.mjs';
+import { LiveGatewayBrowserError } from './live-gateway-origin.mjs';
 import { hostnameResolvesDirectly } from './live-gateway-dns.mjs';
 
 export class LiveLifecycleError extends Error {
@@ -134,9 +135,26 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
       await checkpoint({ stage: 'interrupted_removal', status: 'recovery_required', actionId: first.actionId, failureCode: outcome.action.failureCode ?? null });
     }
   }
-  // Fresh consent must recover the durable completion without recreating anything.
-  await beginRemoval(management, browser, checkpoint);
-  const receipt = await browser.waitFor(() => installer('/api/teardown'), (value) => value?.canAuthorize === true);
+  // Fresh consent must recover the durable completion without recreating anything. While dependencies remain, each
+  // consent continues their removal on the gateway; once they are gone the gateway hands the receipt to the installer.
+  let receipt = null;
+  for (let round = 0; receipt === null && round < 4; round += 1) {
+    const action = await beginRemoval(management, browser, checkpoint);
+    const outcome = await browser.waitFor(async () => {
+      try {
+        const review = await installer('/api/teardown');
+        if (review?.canAuthorize === true) return { review, action: null };
+      } catch (error) {
+        if (!(error instanceof LiveGatewayBrowserError && error.code === 'gateway_http_rejected')) throw error;
+      }
+      return { review: null, action: await management(`/api/teardown-actions/${action.actionId}`) };
+    }, (value) => value.review !== null || ['succeeded', 'recovery_required', 'failed'].includes(value.action?.status));
+    if (outcome.review !== null) { receipt = outcome.review; break; }
+    requireCondition(outcome.action.status !== 'failed', 'dependency_removal_failed');
+    if (outcome.action.status === 'succeeded') await provider.assertDependenciesAbsent(inventory);
+    await checkpoint({ stage: 'dependency_removal', status: outcome.action.status, actionId: action.actionId, failureCode: outcome.action.failureCode ?? null });
+  }
+  requireCondition(receipt !== null, 'removal_receipt_unavailable');
   requireCondition(receipt.hostname === config.basics.managementHostname && receipt.revocationUnconfirmed === false, 'removal_receipt_invalid');
   await checkpoint({ stage: 'root_removal', status: 'receipt_saved', handoff: receipt.handoff });
   await browser.clearRemovalSession();
