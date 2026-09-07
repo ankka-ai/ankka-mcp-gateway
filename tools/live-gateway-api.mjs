@@ -10,7 +10,7 @@ const paths = {
   POST: /^\/api\/(?:sources\/discover|source-actions|source-actions\/action_[A-Za-z0-9_-]{32}\/renew|team-actions)$/u,
   PUT: /^\/api\/sources$/u,
 };
-const REQUEST_TIMEOUT_MS = 120_000;
+export const REQUEST_TIMEOUT_MS = 120_000;
 
 /** Routes a rejection probe may address: the ones the gateway must refuse to a service identity, plus its allowed reads. */
 const probePaths = {

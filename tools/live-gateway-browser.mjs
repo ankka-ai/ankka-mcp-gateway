@@ -8,6 +8,12 @@ const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(
 const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth\/start)$/u;
 const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
 
+/**
+ * A gateway action applies Portal and Access policy changes before it answers, and a Team write has taken more than
+ * thirty seconds live. A write is never retried, so the runner waits for it as long as the API client does.
+ */
+export const BROWSER_REQUEST_TIMEOUT_MS = 120_000;
+
 export function validateLiveBrowserRequest(origins, origin, path, method) {
   if (!origins.includes(origin) || !(API_PATH.test(path) || BOOTSTRAP_PATH.test(path)) || !METHODS.has(method)) {
     throw new LiveGatewayBrowserError('request_outside_lifecycle');
@@ -78,7 +84,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     let response;
     try {
       const options = {
-        method, maxRedirects: 0, timeout: 30_000,
+        method, maxRedirects: 0, timeout: BROWSER_REQUEST_TIMEOUT_MS,
         headers: { origin, accept: 'application/json' },
       };
       if (body !== undefined) {

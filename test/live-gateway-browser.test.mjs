@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { BROWSER_REQUEST_TIMEOUT_MS } from '../tools/live-gateway-browser.mjs';
+import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
 import { validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 
 test('live browser API requests are confined to exact configured origins and lifecycle routes', () => {
@@ -46,4 +48,9 @@ test('a lost callback counts only after the exact hosted completion handoff', ()
     `https://foreign.example.com/teardown#${fragment}`, `${origin}/result#${fragment}`,
     `${origin}/teardown?credential=hidden#${fragment}`,
   ]) assert.throws(() => validateLiveHandoff(value, origin, '/teardown'), { code: 'handoff_invalid' });
+});
+
+test('the browser runner waits for a gateway write as long as the API client does, since neither retries one', () => {
+  assert.equal(BROWSER_REQUEST_TIMEOUT_MS, REQUEST_TIMEOUT_MS);
+  assert.ok(BROWSER_REQUEST_TIMEOUT_MS >= 120_000);
 });
