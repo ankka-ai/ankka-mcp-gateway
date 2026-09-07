@@ -64,7 +64,6 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
  * the journal: management token wait, management exercise, inventory, signed update, interrupted and completed removal.
  */
 export async function continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify }) {
-  const installer = (path, options) => browser.request(config.installerOrigin, path, options);
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
   notify('Install the approved management token directly as the gateway secret in Cloudflare. This command never receives that token.');
   await browser.waitFor(() => management('/api/team'), (value) =>
@@ -76,7 +75,16 @@ export async function continueLiveGatewayLifecycle({ config, browser, provider, 
   const source = await qualifyLiveGatewayManagement({ request: management, source: config.source, checkpoint });
   const inventory = await provider.capture(provision);
   await checkpoint({ stage: 'inventory', status: 'passed', inventory });
+  await finishLiveGatewayLifecycle({ config, browser, provider, inventory, source, publishB, checkpoint });
+}
 
+/**
+ * The signed update and the interrupted, then completed, removal. Also entered by `--resume-installed` after an update
+ * action failed terminally, with the inventory from the journal and the installed source read back from the gateway.
+ */
+export async function finishLiveGatewayLifecycle({ config, browser, provider, inventory, source, publishB, checkpoint }) {
+  const installer = (path, options) => browser.request(config.installerOrigin, path, options);
+  const management = (path, options) => browser.request(config.managementOrigin, path, options);
   await checkpoint({ stage: 'update', status: 'started' });
   await publishB();
   await browser.waitFor(() => management('/api/update'), (value) => exactRelease(value?.available, config.releaseB));

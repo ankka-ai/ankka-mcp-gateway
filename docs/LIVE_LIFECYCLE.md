@@ -102,8 +102,9 @@ The summary includes scope, passed stages, the last stage, a fixed failure code,
 and whether a removal receipt is available. It omits configuration, credentials,
 and the receipt itself. `--resume-installed` continues a journal whose installation
 passed but whose later stages did not run (for example a runner stop while waiting
-for the management token); it refuses a journal whose update already started, and
-the journal records the resume. A saved receipt supports `--recover-removal` with the full
+for the management token) or whose last update action failed terminally on the
+gateway, in which case a new update action follows and both stay in the journal;
+anything later is refused, and the journal records every resume. A saved receipt supports `--recover-removal` with the full
 lifecycle config; earlier failures still require the recorded product recovery flow.
 
 ## Full browser lifecycle

@@ -210,3 +210,15 @@ test('the continuation waits for the team and sources views before the managemen
   assert.deepEqual(reads.slice(0, 4), ['/api/team', '/api/team', '/api/sources', '/api/sources']);
   assert.equal(reads.at(-1), '/api/sources/discover');
 });
+
+test('the finishing half publishes release B before it waits for the gateway to offer it', async () => {
+  const { finishLiveGatewayLifecycle } = await import('../tools/live-gateway-lifecycle.mjs');
+  const order = [];
+  const browser = {
+    waitFor: async (read) => { order.push('wait'); return read(); },
+    request: async (_origin, path) => { order.push(path); throw new Error('stop_here'); },
+  };
+  await assert.rejects(finishLiveGatewayLifecycle({ config, browser, provider: {}, inventory: { synthetic: true }, source: { sourceId: 'synthetic', baselineMembers: [] },
+    publishB: async () => { order.push('publishB'); }, checkpoint: async () => {} }), /stop_here/u);
+  assert.deepEqual(order, ['publishB', 'wait', '/api/update']);
+});
