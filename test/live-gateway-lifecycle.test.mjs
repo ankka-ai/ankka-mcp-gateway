@@ -189,3 +189,24 @@ test('the Stage 2 consent holds the management origin and waits for the provider
   assert.deepEqual(consents.map((options) => options?.holdOrigin), [undefined, config.managementOrigin]);
   assert.deepEqual(managementReads, ['/api/status', '/api/update']);
 });
+
+test('the continuation waits for the team and sources views before the management exercise', async () => {
+  const { continueLiveGatewayLifecycle } = await import('../tools/live-gateway-lifecycle.mjs');
+  const provision = { installId: `acg-${'4'.repeat(24)}`, workerName: `ankka-gateway-acg-${'4'.repeat(24)}`, bootstrapOrigin: `https://ankka-gateway-acg-${'4'.repeat(24)}.synthetic.workers.dev` };
+  const reads = [];
+  let polls = 0;
+  const browser = {
+    waitFor: async (read, accepts) => { for (;;) { const value = await read(); if (accepts(value)) return value; } },
+    request: async (origin, path) => {
+      assert.equal(origin, config.managementOrigin);
+      reads.push(path); polls += 1;
+      if (path === '/api/team') return { schemaVersion: 1, managementCredentialConfigured: polls > 1, editingEnabled: polls > 1, adminEmails: [config.basics.adminEmail],
+        observedAt: '2026-09-01T00:00:00.000Z', revision: 0, members: [{ email: config.basics.adminEmail, sourceIds: [] }] };
+      if (path === '/api/sources') return { applyMode: polls > 3 ? 'account_token' : 'oauth_per_action', installationEnabled: true, schemaVersion: 1, revision: 1, sources: [] };
+      throw new Error('stop_here');
+    },
+  };
+  await assert.rejects(continueLiveGatewayLifecycle({ config, browser, provider: {}, provision, publishB: async () => {}, checkpoint: async () => {}, notify: () => {} }), /stop_here/u);
+  assert.deepEqual(reads.slice(0, 4), ['/api/team', '/api/team', '/api/sources', '/api/sources']);
+  assert.equal(reads.at(-1), '/api/sources/discover');
+});

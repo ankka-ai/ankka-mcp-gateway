@@ -12,7 +12,7 @@ import { resolveOperatorCredential } from './operator-credential.mjs';
 import { LiveGatewayAccessError } from './live-gateway-access.mjs';
 import { qualifyLiveGatewayManagement, LiveManagementQualificationError } from './live-gateway-management.mjs';
 import { createLiveGatewayProvider } from './live-gateway-provider.mjs';
-import { qualifyLiveGatewayLifecycle, finishLiveGatewayRemoval, LiveLifecycleError } from './live-gateway-lifecycle.mjs';
+import { LiveLifecycleError, continueLiveGatewayLifecycle, finishLiveGatewayRemoval, qualifyLiveGatewayLifecycle } from './live-gateway-lifecycle.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const text = v.pipe(v.string(), v.minLength(1));
@@ -78,6 +78,7 @@ export function summarizeLiveJournal(state) {
     lastStage: state.events.findLast((event) => event.stage !== 'command')?.stage ?? null,
     failureCode: state.events.findLast((event) => event.status === 'stopped')?.failureCode ?? null,
     removalReceiptAvailable: state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
+    resumed: state.events.some((event) => event.stage === 'resume'),
   };
 }
 
@@ -136,10 +137,11 @@ async function validateReleasePair(config) {
 }
 
 export async function runLiveLifecycleCommand(args) {
-  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --check-access | --preflight | --management-api | --status]\nFull browser lifecycle requires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access checks cached installer Access over HTTP without Chrome, deployment, or a journal.\n--preflight also validates the release pair and provider inventory without deployment.\n--management-api uses a minimal management config and cached gateway Access; no Chrome or infrastructure token. It installs one synthetic source and grants/removes synthetic membership. The source remains for lifecycle teardown.\n--status reports private journal progress without network access. Neither API checks nor removal recovery qualify the full browser lifecycle.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.';
+  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --resume-installed | --check-access | --preflight | --management-api | --status]\nFull browser lifecycle requires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access checks cached installer Access over HTTP without Chrome, deployment, or a journal.\n--preflight also validates the release pair and provider inventory without deployment.\n--management-api uses a minimal management config and cached gateway Access; no Chrome or infrastructure token. It installs one synthetic source and grants/removes synthetic membership. The source remains for lifecycle teardown.\n--status reports private journal progress without network access. Neither API checks nor removal recovery qualify the full browser lifecycle.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.\n--resume-installed continues a journal whose installation passed but whose later stages did not run; it refuses a journal whose update already started.';
   if (args.length === 1 && args[0] === '--help') { console.log(help); return 0; }
-  requireCondition((args.length === 2 || args.length === 3 && ['--recover-removal', '--check-access', '--preflight', '--management-api', '--status'].includes(args[2])) && args[0] === '--config', 'usage_invalid');
+  requireCondition((args.length === 2 || args.length === 3 && ['--recover-removal', '--resume-installed', '--check-access', '--preflight', '--management-api', '--status'].includes(args[2])) && args[0] === '--config', 'usage_invalid');
   const recover = args[2] === '--recover-removal';
+  const resumeInstalled = args[2] === '--resume-installed';
   const apiOnly = args[2] === '--management-api';
   const input = await readPrivateJson(args[1]);
   if (args[2] === '--status') {
@@ -172,12 +174,12 @@ export async function runLiveLifecycleCommand(args) {
     ((await lstat(parent)).mode & 0o077) === 0, 'private_journal_directory_required');
   const provider = apiOnly ? null : createLiveGatewayProvider({ config, token });
   let state = { schemaVersion: 1, config, scope: apiOnly ? 'management_api' : 'browser_lifecycle', events: [], qualified: false };
-  if (recover) {
+  if (recover || resumeInstalled) {
     state = await readPrivateJson(config.journal);
     requireCondition(JSON.stringify(state.config) === JSON.stringify(config) && Array.isArray(state.events), 'recovery_config_mismatch');
   }
   // Exclusive create makes accidental reruns fail before any cloud mutation.
-  const journal = await open(config.journal, recover ? 'r+' : 'wx', 0o600);
+  const journal = await open(config.journal, recover || resumeInstalled ? 'r+' : 'wx', 0o600);
   await journal.close();
   const lock = await open(`${config.journal}.lock`, 'wx', 0o600);
   let browser;
@@ -236,7 +238,13 @@ export async function runLiveLifecycleCommand(args) {
       return 0;
     }
     // Validate local artifacts and provider reads before opening Chrome or deploying.
-    if (!recover) {
+    if (resumeInstalled) {
+      // Only a journal that stopped between a passed installation and the update may continue; anything later
+      // would repeat a mutation the journal already recorded.
+      await validateReleasePair(config);
+      requireCondition(state.events.some((event) => event.stage === 'installation' && event.status === 'passed') &&
+        !state.events.some((event) => event.stage === 'update' || event.stage === 'lifecycle'), 'resume_point_unsupported');
+    } else if (!recover) {
       await validateReleasePair(config);
       await provider.assertFresh();
     } else {
@@ -248,7 +256,7 @@ export async function runLiveLifecycleCommand(args) {
     browser = await openLiveGatewayBrowser({ ...config, notify: console.log });
     await browser.login(config.installerOrigin);
     await checkpoint({ stage: 'access', status: 'passed' });
-    if (!recover) {
+    if (!recover && !resumeInstalled) {
       await checkpoint({ stage: 'installer_deployment', status: 'started' });
       await deployInstaller(config, config.installerA, config.releaseA);
       await checkpoint({ stage: 'installer_deployment', status: 'passed' });
@@ -264,6 +272,13 @@ export async function runLiveLifecycleCommand(args) {
       await installer('/api/teardown/import', { method: 'POST', body: { handoff: receipt.handoff } });
       await finishLiveGatewayRemoval({ browser, installer, provider, inventory, checkpoint });
       await checkpoint({ stage: 'recovery', status: 'passed' });
+    } else if (resumeInstalled) {
+      const provision = state.events.findLast((event) => event.stage === 'installation' && event.status === 'shell_installed')?.provision;
+      requireCondition(provision, 'installation_provision_required');
+      await provider.assertWorker(provision);
+      await checkpoint({ stage: 'resume', status: 'installed' });
+      await continueLiveGatewayLifecycle({ config, browser, provider, provision, checkpoint, notify: console.log,
+        publishB: () => deployInstaller(config, config.installerB, config.releaseB) });
     } else await qualifyLiveGatewayLifecycle({ config, browser, provider, checkpoint, notify: console.log,
       publishB: () => deployInstaller(config, config.installerB, config.releaseB) });
     return 0;

@@ -56,10 +56,23 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   const updateA = await management('/api/update');
   requireCondition(exactRelease(updateA.current, config.releaseA), 'installed_release_mismatch');
   await checkpoint({ stage: 'installation', status: 'passed' });
+  await continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify });
+}
 
+/**
+ * Everything after a passed installation, also entered by `--resume-installed` with the provision recovered from
+ * the journal: management token wait, management exercise, inventory, signed update, interrupted and completed removal.
+ */
+export async function continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify }) {
+  const installer = (path, options) => browser.request(config.installerOrigin, path, options);
+  const management = (path, options) => browser.request(config.managementOrigin, path, options);
   notify('Install the approved management token directly as the gateway secret in Cloudflare. This command never receives that token.');
   await browser.waitFor(() => management('/api/team'), (value) =>
     value?.managementCredentialConfigured === true && value.editingEnabled === true);
+  // A dashboard deployment reaches the edge gradually; the sources view must show the token-managed mode too before
+  // the exercise starts, or consecutive reads can straddle two Worker versions.
+  await browser.waitFor(() => management('/api/sources'), (value) =>
+    value?.applyMode === 'account_token' && value.installationEnabled === true);
   const source = await qualifyLiveGatewayManagement({ request: management, source: config.source, checkpoint });
   const inventory = await provider.capture(provision);
   await checkpoint({ stage: 'inventory', status: 'passed', inventory });
