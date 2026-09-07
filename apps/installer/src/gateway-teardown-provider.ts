@@ -176,7 +176,16 @@ async function scriptsUnshared(call: Call, rootPresent: boolean, namespaceExists
     const name = parsed.output.id;
     seen.add(name);
     const owned = name === owner.worker.name;
-    const response = await request(call, 'worker_bindings', account(call, `/workers/scripts/${name}/settings`), {}, settling && owned);
+    let response;
+    try {
+      response = await request(call, 'worker_bindings', account(call, `/workers/scripts/${name}/settings`), {}, settling && owned);
+    } catch (error) {
+      // A just-written owner Worker can answer its settings read with a transient provider
+      // error (5xx or timeout) while the upload settles. Inside the caller's bounded settling
+      // loop this is re-read, not judged; the strict settling=false inventory still throws.
+      if (settling && owned && error instanceof GatewayTeardownProviderError && error.code === 'provider_unknown') { consistent = false; continue; }
+      throw error;
+    }
     if (response.absent) { consistent = false; continue; }
     const settings = v.safeParse(settingsSchema, response.value);
     if (!settings.success) fail('worker_bindings', 'provider_unknown');

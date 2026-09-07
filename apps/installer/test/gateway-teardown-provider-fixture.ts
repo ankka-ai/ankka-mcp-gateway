@@ -41,6 +41,7 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
   let failBefore: GatewayRootRemovalStep | null = null;
   let namespaceLag = 0;
   let deploymentLag = 0;
+  let settingsFlaky = 0;
   let foreignVersionBinding = false;
   const ok = <Value>(result: Value): Response => Response.json({ success: true, errors: [], messages: [], result });
   const absent = (): Response => Response.json({ success: false }, { status: 404 });
@@ -76,7 +77,11 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
           ...(additionalNamespace ? [{ id: 'e'.repeat(32), script: root.workerName, class: 'ForeignState', use_sqlite: true }] : [])]);
       }
       if (path === `${base}/workers/scripts`) return ok([...(live.worker ? [{ id: root.workerName }] : []), ...((sharedNamespace || sharedService) ? [{ id: 'foreign-worker' }] : [])]);
-      if (path === `${base}/workers/scripts/${root.workerName}/settings`) return ok({ bindings: live.retired ? [] : [{ type: 'durable_object_namespace', name: 'ADMIN_STATE', class_name: 'AdminState', namespace_id: root.namespaceId }] });
+      if (path === `${base}/workers/scripts/${root.workerName}/settings`) {
+        // The owner Worker's settings endpoint can 5xx transiently right after its retirement upload.
+        if (live.retired && settingsFlaky > 0) { settingsFlaky -= 1; return failure(); }
+        return ok({ bindings: live.retired ? [] : [{ type: 'durable_object_namespace', name: 'ADMIN_STATE', class_name: 'AdminState', namespace_id: root.namespaceId }] });
+      }
       if (path === `${base}/workers/scripts/foreign-worker/settings`) return ok({ bindings: sharedService ? [{ type: 'service', name: 'FOREIGN', service: root.workerName }] : [{ type: 'durable_object_namespace', name: 'FOREIGN', namespace_id: root.namespaceId }] });
       if (path === `${base}/workers/domains`) return ok([...(live.domain ? [domain] : []), ...(extraDomain ? [{ ...domain, id: 'other-domain', hostname: 'other.example.com' }] : [])]);
       if (path === `${base}/workers/domains/${root.domainId}`) return live.domain ? ok(domain) : absent();
@@ -147,6 +152,7 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
     },
     foreignVersionBinding: () => { foreignVersionBinding = true; },
     lag: (listing: 'namespace' | 'deployment' = 'namespace', reads = 2) => { if (listing === 'namespace') namespaceLag = reads; else deploymentLag = reads; },
+    flakySettings: (reads = 2) => { settingsFlaky = reads; },
     renew: () => {
       job = settleGatewayTeardownAttempt({ job, attemptId: ATTEMPT, revocation: 'confirmed', now: clock++ });
       job = authorizeGatewayTeardownJob({ job, attemptId: NEXT_ATTEMPT, ...HASHES, now: clock++ });

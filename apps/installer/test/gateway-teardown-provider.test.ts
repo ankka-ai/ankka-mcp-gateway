@@ -58,6 +58,19 @@ describe('fixed hosted gateway root removal', () => {
     expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
   });
 
+  it('retries a transient owner settings error while the retirement upload settles', async () => {
+    const test = await fixture(); test.flakySettings(2);
+    expect((await test.run()).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+  });
+
+  it('stops a settling step with a bounded absence_not_proven when the owner settings never recover', async () => {
+    const test = await fixture(); test.flakySettings(100);
+    await expect(test.run()).rejects.toMatchObject({ stage: 'retire_namespace', code: 'absence_not_proven' });
+    expect(test.current().pendingStep).toBe('retire_namespace');
+    expect(test.mutations).toEqual(['retire_namespace']);
+  });
+
   it('allows bounded deployment-list propagation after the namespace listing drops the class', async () => {
     const test = await fixture(); test.lag('deployment');
     expect((await test.run()).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
