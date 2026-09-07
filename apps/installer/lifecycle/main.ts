@@ -7,7 +7,7 @@ import { fixedCloudflareOperationAuthority, type ExternalRunnerOperation } from 
 import { assertLifecycleJobApproved, lifecycleHostnames, readLifecycleJob, type LifecycleStage } from '../../../tools/lifecycle-job.mjs';
 import { registerRunLockChild } from '../../../tools/lifecycle-lock.mjs';
 import { openLifecycleRecord, readInstallationSecrets, writeInstallationSecrets } from '../../../tools/lifecycle-record.mjs';
-import { createLiveGatewayProvider } from '../../../tools/live-gateway-provider.mjs';
+import { createLiveGatewayProvider, type LiveGatewayProviderConfig } from '../../../tools/live-gateway-provider.mjs';
 import {
   importPayloadModule, installationSecretsSchema, LifecycleStageError,
   type InstallationSecrets, type LifecycleContext, type PayloadModule,
@@ -133,6 +133,14 @@ async function runStage(stage: LifecycleStage, jobPath: string, runDirectory: st
     payloadModule ??= importPayloadModule(pathToFileURL(resolve(process.cwd(), 'payload/worker/index.js')).href);
     return payloadModule;
   };
+  // The inventory expects the receipt-owned Service Auth policy only when the job opted the gateway into a service identity.
+  const providerBase: LiveGatewayProviderConfig = {
+    accountId: job.target.accountId, zoneId: job.target.zoneId, source: { url: job.source.url },
+    basics: { zoneName: job.target.zoneName, managementHostname: hostnames.management, portalHostname: hostnames.portal },
+  };
+  const providerConfig: LiveGatewayProviderConfig = job.credentials.service === undefined
+    ? providerBase
+    : { ...providerBase, serviceAccess: { tokenId: job.credentials.service.tokenId } };
   const context: LifecycleContext = {
     job, hostnames, record,
     credentials: {
@@ -142,8 +150,7 @@ async function runStage(stage: LifecycleStage, jobPath: string, runDirectory: st
     },
     transport: guarded.transport,
     provider: createLiveGatewayProvider({
-      config: { accountId: job.target.accountId, zoneId: job.target.zoneId, source: { url: job.source.url },
-        basics: { zoneName: job.target.zoneName, managementHostname: hostnames.management, portalHostname: hostnames.portal } },
+      config: providerConfig,
       token: deploymentToken, transport: (input, init) => guarded.transport(input, init),
     }),
     now: Date.now,

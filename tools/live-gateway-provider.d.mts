@@ -10,6 +10,8 @@ export interface LiveGatewayProviderConfig {
   readonly accountId: string; readonly zoneId: string;
   readonly basics: { readonly zoneName: string; readonly managementHostname: string; readonly portalHostname: string };
   readonly source?: { readonly url: string };
+  /** Present when the deployment opted into a service identity: the inventory then expects its Service Auth policy. */
+  readonly serviceAccess?: { readonly tokenId: string };
 }
 export interface LiveGatewayProvider {
   metrics(provision: LiveGatewayProvision): Promise<BoundaryValue | null>;

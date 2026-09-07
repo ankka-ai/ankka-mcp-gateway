@@ -127,11 +127,18 @@ export function createLiveGatewayProvider({ config, token, transport = fetch }) 
       requireCondition(ownedApps.length === 3, 'access_inventory_incomplete');
       const resources = [locator(`${account}/access/ai-controls/mcp/portals`, ownedPortals[0], true),
         ...servers.map((item) => locator(`${account}/access/ai-controls/mcp/servers`, item, true))];
+      const serviceTokenId = config.serviceAccess?.tokenId ?? null;
       for (const app of ownedApps) {
         const dependency = app.domain !== config.basics.managementHostname;
         const appPath = `${account}/access/apps/${encodeURIComponent(app.id)}`;
         const policies = await list(`${appPath}/policies`);
-        requireCondition(policies.length === 1, 'policy_inventory_incomplete');
+        // Each application carries one policy, except that a management application whose deployment opted into a
+        // service identity also carries exactly one Service Auth policy admitting exactly that token.
+        const servicePolicies = policies.filter((item) => item.decision === 'non_identity');
+        const expectedServicePolicies = !dependency && serviceTokenId !== null ? 1 : 0;
+        requireCondition(policies.length === 1 + expectedServicePolicies && servicePolicies.length === expectedServicePolicies &&
+          servicePolicies.every((item) => item.include?.length === 1 && item.include[0]?.service_token?.token_id === serviceTokenId),
+        'policy_inventory_incomplete');
         resources.push(...policies.map((item) => locator(`${appPath}/policies`, item, dependency)), locator(`${account}/access/apps`, app, dependency));
       }
       const records = await dns();
