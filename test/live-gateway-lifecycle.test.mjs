@@ -120,7 +120,7 @@ test('complete orchestration proves token management, distinct update, lost call
     interruptionObserved: () => interrupted,
     clearRemovalSession: async () => evidence.push('removal_cookie_cleared'),
   };
-  await qualifyLiveGatewayLifecycle({ config, browser, notify: () => {},
+  await qualifyLiveGatewayLifecycle({ config, browser, notify: () => {}, resolves: async () => true,
     checkpoint: async (event) => events.push(event),
     publishB: async () => { available = runtimeIdentity(config.releaseB); evidence.push('release_b_activated'); },
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
@@ -185,7 +185,10 @@ test('the Stage 2 consent holds the management origin and waits for the provider
     },
   };
   const provider = { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => ready };
-  await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider, checkpoint: async () => {}, notify: () => {} }), /stop_here/u);
+  const resolutions = [];
+  await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider, checkpoint: async () => {}, notify: () => {},
+    resolves: async (hostname) => { resolutions.push(hostname); return true; } }), /stop_here/u);
+  assert.deepEqual(resolutions, [new URL(config.managementOrigin).hostname]);
   assert.deepEqual(consents.map((options) => options?.holdOrigin), [undefined, config.managementOrigin]);
   assert.deepEqual(managementReads, ['/api/status', '/api/update']);
 });

@@ -1,4 +1,5 @@
 import { qualifyLiveGatewayManagement } from './live-gateway-management.mjs';
+import { hostnameResolvesDirectly } from './live-gateway-dns.mjs';
 
 export class LiveLifecycleError extends Error {
   constructor(code) { super(code); this.code = code; }
@@ -13,7 +14,7 @@ const exactRelease = (value, expected) => value?.release === expected.release &&
  * OAuth is reviewed in the runner's own browser; routine management uses the
  * gateway's account token. The operator token belongs only to the provider port.
  */
-export async function qualifyLiveGatewayLifecycle({ config, browser, provider, publishB, checkpoint, notify }) {
+export async function qualifyLiveGatewayLifecycle({ config, browser, provider, publishB, checkpoint, notify, resolves = hostnameResolvesDirectly }) {
   const installer = (path, options) => browser.request(config.installerOrigin, path, options);
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
   await provider.assertFresh();
@@ -50,8 +51,11 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   // The consent callback sends the browser to the management hostname before its record exists, and a negative
   // answer is cached for the zone's negative TTL. The runner therefore reads the provider until the custom domain is
   // attached and only then touches the hostname; the browser is held off that origin for the same window.
+  // The custom domain is listed a few seconds before its record is served; the first system lookup in that gap
+  // would be cached negatively, so the hostname must also resolve when the DNS servers are asked directly.
+  const managementHostname = new URL(config.managementOrigin).hostname;
   await browser.consent(setup.authorizationUrl,
-    async () => (await provider.managementDomainReady(provision) ? management('/api/status') : null),
+    async () => (await provider.managementDomainReady(provision) && await resolves(managementHostname) ? management('/api/status') : null),
     (value) => value?.schemaVersion === 1, { holdOrigin: config.managementOrigin });
   const updateA = await management('/api/update');
   requireCondition(exactRelease(updateA.current, config.releaseA), 'installed_release_mismatch');
