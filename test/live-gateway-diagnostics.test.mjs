@@ -41,10 +41,10 @@ test('the report carries the hosted root job\'s outcome: status, steps done, the
     { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, revocationUnconfirmed: true },
   ];
   const result = await lifecycleFailureReport({ failureCode: 'root_removal_failed', events });
-  assert.deepEqual(result.rootRemoval, { status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', revocationUnconfirmed: true });
+  assert.deepEqual(result.rootRemoval, { status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', complete: false, revocationUnconfirmed: true });
   assert.equal(JSON.stringify(result).includes('private-receipt'), false);
   assert.equal(rootRemovalSummary([{ stage: 'root_removal', status: 'started' }]), null);
-  assert.deepEqual(rootRemovalSummary([{ stage: 'root_removal', status: 'passed' }]), { status: 'passed', stepsDone: 5, stepCount: 5, failureReason: null, revocationUnconfirmed: false });
-  assert.deepEqual(rootRemovalSummary([{ stage: 'root_removal', status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, revocationUnconfirmed: true }]),
-    { status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, revocationUnconfirmed: true });
+  assert.deepEqual(rootRemovalSummary([{ stage: 'root_removal', status: 'passed' }]), { status: 'passed', stepsDone: 5, stepCount: 5, failureReason: null, complete: true, revocationUnconfirmed: false });
+  assert.deepEqual(rootRemovalSummary([{ stage: 'root_removal', status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, complete: true, revocationUnconfirmed: true }]),
+    { status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, complete: true, revocationUnconfirmed: true });
 });

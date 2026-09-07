@@ -120,6 +120,9 @@ export async function finishLiveGatewayLifecycle({ config, browser, provider, in
 export async function removeLiveGateway({ config, browser, provider, inventory, checkpoint, phase = 'interrupted' }) {
   const installer = (path, options) => browser.request(config.installerOrigin, path, options);
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
+  // An attached browser may still hold the hosted removal session of an earlier gateway; its job must never be read
+  // as this gateway's receipt.
+  await browser.clearRemovalSession();
   if (phase === 'interrupted') {
     await checkpoint({ stage: 'interrupted_removal', status: 'started' });
     await browser.loseNextTeardownCallbackResponse();
@@ -201,8 +204,11 @@ export async function finishLiveGatewayRemoval({ browser, installer, provider, i
   if (review.canAuthorize) {
     await checkpoint({ stage: 'root_removal', status: 'started' });
     const authorization = await installer('/api/teardown/authorize', { method: 'POST', body: {}, csrfToken: review.csrfToken });
+    // The wait ends on the job's settled end, a failed step, or five verified steps whose attempt was cut before it
+    // settled and has expired (the job then asks for another authorization).
     await browser.consent(authorization.authorizationUrl, () => installer('/api/teardown'), (value) =>
-      value?.steps?.length === 5 && value.steps.every((step) => step.done) || Boolean(value?.failureReason));
+      value?.complete === true || Boolean(value?.failureReason) ||
+      value?.steps?.length === 5 && value.steps.every((step) => step.done) && value.canAuthorize === true);
   }
   const removed = await installer('/api/teardown');
   const outcome = rootRemovalOutcome(removed);
@@ -210,13 +216,15 @@ export async function finishLiveGatewayRemoval({ browser, installer, provider, i
     await checkpoint({ stage: 'root_removal', status: 'failed', ...outcome });
     throw new LiveLifecycleError('root_removal_failed');
   }
-  if (outcome.stepsDone === 5 && outcome.stepCount === 5 && outcome.canAuthorize === false && outcome.revocationUnconfirmed === true) {
-    // The five steps finished; independent absence is still proven, and the historical flag stays in the record.
+  const settled = outcome.complete && outcome.stepsDone === 5 && outcome.stepCount === 5 && outcome.canAuthorize === false;
+  if (settled && outcome.revocationUnconfirmed === true) {
+    // The job settled with the warning; independent absence is still proven, and the flag stays in the record.
     await provider.assertAllAbsent(inventory);
     await checkpoint({ stage: 'root_removal', status: 'removed_revocation_unconfirmed', ...outcome });
     throw new LiveLifecycleError('root_removal_revocation_unconfirmed');
   }
-  if (!(outcome.stepsDone === 5 && outcome.stepCount === 5 && outcome.canAuthorize === false && outcome.revocationUnconfirmed === false)) {
+  if (!settled) {
+    // Five verified steps with an unsettled job (the callback cut before its revoke and settlement) are not a pass.
     await checkpoint({ stage: 'root_removal', status: 'not_verified', ...outcome });
     throw new LiveLifecycleError('root_removal_not_verified');
   }
@@ -229,5 +237,5 @@ export function rootRemovalOutcome(view) {
   const steps = Array.isArray(view?.steps) ? view.steps : [];
   const reason = v.is(v.pipe(v.string(), v.regex(/^[a-z0-9_]{1,120}$/u)), view?.failureReason) ? view.failureReason : null;
   return { stepsDone: steps.filter((step) => step?.done === true).length, stepCount: steps.length, failureReason: reason,
-    canAuthorize: view?.canAuthorize === true, revocationUnconfirmed: view?.revocationUnconfirmed === true };
+    canAuthorize: view?.canAuthorize === true, complete: view?.complete === true, revocationUnconfirmed: view?.revocationUnconfirmed === true };
 }

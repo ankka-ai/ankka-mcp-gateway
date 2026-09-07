@@ -193,6 +193,13 @@ config and `--recover-removal`. Recovery does not turn an incomplete lifecycle r
 into a passing lifecycle result. Before a receipt exists, use the product's existing
 setup/removal recovery flow and the recorded action references.
 
+Before the removal phase the runner clears any hosted removal session its
+browser still holds, so an earlier gateway's job is never read as this one's
+receipt. A root removal passes only once the installer's job has settled
+(`complete`): five verified steps whose attempt was cut before its revoke and
+settlement, for example by a browser that gave up on a long callback, are
+recorded as not verified and finish on the next authorization.
+
 A receipt the gateway hands over with its unconfirmed-revocation warning is
 saved with that warning recorded; the root removal still runs and is verified,
 and the run then stops as `root_removal_revocation_unconfirmed` rather than

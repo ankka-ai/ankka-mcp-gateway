@@ -91,7 +91,7 @@ test('API passes and recovery receipts never imply full lifecycle qualification'
   assert.equal(result.rootRemoval, null);
   assert.deepEqual(summarizeLiveJournal({ ...state, events: [...state.events,
     { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, revocationUnconfirmed: true }] }).rootRemoval,
-  { status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', revocationUnconfirmed: true });
+  { status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', complete: false, revocationUnconfirmed: true });
   assert.equal(summarizeLiveJournal({ ...state, qualified: true }).qualified, false);
   // The service proof is summarized by outcome and layer, never by identity or secret.
   const proven = summarizeLiveJournal({ ...state, events: [

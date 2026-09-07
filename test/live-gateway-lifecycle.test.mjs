@@ -45,7 +45,7 @@ test('a failed final removal records the hosted job\'s reason word and steps don
   const checkpoints = [];
   let verified = false;
   const steps = [{ done: true }, { done: false }, { done: false }, { done: false }, { done: false }];
-  const view = { canAuthorize: true, steps, failureReason: 'worker_bindings_provider_unknown', revocationUnconfirmed: true, csrfToken: 'synthetic' };
+  const view = { canAuthorize: true, complete: false, steps, failureReason: 'worker_bindings_provider_unknown', revocationUnconfirmed: true, csrfToken: 'synthetic' };
   await assert.rejects(finishLiveGatewayRemoval({
     browser: { consent: async () => view },
     installer: async (path) => path === '/api/teardown/authorize' ? { authorizationUrl: 'synthetic-consent' } : view,
@@ -54,7 +54,7 @@ test('a failed final removal records the hosted job\'s reason word and steps don
   }), { code: 'root_removal_failed' });
   assert.equal(verified, false);
   assert.deepEqual(checkpoints, [{ stage: 'root_removal', status: 'started' },
-    { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, revocationUnconfirmed: true }]);
+    { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, complete: false, revocationUnconfirmed: true }]);
   // A reason word outside the fixed vocabulary is not copied into the journal.
   assert.equal(rootRemovalOutcome({ failureReason: 'Internal error: token abc' }).failureReason, null);
 });
@@ -64,28 +64,31 @@ test('five finished steps under an unconfirmed revocation are verified absent an
   for (const absent of [true, false]) {
     const checkpoints = []; let verified = false;
     const run = finishLiveGatewayRemoval({ inventory: { synthetic: true },
-      installer: async () => ({ canAuthorize: false, steps: done, revocationUnconfirmed: true }),
+      installer: async () => ({ canAuthorize: false, complete: true, steps: done, revocationUnconfirmed: true }),
       provider: { assertAllAbsent: async () => { verified = true; if (!absent) throw new Error('resource_still_present'); } },
       checkpoint: async (event) => checkpoints.push(event),
     });
     if (absent) {
       await assert.rejects(run, { code: 'root_removal_revocation_unconfirmed' });
-      assert.deepEqual(checkpoints, [{ stage: 'root_removal', status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, canAuthorize: false, revocationUnconfirmed: true }]);
+      assert.deepEqual(checkpoints, [{ stage: 'root_removal', status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, canAuthorize: false, complete: true, revocationUnconfirmed: true }]);
     } else { await assert.rejects(run, /resource_still_present/u); assert.deepEqual(checkpoints, []); }
     assert.equal(verified, true);
   }
-  // Fewer than five steps without a reason is not verified, with the counts recorded.
-  const checkpoints = [];
-  await assert.rejects(finishLiveGatewayRemoval({ installer: async () => ({ canAuthorize: false, steps: done.slice(0, 4), revocationUnconfirmed: false }),
-    provider: { assertAllAbsent: async () => assert.fail('absence must not be read') }, checkpoint: async (event) => checkpoints.push(event) }), { code: 'root_removal_not_verified' });
-  assert.deepEqual(checkpoints, [{ stage: 'root_removal', status: 'not_verified', stepsDone: 4, stepCount: 4, failureReason: null, canAuthorize: false, revocationUnconfirmed: false }]);
+  // Fewer than five steps without a reason, or five verified steps whose job has not settled, are not verified.
+  for (const view of [{ canAuthorize: false, complete: false, steps: done.slice(0, 4), revocationUnconfirmed: false },
+    { canAuthorize: false, complete: false, steps: done, revocationUnconfirmed: false }]) {
+    const checkpoints = [];
+    await assert.rejects(finishLiveGatewayRemoval({ installer: async () => view,
+      provider: { assertAllAbsent: async () => assert.fail('absence must not be read') }, checkpoint: async (event) => checkpoints.push(event) }), { code: 'root_removal_not_verified' });
+    assert.deepEqual(checkpoints, [{ stage: 'root_removal', status: 'not_verified', stepsDone: view.steps.length, stepCount: view.steps.length, failureReason: null, canAuthorize: false, complete: false, revocationUnconfirmed: false }]);
+  }
 });
 
 test('successful hosted removal still requires independent provider absence', async () => {
   for (const absent of [false, true]) {
     const checkpoints = [], inventory = { synthetic: true };
     const run = finishLiveGatewayRemoval({ inventory,
-      installer: async () => ({ canAuthorize: false, steps: Array.from({ length: 5 }, () => ({ done: true })), revocationUnconfirmed: false }),
+      installer: async () => ({ canAuthorize: false, complete: true, steps: Array.from({ length: 5 }, () => ({ done: true })), revocationUnconfirmed: false }),
       provider: { assertAllAbsent: async (value) => { assert.equal(value, inventory); if (!absent) throw new Error('resource_still_present'); } },
       checkpoint: async (event) => checkpoints.push(event),
     });
@@ -117,7 +120,7 @@ test('complete orchestration proves token management, distinct update, lost call
         if (path === '/api/plan') return { session: { plan: { releaseId: config.releaseA.release } } };
         if (path === '/api/bootstrap' || path === '/api/teardown/authorize') return { authorizationUrl: 'synthetic-consent' };
         if (path === '/api/session') return { session: { phase: 'handed_off', provision } };
-        if (path === '/api/teardown') return { hostname: config.basics.managementHostname, handoff: receipt,
+        if (path === '/api/teardown') return { hostname: config.basics.managementHostname, handoff: receipt, complete: removed,
           canAuthorize: !removed, revocationUnconfirmed: false, csrfToken: 'synthetic', steps: Array.from({ length: 5 }, () => ({ done: removed })) };
         if (path === '/api/teardown/import') { assert.equal(options.body.handoff, receipt); evidence.push('receipt_imported'); return { imported: true }; }
       }
@@ -157,7 +160,7 @@ test('complete orchestration proves token management, distinct update, lost call
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
-  assert.deepEqual(evidence, ['release_b_activated', 'service_identity_proven', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
+  assert.deepEqual(evidence, ['release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
   assert.equal(events.find((event) => event.status === 'receipt_saved').revocationUnconfirmed, false);
@@ -263,14 +266,15 @@ test('the removal half starts with the interrupted sequence, or with the root re
   for (const phase of ['interrupted', 'root']) {
     const calls = [];
     const browser = {
+      clearRemovalSession: async () => { calls.push('clear'); },
       loseNextTeardownCallbackResponse: async () => { calls.push('arm'); },
       request: async (_origin, path) => { calls.push(path); throw new Error('stop_here'); },
     };
     await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => { calls.push(`${event.stage}:${event.status}`); }, phase }), /stop_here/u);
     // The root phase first asks the installer whether it already holds the receipt, then opens a round.
     assert.deepEqual(calls, phase === 'interrupted'
-      ? ['interrupted_removal:started', 'arm', 'dependency_removal:started', '/api/teardown-actions']
-      : ['/api/teardown']);
+      ? ['clear', 'interrupted_removal:started', 'arm', 'dependency_removal:started', '/api/teardown-actions']
+      : ['clear', '/api/teardown']);
   }
 });
 
@@ -280,10 +284,13 @@ test('a receipt handed over with the unconfirmed-revocation warning is saved wit
     const events = [];
     const browser = {
       waitFor: async (read, accepts) => { const value = await read(); assert.ok(accepts(value)); return value; },
-      continueHandoff: async () => {}, clearRemovalSession: async () => { throw new Error('stop_here'); },
-      request: async (origin, path) => origin === config.installerOrigin && path === '/api/teardown'
-        ? { canAuthorize: true, hostname, handoff: 'private-receipt', revocationUnconfirmed }
-        : path === '/api/teardown-actions' ? { actionId: `action_${'A'.repeat(32)}`, handoffUrl: 'synthetic' } : { status: 'succeeded' },
+      continueHandoff: async () => {}, clearRemovalSession: async () => {},
+      request: async (origin, path) => {
+        if (path === '/api/teardown/import') throw new Error('stop_here');
+        return origin === config.installerOrigin && path === '/api/teardown'
+          ? { canAuthorize: true, hostname, handoff: 'private-receipt', revocationUnconfirmed }
+          : path === '/api/teardown-actions' ? { actionId: `action_${'A'.repeat(32)}`, handoffUrl: 'synthetic' } : { status: 'succeeded' };
+      },
     };
     const run = removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => events.push(event), phase: 'root' });
     if (expected === 'saved') {
@@ -301,14 +308,15 @@ test('a receipt the installer already holds is taken without opening another rem
   const calls = [], events = [];
   const browser = {
     waitFor: async (read, accepts) => { const value = await read(); assert.ok(accepts(value)); return value; },
-    continueHandoff: async () => {}, clearRemovalSession: async () => { throw new Error('stop_here'); },
+    continueHandoff: async () => {}, clearRemovalSession: async () => {},
     request: async (origin, path, options = {}) => {
       calls.push(`${options.method ?? 'GET'} ${path}`);
+      if (path === '/api/teardown/import') throw new Error('stop_here');
       if (origin === config.installerOrigin && path === '/api/teardown') return { canAuthorize: true, hostname: config.basics.managementHostname, handoff: 'private-receipt', revocationUnconfirmed: false };
       throw new Error('unexpected_request');
     },
   };
   await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => events.push(event), phase: 'root' }), /stop_here/u);
-  assert.deepEqual(calls, ['GET /api/teardown']);
+  assert.deepEqual(calls, ['GET /api/teardown', 'POST /api/teardown/import']);
   assert.deepEqual(events, [{ stage: 'root_removal', status: 'receipt_saved', handoff: 'private-receipt', revocationUnconfirmed: false }]);
 });

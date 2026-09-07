@@ -11,7 +11,7 @@ import { gatewayRootProviderFixture, TOKEN } from './gateway-teardown-provider-f
 import { teardownSqliteFixture } from './gateway-teardown-sqlite-fixture';
 import { ENCRYPTION_KEY, CLIENT_ID, CLIENT_SECRET } from './fixtures';
 
-const viewSchema = v.object({ csrfToken: v.string(), canAuthorize: v.boolean(), revocationUnconfirmed: v.boolean(),
+const viewSchema = v.object({ csrfToken: v.string(), canAuthorize: v.boolean(), complete: v.boolean(), revocationUnconfirmed: v.boolean(),
   message: v.string(), failureReason: v.nullable(v.string()), steps: v.array(v.object({ done: v.boolean() })), handoff: v.string() });
 
 async function fixture() {
@@ -145,7 +145,7 @@ describe('hosted removal browser callback and durable recovery', () => {
     try {
       expect((await test.import()).status).toBe(200);
       const page = await test.send('/teardown'); expect(page.status).toBe(200);
-      expect((await test.view()).canAuthorize).toBe(true);
+      expect((await test.view()).canAuthorize).toBe(true); expect((await test.view()).complete).toBe(false);
       const callback = await test.start();
       const callbackCookie = test.cookie();
       const sealed = callbackCookie.slice(GATEWAY_TEARDOWN_COOKIE.length + 1);
@@ -156,7 +156,7 @@ describe('hosted removal browser callback and durable recovery', () => {
       expect(response.status).toBe(303);
       const view = await test.view();
       expect(view.steps.every((step) => step.done)).toBe(true);
-      expect(view.canAuthorize).toBe(false); expect(view.revocationUnconfirmed).toBe(false);
+      expect(view.canAuthorize).toBe(false); expect(view.revocationUnconfirmed).toBe(false); expect(view.complete).toBe(true);
       expect(test.grants()).toBe(1); expect(test.revoked()).toBe(1);
       expect((await test.send(callback.href, undefined, { cookie: callbackCookie })).status).toBe(409);
       expect(test.grants()).toBe(1);
