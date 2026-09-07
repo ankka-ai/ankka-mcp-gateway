@@ -27,3 +27,28 @@ function createResolver(server) {
   instance.setServers([server]);
   return (hostname, type) => type === 'A' ? instance.resolve4(hostname) : instance.resolve6(hostname);
 }
+
+/** Whether the operating system resolver (what browsers and HTTP clients use) currently resolves the hostname. */
+export async function systemResolves(hostname, { lookup = dns.lookup } = {}) {
+  try { await lookup(hostname); return true; } catch { return false; }
+}
+
+/**
+ * Waits until the hostname resolves through the system resolver. When the servers already answer but the system
+ * does not, the system cached a negative answer; the operator is told how to clear it while the wait continues, up
+ * to the zone's negative TTL.
+ */
+export async function awaitSystemResolution(hostname, { notify, seconds = 1_900, direct = hostnameResolvesDirectly, system = systemResolves, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)), now = Date.now } = {}) {
+  const deadline = now() + seconds * 1000;
+  let noticed = false;
+  while (now() < deadline) {
+    if (await system(hostname)) return true;
+    if (!noticed && await direct(hostname)) {
+      noticed = true;
+      notify?.(`${hostname} resolves at the DNS servers but not through this machine's resolver, which cached its absence. ` +
+        'Clear the cache to continue now: sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder');
+    }
+    await sleep(5_000);
+  }
+  return false;
+}

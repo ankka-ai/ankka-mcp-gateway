@@ -1,4 +1,5 @@
 import { lifecycleFailureReport, checkSignedConfigurationEndpoint } from './live-gateway-diagnostics.mjs';
+import { awaitSystemResolution } from './live-gateway-dns.mjs';
 import { readFile, realpath, lstat, open, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { resolve, dirname, isAbsolute, relative } from 'node:path';
@@ -242,7 +243,7 @@ export async function runLiveLifecycleCommand(args) {
       // Only a journal that stopped between a passed installation and the update may continue; anything later
       // would repeat a mutation the journal already recorded.
       await validateReleasePair(config);
-      requireCondition(state.events.some((event) => event.stage === 'installation' && event.status === 'passed') &&
+      requireCondition(state.events.some((event) => event.stage === 'installation' && ['configured', 'passed'].includes(event.status)) &&
         !state.events.some((event) => event.stage === 'update' && event.status === 'passed') &&
         !state.events.some((event) => ['interrupted_removal', 'dependency_removal', 'root_removal', 'lifecycle'].includes(event.stage)),
       'resume_point_unsupported');
@@ -280,13 +281,25 @@ export async function runLiveLifecycleCommand(args) {
       await provider.assertWorker(provision);
       const publishB = () => deployInstaller(config, config.installerB, config.releaseB);
       const recorded = state.events.findLast((event) => event.stage === 'update' && event.status === 'recorded');
+      const management = (path, options) => browser.request(config.managementOrigin, path, options);
+      if (!state.events.some((event) => event.stage === 'installation' && event.status === 'passed')) {
+        // The run stopped between the Stage 2 consent and the first successful read of the new gateway. The provider,
+        // not the journal, says whether the installation completed; the installation checks then run as usual.
+        const managementHostname = new URL(config.managementOrigin).hostname;
+        requireCondition(await provider.managementDomainReady(provision), 'installation_not_completed');
+        requireCondition(await awaitSystemResolution(managementHostname, { notify: console.log }), 'management_hostname_unresolved');
+        const updateA = await management('/api/update');
+        requireCondition(updateA?.current?.release === config.releaseA.release &&
+          updateA.current.artifactSha256 === `sha256:${config.releaseA.artifactSha256}`, 'installed_release_mismatch');
+        await checkpoint({ stage: 'resume', status: 'installation' });
+        await checkpoint({ stage: 'installation', status: 'passed' });
+      }
       if (recorded === undefined) {
         await checkpoint({ stage: 'resume', status: 'installed' });
         await continueLiveGatewayLifecycle({ config, browser, provider, provision, checkpoint, notify: console.log, publishB });
       } else {
         // An update action that failed terminally on the gateway may be followed by a new one; the journal keeps both, and
         // the inventory comes from the journal while the installed source and roster are read back from the gateway.
-        const management = (path, options) => browser.request(config.managementOrigin, path, options);
         const action = await management(`/api/update-actions/${recorded.actionId}`);
         requireCondition(action?.status === 'failed', 'resume_point_unsupported');
         const inventory = state.events.findLast((event) => event.stage === 'inventory' && event.status === 'passed')?.inventory;
