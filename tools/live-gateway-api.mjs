@@ -10,6 +10,8 @@ const paths = {
   POST: /^\/api\/(?:sources\/discover|source-actions|source-actions\/action_[A-Za-z0-9_-]{32}\/renew|team-actions)$/u,
   PUT: /^\/api\/sources$/u,
 };
+const REQUEST_TIMEOUT_MS = 120_000;
+
 /** Routes a rejection probe may address: the ones the gateway must refuse to a service identity, plus its allowed reads. */
 const probePaths = {
   GET: /^\/api\/(?:status|team|update-actions\/action_[A-Za-z0-9_-]{32})$/u,
@@ -36,7 +38,8 @@ function createRequest({ origin, transport, signal, credentials, allow = paths, 
     const identity = await credentials();
     try {
       const options = {
-        method, redirect, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
+        // A gateway action applies Portal and Access policy changes before it answers; a slow write is awaited, not abandoned.
+        method, redirect, signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]) : AbortSignal.timeout(REQUEST_TIMEOUT_MS),
         headers: { origin, accept: 'application/json', ...identity },
       };
       if (body !== undefined) {
