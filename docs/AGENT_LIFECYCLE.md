@@ -165,7 +165,9 @@ The job is a private JSON file outside the checkout with mode `0600`.
                 "b": { "publishDirectory": "/private/releases/B/publish", "pin": "/private/releases/B/pin.json" } },
   "source": { "url": "https://synthetic.example.net/mcp", "tool": "synthetic_status" },
   "credentials": { "deployment": { "keychain": { "service": "ankka-lifecycle-runner", "account": "deployment-token" } },
-                   "management": { "keychain": { "service": "ankka-lifecycle-runner", "account": "management-token" } } },
+                   "management": { "keychain": { "service": "ankka-lifecycle-runner", "account": "management-token" } },
+                   "service": { "secret": { "keychain": { "service": "ankka-lifecycle-runner", "account": "access-client-secret" } },
+                                "clientId": "<32 hex>.access", "tokenId": "<service token uuid>" } },
   "operations": ["install", "manage", "update", "remove"],
   "runDirectory": "/private/runs/lifecycle-20260906-a"
 }

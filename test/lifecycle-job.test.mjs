@@ -82,3 +82,19 @@ test('credential references are names only and the schema refuses inline values 
     await assert.rejects(readLifecycleJob(path), { code: 'private_path_required' });
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
+
+test('a service credential names the token by its Access common name and the client id form is exact', async () => {
+  const service = { secret: { keychain: { service: 'ankka-lifecycle-runner', account: 'access-client-secret' } },
+    clientId: `${'c'.repeat(32)}.access`, tokenId: '11111111-2222-3333-4444-555555555555' };
+  const { directory, path, job } = await fixture();
+  try {
+    await writeFile(path, JSON.stringify({ ...job, credentials: { ...job.credentials, service } }), { mode: 0o600 });
+    assert.deepEqual((await readLifecycleJob(path)).credentials.service, service);
+    for (const clientId of ['c'.repeat(32), `${'c'.repeat(32)}.ACCESS`, `${'c'.repeat(31)}.access`]) {
+      await writeFile(path, JSON.stringify({ ...job, credentials: { ...job.credentials, service: { ...service, clientId } } }), { mode: 0o600 });
+      await assert.rejects(readLifecycleJob(path), { code: 'job_invalid' });
+    }
+    await writeFile(path, JSON.stringify({ ...job, credentials: { ...job.credentials, service: { ...service, secret: { value: 'inline' } } } }), { mode: 0o600 });
+    await assert.rejects(readLifecycleJob(path), { code: 'job_invalid' });
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});

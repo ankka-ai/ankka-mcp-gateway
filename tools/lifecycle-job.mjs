@@ -70,7 +70,8 @@ export const lifecycleJobSchema = v.strictObject({
     deployment: credentialReference,
     management: credentialReference,
     service: v.optional(v.strictObject({
-      secret: credentialReference, clientId: providerId,
+      // An Access service token's client id is the token's common name: 32 hex characters and the `.access` suffix.
+      secret: credentialReference, clientId: v.pipe(text, v.regex(/^[a-f0-9]{32}\.access$/u)),
       tokenId: v.pipe(text, v.regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u)),
     })),
   }),
