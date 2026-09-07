@@ -25,9 +25,20 @@ export async function lifecycleFailureReport({ events, failureCode, httpStatus, 
     schemaVersion: 1, httpStatus: Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? httpStatus : null, failedStage: last?.stage ?? 'preflight', failureCode,
     lastMutationStage: pending?.stage ?? null,
     removalReceiptAvailable: events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
+    rootRemoval: rootRemovalSummary(events),
     recovery: 'inspect_private_journal_before_retry',
     metricsStatus: runtimeMetrics === null ? 'unavailable' : 'available', runtimeMetrics,
   };
+}
+
+/** The hosted root job's recorded outcome: its status, the steps done, the fixed reason word and the revocation flag; null before any outcome. */
+export function rootRemovalSummary(events) {
+  const outcome = events.findLast((event) => event.stage === 'root_removal' && ['failed', 'removed_revocation_unconfirmed', 'not_verified', 'passed'].includes(event.status));
+  if (outcome === undefined) return null;
+  return { status: outcome.status, stepsDone: Number.isInteger(outcome.stepsDone) ? outcome.stepsDone : outcome.status === 'passed' ? 5 : null,
+    stepCount: Number.isInteger(outcome.stepCount) ? outcome.stepCount : outcome.status === 'passed' ? 5 : null,
+    failureReason: typeof outcome.failureReason === 'string' ? outcome.failureReason : null,
+    revocationUnconfirmed: outcome.revocationUnconfirmed === true };
 }
 
 /** The shell cannot perform browser Access login when certifying its signed

@@ -205,6 +205,13 @@ relay, releases, and temporary setup tokens for separately authorized fixture cl
 A stopped run saves a `diagnostics` object beside its final journal event and
 prints the same compact report. It names the failed stage, the last recorded
 mutation stage, the fixed failure code, and whether a removal receipt exists.
+Once the hosted root job has answered, the report and `--status` also carry
+its outcome under `rootRemoval`: the steps done out of five, the job's fixed
+reason word when a step failed, and its revocation flag. The stop codes are
+distinct: `root_removal_failed` when the job reports a reason word,
+`root_removal_revocation_unconfirmed` when all five steps finished under an
+unconfirmed grant revocation (independent absence is still checked first, and
+the run is not a pass), and `root_removal_not_verified` for anything else.
 When a shell was recorded and the operator credential can query Workers
 analytics, it includes numeric request/error counts and CPU/memory quantiles
 from the preceding 30 minutes. Missing permissions, unavailable metrics, or a

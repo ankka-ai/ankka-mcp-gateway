@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { finishLiveGatewayRemoval, qualifyLiveGatewayLifecycle } from '../tools/live-gateway-lifecycle.mjs';
+import { finishLiveGatewayRemoval, qualifyLiveGatewayLifecycle, rootRemovalOutcome } from '../tools/live-gateway-lifecycle.mjs';
 import { validateLiveLifecycleConfig } from '../tools/live-gateway-command.mjs';
 
 const config = {
@@ -41,15 +41,44 @@ test('an uncertain bootstrap mutation is checkpointed once and never retried', a
   assert.deepEqual(checkpoints, [{ stage: 'installation', status: 'started' }]);
 });
 
-test('a failed final removal never qualifies or runs the absence success path', async () => {
+test('a failed final removal records the hosted job\'s reason word and steps done, and never runs the absence success path', async () => {
   const checkpoints = [];
   let verified = false;
+  const steps = [{ done: true }, { done: false }, { done: false }, { done: false }, { done: false }];
+  const view = { canAuthorize: true, steps, failureReason: 'worker_bindings_provider_unknown', revocationUnconfirmed: true, csrfToken: 'synthetic' };
   await assert.rejects(finishLiveGatewayRemoval({
-    installer: async () => ({ canAuthorize: false, steps: [{ done: true }], failureReason: 'provider_conflict' }),
+    browser: { consent: async () => view },
+    installer: async (path) => path === '/api/teardown/authorize' ? { authorizationUrl: 'synthetic-consent' } : view,
     provider: { assertAllAbsent: async () => { verified = true; } },
     checkpoint: async (event) => checkpoints.push(event),
-  }), { code: 'root_removal_not_verified' });
-  assert.equal(verified, false); assert.deepEqual(checkpoints, []);
+  }), { code: 'root_removal_failed' });
+  assert.equal(verified, false);
+  assert.deepEqual(checkpoints, [{ stage: 'root_removal', status: 'started' },
+    { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, revocationUnconfirmed: true }]);
+  // A reason word outside the fixed vocabulary is not copied into the journal.
+  assert.equal(rootRemovalOutcome({ failureReason: 'Internal error: token abc' }).failureReason, null);
+});
+
+test('five finished steps under an unconfirmed revocation are verified absent and still stopped as such, never passed', async () => {
+  const done = Array.from({ length: 5 }, () => ({ done: true }));
+  for (const absent of [true, false]) {
+    const checkpoints = []; let verified = false;
+    const run = finishLiveGatewayRemoval({ inventory: { synthetic: true },
+      installer: async () => ({ canAuthorize: false, steps: done, revocationUnconfirmed: true }),
+      provider: { assertAllAbsent: async () => { verified = true; if (!absent) throw new Error('resource_still_present'); } },
+      checkpoint: async (event) => checkpoints.push(event),
+    });
+    if (absent) {
+      await assert.rejects(run, { code: 'root_removal_revocation_unconfirmed' });
+      assert.deepEqual(checkpoints, [{ stage: 'root_removal', status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, canAuthorize: false, revocationUnconfirmed: true }]);
+    } else { await assert.rejects(run, /resource_still_present/u); assert.deepEqual(checkpoints, []); }
+    assert.equal(verified, true);
+  }
+  // Fewer than five steps without a reason is not verified, with the counts recorded.
+  const checkpoints = [];
+  await assert.rejects(finishLiveGatewayRemoval({ installer: async () => ({ canAuthorize: false, steps: done.slice(0, 4), revocationUnconfirmed: false }),
+    provider: { assertAllAbsent: async () => assert.fail('absence must not be read') }, checkpoint: async (event) => checkpoints.push(event) }), { code: 'root_removal_not_verified' });
+  assert.deepEqual(checkpoints, [{ stage: 'root_removal', status: 'not_verified', stepsDone: 4, stepCount: 4, failureReason: null, canAuthorize: false, revocationUnconfirmed: false }]);
 });
 
 test('successful hosted removal still requires independent provider absence', async () => {

@@ -177,7 +177,12 @@ async function beginRemoval(management, browser, checkpoint) {
   return action;
 }
 
-/** Also used by the explicit recovery command with the saved receipt/inventory. */
+/**
+ * Also used by the explicit recovery command with the saved receipt/inventory. The hosted job's outcome is recorded
+ * before the stop code names it: a failed step keeps its reason word and the steps done, a job whose five steps
+ * finished under an unconfirmed grant revocation is verified absent and still stopped as such (never a pass), and
+ * anything else is not verified.
+ */
 export async function finishLiveGatewayRemoval({ browser, installer, provider, inventory, checkpoint }) {
   const review = await installer('/api/teardown');
   if (review.canAuthorize) {
@@ -187,8 +192,29 @@ export async function finishLiveGatewayRemoval({ browser, installer, provider, i
       value?.steps?.length === 5 && value.steps.every((step) => step.done) || Boolean(value?.failureReason));
   }
   const removed = await installer('/api/teardown');
-  requireCondition(removed.steps?.length === 5 && removed.steps.every((step) => step.done) &&
-    removed.canAuthorize === false && removed.revocationUnconfirmed === false && !removed.failureReason, 'root_removal_not_verified');
+  const outcome = rootRemovalOutcome(removed);
+  if (outcome.failureReason !== null) {
+    await checkpoint({ stage: 'root_removal', status: 'failed', ...outcome });
+    throw new LiveLifecycleError('root_removal_failed');
+  }
+  if (outcome.stepsDone === 5 && outcome.stepCount === 5 && outcome.canAuthorize === false && outcome.revocationUnconfirmed === true) {
+    // The five steps finished; independent absence is still proven, and the historical flag stays in the record.
+    await provider.assertAllAbsent(inventory);
+    await checkpoint({ stage: 'root_removal', status: 'removed_revocation_unconfirmed', ...outcome });
+    throw new LiveLifecycleError('root_removal_revocation_unconfirmed');
+  }
+  if (!(outcome.stepsDone === 5 && outcome.stepCount === 5 && outcome.canAuthorize === false && outcome.revocationUnconfirmed === false)) {
+    await checkpoint({ stage: 'root_removal', status: 'not_verified', ...outcome });
+    throw new LiveLifecycleError('root_removal_not_verified');
+  }
   await provider.assertAllAbsent(inventory);
   await checkpoint({ stage: 'root_removal', status: 'passed' });
+}
+
+/** The hosted job's view reduced to what the journal and the stop diagnostics may carry: counts, flags and the fixed reason word. */
+export function rootRemovalOutcome(view) {
+  const steps = Array.isArray(view?.steps) ? view.steps : [];
+  const reason = typeof view?.failureReason === 'string' && /^[a-z0-9_]{1,120}$/u.test(view.failureReason) ? view.failureReason : null;
+  return { stepsDone: steps.filter((step) => step?.done === true).length, stepCount: steps.length, failureReason: reason,
+    canAuthorize: view?.canAuthorize === true, revocationUnconfirmed: view?.revocationUnconfirmed === true };
 }

@@ -1,4 +1,4 @@
-import { lifecycleFailureReport, checkSignedConfigurationEndpoint } from './live-gateway-diagnostics.mjs';
+import { lifecycleFailureReport, checkSignedConfigurationEndpoint, rootRemovalSummary } from './live-gateway-diagnostics.mjs';
 import { awaitSystemResolution } from './live-gateway-dns.mjs';
 import { readFile, realpath, lstat, open, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -111,6 +111,7 @@ export function summarizeLiveJournal(state) {
     failureCode: state.events.findLast((event) => event.status === 'stopped')?.failureCode ?? null,
     removalReceiptAvailable: state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
     resumed: state.events.some((event) => event.stage === 'resume'),
+    rootRemoval: rootRemovalSummary(state.events),
     serviceIdentity: state.events.some((event) => event.stage === 'service_identity') ? {
       admitted: passed.includes('service_identity'),
       operationsRefused: state.events.some((event) => event.stage === 'service_rejection' && event.status === 'operations_refused'),

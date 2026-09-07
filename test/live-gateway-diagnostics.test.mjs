@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { lifecycleFailureReport, checkSignedConfigurationEndpoint } from '../tools/live-gateway-diagnostics.mjs';
+import { lifecycleFailureReport, checkSignedConfigurationEndpoint, rootRemovalSummary } from '../tools/live-gateway-diagnostics.mjs';
 
 test('failed stage and safe recovery evidence survive unavailable metrics', async () => {
   const result = await lifecycleFailureReport({ failureCode: 'update_not_verified', httpStatus: 503, events: [
@@ -32,4 +32,19 @@ test('machine endpoint preflight catches browser Access redirects without follow
   assert.equal(result, 'configuration_endpoint_requires_browser_login'); assert.equal(calls, 1);
   assert.equal(await checkSignedConfigurationEndpoint('https://installer.example.com', async () => Response.json({}, { status: 400 })), null);
   assert.equal(await checkSignedConfigurationEndpoint('https://installer.example.com', async () => new Response('HTML', { status: 500 })), 'configuration_endpoint_unexpected_response');
+});
+
+test('the report carries the hosted root job\'s outcome: status, steps done, the reason word and the revocation flag', async () => {
+  const events = [
+    { stage: 'root_removal', status: 'receipt_saved', handoff: 'private-receipt' },
+    { stage: 'root_removal', status: 'started' },
+    { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, revocationUnconfirmed: true },
+  ];
+  const result = await lifecycleFailureReport({ failureCode: 'root_removal_failed', events });
+  assert.deepEqual(result.rootRemoval, { status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', revocationUnconfirmed: true });
+  assert.equal(JSON.stringify(result).includes('private-receipt'), false);
+  assert.equal(rootRemovalSummary([{ stage: 'root_removal', status: 'started' }]), null);
+  assert.deepEqual(rootRemovalSummary([{ stage: 'root_removal', status: 'passed' }]), { status: 'passed', stepsDone: 5, stepCount: 5, failureReason: null, revocationUnconfirmed: false });
+  assert.deepEqual(rootRemovalSummary([{ stage: 'root_removal', status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, revocationUnconfirmed: true }]),
+    { status: 'removed_revocation_unconfirmed', stepsDone: 5, stepCount: 5, failureReason: null, revocationUnconfirmed: true });
 });
