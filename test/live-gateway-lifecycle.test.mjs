@@ -267,9 +267,10 @@ test('the removal half starts with the interrupted sequence, or with the root re
       request: async (_origin, path) => { calls.push(path); throw new Error('stop_here'); },
     };
     await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => { calls.push(`${event.stage}:${event.status}`); }, phase }), /stop_here/u);
+    // The root phase first asks the installer whether it already holds the receipt, then opens a round.
     assert.deepEqual(calls, phase === 'interrupted'
       ? ['interrupted_removal:started', 'arm', 'dependency_removal:started', '/api/teardown-actions']
-      : ['dependency_removal:started', '/api/teardown-actions']);
+      : ['/api/teardown']);
   }
 });
 
