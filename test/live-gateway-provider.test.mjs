@@ -102,3 +102,15 @@ test('the inventory expects the management application\'s Service Auth policy ex
   await assert.rejects(provider(serviceConfig, { managementPolicies: [admin, service('99999999-2222-3333-4444-555555555555')] }).capture(provision), { code: 'policy_inventory_incomplete' });
   await assert.rejects(provider(serviceConfig, { managementPolicies: [admin, service(tokenId)], portalPolicies: [admin, service(tokenId)] }).capture(provision), { code: 'policy_inventory_incomplete' });
 });
+
+test('the management domain is ready only when it is a custom domain of the installation\'s Worker', async () => {
+  const installId = `acg-${'e'.repeat(24)}`;
+  const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.tenant.workers.dev/` };
+  const provider = (domains) => createLiveGatewayProvider({ config, token: 'synthetic-test-token', transport: async (url) => {
+    assert.ok(new URL(url).pathname.endsWith('/workers/domains'));
+    return response(domains);
+  } });
+  assert.equal(await provider([]).managementDomainReady(provision), false);
+  assert.equal(await provider([{ hostname: 'manage.example.com', service: 'ankka-gateway-other' }]).managementDomainReady(provision), false);
+  assert.equal(await provider([{ hostname: 'manage.example.com', service: provision.workerName }]).managementDomainReady(provision), true);
+});

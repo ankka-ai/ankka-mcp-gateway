@@ -29,6 +29,12 @@ to additionally validate the signed release pair and read the target provider
 inventory with the operator token. These checks cannot prove that all future
 write permissions or consent steps will succeed.
 
+After the Stage 2 consent the installer sends the browser to the new management
+hostname before its DNS record exists, and resolvers cache that negative answer
+for the zone's negative TTL (30 minutes on Cloudflare zones). The runner therefore
+answers that origin locally in the test tab and reads the provider until the
+custom domain is attached before its first request to the hostname.
+
 The runner reads the cached Access token into memory and installs a secure,
 host-only `CF_Authorization` cookie in its own browser context. Browser navigation
 and API calls share that context, preserving the application's CSRF and callback

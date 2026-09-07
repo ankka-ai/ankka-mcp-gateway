@@ -47,7 +47,12 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
     configured.plan.releaseArtifactSha256 === config.releaseA.artifactSha256, 'setup_release_mismatch');
   await checkpoint({ stage: 'installation', status: 'configured', plan: configured.plan });
   const setup = await browser.request(bootstrapOrigin, '/__ankka/install/oauth/start', { method: 'POST', body: {} });
-  await browser.consent(setup.authorizationUrl, () => management('/api/status'), (value) => value?.schemaVersion === 1);
+  // The consent callback sends the browser to the management hostname before its record exists, and a negative
+  // answer is cached for the zone's negative TTL. The runner therefore reads the provider until the custom domain is
+  // attached and only then touches the hostname; the browser is held off that origin for the same window.
+  await browser.consent(setup.authorizationUrl,
+    async () => (await provider.managementDomainReady(provision) ? management('/api/status') : null),
+    (value) => value?.schemaVersion === 1, { holdOrigin: config.managementOrigin });
   const updateA = await management('/api/update');
   requireCondition(exactRelease(updateA.current, config.releaseA), 'installed_release_mismatch');
   await checkpoint({ stage: 'installation', status: 'passed' });

@@ -171,13 +171,23 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       return waitFor(() => request(origin, origin === installerOrigin ? '/api/session' : '/api/status'),
         (value) => value.schemaVersion === 1);
     },
-    async consent(authorizationUrl, read, accepts) {
+    async consent(authorizationUrl, read, accepts, { holdOrigin } = {}) {
       const url = new URL(authorizationUrl);
       if (url.origin !== 'https://dash.cloudflare.com' || url.pathname !== '/oauth2/auth') {
         throw new LiveGatewayBrowserError('authorization_url_invalid');
       }
-      await navigate(url.href);
-      return waitFor(read, accepts, { instruction: 'Review and approve the test operation in Cloudflare. The runner will continue after the callback.' });
+      // A held origin is answered locally so the browser never resolves a hostname whose record may not exist yet.
+      const hold = holdOrigin === undefined ? null : (route) => route.fulfill({
+        status: 200, contentType: 'text/html; charset=utf-8',
+        body: '<!doctype html><title>Ankka lifecycle</title><p>Installation is finishing. The runner continues by API.</p>',
+      });
+      if (hold !== null) await page.route((target) => target.origin === holdOrigin, hold);
+      try {
+        await navigate(url.href);
+        return await waitFor(read, accepts, { instruction: 'Review and approve the test operation in Cloudflare. The runner will continue after the callback.' });
+      } finally {
+        if (hold !== null) await page.unroute((target) => target.origin === holdOrigin, hold).catch(() => {});
+      }
     },
     async loseNextTeardownCallbackResponse() {
       if (interruptionArmed) throw new LiveGatewayBrowserError('interruption_already_armed');

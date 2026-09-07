@@ -123,7 +123,7 @@ test('complete orchestration proves token management, distinct update, lost call
   await qualifyLiveGatewayLifecycle({ config, browser, notify: () => {},
     checkpoint: async (event) => events.push(event),
     publishB: async () => { available = runtimeIdentity(config.releaseB); evidence.push('release_b_activated'); },
-    provider: { assertFresh: async () => {}, assertWorker: async () => {}, capture: async () => ({ synthetic: true }),
+    provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
   assert.deepEqual(evidence, ['release_b_activated', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
@@ -154,3 +154,38 @@ test('an attached browser holding a handed-off installer session gets a fresh dr
   assert.deepEqual(requests, []);
 });
 
+
+test('the Stage 2 consent holds the management origin and waits for the provider before the first management read', async () => {
+  const provision = { installId: `acg-${'3'.repeat(24)}`, workerName: `ankka-gateway-acg-${'3'.repeat(24)}`, bootstrapOrigin: `https://ankka-gateway-acg-${'3'.repeat(24)}.synthetic.workers.dev` };
+  const consents = [], managementReads = [];
+  let ready = false;
+  const browser = {
+    login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
+    adoptBootstrap: () => provision.bootstrapOrigin,
+    waitFor: async (read) => read(),
+    consent: async (_url, read, accepts, options) => {
+      consents.push(options);
+      if (consents.length === 1) return { session: { phase: 'handed_off', provision } };
+      assert.equal(await read(), null); // not ready: no management request
+      ready = true;
+      const value = await read(); assert.ok(accepts(value)); return value;
+    },
+    request: async (origin, path, options = {}) => {
+      if (origin === config.installerOrigin) {
+        if (path === '/api/plan') return { session: { plan: { releaseId: config.releaseA.release } } };
+        if (path === '/api/bootstrap') return { authorizationUrl: 'https://dash.cloudflare.com/oauth2/auth?synthetic' };
+      }
+      if (origin === provision.bootstrapOrigin) {
+        if (path === '/__ankka/install/setup') return { availableZones: [] };
+        if (path === '/__ankka/install/configuration') return { plan: { releaseId: config.releaseA.release, releaseArtifactSha256: config.releaseA.artifactSha256 } };
+        if (path === '/__ankka/install/oauth/start') return { authorizationUrl: 'https://dash.cloudflare.com/oauth2/auth?synthetic2' };
+      }
+      if (origin === config.managementOrigin) { managementReads.push(path); if (path === '/api/status') return { schemaVersion: 1 }; throw new Error('stop_here'); }
+      throw new Error(`unexpected ${origin}${path}`);
+    },
+  };
+  const provider = { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => ready };
+  await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider, checkpoint: async () => {}, notify: () => {} }), /stop_here/u);
+  assert.deepEqual(consents.map((options) => options?.holdOrigin), [undefined, config.managementOrigin]);
+  assert.deepEqual(managementReads, ['/api/status', '/api/update']);
+});

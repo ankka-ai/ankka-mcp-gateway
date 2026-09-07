@@ -111,6 +111,11 @@ export function createLiveGatewayProvider({ config, token, transport = fetch }) 
       validateLiveBootstrapOrigin(provision);
       requireCondition(await read(`${account}/workers/workers/${provision.workerName}`, true) !== null, 'worker_account_mismatch');
     },
+    /** True once the management hostname is a custom domain of this installation's Worker: the earliest safe moment to resolve it. */
+    async managementDomainReady(provision) {
+      validateLiveBootstrapOrigin(provision);
+      return (await domains()).some((item) => item.hostname === config.basics.managementHostname && item.service === provision.workerName);
+    },
     async capture(provision) {
       validateLiveBootstrapOrigin(provision);
       const ownedPortals = (await portals()).filter((item) => item.hostname === config.basics.portalHostname);

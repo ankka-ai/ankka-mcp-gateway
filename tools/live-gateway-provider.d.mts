@@ -17,6 +17,7 @@ export interface LiveGatewayProvider {
   metrics(provision: LiveGatewayProvision): Promise<BoundaryValue | null>;
   assertFresh(): Promise<void>;
   assertWorker(provision: LiveGatewayProvision): Promise<void>;
+  managementDomainReady(provision: LiveGatewayProvision): Promise<boolean>;
   capture(provision: LiveGatewayProvision): Promise<LiveGatewayInventory>;
   assertDependenciesAbsent(inventory: LiveGatewayInventory): Promise<void>;
   assertAllAbsent(inventory: LiveGatewayInventory): Promise<void>;
