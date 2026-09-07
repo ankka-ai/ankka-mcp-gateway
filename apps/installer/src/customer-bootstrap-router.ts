@@ -146,7 +146,7 @@ async function hostnameResolvesOverHttps(hostname: string): Promise<boolean> {
   for (const type of ['A', 'AAAA']) {
     try {
       const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`, {
-        headers: { accept: 'application/dns-json' }, redirect: 'error', signal: AbortSignal.timeout(3_000),
+        headers: { accept: 'application/dns-json' }, redirect: 'manual', signal: AbortSignal.timeout(3_000),
       });
       if (!response.ok) continue;
       const parsed = v.safeParse(v.looseObject({ Status: v.number(), Answer: v.optional(v.array(v.looseObject({ type: v.number() }))) }), await response.json());
