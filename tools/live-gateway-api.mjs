@@ -19,6 +19,31 @@ const probePaths = {
   DELETE: /^\/api\/source-actions\/action_[A-Za-z0-9_-]{32}$/u,
 };
 
+/** The gateway's own fixed refusal body; a refusal without it came from the Access edge. */
+const gatewayRefusal = v.looseObject({ schemaVersion: v.literal(1), error: v.pipe(v.string(), v.regex(/^[a-z_]{1,64}$/u)) });
+const refusal = v.strictObject({ refused: v.number(), layer: v.picklist(['access_edge', 'gateway', 'unknown']), code: v.nullable(v.string()) });
+
+/** The gateway's fixed refusal code in a response, or null when the body is not the gateway's JSON. Reads at most 16 KiB; the lock is released so the caller can still cancel. */
+async function gatewayRefusalOf(response) {
+  if (!response.headers.get('content-type')?.includes('application/json') || !response.body) return null;
+  const reader = response.body.getReader();
+  const chunks = []; let size = 0; let text = null;
+  try {
+    for (;;) {
+      const item = await reader.read(); if (item.done) break;
+      size += item.value.length;
+      if (size > 16 * 1024) { await reader.cancel(); break; }
+      chunks.push(item.value);
+    }
+    if (size <= 16 * 1024) text = Buffer.concat(chunks).toString('utf8');
+  } catch { text = null; } finally { reader.releaseLock(); }
+  if (text === null) return null;
+  try {
+    const parsed = v.safeParse(gatewayRefusal, JSON.parse(text));
+    return parsed.success ? parsed.output.error : null;
+  } catch { return null; }
+}
+
 /** Fixed-origin HTTP checks with cached operator Access identity. No browser,
  * infrastructure token, redirects, login prompts, cookie export, or write retry.
  */
@@ -48,7 +73,7 @@ function createRequest({ origin, transport, signal, credentials, allow = paths, 
       }
       const response = await transport(origin + path, options);
       if (response.status !== 200) {
-        const outcome = rejected(response.status, response);
+        const outcome = await rejected(response.status, response);
         await response.body?.cancel();
         if (outcome !== false) return outcome;
         if ([301, 302, 303, 307, 308, 401, 403].includes(response.status)) throw new LiveGatewayAccessError('access_session_rejected');
@@ -76,9 +101,11 @@ function createRequest({ origin, transport, signal, credentials, allow = paths, 
 /**
  * Fixed-origin checks as the Access service identity: the client id and secret
  * ride in the service-token headers, no cookie, no cached human session, no
- * login. `probe` returns the HTTP status of a request the gateway or the Access
- * edge is expected to refuse (a redirect to the Access login page counts by its
- * status), so rejection is evidence rather than an error.
+ * login. `probe` returns the outcome of a request the gateway or the Access edge
+ * is expected to refuse, so rejection is evidence rather than an error: the HTTP
+ * status, the layer that answered (`access_edge` for a redirect to the Access
+ * login page or an edge 401/403, `gateway` for the gateway's own fixed JSON
+ * refusal, `admitted` for 200) and, from the gateway, its refusal code.
  */
 export function createLiveGatewayServiceApi({ origin, clientId, secret, transport = fetch, signal }) {
   requireOrigin(origin);
@@ -89,15 +116,19 @@ export function createLiveGatewayServiceApi({ origin, clientId, secret, transpor
   // Redirects are observed, never followed: the Access edge answers an identity it does not admit with a
   // redirect to its login page, and that redirect is the refusal a probe records.
   const request = createRequest({ origin, transport, signal, credentials, redirect: 'manual' });
-  const probe = createRequest({ origin, transport, signal, credentials, allow: probePaths, redirect: 'manual', rejected: (status, response) => {
-    if (status < 300 || status >= 400) return { refused: status };
-    let host = null;
-    try { host = new URL(response.headers.get('location') ?? '', origin).hostname; } catch { host = null; }
-    return host !== null && host.endsWith('.cloudflareaccess.com') ? { refused: status } : false;
+  const probe = createRequest({ origin, transport, signal, credentials, allow: probePaths, redirect: 'manual', rejected: async (status, response) => {
+    if (status >= 300 && status < 400) {
+      let host = null;
+      try { host = new URL(response.headers.get('location') ?? '', origin).hostname; } catch { host = null; }
+      return host !== null && host.endsWith('.cloudflareaccess.com') ? { refused: status, layer: 'access_edge', code: null } : false;
+    }
+    // The gateway refuses with its fixed JSON body; the edge's own 401 and 403 pages carry no such body.
+    const code = await gatewayRefusalOf(response);
+    return { refused: status, layer: code !== null ? 'gateway' : status === 401 || status === 403 ? 'access_edge' : 'unknown', code };
   } });
   return { request, async probe(path, options) {
     const outcome = await probe(path, options);
-    return v.is(v.strictObject({ refused: v.number() }), outcome) ? outcome.refused : 200;
+    return v.is(refusal, outcome) ? { status: outcome.refused, layer: outcome.layer, code: outcome.code } : { status: 200, layer: 'admitted', code: null };
   } };
 }
 

@@ -73,13 +73,18 @@ installer never carries them). A management config with the same
 `serviceAccess` section, holding the secret only by keychain or environment
 reference, runs the exercise over the deployed protected routes as that
 identity: no browser, no cached human session, no login. Before the exercise
-it proves the gateway refuses the update and teardown action routes, source
-action cancellation and update action reads to the service identity (`403`),
-and, when the section names a `foreign` service token, that an unapproved
-identity is refused before it reaches the gateway: the Access edge answers a
-service token no policy admits with a redirect to its login page (recorded by
-status, `302`; `401` and `403` also count). The journal records the actor as
-`service`.
+it proves three things in order, each recorded with the layer that answered.
+The approved identity is admitted (`service_identity: passed`), the positive
+control without which a refusal would prove nothing. When the section names a
+`foreign` service token, that valid but unapproved identity is refused, and
+the journal records whether the Access edge answered (a redirect to its login
+page, `302`, or its own `401`/`403` page: `layer: access_edge`) or the gateway
+did (its fixed JSON `401 access_required`: `layer: gateway`); the edge is
+expected, because the receipt-owned policy admits exactly one token. Then the
+gateway itself refuses the update and teardown action routes, source action
+cancellation and update action reads to the approved identity
+(`403 service_operation_denied`, `layer: gateway`), which is the Worker-level
+check observed live. The journal records the actor as `service`.
 
 This mode uses the same management exercise as the full lifecycle: install the
 synthetic source, verify default deny, grant synthetic membership, then remove it.
@@ -99,8 +104,10 @@ npm run validate:lifecycle:live -- --config /private/path/config.json --status
 ```
 
 The summary includes scope, passed stages, the last stage, a fixed failure code,
-and whether a removal receipt is available. It omits configuration, credentials,
-and the receipt itself. `--resume-installed` continues a journal whose installation
+whether a removal receipt is available and, once the service identity was
+proven, its admission, the refused operations and the layer that refused the
+foreign identity. It omits configuration, credentials, and the receipt itself.
+`--resume-installed` continues a journal whose installation
 passed but whose later stages did not run (for example a runner stop while waiting
 for the management token), whose Stage 2 consent was given but whose first read
 of the new gateway never succeeded (the provider confirms the installation, and
@@ -166,6 +173,11 @@ sessions locally; protect it and remove it when qualification is finished. When 
 activate the management secret directly in Cloudflare. No consent is expected
 for the synthetic source installation or the grant and removal of
 `qualification@example.com`. An OAuth handoff for those operations fails validation.
+
+When the config carries `serviceAccess`, the service-identity proof described
+above runs over the updated runtime after the update passes and before the
+first removal write, so the journal holds the updated release's service binding
+and the refusals of a gateway that is still whole beside the removal evidence.
 
 After the signed A → B update, the command discards the browser response from a
 successful dependency-removal callback. It verifies that dependencies are absent,

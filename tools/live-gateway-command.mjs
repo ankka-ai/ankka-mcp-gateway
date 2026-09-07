@@ -46,6 +46,36 @@ const schema = v.strictObject({
 });
 function requireCondition(value, code) { if (!value) throw new LiveLifecycleError(code); }
 
+/**
+ * The service identity over the deployed protected routes, recorded by the layer that answered. The approved identity
+ * is admitted first (the positive control: a later refusal cannot be a broken edge or gateway); a valid but unapproved
+ * identity, when the config names one, is refused before or at the gateway and the layer is recorded rather than
+ * assumed; and the operations outside the allowlist are refused by the gateway itself with its fixed code, which is
+ * the Worker-level check observed live. Returns the approved identity's API for the management exercise.
+ */
+export async function proveServiceIdentity({ config, checkpoint, signal, transport = fetch, credential = resolveOperatorCredential }) {
+  const service = config.serviceAccess;
+  const api = createLiveGatewayServiceApi({ origin: config.managementOrigin, clientId: service.clientId, secret: await credential(service.secret), transport, signal });
+  const admitted = await api.probe('/api/status');
+  requireCondition(admitted.status === 200 && admitted.layer === 'admitted', 'service_identity_not_admitted');
+  await checkpoint({ stage: 'service_identity', status: 'passed', httpStatus: 200, layer: 'admitted' });
+  if (service.foreign !== undefined) {
+    const foreign = createLiveGatewayServiceApi({ origin: config.managementOrigin, clientId: service.foreign.clientId, secret: await credential(service.foreign.secret), transport, signal });
+    // The Access edge answers a token no policy admits with a redirect to its login page or its own 401/403; a token
+    // the edge admitted but the gateway does not recognise answers the gateway's 401. Either is a refusal.
+    const refused = await foreign.probe('/api/status');
+    requireCondition([302, 401, 403].includes(refused.status) && ['access_edge', 'gateway'].includes(refused.layer), 'service_foreign_identity_not_refused');
+    await checkpoint({ stage: 'service_rejection', status: 'foreign_identity_refused', httpStatus: refused.status, layer: refused.layer, code: refused.code });
+  }
+  for (const [path, method] of [['/api/update-actions', 'POST'], ['/api/teardown-actions', 'POST'],
+    [`/api/source-actions/action_${'A'.repeat(32)}`, 'DELETE'], [`/api/update-actions/action_${'A'.repeat(32)}`, 'GET']]) {
+    const refused = await api.probe(path, method === 'GET' ? {} : { method, body: { schemaVersion: 1 } });
+    requireCondition(refused.status === 403 && refused.layer === 'gateway' && refused.code === 'service_operation_denied', 'service_operation_not_refused');
+  }
+  await checkpoint({ stage: 'service_rejection', status: 'operations_refused', httpStatus: 403, layer: 'gateway', code: 'service_operation_denied' });
+  return api;
+}
+
 async function outsideRepository(path) {
   requireCondition(isAbsolute(path), 'private_path_required');
   const canonical = await realpath(path);
@@ -72,6 +102,7 @@ export function validateLiveManagementConfig(input) {
 export function summarizeLiveJournal(state) {
   requireCondition(state?.schemaVersion === 1 && Array.isArray(state.events), 'journal_invalid');
   const passed = [...new Set(state.events.filter((event) => event.status === 'passed').map((event) => event.stage))];
+  const foreign = state.events.findLast((event) => event.stage === 'service_rejection' && event.status === 'foreign_identity_refused');
   return {
     scope: state.scope ?? 'browser_lifecycle',
     qualified: (state.scope ?? 'browser_lifecycle') === 'browser_lifecycle' && state.qualified === true && passed.includes('lifecycle'),
@@ -80,6 +111,11 @@ export function summarizeLiveJournal(state) {
     failureCode: state.events.findLast((event) => event.status === 'stopped')?.failureCode ?? null,
     removalReceiptAvailable: state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
     resumed: state.events.some((event) => event.stage === 'resume'),
+    serviceIdentity: state.events.some((event) => event.stage === 'service_identity') ? {
+      admitted: passed.includes('service_identity'),
+      operationsRefused: state.events.some((event) => event.stage === 'service_rejection' && event.status === 'operations_refused'),
+      foreignIdentity: foreign === undefined ? null : { httpStatus: foreign.httpStatus ?? null, layer: foreign.layer ?? null },
+    } : null,
   };
 }
 
@@ -203,26 +239,10 @@ export async function runLiveLifecycleCommand(args) {
   try {
     await checkpoint({ stage: recover ? 'recovery' : 'preflight', status: 'started' });
     if (apiOnly && config.serviceAccess !== undefined) {
-      // The deployed protected routes as the service identity: no browser, no cached human session. Refusals of an
-      // unapproved identity and of operations outside the allowlist are proven before the exercise.
-      const service = config.serviceAccess;
-      const api = createLiveGatewayServiceApi({ origin: config.managementOrigin, clientId: service.clientId,
-        secret: await resolveOperatorCredential(service.secret), signal: cancellation.signal });
-      if (service.foreign !== undefined) {
-        const foreign = createLiveGatewayServiceApi({ origin: config.managementOrigin, clientId: service.foreign.clientId,
-          secret: await resolveOperatorCredential(service.foreign.secret), signal: cancellation.signal });
-        // The Access edge refuses an identity no policy admits with a redirect to its login page (or 401/403).
-        const refusal = await foreign.probe('/api/status');
-        requireCondition([302, 401, 403].includes(refusal), 'service_foreign_identity_not_refused');
-        await checkpoint({ stage: 'service_rejection', status: 'foreign_identity_refused', httpStatus: refusal });
-      }
-      requireCondition(await api.probe('/api/status') === 200, 'service_identity_not_admitted');
-      for (const [path, method] of [['/api/update-actions', 'POST'], ['/api/teardown-actions', 'POST'],
-        [`/api/source-actions/action_${'A'.repeat(32)}`, 'DELETE'], [`/api/update-actions/action_${'A'.repeat(32)}`, 'GET']]) {
-        const status = await api.probe(path, method === 'GET' ? {} : { method, body: { schemaVersion: 1 } });
-        requireCondition(status === 403, 'service_operation_not_refused');
-      }
-      await checkpoint({ stage: 'service_rejection', status: 'operations_refused' });
+      // The deployed protected routes as the service identity: no browser, no cached human session. Admission of the
+      // approved identity, refusal of an unapproved one and refusal of operations outside the allowlist are proven,
+      // each by the layer that answered, before the exercise.
+      const api = await proveServiceIdentity({ config, checkpoint, signal: cancellation.signal });
       await checkpoint({ stage: 'access', status: 'passed', actor: 'service' });
       await qualifyLiveGatewayManagement({ request: api.request, source: config.source, checkpoint });
       await checkpoint({ stage: 'management_api', status: 'passed', actor: 'service' });
@@ -257,6 +277,8 @@ export async function runLiveLifecycleCommand(args) {
     }
     await createLiveGatewayApi({ origin: config.installerOrigin, email: config.basics.adminEmail, signal: cancellation.signal }).checkAccess();
     await checkpoint({ stage: 'preflight', status: 'passed' });
+    // In the full lifecycle the service identity is proven over the updated runtime, before any removal begins.
+    const proveService = config.serviceAccess === undefined ? null : () => proveServiceIdentity({ config, checkpoint, signal: cancellation.signal });
     browser = await openLiveGatewayBrowser({ ...config, notify: console.log });
     await browser.login(config.installerOrigin);
     await checkpoint({ stage: 'access', status: 'passed' });
@@ -316,11 +338,13 @@ export async function runLiveLifecycleCommand(args) {
             phase = 'root';
           } else requireCondition(action?.status !== undefined, 'resume_point_unsupported');
         }
+        // A journal that stopped between the update and the first removal write still owes the service proof.
+        if (proveService !== null && removal === undefined && !proved && !state.events.some((event) => event.stage === 'service_identity')) await proveService();
         await checkpoint({ stage: 'resume', status: 'removal', phase });
         await removeLiveGateway({ config, browser, provider, inventory, checkpoint, phase });
       } else if (recorded === undefined) {
         await checkpoint({ stage: 'resume', status: 'installed' });
-        await continueLiveGatewayLifecycle({ config, browser, provider, provision, checkpoint, notify: console.log, publishB });
+        await continueLiveGatewayLifecycle({ config, browser, provider, provision, checkpoint, notify: console.log, publishB, proveService });
       } else {
         // An update action that failed terminally on the gateway may be followed by a new one; the journal keeps both, and
         // the inventory comes from the journal while the installed source and roster are read back from the gateway.
@@ -333,10 +357,10 @@ export async function runLiveLifecycleCommand(args) {
         const team = await management('/api/team');
         requireCondition(installed !== undefined && Array.isArray(team?.members), 'resume_point_unsupported');
         await checkpoint({ stage: 'resume', status: 'update', failedActionId: recorded.actionId, failureCode: action.failureCode ?? null });
-        await finishLiveGatewayLifecycle({ config, browser, provider, inventory, source: { sourceId: installed.id, baselineMembers: team.members }, publishB, checkpoint });
+        await finishLiveGatewayLifecycle({ config, browser, provider, inventory, source: { sourceId: installed.id, baselineMembers: team.members }, publishB, checkpoint, proveService });
       }
     } else await qualifyLiveGatewayLifecycle({ config, browser, provider, checkpoint, notify: console.log,
-      publishB: () => deployInstaller(config, config.installerB, config.releaseB) });
+      publishB: () => deployInstaller(config, config.installerB, config.releaseB), proveService });
     return 0;
   } catch (error) {
     const failureCode = error instanceof LiveLifecycleError || error instanceof LiveGatewayBrowserError || error instanceof LiveGatewayAccessError || error instanceof LiveGatewayApiError ||

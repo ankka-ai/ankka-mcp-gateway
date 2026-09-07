@@ -123,10 +123,12 @@ test('complete orchestration proves token management, distinct update, lost call
   await qualifyLiveGatewayLifecycle({ config, browser, notify: () => {}, resolves: async () => true,
     checkpoint: async (event) => events.push(event),
     publishB: async () => { available = runtimeIdentity(config.releaseB); evidence.push('release_b_activated'); },
+    // The service identity is proven over the updated runtime, before the first removal write.
+    proveService: async () => { assert.equal(current.release, config.releaseB.release); evidence.push('service_identity_proven'); },
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
-  assert.deepEqual(evidence, ['release_b_activated', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
+  assert.deepEqual(evidence, ['release_b_activated', 'service_identity_proven', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
 });

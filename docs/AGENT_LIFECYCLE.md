@@ -139,7 +139,8 @@ Coverage that stays outside the runner, by design:
 
 - the deployed management routes as the service identity: proven against a
   gateway installed through an isolated installer (browser consent once per
-  release) with the browser runner's service mode, see
+  release) with the browser runner's service mode, including the refusal of a
+  valid but unapproved identity recorded by the layer that answered, see
   [live lifecycle](LIVE_LIFECYCLE.md);
 - browser onboarding, real OAuth permissions and consent screens;
 - the deployed Durable Object's update handover and its hosted removal job;

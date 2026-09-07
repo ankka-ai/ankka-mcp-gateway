@@ -15,7 +15,7 @@ const exactRelease = (value, expected) => value?.release === expected.release &&
  * OAuth is reviewed in the runner's own browser; routine management uses the
  * gateway's account token. The operator token belongs only to the provider port.
  */
-export async function qualifyLiveGatewayLifecycle({ config, browser, provider, publishB, checkpoint, notify, resolves = hostnameResolvesDirectly }) {
+export async function qualifyLiveGatewayLifecycle({ config, browser, provider, publishB, checkpoint, notify, resolves = hostnameResolvesDirectly, proveService = null }) {
   const installer = (path, options) => browser.request(config.installerOrigin, path, options);
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
   await provider.assertFresh();
@@ -61,14 +61,14 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   const updateA = await management('/api/update');
   requireCondition(exactRelease(updateA.current, config.releaseA), 'installed_release_mismatch');
   await checkpoint({ stage: 'installation', status: 'passed' });
-  await continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify });
+  await continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify, proveService });
 }
 
 /**
  * Everything after a passed installation, also entered by `--resume-installed` with the provision recovered from
  * the journal: management token wait, management exercise, inventory, signed update, interrupted and completed removal.
  */
-export async function continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify }) {
+export async function continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify, proveService = null }) {
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
   notify('Install the approved management token directly as the gateway secret in Cloudflare. This command never receives that token.');
   await browser.waitFor(() => management('/api/team'), (value) =>
@@ -80,14 +80,16 @@ export async function continueLiveGatewayLifecycle({ config, browser, provider, 
   const source = await qualifyLiveGatewayManagement({ request: management, source: config.source, checkpoint });
   const inventory = await provider.capture(provision);
   await checkpoint({ stage: 'inventory', status: 'passed', inventory });
-  await finishLiveGatewayLifecycle({ config, browser, provider, inventory, source, publishB, checkpoint });
+  await finishLiveGatewayLifecycle({ config, browser, provider, inventory, source, publishB, checkpoint, proveService });
 }
 
 /**
- * The signed update and the interrupted, then completed, removal. Also entered by `--resume-installed` after an update
- * action failed terminally, with the inventory from the journal and the installed source read back from the gateway.
+ * The signed update, the service-identity proof over the updated runtime, and the interrupted, then completed, removal.
+ * Also entered by `--resume-installed` after an update action failed terminally, with the inventory from the journal
+ * and the installed source read back from the gateway. `proveService` runs after the update and before any removal
+ * write, so the refusals it records come from a gateway that still carries the updated service binding and is whole.
  */
-export async function finishLiveGatewayLifecycle({ config, browser, provider, inventory, source, publishB, checkpoint }) {
+export async function finishLiveGatewayLifecycle({ config, browser, provider, inventory, source, publishB, checkpoint, proveService = null }) {
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
   await checkpoint({ stage: 'update', status: 'started' });
   await publishB();
@@ -106,6 +108,7 @@ export async function finishLiveGatewayLifecycle({ config, browser, provider, in
     item.id === source.sourceId && item.status === 'installed') && team.managementCredentialConfigured === true &&
     team.editingEnabled === true && JSON.stringify(team.members) === JSON.stringify(source.baselineMembers), 'update_did_not_preserve_management');
   await checkpoint({ stage: 'update', status: 'passed' });
+  if (proveService !== null) await proveService();
   await removeLiveGateway({ config, browser, provider, inventory, checkpoint, phase: 'interrupted' });
 }
 
