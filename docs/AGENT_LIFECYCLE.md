@@ -193,8 +193,65 @@ removal executors.
 The runner is a small parent process over a file record: one lock, atomic
 writes, one child process per stage. Cloudflare Workflows would replace the
 parent's sequencing and the record's event log with durable steps, but not the
-reconciliation, ownership checks or credential custody. It is evaluated after
-the first milestone in a bounded prototype over the same stage functions and
-adopted only if it removes more coordination code than it adds. It is
-reconsidered earlier only if the runner starts accumulating orchestration
-machinery of its own.
+reconciliation, ownership checks or credential custody. The rule from the
+first milestone stands: a bounded prototype over the same stage functions is
+adopted only if it removes more coordination code than it adds, and it is
+looked at early only if the runner accumulates orchestration machinery.
+
+**Decision, 2026-09-07 (slice 5 of #152): the stages are not ported into
+Workflow steps and no prototype was started.** The early trigger has not fired. Since the runner landed, its
+coordination code changed in two places, the lock's liveness and takeover
+rules and the record's reload-before-write, both regressions for defects the
+live runs exposed; the stages gained bounded waits (the Stage 2 lease, the
+consent window), not sequencing. The prototype was costed on paper instead:
+
+- Replaced: the parent's loop and exit codes. One `step.do` per stage,
+  `restart({ from })` for `--resume --from`, `terminate` for `cancel`, a
+  unique instance id for the run lock, `step.sleep` for the bounded waits,
+  the instance status for `status`.
+- Not replaced: the record's Durable Object storage stand-in and the
+  installation secrets. The production code writes them between provider
+  calls, and a step persists only its return value, so they would move into a
+  real Durable Object of a runner Worker deployed into the disposable
+  account. The reconciliation, the transport guard, the stages and the
+  release loader stay; the publish directories become R2 objects and the
+  payload is bundled.
+- Lost: the interruption proof. `--interrupt-after` kills the process between
+  a mutating response and the write that would journal it. A Worker cannot
+  end itself; a thrown error lets the code after the mutation run, so the
+  journal or the stage result records a failure, a different recovery state;
+  `restart` cancels an in-flight step from outside but not at a chosen
+  response. The armed-but-unrecorded class would be proven only by the local
+  runner and the workerd fixtures.
+- Changed custody: the deployment, management and service credentials become
+  Worker secrets in the account they act on, resting there between runs
+  instead of being read from the keychain for one run; installation key
+  material rests in Durable Object storage. That amends the credential table
+  in #152 and is the operator's decision, not a slice's side effect.
+- Added: a runner Worker with a Workflow class, a Durable Object class and
+  its migrations, an R2 release path, a secret provisioning path, and a
+  deployed-runner identity to record beside `executedSource` and the release
+  identities. That is more coordination code than the parent and the lock it
+  removes.
+
+The one thing the local runner cannot do is run with no operator host awake.
+That is a hosting question, not an orchestration one, and the runner does not
+change for it: the job file already accepts `env:` credential references, and
+the lock, the release candidate build and the signing script run headless on
+Linux. The first off-host host is a CI job in a private repository that checks
+out this public repository at one commit, builds and dev-signs the release
+pair, writes and approves a job with a fresh prefix, runs it, and stores the
+encrypted run directory for resume. It cannot run in this repository's own
+Actions: a public repository's logs and artifacts are readable by anyone, and
+the record names test-account hostnames. The same command moves into a
+Cloudflare sandbox when secrets and logs should stay inside the disposable
+account; a Workflow around that one sandboxed command, which is the shape
+`@cloudflare/ci` (August 2026) gives a pipeline, then adds a schedule, an
+approval gate and a status API. That is the point at which Workflows earn a
+place here. Cloudflare Artifacts is storage for agent workspaces, not a system
+of record: GitHub keeps the review, the required checks, the immutable
+releases and the issues. Workflows are not a candidate for the hosted
+customer path: persisted step state would persist the operation-scoped grant.
+
+Reconsider the port itself only when the runner needs a scheduler, a queue,
+parallel stages or coordination across jobs.
