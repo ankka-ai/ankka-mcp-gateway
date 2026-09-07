@@ -58,7 +58,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     }
     try {
       await page.bringToFront();
-      await page.goto(target.href, { waitUntil: 'domcontentloaded' });
+      // The Cloudflare consent page is a heavy application; give any navigation well over the default 30 seconds.
+      await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 90_000 });
       await page.bringToFront();
       if (page.url() === 'about:blank') throw new Error();
       const visibleOrigin = new URL(page.url()).origin;
