@@ -92,7 +92,8 @@ export function customerInstallProgressPage(
     }catch{
       if(!active)return;
       misses+=1;
-      if(misses>=3){openManagement();return}
+      if(misses===3){message.textContent='Still finishing. The temporary setup address is being replaced by your management address; this can take a few minutes.'}
+      if(misses>=20){openManagement();return}
     }finally{clearTimeout(timeout)}
     if(active)timer=setTimeout(poll,3000);
   };

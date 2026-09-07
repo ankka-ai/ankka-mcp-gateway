@@ -67,6 +67,8 @@ export interface CustomerBootstrapRouterDependencies {
   readonly randomBytes?: BootstrapRandomBytes;
   readonly state: CustomerBootstrapStatePort;
   readonly transport: CustomerCloudflareTransport;
+  /** Answers whether the management hostname resolves; DNS-over-HTTPS when absent. */
+  readonly resolvesManagementHostname?: (hostname: string) => Promise<boolean>;
   /**
    * Verifies and adopts the exact deploy-signed Worker/namespace handoff and
    * ownership certificate. It must be idempotent for byte-identical evidence.
@@ -124,6 +126,8 @@ export interface CustomerBootstrapRouterConfig {
   readonly secretCommitment: string;
   readonly capabilityExpiresAt: number;
   readonly publicClientId: string;
+  /** The final management hostname; READY is reported only once it resolves. */
+  readonly managementHostname?: string | undefined;
 }
 
 const configSchema = v.strictObject({
@@ -133,7 +137,26 @@ const configSchema = v.strictObject({
   secretCommitment: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
   capabilityExpiresAt: v.pipe(v.number(), v.safeInteger()),
   publicClientId: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{16,128}$/u)),
+  /** When present, READY is reported only once this hostname resolves, so a browser never caches its absence. */
+  managementHostname: v.optional(v.pipe(v.string(), v.regex(/^[a-z0-9](?:[a-z0-9.-]{1,251}[a-z0-9])?$/u))),
 });
+
+/** Resolver-agnostic DNS check through Cloudflare's DNS-over-HTTPS endpoint; absence is never cached here. */
+async function hostnameResolvesOverHttps(hostname: string): Promise<boolean> {
+  for (const type of ['A', 'AAAA']) {
+    try {
+      const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`, {
+        headers: { accept: 'application/dns-json' }, redirect: 'error', signal: AbortSignal.timeout(3_000),
+      });
+      if (!response.ok) continue;
+      const parsed = v.safeParse(v.looseObject({ Status: v.number(), Answer: v.optional(v.array(v.looseObject({ type: v.number() }))) }), await response.json());
+      if (parsed.success && parsed.output.Status === 0 && (parsed.output.Answer?.length ?? 0) > 0) return true;
+    } catch {
+      // A failed lookup only defers readiness; the next status poll asks again.
+    }
+  }
+  return false;
+}
 
 function headers(contentType = 'application/json; charset=utf-8'): Headers {
   return new Headers({
@@ -278,6 +301,7 @@ export function createCustomerBootstrapRouter(
   const parsedConfig = v.safeParse(configSchema, rawConfig);
   if (!parsedConfig.success) throw new CustomerBootstrapStateError('invalid');
   const config = Object.freeze(parsedConfig.output);
+  let managementResolved = false;
   const now = dependencies.now ?? Date.now;
 
   const persistTransition = async (
@@ -327,7 +351,14 @@ export function createCustomerBootstrapRouter(
       try {
         const current = await readState();
         if (request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_STATUS_PATH) {
-          return json(publicCustomerBootstrapStatus(current));
+          const status = publicCustomerBootstrapStatus(current);
+          // The browser navigates to the management hostname on READY. Resolvers cache a missing name for the
+          // zone's negative TTL, so READY waits until the name resolves; the install itself is already complete.
+          if (status.status === 'READY' && config.managementHostname !== undefined && !managementResolved) {
+            managementResolved = await (dependencies.resolvesManagementHostname ?? hostnameResolvesOverHttps)(config.managementHostname);
+            if (!managementResolved) return json({ ...status, status: 'CONVERGING' });
+          }
+          return json(status);
         }
         // READY is terminal. A clean release serves the final Gateway; this
         // restricted bootstrap version never reopens any setup endpoint.

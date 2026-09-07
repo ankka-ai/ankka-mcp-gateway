@@ -231,6 +231,8 @@ describe('restricted customer bootstrap router', () => {
         return true;
       },
     };
+    let managementResolvable = false;
+    const resolutions: string[] = [];
     const router = createCustomerBootstrapRouter({
       accountId: ACCOUNT_ID,
       installId: INSTALL_ID,
@@ -238,10 +240,12 @@ describe('restricted customer bootstrap router', () => {
       secretCommitment: capability.secretCommitment,
       capabilityExpiresAt: capability.expiresAt,
       publicClientId: CLIENT_ID,
+      managementHostname: 'manage.example.com',
     }, {
       now: () => NOW + 1,
       state: statePort,
       transport,
+      resolvesManagementHostname: async (hostname) => { resolutions.push(hostname); return managementResolvable; },
       acceptHandoff: async () => undefined,
       issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 }),
       beginRelay: async ({ gatewayState, pkceChallenge, gatewayCallback }) =>
@@ -338,9 +342,16 @@ describe('restricted customer bootstrap router', () => {
     }));
     expect(replay.status).toBe(404);
     expect((await router.fetch(new Request(`${ORIGIN}/api/status`))).status).toBe(404);
+    // READY is withheld until the management hostname resolves, then remembered.
+    expect(await (await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_STATUS_PATH}`))).json()).toEqual({
+      schemaVersion: 1, status: 'CONVERGING', canRetry: false,
+    });
+    managementResolvable = true;
     expect(await (await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_STATUS_PATH}`))).json()).toEqual({
       schemaVersion: 1, status: 'READY', canRetry: false,
     });
+    expect(await (await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_STATUS_PATH}`))).json()).toMatchObject({ status: 'READY' });
+    expect(resolutions).toEqual(['manage.example.com', 'manage.example.com']);
   });
 
   it('keeps a multi-account Stage 2 grant INCOMPLETE and revokes it', async () => {
