@@ -42,6 +42,7 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
   let namespaceLag = 0;
   let deploymentLag = 0;
   let settingsFlaky = 0;
+  let flakyReads = 0;
   let foreignVersionBinding = false;
   const ok = <Value>(result: Value): Response => Response.json({ success: true, errors: [], messages: [], result });
   const absent = (): Response => Response.json({ success: false }, { status: 404 });
@@ -67,6 +68,7 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
     const base = `/client/v4/accounts/${root.accountId}`;
     const app = `/client/v4/zones/${root.zoneId}/access/apps/${root.applicationId}`;
     if (request.method === 'GET') {
+      if (flakyReads > 0) { flakyReads -= 1; return failure(); }
       if (path === `${base}/workers/workers/${root.workerName}` || path === `${base}/workers/workers/${root.workerId}`) {
         return live.worker ? ok({ id: root.workerId, name: root.workerName, tail_consumers: [] }) : absent();
       }
@@ -153,6 +155,7 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
     foreignVersionBinding: () => { foreignVersionBinding = true; },
     lag: (listing: 'namespace' | 'deployment' = 'namespace', reads = 2) => { if (listing === 'namespace') namespaceLag = reads; else deploymentLag = reads; },
     flakySettings: (reads = 2) => { settingsFlaky = reads; },
+    flakyReads: (reads = 2) => { flakyReads = reads; },
     renew: () => {
       job = settleGatewayTeardownAttempt({ job, attemptId: ATTEMPT, revocation: 'confirmed', now: clock++ });
       job = authorizeGatewayTeardownJob({ job, attemptId: NEXT_ATTEMPT, ...HASHES, now: clock++ });

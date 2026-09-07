@@ -58,6 +58,12 @@ describe('fixed hosted gateway root removal', () => {
     expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
   });
 
+  it('retries a transient provider error on a strict-inventory read and still removes the root', async () => {
+    const test = await fixture(); test.flakyReads(2);
+    expect((await test.run()).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+  });
+
   it('retries a transient owner settings error while the retirement upload settles', async () => {
     const test = await fixture(); test.flakySettings(2);
     expect((await test.run()).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);

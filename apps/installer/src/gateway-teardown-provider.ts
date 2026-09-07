@@ -75,6 +75,7 @@ interface Call {
   readonly accessToken: string;
   readonly transport: FetchTransport;
   readonly authority: VerifiedGatewayTeardownHandoff;
+  readonly wait?: (milliseconds: number) => Promise<void>;
 }
 function account(call: Call, path: string): URL {
   return new URL(`/client/v4/accounts/${call.authority.certificate.statement.accountId}${path}`, CLOUDFLARE_API_ORIGIN);
@@ -84,7 +85,10 @@ function applicationUrl(call: Call, suffix = ''): URL {
   return new URL(`/client/v4/zones/${management.zoneId}/access/apps/${management.applicationId}${suffix}`, CLOUDFLARE_API_ORIGIN);
 }
 
-async function request(call: Call, stage: string, url: URL, init: RequestInit = {}, missing = false) {
+// A read mutates nothing, so a transient provider error (a 5xx or a timeout) is retried this many times.
+const READ_RETRY_DELAYS_MS = Object.freeze([400, 1_200]);
+
+async function requestOnce(call: Call, stage: string, url: URL, init: RequestInit, missing: boolean) {
   try {
     return await withDeadline(async (signal) => {
       const response = await call.transport(url, { ...init, signal, redirect: 'manual',
@@ -102,6 +106,28 @@ async function request(call: Call, stage: string, url: URL, init: RequestInit = 
   } catch (error) {
     if (error instanceof GatewayTeardownProviderError) throw error;
     fail(stage, 'provider_unknown');
+  }
+}
+
+/**
+ * A write is sent at most once: a rejected or unknown response leaves its boundary
+ * pending for a fresh consent, never a silent retry that might apply twice. A read
+ * mutates nothing, and a transient provider error (a 5xx or a timeout, surfaced as
+ * provider_unknown) is no evidence of any resource, so a read is retried a bounded
+ * number of times before it is judged. A 4xx rejection and every deterministic
+ * mismatch (foreign_dependency, identity_mismatch) still fail at once.
+ */
+async function request(call: Call, stage: string, url: URL, init: RequestInit = {}, missing = false) {
+  const method = init.method ?? 'GET';
+  const delays = method === 'GET' || method === 'HEAD' ? READ_RETRY_DELAYS_MS : [];
+  const wait = call.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestOnce(call, stage, url, init, missing);
+    } catch (error) {
+      if (attempt >= delays.length || !(error instanceof GatewayTeardownProviderError) || error.code !== 'provider_unknown') throw error;
+      await wait(delays[attempt] ?? 0);
+    }
   }
 }
 
@@ -375,9 +401,9 @@ export async function executeGatewayRootRemoval(input: {
   if (job === null || job.phase !== 'exchanging' || job.attempt?.id !== input.attemptId || job.attempt.expiresAt <= input.now()) fail('start', 'job_conflict');
   const authority = await verifyGatewayTeardownJobAuthority({ job, trust: input.trust });
   if (authority.certificate.statement.accountId !== input.authorizedAccountId) fail('account', 'identity_mismatch');
-  const call = { authority, accessToken: input.accessToken, transport: input.transport };
-  const module = await retirementModule(job, input.bundle);
   const wait = input.wait ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const call = { authority, accessToken: input.accessToken, transport: input.transport, wait };
+  const module = await retirementModule(job, input.bundle);
   const commit = async (previous: GatewayTeardownJob, next: GatewayTeardownJob): Promise<GatewayTeardownJob> => {
     if (!await input.port.compareAndSet(previous.revision, next)) fail('persist', 'job_conflict');
     return next;
