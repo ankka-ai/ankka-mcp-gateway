@@ -47,6 +47,7 @@ import {
   type HostedStage1Session,
 } from './hosted-stage1-session';
 import type { CloudflareOauthConfig, FetchTransport } from './oauth';
+import { parseOauthCallbackQuery } from './oauth-callback-query';
 import { importOwnershipIssuerKey, type OwnershipIssuerKey } from './ownership-issuer-key';
 import {
   PinnedR2ReleaseBundleProvider,
@@ -306,40 +307,11 @@ function createLazyReleaseSnapshot(
   };
 }
 
-function uniqueQuery(url: URL, key: string): string | null {
-  const values = url.searchParams.getAll(key);
-  if (values.length > 1) throw new DeployError(400, 'callback_invalid');
-  return values[0] ?? null;
-}
-
-function echoedScopeIsExact(value: string, kind: 'bootstrap' | 'cleanup'): boolean {
-  if (value.length > 1_024) return false;
-  const values = [...new Set(value.split(/\s+/u).filter(Boolean))].sort();
-  const expected = [...exactOperationScopes(kind === 'cleanup' ? 'uninstall-finalize' : 'bootstrap')].sort();
-  return values.length === expected.length && values.every((scope, index) => scope === expected[index]);
-}
-
 /** Accepts only `code`, `state`, the echoed exact scope, and the standard denial fields. */
 function parseCallbackQuery(url: URL, kind: 'bootstrap' | 'cleanup'): CallbackQuery {
-  const keys = [...url.searchParams.keys()];
-  const state = uniqueQuery(url, 'state');
-  const code = uniqueQuery(url, 'code');
-  const oauthError = uniqueQuery(url, 'error');
-  const echoedScope = uniqueQuery(url, 'scope');
-  const allowed = code !== null
-    ? new Set(['code', 'scope', 'state'])
-    : new Set(['error', 'error_description', 'error_uri', 'state']);
-  if (
-    keys.some((key) => !allowed.has(key)) ||
-    state === null || !TOKEN.test(state) ||
-    (code === null) === (oauthError === null) ||
-    (code !== null && (code.length < 8 || code.length > 4_096)) ||
-    (oauthError !== null && (oauthError.length < 1 || oauthError.length > 128)) ||
-    (echoedScope !== null && !echoedScopeIsExact(echoedScope, kind))
-  ) throw new DeployError(400, 'callback_invalid');
-  if (oauthError !== null) return Object.freeze({ state, code: null, denied: true });
-  if (code === null) throw new DeployError(400, 'callback_invalid');
-  return Object.freeze({ state, code, denied: false });
+  const query = parseOauthCallbackQuery(url, exactOperationScopes(kind === 'cleanup' ? 'uninstall-finalize' : 'bootstrap'));
+  if (query === null) throw new DeployError(400, 'callback_invalid');
+  return query;
 }
 
 function provisionFailureCode(error: DeployError): HostedStage1FailureCode {

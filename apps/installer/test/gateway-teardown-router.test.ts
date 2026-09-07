@@ -164,6 +164,23 @@ describe('hosted removal browser callback and durable recovery', () => {
     } finally { test.close(); }
   });
 
+  it('accepts the scope Cloudflare echoes beside the code and rejects any other echo or parameter without spending the attempt', async () => {
+    const test = await fixture();
+    try {
+      await test.import();
+      const callback = await test.start();
+      const echoing = (scope: string) => { const url = new URL(callback.href); url.searchParams.set('scope', scope); return url.href; };
+      expect((await test.send(echoing('workers-scripts.write zone-access.write dns.write'))).status).toBe(409);
+      const extra = new URL(callback.href); extra.searchParams.set('iss', 'https://dash.cloudflare.com');
+      expect((await test.send(extra.href)).status).toBe(409);
+      expect(test.grants()).toBe(0); expect(test.mutations).toEqual([]);
+      expect((await test.port.read())?.phase).toBe('authorizing');
+      expect((await test.send(echoing('zone-access.write workers-scripts.write'))).status).toBe(303);
+      expect((await test.port.read())?.phase).toBe('removed');
+      expect(test.grants()).toBe(1); expect(test.mutations).toHaveLength(5);
+    } finally { test.close(); }
+  });
+
   it.each(['retire_namespace', 'worker'] as const)('recovers a lost %s response after the gateway and browser session are gone', async (step) => {
     const test = await fixture();
     try {
