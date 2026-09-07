@@ -59,7 +59,9 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   await browser.consent(setup.authorizationUrl,
     async () => (await provider.managementDomainReady(provision) && await resolves(managementHostname) ? management('/api/status') : null),
     (value) => value?.schemaVersion === 1, { holdOrigin: config.managementOrigin });
-  const updateA = await management('/api/update');
+  // The first reads after convergence can meet a transient 503 while the new runtime and its Access application
+  // settle; a read is retried until it answers, and only then is the installed release judged.
+  const updateA = await browser.waitFor(() => management('/api/update'), (value) => value?.current !== undefined);
   requireCondition(exactRelease(updateA.current, config.releaseA), 'installed_release_mismatch');
   await checkpoint({ stage: 'installation', status: 'passed' });
   await continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify, proveService });
