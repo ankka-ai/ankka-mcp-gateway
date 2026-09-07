@@ -1,3 +1,4 @@
+import * as v from 'valibot';
 import { qualifyLiveGatewayManagement } from './live-gateway-management.mjs';
 import { LiveGatewayBrowserError } from './live-gateway-origin.mjs';
 import { hostnameResolvesDirectly } from './live-gateway-dns.mjs';
@@ -214,7 +215,7 @@ export async function finishLiveGatewayRemoval({ browser, installer, provider, i
 /** The hosted job's view reduced to what the journal and the stop diagnostics may carry: counts, flags and the fixed reason word. */
 export function rootRemovalOutcome(view) {
   const steps = Array.isArray(view?.steps) ? view.steps : [];
-  const reason = typeof view?.failureReason === 'string' && /^[a-z0-9_]{1,120}$/u.test(view.failureReason) ? view.failureReason : null;
+  const reason = v.is(v.pipe(v.string(), v.regex(/^[a-z0-9_]{1,120}$/u)), view?.failureReason) ? view.failureReason : null;
   return { stepsDone: steps.filter((step) => step?.done === true).length, stepCount: steps.length, failureReason: reason,
     canAuthorize: view?.canAuthorize === true, revocationUnconfirmed: view?.revocationUnconfirmed === true };
 }

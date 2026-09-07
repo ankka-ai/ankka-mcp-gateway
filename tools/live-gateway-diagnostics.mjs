@@ -37,7 +37,7 @@ export function rootRemovalSummary(events) {
   if (outcome === undefined) return null;
   return { status: outcome.status, stepsDone: Number.isInteger(outcome.stepsDone) ? outcome.stepsDone : outcome.status === 'passed' ? 5 : null,
     stepCount: Number.isInteger(outcome.stepCount) ? outcome.stepCount : outcome.status === 'passed' ? 5 : null,
-    failureReason: typeof outcome.failureReason === 'string' ? outcome.failureReason : null,
+    failureReason: v.is(v.string(), outcome.failureReason) ? outcome.failureReason : null,
     revocationUnconfirmed: outcome.revocationUnconfirmed === true };
 }
 
