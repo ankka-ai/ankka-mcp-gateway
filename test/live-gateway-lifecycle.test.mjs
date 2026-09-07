@@ -294,3 +294,20 @@ test('a receipt handed over with the unconfirmed-revocation warning is saved wit
     }
   }
 });
+
+test('a receipt the installer already holds is taken without opening another removal action', async () => {
+  const { removeLiveGateway } = await import('../tools/live-gateway-lifecycle.mjs');
+  const calls = [], events = [];
+  const browser = {
+    waitFor: async (read, accepts) => { const value = await read(); assert.ok(accepts(value)); return value; },
+    continueHandoff: async () => {}, clearRemovalSession: async () => { throw new Error('stop_here'); },
+    request: async (origin, path, options = {}) => {
+      calls.push(`${options.method ?? 'GET'} ${path}`);
+      if (origin === config.installerOrigin && path === '/api/teardown') return { canAuthorize: true, hostname: config.basics.managementHostname, handoff: 'private-receipt', revocationUnconfirmed: false };
+      throw new Error('unexpected_request');
+    },
+  };
+  await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => events.push(event), phase: 'root' }), /stop_here/u);
+  assert.deepEqual(calls, ['GET /api/teardown']);
+  assert.deepEqual(events, [{ stage: 'root_removal', status: 'receipt_saved', handoff: 'private-receipt', revocationUnconfirmed: false }]);
+});

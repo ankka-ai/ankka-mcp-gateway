@@ -142,15 +142,25 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
   // Fresh consent must recover the durable completion without recreating anything. While dependencies remain, each
   // consent continues their removal on the gateway; once they are gone the gateway hands the receipt to the installer.
   let receipt = null;
+  // The installer's view of a handed-over receipt; null until the gateway has handed one over.
+  const heldReceipt = async () => {
+    try {
+      const review = await installer('/api/teardown');
+      return review?.canAuthorize === true ? review : null;
+    } catch (error) {
+      if (error instanceof LiveGatewayBrowserError && error.code === 'gateway_http_rejected') return null;
+      throw error;
+    }
+  };
   for (let round = 0; receipt === null && round < 4; round += 1) {
+    // A lost callback response can hide a removal the gateway completed and handed over; the gateway then refuses a
+    // new action, so a receipt the installer already holds is taken before any round is opened.
+    receipt = await heldReceipt();
+    if (receipt !== null) break;
     const action = await beginRemoval(management, browser, checkpoint);
     const outcome = await browser.waitFor(async () => {
-      try {
-        const review = await installer('/api/teardown');
-        if (review?.canAuthorize === true) return { review, action: null };
-      } catch (error) {
-        if (!(error instanceof LiveGatewayBrowserError && error.code === 'gateway_http_rejected')) throw error;
-      }
+      const review = await heldReceipt();
+      if (review !== null) return { review, action: null };
       return { review: null, action: await management(`/api/teardown-actions/${action.actionId}`) };
     }, (value) => value.review !== null || ['succeeded', 'recovery_required', 'failed'].includes(value.action?.status));
     if (outcome.review !== null) { receipt = outcome.review; break; }
