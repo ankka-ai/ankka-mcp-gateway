@@ -13,7 +13,7 @@ import { resolveOperatorCredential } from './operator-credential.mjs';
 import { LiveGatewayAccessError } from './live-gateway-access.mjs';
 import { qualifyLiveGatewayManagement, LiveManagementQualificationError } from './live-gateway-management.mjs';
 import { createLiveGatewayProvider } from './live-gateway-provider.mjs';
-import { LiveLifecycleError, continueLiveGatewayLifecycle, finishLiveGatewayLifecycle, finishLiveGatewayRemoval, qualifyLiveGatewayLifecycle } from './live-gateway-lifecycle.mjs';
+import { LiveLifecycleError, continueLiveGatewayLifecycle, finishLiveGatewayLifecycle, finishLiveGatewayRemoval, qualifyLiveGatewayLifecycle, removeLiveGateway } from './live-gateway-lifecycle.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const text = v.pipe(v.string(), v.minLength(1));
@@ -138,7 +138,7 @@ async function validateReleasePair(config) {
 }
 
 export async function runLiveLifecycleCommand(args) {
-  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --resume-installed | --check-access | --preflight | --management-api | --status]\nFull browser lifecycle requires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access checks cached installer Access over HTTP without Chrome, deployment, or a journal.\n--preflight also validates the release pair and provider inventory without deployment.\n--management-api uses a minimal management config and cached gateway Access; no Chrome or infrastructure token. It installs one synthetic source and grants/removes synthetic membership. The source remains for lifecycle teardown.\n--status reports private journal progress without network access. Neither API checks nor removal recovery qualify the full browser lifecycle.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.\n--resume-installed continues a journal whose installation passed but whose later stages did not run, or whose last update action failed terminally on the gateway; anything later is refused.';
+  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --resume-installed | --check-access | --preflight | --management-api | --status]\nFull browser lifecycle requires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access checks cached installer Access over HTTP without Chrome, deployment, or a journal.\n--preflight also validates the release pair and provider inventory without deployment.\n--management-api uses a minimal management config and cached gateway Access; no Chrome or infrastructure token. It installs one synthetic source and grants/removes synthetic membership. The source remains for lifecycle teardown.\n--status reports private journal progress without network access. Neither API checks nor removal recovery qualify the full browser lifecycle.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.\n--resume-installed continues a journal from anywhere between a consented installation and the saved removal receipt: unfinished management, a terminally failed update action, or an unfinished removal; a saved receipt belongs to --recover-removal.';
   if (args.length === 1 && args[0] === '--help') { console.log(help); return 0; }
   requireCondition((args.length === 2 || args.length === 3 && ['--recover-removal', '--resume-installed', '--check-access', '--preflight', '--management-api', '--status'].includes(args[2])) && args[0] === '--config', 'usage_invalid');
   const recover = args[2] === '--recover-removal';
@@ -243,10 +243,11 @@ export async function runLiveLifecycleCommand(args) {
       // Only a journal that stopped between a passed installation and the update may continue; anything later
       // would repeat a mutation the journal already recorded.
       await validateReleasePair(config);
+      // A journal that stopped anywhere between a consented installation and the saved removal receipt may continue;
+      // a saved receipt belongs to --recover-removal, and a passed lifecycle has nothing left to do.
       requireCondition(state.events.some((event) => event.stage === 'installation' && ['configured', 'passed'].includes(event.status)) &&
-        !state.events.some((event) => event.stage === 'update' && event.status === 'passed') &&
-        !state.events.some((event) => ['interrupted_removal', 'dependency_removal', 'root_removal', 'lifecycle'].includes(event.stage)),
-      'resume_point_unsupported');
+        !state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved') &&
+        !state.events.some((event) => event.stage === 'lifecycle'), 'resume_point_unsupported');
     } else if (!recover) {
       await validateReleasePair(config);
       await provider.assertFresh();
@@ -294,7 +295,26 @@ export async function runLiveLifecycleCommand(args) {
         await checkpoint({ stage: 'resume', status: 'installation' });
         await checkpoint({ stage: 'installation', status: 'passed' });
       }
-      if (recorded === undefined) {
+      if (state.events.some((event) => event.stage === 'update' && event.status === 'passed')) {
+        // The removal half. An unauthorized or failed dependency-removal action expired without effect and the
+        // interrupted removal starts over; a succeeded one already removed the dependencies and only the root remains.
+        const inventory = state.events.findLast((event) => event.stage === 'inventory' && event.status === 'passed')?.inventory;
+        requireCondition(inventory, 'inventory_required');
+        const proved = state.events.some((event) => event.stage === 'interrupted_removal' && event.status === 'passed');
+        const removal = state.events.findLast((event) => event.stage === 'dependency_removal' && event.status === 'recorded');
+        let phase = 'interrupted';
+        if (proved) phase = 'root';
+        else if (removal !== undefined) {
+          const action = await management(`/api/teardown-actions/${removal.actionId}`);
+          if (action?.status === 'succeeded') {
+            await provider.assertDependenciesAbsent(inventory);
+            await checkpoint({ stage: 'interrupted_removal', status: 'passed', recoveredActionId: removal.actionId });
+            phase = 'root';
+          } else requireCondition(action?.status !== undefined && action.status !== 'succeeded', 'resume_point_unsupported');
+        }
+        await checkpoint({ stage: 'resume', status: 'removal', phase });
+        await removeLiveGateway({ config, browser, provider, inventory, checkpoint, phase });
+      } else if (recorded === undefined) {
         await checkpoint({ stage: 'resume', status: 'installed' });
         await continueLiveGatewayLifecycle({ config, browser, provider, provision, checkpoint, notify: console.log, publishB });
       } else {

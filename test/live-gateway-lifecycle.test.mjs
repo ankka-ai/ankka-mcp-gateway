@@ -225,3 +225,18 @@ test('the finishing half publishes release B before it waits for the gateway to 
     publishB: async () => { order.push('publishB'); }, checkpoint: async () => {} }), /stop_here/u);
   assert.deepEqual(order, ['publishB', 'wait', '/api/update']);
 });
+
+test('the removal half starts with the interrupted sequence, or with the root removal when the journal already proved it', async () => {
+  const { removeLiveGateway } = await import('../tools/live-gateway-lifecycle.mjs');
+  for (const phase of ['interrupted', 'root']) {
+    const calls = [];
+    const browser = {
+      loseNextTeardownCallbackResponse: async () => { calls.push('arm'); },
+      request: async (_origin, path) => { calls.push(path); throw new Error('stop_here'); },
+    };
+    await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => { calls.push(`${event.stage}:${event.status}`); }, phase }), /stop_here/u);
+    assert.deepEqual(calls, phase === 'interrupted'
+      ? ['interrupted_removal:started', 'arm', 'dependency_removal:started', '/api/teardown-actions']
+      : ['dependency_removal:started', '/api/teardown-actions']);
+  }
+});

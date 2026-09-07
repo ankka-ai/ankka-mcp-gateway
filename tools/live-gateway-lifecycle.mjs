@@ -87,7 +87,6 @@ export async function continueLiveGatewayLifecycle({ config, browser, provider, 
  * action failed terminally, with the inventory from the journal and the installed source read back from the gateway.
  */
 export async function finishLiveGatewayLifecycle({ config, browser, provider, inventory, source, publishB, checkpoint }) {
-  const installer = (path, options) => browser.request(config.installerOrigin, path, options);
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
   await checkpoint({ stage: 'update', status: 'started' });
   await publishB();
@@ -106,15 +105,26 @@ export async function finishLiveGatewayLifecycle({ config, browser, provider, in
     item.id === source.sourceId && item.status === 'installed') && team.managementCredentialConfigured === true &&
     team.editingEnabled === true && JSON.stringify(team.members) === JSON.stringify(source.baselineMembers), 'update_did_not_preserve_management');
   await checkpoint({ stage: 'update', status: 'passed' });
+  await removeLiveGateway({ config, browser, provider, inventory, checkpoint, phase: 'interrupted' });
+}
 
-  await checkpoint({ stage: 'interrupted_removal', status: 'started' });
-  await browser.loseNextTeardownCallbackResponse();
-  const first = await beginRemoval(management, browser, checkpoint);
-  await browser.waitFor(async () => ({ interrupted: browser.interruptionObserved() }), (value) => value.interrupted);
-  const firstAction = await management(`/api/teardown-actions/${first.actionId}`);
-  requireCondition(firstAction.status === 'succeeded', 'interrupted_removal_not_completed');
-  await provider.assertDependenciesAbsent(inventory);
-  await checkpoint({ stage: 'interrupted_removal', status: 'passed' });
+/**
+ * The interrupted dependency removal and the receipt-backed root removal. `phase` is `interrupted` for the whole
+ * sequence and `root` when the journal already proved the interrupted removal; `--resume-installed` enters both.
+ */
+export async function removeLiveGateway({ config, browser, provider, inventory, checkpoint, phase = 'interrupted' }) {
+  const installer = (path, options) => browser.request(config.installerOrigin, path, options);
+  const management = (path, options) => browser.request(config.managementOrigin, path, options);
+  if (phase === 'interrupted') {
+    await checkpoint({ stage: 'interrupted_removal', status: 'started' });
+    await browser.loseNextTeardownCallbackResponse();
+    const first = await beginRemoval(management, browser, checkpoint);
+    await browser.waitFor(async () => ({ interrupted: browser.interruptionObserved() }), (value) => value.interrupted);
+    const firstAction = await management(`/api/teardown-actions/${first.actionId}`);
+    requireCondition(firstAction.status === 'succeeded', 'interrupted_removal_not_completed');
+    await provider.assertDependenciesAbsent(inventory);
+    await checkpoint({ stage: 'interrupted_removal', status: 'passed' });
+  }
   // Fresh consent must recover the durable completion without recreating anything.
   await beginRemoval(management, browser, checkpoint);
   const receipt = await browser.waitFor(() => installer('/api/teardown'), (value) => value?.canAuthorize === true);
