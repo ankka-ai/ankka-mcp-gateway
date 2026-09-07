@@ -126,7 +126,9 @@ The private config has these fields:
   it only for a trusted local runner. The runner opens and closes only its new test
   tab, preserves existing tabs and the context, and disconnects on exit. Disable
   debugging after the test if you enabled it only for this run. It does not copy
-  your profile or export stored cookies.
+  your profile or export stored cookies. A previous installation's installer session
+  left in that browser is replaced through the installer's own new-session route
+  before the run starts; a session still provisioning stops the run.
 
 Provide the already-authorized operator token through `CLOUDFLARE_API_TOKEN`.
 It is used for isolated installer deployment and direct Cloudflare read-back.

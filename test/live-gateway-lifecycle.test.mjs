@@ -130,3 +130,27 @@ test('complete orchestration proves token management, distinct update, lost call
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
 });
+
+test('an attached browser holding a handed-off installer session gets a fresh draft through the installer; a provisioning one stops', async () => {
+  const provision = { installId: `acg-${'2'.repeat(24)}`, workerName: 'ankka-gateway-old', bootstrapOrigin: 'https://ankka-gateway-old.synthetic.workers.dev' };
+  const requests = [];
+  const browser = {
+    login: async () => ({ session: { phase: 'handed_off', provision }, csrfToken: 'stale' }),
+    request: async (_origin, path, options = {}) => {
+      requests.push({ path, method: options.method ?? 'GET', csrfToken: options.csrfToken });
+      if (path === '/api/session/new') return { session: { phase: 'draft', provision: null }, csrfToken: 'fresh' };
+      if (path === '/api/session') return { session: { phase: 'draft', provision: null }, csrfToken: 'fresh' };
+      if (path === '/api/plan') return { session: { plan: { releaseId: config.releaseA.release } } };
+      throw new Error('stop_here');
+    },
+  };
+  await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider: { assertFresh: async () => {} }, checkpoint: async () => {} }), /stop_here/u);
+  assert.deepEqual(requests.map((r) => `${r.method} ${r.path}`), ['POST /api/session/new', 'GET /api/session', 'POST /api/plan', 'POST /api/bootstrap']);
+  assert.equal(requests[0].csrfToken, 'stale');
+  assert.equal(requests[2].csrfToken, 'fresh');
+  const busy = { ...browser, login: async () => ({ session: { phase: 'provisioning', provision }, csrfToken: 'stale' }), request: async (_origin, path) => { requests.push({ path }); throw new Error('unexpected'); } };
+  requests.length = 0;
+  await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser: busy, provider: { assertFresh: async () => {} }, checkpoint: async () => {} }), { code: 'fresh_installer_session_required' });
+  assert.deepEqual(requests, []);
+});
+

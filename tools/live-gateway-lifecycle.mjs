@@ -17,7 +17,14 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   const installer = (path, options) => browser.request(config.installerOrigin, path, options);
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
   await provider.assertFresh();
-  const session = await browser.login(config.installerOrigin);
+  let session = await browser.login(config.installerOrigin);
+  if (session?.session?.phase !== 'draft' || session.session.provision !== null) {
+    // An attached browser may still hold the previous installation's session. The installer issues a fresh
+    // draft for a draft, failed or handed-off session and keeps the old one's evidence; anything else stops here.
+    requireCondition(['draft', 'failed', 'handed_off'].includes(session?.session?.phase), 'fresh_installer_session_required');
+    await installer('/api/session/new', { method: 'POST', body: {}, csrfToken: session.csrfToken });
+    session = await installer('/api/session');
+  }
   requireCondition(session?.session?.phase === 'draft' && session.session.provision === null, 'fresh_installer_session_required');
   await checkpoint({ stage: 'installation', status: 'started' });
   const planned = await installer('/api/plan', { method: 'POST', body: {}, csrfToken: session.csrfToken });
