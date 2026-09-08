@@ -14,6 +14,11 @@ const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
  */
 export const BROWSER_REQUEST_TIMEOUT_MS = 120_000;
 
+/** Matches requests to the origin currently held (none when `hold.origin` is null); evaluated per request. */
+export function heldOriginMatcher(hold) {
+  return (url) => hold.origin !== null && url.origin === hold.origin;
+}
+
 export function validateLiveBrowserRequest(origins, origin, path, method) {
   if (!origins.includes(origin) || !(API_PATH.test(path) || BOOTSTRAP_PATH.test(path)) || !METHODS.has(method)) {
     throw new LiveGatewayBrowserError('request_outside_lifecycle');
@@ -51,6 +56,14 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     : await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
   const page = borrowed ? await context.newPage() : context.pages()[0] ?? await context.newPage();
   page.setDefaultTimeout(30_000);
+  // A held origin is answered locally so the browser never resolves a hostname whose record may not exist yet. The
+  // route stays installed for the page's life and consults the held origin per request: releasing the hold changes
+  // the variable, not the routes, because an attached browser can refuse to remove a route without saying so.
+  const hold = { origin: null };
+  await page.route(heldOriginMatcher(hold), (route) => route.fulfill({
+    status: 200, contentType: 'text/html; charset=utf-8',
+    body: '<!doctype html><title>Ankka lifecycle</title><p>Installation is finishing. The runner continues by API.</p>',
+  }));
   let interrupted = false;
   let interruptionArmed = false;
   let interruptionError = null;
@@ -182,17 +195,12 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       if (url.origin !== 'https://dash.cloudflare.com' || url.pathname !== '/oauth2/auth') {
         throw new LiveGatewayBrowserError('authorization_url_invalid');
       }
-      // A held origin is answered locally so the browser never resolves a hostname whose record may not exist yet.
-      const hold = holdOrigin === undefined ? null : (route) => route.fulfill({
-        status: 200, contentType: 'text/html; charset=utf-8',
-        body: '<!doctype html><title>Ankka lifecycle</title><p>Installation is finishing. The runner continues by API.</p>',
-      });
-      if (hold !== null) await page.route((target) => target.origin === holdOrigin, hold);
+      hold.origin = holdOrigin ?? null;
       try {
         await navigate(url.href);
         return await waitFor(read, accepts, { instruction: 'Review and approve the test operation in Cloudflare. The runner will continue after the callback.' });
       } finally {
-        if (hold !== null) await page.unroute((target) => target.origin === holdOrigin, hold).catch(() => {});
+        hold.origin = null;
       }
     },
     async loseNextTeardownCallbackResponse() {
