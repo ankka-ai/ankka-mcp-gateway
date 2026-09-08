@@ -149,7 +149,13 @@ The private config has these fields:
   it only for a trusted local runner. The runner opens and closes only its new test
   tab, preserves existing tabs and the context, and disconnects on exit. Disable
   debugging after the test if you enabled it only for this run. It does not copy
-  your profile or export stored cookies. A previous installation's installer session
+  your profile or export stored cookies. After each approval leave the runner's
+  tab alone: the installer page in it consumes the one-time handoff to the new
+  shell, and a closed or navigated tab leaves the shell refusing the runner
+  until its window expires. A machine whose first resolver is a caching
+  forwarder (Tailscale MagicDNS, for example) can cache the new management
+  hostname's absence for the zone's negative TTL; take it out of the path for
+  the run. A previous installation's installer session
   left in that browser is replaced through the installer's own new-session route
   before the run starts; a session still provisioning stops the run.
 
