@@ -187,7 +187,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
       bindings: Object.freeze([
         Object.freeze({ name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' }),
         Object.freeze({ name: 'ASSETS', type: 'assets' }),
-        ...Object.entries(bindings).map(([name, text]) => Object.freeze({ name, text, type: 'plain_text' })),
+        ...Object.entries(bindings).flatMap(([name, text]) => (text === undefined ? [] : [Object.freeze({ name, text, type: 'plain_text' })])),
       ]),
       compatibility_date: '2026-08-08',
       created_on: '2026-08-26T00:00:00.000Z',

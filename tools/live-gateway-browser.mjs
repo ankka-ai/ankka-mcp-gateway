@@ -1,49 +1,28 @@
 import { chromium } from 'playwright-core';
-import * as v from 'valibot';
 import { createLiveGatewayAccess, LiveGatewayAccessError } from './live-gateway-access.mjs';
+import { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
+
+export { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
 
 const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
 const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth\/start)$/u;
 const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
 
-export class LiveGatewayBrowserError extends Error {
-  constructor(code, status = null) {
-    super(code);
-    this.code = code;
-    this.status = status;
-  }
-}
+/**
+ * A gateway action applies Portal and Access policy changes before it answers, and a Team write has taken more than
+ * thirty seconds live. A write is never retried, so the runner waits for it as long as the API client does.
+ */
+export const BROWSER_REQUEST_TIMEOUT_MS = 120_000;
 
-export function validateLiveBrowserOrigin(value) {
-  let url;
-  try { url = new URL(value); } catch { throw new LiveGatewayBrowserError('origin_invalid'); }
-  if (url.protocol !== 'https:' || url.origin !== value || url.username || url.password) {
-    throw new LiveGatewayBrowserError('origin_invalid');
-  }
-  return url.origin;
+/** Matches requests to the origin currently held (none when `hold.origin` is null); evaluated per request. */
+export function heldOriginMatcher(hold) {
+  return (url) => hold.origin !== null && url.origin === hold.origin;
 }
 
 export function validateLiveBrowserRequest(origins, origin, path, method) {
   if (!origins.includes(origin) || !(API_PATH.test(path) || BOOTSTRAP_PATH.test(path)) || !METHODS.has(method)) {
     throw new LiveGatewayBrowserError('request_outside_lifecycle');
   }
-}
-
-export function validateLiveBootstrapOrigin(provision) {
-  if (!/^acg-[a-f0-9]{24}$/u.test(provision?.installId) ||
-      provision.workerName !== `ankka-gateway-${provision.installId}`) {
-    throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
-  }
-  // The installer publishes its bootstrap base URL with a root slash.
-  // Normalize only that documented form; paths, queries and fragments stay invalid.
-  const base = provision.bootstrapOrigin;
-  const origin = validateLiveBrowserOrigin(v.is(v.string(), base) && base.endsWith('/') ? base.slice(0, -1) : base);
-  const labels = new URL(origin).hostname.split('.');
-  if (labels.length !== 4 || labels[0] !== provision.workerName ||
-      !/^[a-z0-9-]{1,63}$/u.test(labels[1]) || labels.slice(2).join('.') !== 'workers.dev') {
-    throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
-  }
-  return origin;
 }
 
 export function validateLiveHandoff(value, origin, path) {
@@ -77,6 +56,14 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     : await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
   const page = borrowed ? await context.newPage() : context.pages()[0] ?? await context.newPage();
   page.setDefaultTimeout(30_000);
+  // A held origin is answered locally so the browser never resolves a hostname whose record may not exist yet. The
+  // route stays installed for the page's life and consults the held origin per request: releasing the hold changes
+  // the variable, not the routes, because an attached browser can refuse to remove a route without saying so.
+  const hold = { origin: null };
+  await page.route(heldOriginMatcher(hold), (route) => route.fulfill({
+    status: 200, contentType: 'text/html; charset=utf-8',
+    body: '<!doctype html><title>Ankka lifecycle</title><p>Installation is finishing. The runner continues by API.</p>',
+  }));
   let interrupted = false;
   let interruptionArmed = false;
   let interruptionError = null;
@@ -90,7 +77,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     }
     try {
       await page.bringToFront();
-      await page.goto(target.href, { waitUntil: 'domcontentloaded' });
+      // The Cloudflare consent page is a heavy application; give any navigation well over the default 30 seconds.
+      await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 90_000 });
       await page.bringToFront();
       if (page.url() === 'about:blank') throw new Error();
       const visibleOrigin = new URL(page.url()).origin;
@@ -109,7 +97,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     let response;
     try {
       const options = {
-        method, maxRedirects: 0, timeout: 30_000,
+        method, maxRedirects: 0, timeout: BROWSER_REQUEST_TIMEOUT_MS,
         headers: { origin, accept: 'application/json' },
       };
       if (body !== undefined) {
@@ -202,14 +190,21 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       return waitFor(() => request(origin, origin === installerOrigin ? '/api/session' : '/api/status'),
         (value) => value.schemaVersion === 1);
     },
-    async consent(authorizationUrl, read, accepts) {
+    async consent(authorizationUrl, read, accepts, { holdOrigin, keepHold = false } = {}) {
       const url = new URL(authorizationUrl);
       if (url.origin !== 'https://dash.cloudflare.com' || url.pathname !== '/oauth2/auth') {
         throw new LiveGatewayBrowserError('authorization_url_invalid');
       }
-      await navigate(url.href);
-      return waitFor(read, accepts, { instruction: 'Review and approve the test operation in Cloudflare. The runner will continue after the callback.' });
+      hold.origin = holdOrigin ?? null;
+      try {
+        await navigate(url.href);
+        return await waitFor(read, accepts, { instruction: 'Review and approve the test operation in Cloudflare. The runner will continue after the callback.' });
+      } finally {
+        // A caller that keeps the hold (the hostname is not served yet) releases it itself.
+        if (!keepHold) hold.origin = null;
+      }
     },
+    release() { hold.origin = null; },
     async loseNextTeardownCallbackResponse() {
       if (interruptionArmed) throw new LiveGatewayBrowserError('interruption_already_armed');
       interruptionArmed = true;

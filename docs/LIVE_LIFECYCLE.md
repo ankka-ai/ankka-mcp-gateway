@@ -1,5 +1,10 @@
 # Live lifecycle validation
 
+This command is the customer-path layer: browser onboarding, real OAuth
+consent, the deployed Durable Object's handovers and the hosted removal job.
+Unattended development runs use the [lifecycle runner](AGENT_LIFECYCLE.md)
+instead; neither replaces the other's evidence.
+
 The live command creates and removes a disposable gateway. It requires a prepared,
 published pair of distinct signed releases and an isolated installer. It does not
 use production signing keys or prepare accounts, billing, OAuth clients, or token
@@ -23,6 +28,12 @@ It does not qualify the lifecycle or verify dashboard login. Use `--preflight`
 to additionally validate the signed release pair and read the target provider
 inventory with the operator token. These checks cannot prove that all future
 write permissions or consent steps will succeed.
+
+After the Stage 2 consent the installer sends the browser to the new management
+hostname before its DNS record exists, and resolvers cache that negative answer
+for the zone's negative TTL (30 minutes on Cloudflare zones). The runner therefore
+answers that origin locally in the test tab and reads the provider until the
+custom domain is attached before its first request to the hostname.
 
 The runner reads the cached Access token into memory and installs a secure,
 host-only `CF_Authorization` cookie in its own browser context. Browser navigation
@@ -52,6 +63,29 @@ or members. Authenticate once with `cloudflared access login --quiet --app
 <management-origin>` in your normal browser. The command only reads that cached
 session; it never starts interactive login.
 
+### As the service identity
+
+An isolated installer deployed with `ANKKA_SERVICE_ACCESS_CLIENT_ID` and
+`ANKKA_SERVICE_ACCESS_TOKEN_ID` opts every gateway it certifies into that one
+Access service identity (the live config's `serviceAccess` section supplies
+both, and the browser runner passes them as deployment variables; the hosted
+installer never carries them). A management config with the same
+`serviceAccess` section, holding the secret only by keychain or environment
+reference, runs the exercise over the deployed protected routes as that
+identity: no browser, no cached human session, no login. Before the exercise
+it proves three things in order, each recorded with the layer that answered.
+The approved identity is admitted (`service_identity: passed`), the positive
+control without which a refusal would prove nothing. When the section names a
+`foreign` service token, that valid but unapproved identity is refused, and
+the journal records whether the Access edge answered (a redirect to its login
+page, `302`, or its own `401`/`403` page: `layer: access_edge`) or the gateway
+did (its fixed JSON `401 access_required`: `layer: gateway`); the edge is
+expected, because the receipt-owned policy admits exactly one token. Then the
+gateway itself refuses the update and teardown action routes, source action
+cancellation and update action reads to the approved identity
+(`403 service_operation_denied`, `layer: gateway`), which is the Worker-level
+check observed live. The journal records the actor as `service`.
+
 This mode uses the same management exercise as the full lifecycle: install the
 synthetic source, verify default deny, grant synthetic membership, then remove it.
 It leaves the source installed for subsequent product removal; it does not delete
@@ -70,8 +104,20 @@ npm run validate:lifecycle:live -- --config /private/path/config.json --status
 ```
 
 The summary includes scope, passed stages, the last stage, a fixed failure code,
-and whether a removal receipt is available. It omits configuration, credentials,
-and the receipt itself. A saved receipt supports `--recover-removal` with the full
+whether a removal receipt is available and, once the service identity was
+proven, its admission, the refused operations and the layer that refused the
+foreign identity. It omits configuration, credentials, and the receipt itself.
+`--resume-installed` continues a journal whose installation
+passed but whose later stages did not run (for example a runner stop while waiting
+for the management token), whose Stage 2 consent was given but whose first read
+of the new gateway never succeeded (the provider confirms the installation, and
+a negatively cached hostname is waited out with a notice), or whose last update
+action failed terminally on the gateway, in which case a new update action
+follows and both stay in the journal, or whose removal did not finish: an
+unauthorized or failed dependency-removal action expired without effect and the
+interrupted removal starts over, while a succeeded one leaves only the root
+removal. A journal with a saved removal receipt belongs to `--recover-removal`,
+and the journal records every resume. A saved receipt supports `--recover-removal` with the full
 lifecycle config; earlier failures still require the recorded product recovery flow.
 
 ## Full browser lifecycle
@@ -103,7 +149,15 @@ The private config has these fields:
   it only for a trusted local runner. The runner opens and closes only its new test
   tab, preserves existing tabs and the context, and disconnects on exit. Disable
   debugging after the test if you enabled it only for this run. It does not copy
-  your profile or export stored cookies.
+  your profile or export stored cookies. After each approval leave the runner's
+  tab alone: the installer page in it consumes the one-time handoff to the new
+  shell, and a closed or navigated tab leaves the shell refusing the runner
+  until its window expires. A machine whose first resolver is a caching
+  forwarder (Tailscale MagicDNS, for example) can cache the new management
+  hostname's absence for the zone's negative TTL; take it out of the path for
+  the run. A previous installation's installer session
+  left in that browser is replaced through the installer's own new-session route
+  before the run starts; a session still provisioning stops the run.
 
 Provide the already-authorized operator token through `CLOUDFLARE_API_TOKEN`.
 It is used for isolated installer deployment and direct Cloudflare read-back.
@@ -126,6 +180,11 @@ activate the management secret directly in Cloudflare. No consent is expected
 for the synthetic source installation or the grant and removal of
 `qualification@example.com`. An OAuth handoff for those operations fails validation.
 
+When the config carries `serviceAccess`, the service-identity proof described
+above runs over the updated runtime after the update passes and before the
+first removal write, so the journal holds the updated release's service binding
+and the refusals of a gateway that is still whole beside the removal evidence.
+
 After the signed A → B update, the command discards the browser response from a
 successful dependency-removal callback. It verifies that dependencies are absent,
 then uses fresh consent to recover the saved completion. It saves the signed
@@ -140,6 +199,18 @@ config and `--recover-removal`. Recovery does not turn an incomplete lifecycle r
 into a passing lifecycle result. Before a receipt exists, use the product's existing
 setup/removal recovery flow and the recorded action references.
 
+Before the removal phase the runner clears any hosted removal session its
+browser still holds, so an earlier gateway's job is never read as this one's
+receipt. A root removal passes only once the installer's job has settled
+(`complete`): five verified steps whose attempt was cut before its revoke and
+settlement, for example by a browser that gave up on a long callback, are
+recorded as not verified and finish on the next authorization.
+
+A receipt the gateway hands over with its unconfirmed-revocation warning is
+saved with that warning recorded; the root removal still runs and is verified,
+and the run then stops as `root_removal_revocation_unconfirmed` rather than
+passing. A receipt for a different hostname is refused.
+
 An exclusive `.lock` file protects the journal while the command runs. If the
 process is forcibly terminated, verify that it has exited before removing its stale
 lock. Journal replacements are atomic and synced. Keep the journal and receipt until
@@ -152,6 +223,13 @@ relay, releases, and temporary setup tokens for separately authorized fixture cl
 A stopped run saves a `diagnostics` object beside its final journal event and
 prints the same compact report. It names the failed stage, the last recorded
 mutation stage, the fixed failure code, and whether a removal receipt exists.
+Once the hosted root job has answered, the report and `--status` also carry
+its outcome under `rootRemoval`: the steps done out of five, the job's fixed
+reason word when a step failed, and its revocation flag. The stop codes are
+distinct: `root_removal_failed` when the job reports a reason word,
+`root_removal_revocation_unconfirmed` when all five steps finished under an
+unconfirmed grant revocation (independent absence is still checked first, and
+the run is not a pass), and `root_removal_not_verified` for anything else.
 When a shell was recorded and the operator credential can query Workers
 analytics, it includes numeric request/error counts and CPU/memory quantiles
 from the preceding 30 minutes. Missing permissions, unavailable metrics, or a

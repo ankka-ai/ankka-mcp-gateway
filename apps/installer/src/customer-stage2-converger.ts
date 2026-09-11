@@ -9,6 +9,7 @@ import {
   attachManagementCustomDomain,
   createManagementAccessApplication,
   createManagementAdminAllowPolicy,
+  createManagementServicePolicy,
   getAccountWorkersSubdomain,
   getZeroTrustOrganization,
   listAccessIdentityProviders,
@@ -17,9 +18,11 @@ import {
   prepareManagementAccessApplicationIntent,
   prepareManagementAdminPolicyIntent,
   prepareManagementCustomDomainIntent,
+  prepareManagementServicePolicyIntent,
   recoverManagementAccessApplication,
   recoverManagementAdminAllowPolicy,
   recoverManagementCustomDomain,
+  recoverManagementServicePolicy,
   setWorkerBootstrapSubdomain,
   verifyManagementAccessApplicationGet,
   verifyManagementAccessApplicationList,
@@ -27,10 +30,13 @@ import {
   verifyManagementAdminAllowPolicyList,
   verifyManagementCustomDomainGet,
   verifyManagementCustomDomainList,
+  verifyManagementServicePolicyGet,
+  verifyManagementServicePolicyList,
   verifyWorkerBootstrapSubdomain,
   type ManagementAccessApplicationLocator,
   type ManagementAdminPolicyLocator,
   type ManagementCustomDomainLocator,
+  type ManagementServicePolicyLocator,
   type ZeroTrustOrganization,
 } from './cloudflare-management-surface';
 import type { CustomerBootstrapConvergenceResult } from './customer-bootstrap-callback';
@@ -77,7 +83,6 @@ import {
   type CustomerWorkerActiveRelease,
 } from './customer-worker-self-update';
 import { sha256Hex } from './crypto';
-import { PUBLIC_ORIGIN } from './constants';
 import type { GatewayWorkerPlainTextBindings } from './cloudflare-worker-direct-upload';
 import { isPlainDataTree } from './plain-data';
 import {
@@ -137,6 +142,8 @@ export interface CustomerStage2BootstrapRuntime {
 }
 
 export interface CustomerStage2RuntimeIdentity {
+  /** The control-plane origin the bootstrap shell was bound to: the release manifest's, never a compiled constant. */
+  readonly controlPlaneOrigin: string;
   readonly updateChannel: 'canary' | 'stable';
   readonly updateKeyId: string;
   readonly updatePublicKey: string;
@@ -518,7 +525,7 @@ async function adoptOwnership(input: CustomerStage2ConvergerInput): Promise<Read
     ANKKA_GATEWAY_RELEASE: plan.releaseId,
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${plan.releaseArtifactSha256}`,
     ANKKA_INSTALL_ID: plan.managementOwnershipMarker,
-    ANKKA_INSTALLER_ORIGIN: PUBLIC_ORIGIN,
+    ANKKA_INSTALLER_ORIGIN: input.runtime.controlPlaneOrigin,
     ANKKA_MANAGEMENT_HOSTNAME: plan.bootstrapIdentity === undefined ? plan.gatewayConfiguration.managementHostname : new URL(state.trust.bootstrapCallback).hostname,
     ANKKA_PLAN_HASH: plan.bootstrapIdentity?.planHash ?? plan.planHash,
     ANKKA_PLAN_ID: plan.bootstrapIdentity?.planId ?? plan.planId,
@@ -573,7 +580,8 @@ function finalBindings(
   context: Context,
   application: ManagementAccessApplicationLocator,
 ): GatewayWorkerPlainTextBindings {
-  return Object.freeze({
+  const serviceAccess = context.plan.gatewayConfiguration.serviceAccess;
+  const required = {
     ADMIN_EMAILS: context.plan.managementAdminEmails.join(','),
     ANKKA_INSTALL_ID: context.journal.identity.installId,
     ANKKA_GATEWAY_RELEASE: context.plan.releaseId,
@@ -590,7 +598,9 @@ function finalBindings(
     CLOUDFLARE_ZONE_ID: context.target.zoneId,
     CLOUDFLARE_ZONE_NAME: context.target.zoneName,
     ZERO_TRUST_READY: 'true',
-  });
+  } as const;
+  // The service identity the plan opted into reaches the runtime as a binding; every other gateway has none.
+  return Object.freeze(serviceAccess === undefined ? required : { ...required, ANKKA_SERVICE_CLIENT_ID: serviceAccess.clientId });
 }
 
 function providerCall(context: Context) {
@@ -675,6 +685,19 @@ async function provePolicy(
   const operation = policyOperation(context, application);
   await verifyManagementAdminAllowPolicyGet({ ...operation, ...locator });
   await verifyManagementAdminAllowPolicyList({ ...operation, ...locator });
+  context.proofs.set(key, true);
+}
+
+async function proveServicePolicy(
+  context: Context,
+  application: ManagementAccessApplicationLocator,
+  locator: ManagementServicePolicyLocator,
+): Promise<void> {
+  const key = `service-policy:${canonicalJson({ application, locator })}`;
+  if (context.proofs.has(key)) return;
+  const operation = policyOperation(context, application);
+  await verifyManagementServicePolicyGet({ ...operation, ...locator });
+  await verifyManagementServicePolicyList({ ...operation, ...locator });
   context.proofs.set(key, true);
 }
 
@@ -774,6 +797,39 @@ async function convergePolicy(
   }
   const locator = policyLocator(action?.locator ?? null);
   await provePolicy(context, application, locator);
+  return locator;
+}
+
+/** The receipt-owned Service Auth policy, only for a plan that opted into a service identity. */
+async function convergeServicePolicy(
+  context: Context,
+  application: ManagementAccessApplicationLocator,
+): Promise<ManagementServicePolicyLocator> {
+  const name = 'management_service_policy' as const;
+  const operation = policyOperation(context, application);
+  const intent = prepareManagementServicePolicyIntent(operation);
+  await prepareAction(context, name, jsonObject(intent));
+  let action = customerStage2Action(context.journal, name);
+  let armedHere = false;
+  if (action?.phase === 'prepared') {
+    await armAction(context, name);
+    action = customerStage2Action(context.journal, name);
+    armedHere = true;
+  }
+  if (action?.phase === 'send_armed') {
+    const locator = armedHere
+      ? await createManagementServicePolicy({ ...operation, intent })
+      : (await recoverManagementServicePolicy({ ...operation, intent })).locator;
+    await submitAction(context, name, jsonValue(locator));
+    action = customerStage2Action(context.journal, name);
+  }
+  if (action?.phase === 'submitted') {
+    await proveServicePolicy(context, application, policyLocator(action.locator));
+    await verifyAction(context, name);
+    action = customerStage2Action(context.journal, name);
+  }
+  const locator = policyLocator(action?.locator ?? null);
+  await proveServicePolicy(context, application, locator);
   return locator;
 }
 
@@ -1007,11 +1063,13 @@ async function terminalProof(
   context: Context,
   application: ManagementAccessApplicationLocator,
   policy: ManagementAdminPolicyLocator,
+  servicePolicy: ManagementServicePolicyLocator | null,
   domain: ManagementCustomDomainLocator,
   runtime: boolean,
 ): Promise<void> {
   await proveApplication(context, application);
   await provePolicy(context, application, policy);
+  if (servicePolicy !== null) await proveServicePolicy(context, application, servicePolicy);
   await proveGatewayResources(context);
   await proveDomain(context, domain);
   await proveWorkersDevDisabled(context);
@@ -1024,12 +1082,15 @@ async function convergeTerminal(
   context: Context,
   application: ManagementAccessApplicationLocator,
   policy: ManagementAdminPolicyLocator,
+  servicePolicy: ManagementServicePolicyLocator | null,
   domain: ManagementCustomDomainLocator,
 ): Promise<void> {
   const name = 'terminal_verify' as const;
-  await terminalProof(context, application, policy, domain, false);
+  await terminalProof(context, application, policy, servicePolicy, domain, false);
+  // Every action before this one, whether or not the plan took the service policy slot.
+  const terminalIndex = context.journal.actions.findIndex((action) => action.name === name);
   const prerequisiteHash = `sha256:${await sha256Hex(canonicalJson(
-    context.journal.actions.slice(0, 5),
+    terminalIndex === -1 ? context.journal.actions : context.journal.actions.slice(0, terminalIndex),
   ))}`;
   const record = jsonObject({
     schemaVersion: 1,
@@ -1060,7 +1121,7 @@ async function convergeTerminal(
     action = customerStage2Action(context.journal, name);
   }
   if (action?.phase === 'submitted') {
-    await terminalProof(context, application, policy, domain, false);
+    await terminalProof(context, application, policy, servicePolicy, domain, false);
     await verifyAction(context, name);
   }
 }
@@ -1207,7 +1268,9 @@ export async function convergeCustomerStage2(
       const domain = domainLocator(
         customerStage2Action(journal, 'management_custom_domain')?.locator ?? null,
       );
-      await terminalProof(completed, application, policy, domain, true);
+      const servicePolicyAction = customerStage2Action(journal, 'management_service_policy');
+      const servicePolicy = servicePolicyAction === null ? null : policyLocator(servicePolicyAction.locator);
+      await terminalProof(completed, application, policy, servicePolicy, domain, true);
       return success();
     }
     const acquiredAt = clock(input, journal.updatedAt);
@@ -1234,10 +1297,12 @@ export async function convergeCustomerStage2(
   try {
     const application = await convergeApplication(context);
     const policy = await convergePolicy(context, application);
+    const servicePolicy = context.plan.gatewayConfiguration.serviceAccess === undefined
+      ? null : await convergeServicePolicy(context, application);
     await convergeGatewayResources(context, application);
     const domain = await convergeDomain(context);
     await convergeWorkersDev(context);
-    await convergeTerminal(context, application, policy, domain);
+    await convergeTerminal(context, application, policy, servicePolicy, domain);
     const handedOver = await convergeFinalRuntime(context, application);
     return handedOver ? Object.freeze({ verified: false, handedOver: true }) : success();
   } catch (error) {

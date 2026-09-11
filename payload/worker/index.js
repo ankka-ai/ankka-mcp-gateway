@@ -1106,7 +1106,7 @@ async function discoverMcpTools(value) {
   }
 }
 
-async function inspectMcpSource(value) {
+export async function inspectMcpSource(value) {
   const endpoint = publicMcpUrl(value);
   if (!endpoint) throw new SourceDiscoveryError(400, 'source_url_invalid');
   // Google's public catalogue does not make its operations unauthenticated.
@@ -1135,7 +1135,7 @@ function bigQueryConnectionBlock(endpoint) {
     : null;
 }
 
-async function verifyManagedSource(source) {
+export async function verifyManagedSource(source) {
   const connectionBlock = bigQueryConnectionBlock(publicMcpUrl(source.url));
   if (connectionBlock) throw new SourceDiscoveryError(409, connectionBlock);
   const inspected = await inspectMcpSource(source.url);
@@ -2801,7 +2801,7 @@ function safeSourceAction(value) {
       (Object.hasOwn(value, 'bigquerySetupStarted') && value.bigquerySetupStarted !== true) ||
       (Object.hasOwn(value, 'initialPolicyVersion') && value.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) ||
       !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
-      !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
+      !normalizedActor(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
       (Object.hasOwn(value, 'renewedAt') && value.renewedAt !== value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
@@ -2820,7 +2820,7 @@ function safeSourceAction(value) {
       (portalUpdate && resources.length !== SOURCE_ACTION_RESOURCE_ORDER.length)) return null;
   return Object.freeze({
     ...value,
-    actorEmail: normalizedEmail(value.actorEmail),
+    actorEmail: normalizedActor(value.actorEmail),
     resources: Object.freeze(resources),
     pending,
     portalUpdate,
@@ -2842,6 +2842,7 @@ function publicSourceAction(action) {
     schemaVersion: 1,
     actionId: action.actionId,
     sourceId: action.sourceId,
+    actorKind: actorKind(action.actorEmail),
     status: action.status,
     expiresAt: new Date(action.expiresAt).toISOString(),
     failureCode: action.failureCode,
@@ -2864,7 +2865,7 @@ function sourceActionState(action, now) {
 }
 
 function sourceActionCanCancel(action, actorEmail, now) {
-  return action.actorEmail === normalizedEmail(actorEmail) && now >= action.issuedAt &&
+  return action.actorEmail === normalizedActor(actorEmail) && now >= action.issuedAt &&
     action.status === 'authorization_required' && !sourceActionHasWriteEvidence(action);
 }
 
@@ -2873,7 +2874,7 @@ function sourceActionCanRenew(action, actorEmail, now) {
   // work must wait out the previous execution window before rotating its key.
   // An unacknowledged hostname-less app creation has no authoritative locator:
   // the zone listing cannot prove it absent, so it still needs manual review.
-  return action.actorEmail === normalizedEmail(actorEmail) && now >= action.issuedAt &&
+  return action.actorEmail === normalizedActor(actorEmail) && now >= action.issuedAt &&
     (action.expiresAt <= now || sourceActionConnectionPaused(action) ||
       (action.bigquerySetupStarted === true && action.failureCode === 'bigquery_setup_required')) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
@@ -2966,12 +2967,12 @@ function parseSourceActionPrepare(value) {
     'issuedAt', 'expiresAt', 'actionKeyHash', 'sourceHash',
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
       !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
-      !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
+      !normalizedActor(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
       !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
       !isText(value.sourceHash) || !HASH.test(value.sourceHash)) return null;
-  return Object.freeze({ ...value, actorEmail: normalizedEmail(value.actorEmail) });
+  return Object.freeze({ ...value, actorEmail: normalizedActor(value.actorEmail) });
 }
 
 async function prepareSourceAction(storage, input) {
@@ -3011,7 +3012,7 @@ async function prepareSourceAction(storage, input) {
   return action;
 }
 
-async function managedSourceHash(source) {
+export async function managedSourceHash(source) {
   return sha256({
     id: source.id,
     label: source.label,
@@ -3155,7 +3156,7 @@ function sourceActionClaim(value, environment, action, nowMs) {
     ...(Object.hasOwn(value ?? {}, 'bigqueryPhase') ? ['bigqueryPhase'] : []),
   ]) || (Object.hasOwn(value ?? {}, 'bigqueryPhase') && !['start', 'failed'].includes(value.bigqueryPhase)) || value.schemaVersion !== 1 || value.actionId !== action.actionId ||
       !isText(value.actionKey) || !NONCE.test(value.actionKey) ||
-      normalizedEmail(value.actorEmail) !== action.actorEmail || value.accountId !== environment.accountId ||
+      normalizedActor(value.actorEmail) !== action.actorEmail || value.accountId !== environment.accountId ||
       !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
       value.expiresAt !== action.expiresAt || value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 ||
       value.issuedAt < action.issuedAt || value.expiresAt <= nowMs ||
@@ -5124,57 +5125,125 @@ function accessConfiguration(env) {
     ? [...new Set(env.ADMIN_EMAILS.split(',').map(normalizedEmail).filter(Boolean))].sort(compareText)
     : [];
   if (emails.length < 1) return null;
-  return Object.freeze({ aud: env.CF_ACCESS_AUD, issuer: issuer.origin, emails: Object.freeze(emails) });
+  // The one service identity this gateway accepts, set only by a deployment configuration that opted in.
+  if (env.ANKKA_SERVICE_CLIENT_ID !== undefined && (!isText(env.ANKKA_SERVICE_CLIENT_ID) || !SERVICE_CLIENT_ID.test(env.ANKKA_SERVICE_CLIENT_ID))) return null;
+  const serviceClientId = isText(env.ANKKA_SERVICE_CLIENT_ID) ? env.ANKKA_SERVICE_CLIENT_ID : null;
+  return Object.freeze({ aud: env.CF_ACCESS_AUD, issuer: issuer.origin, emails: Object.freeze(emails), serviceClientId });
 }
 
+const SERVICE_CLIENT_ID = /^[a-f0-9]{32}\.access$/u;
+const SERVICE_ACTOR = /^service:[a-f0-9]{32}\.access$/u;
+
+/** An actor identity as action records carry it: an administrator's normalized email or `service:<client id>`. */
+function normalizedActor(value) {
+  if (!isText(value)) return null;
+  return SERVICE_ACTOR.test(value) ? value : normalizedEmail(value);
+}
+function actorKind(actorEmail) { return SERVICE_ACTOR.test(actorEmail) ? 'service' : 'human'; }
+function actorId(actor) { return actor.kind === 'human' ? actor.email : `service:${actor.clientId}`; }
+function serviceActorOf(configuration) {
+  return configuration?.serviceClientId ? `service:${configuration.serviceClientId}` : null;
+}
+function teamActorAllowed(actorEmail, configuration) {
+  return configuration !== null && (configuration.emails.includes(actorEmail) || actorEmail === serviceActorOf(configuration));
+}
+
+// Service identities act only on these routes; everything else is denied to them, including update and
+// teardown action creation and source action cancellation.
+const SERVICE_ROUTES = Object.freeze([
+  ['GET', /^\/api\/status$/u], ['GET', /^\/api\/update$/u],
+  ['POST', /^\/api\/sources\/discover$/u], ['GET', /^\/api\/sources$/u], ['PUT', /^\/api\/sources$/u],
+  ['GET', /^\/api\/source-actions(?:\/action_[A-Za-z0-9_-]{32})?$/u], ['POST', /^\/api\/source-actions$/u],
+  ['POST', /^\/api\/source-actions\/action_[A-Za-z0-9_-]{32}\/renew$/u],
+  ['GET', /^\/api\/team$/u], ['POST', /^\/api\/team-actions$/u], ['GET', /^\/api\/team-actions\/action_[A-Za-z0-9_-]{32}$/u],
+]);
+function serviceOperationAllowed(method, pathname) {
+  return SERVICE_ROUTES.some(([allowedMethod, route]) => allowedMethod === method && route.test(pathname));
+}
+
+/** The verified actor of a management request, or the fixed refusal: unauthenticated, or a service identity outside its allowlist. */
+async function managementActor(request, env) {
+  const actor = await verifyAccessActor(request, env);
+  if (!actor) return { response: fixedJson(401, { schemaVersion: 1, error: 'access_required' }) };
+  let pathname;
+  try { pathname = new URL(request.url).pathname; } catch { return { response: fixedJson(400, { schemaVersion: 1, error: 'request_invalid' }) }; }
+  if (actor.kind === 'service' && !serviceOperationAllowed(request.method, pathname)) {
+    return { response: fixedJson(403, { schemaVersion: 1, error: 'service_operation_denied' }) };
+  }
+  return { actor, actorEmail: actorId(actor) };
+}
+
+/** The administrator named by a verified Access token, or false. Routes that admit the service identity use verifyAccessActor. */
 export async function verifyAccess(request, env, nowMs = Date.now()) {
+  const actor = await verifyAccessActor(request, env, nowMs);
+  return actor?.kind === 'human' ? actor.email : false;
+}
+
+/**
+ * The verified caller of a management request: an administrator, identified by the
+ * email claim that must match the identity header and the configured administrators,
+ * or the one configured service identity, identified by the exact `common_name` of a
+ * token that carries no email claim and no identity header. `type: app` appears on
+ * both kinds of token and distinguishes nothing. Issuer, audience, validity window
+ * and the signature against the issuer's published keys are verified for both.
+ */
+export async function verifyAccessActor(request, env, nowMs = Date.now()) {
   const configuration = accessConfiguration(env);
   const assertion = request.headers.get('cf-access-jwt-assertion');
   const claimedEmail = normalizedEmail(request.headers.get('cf-access-authenticated-user-email'));
-  if (!configuration || !assertion || !claimedEmail || !configuration.emails.includes(claimedEmail)) return false;
+  if (!configuration || !assertion) return null;
   const segments = assertion.split('.');
-  if (segments.length !== 3) return false;
+  if (segments.length !== 3) return null;
   const headerBytes = decodeBase64Url(segments[0]);
   const payloadBytes = decodeBase64Url(segments[1]);
   const signature = decodeBase64Url(segments[2]);
   if (!headerBytes || !payloadBytes || !signature || headerBytes.byteLength > 4096 ||
-      payloadBytes.byteLength > 16 * 1024 || signature.byteLength > 1024) return false;
+      payloadBytes.byteLength > 16 * 1024 || signature.byteLength > 1024) return null;
   let header;
   let payload;
   try {
     header = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(headerBytes));
     payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes));
   } catch {
-    return false;
+    return null;
   } finally {
     headerBytes.fill(0);
     payloadBytes.fill(0);
   }
   const now = Math.floor(nowMs / 1000);
   const audiences = isText(payload.aud) ? [payload.aud] : payload.aud;
-  const email = normalizedEmail(payload.email);
   if (!isRecord(header) || header.alg !== 'RS256' || !isText(header.kid) ||
       !/^[A-Za-z0-9_.:-]{1,256}$/u.test(header.kid) || !isRecord(payload) ||
       payload.iss !== configuration.issuer || !Array.isArray(audiences) ||
-      !audiences.includes(configuration.aud) || email !== claimedEmail ||
+      !audiences.includes(configuration.aud) ||
       !Number.isSafeInteger(payload.exp) || payload.exp <= now ||
-      (Object.hasOwn(payload, 'nbf') && (!Number.isSafeInteger(payload.nbf) || payload.nbf > now + 30))) return false;
+      (Object.hasOwn(payload, 'nbf') && (!Number.isSafeInteger(payload.nbf) || payload.nbf > now + 30))) return null;
+  let actor;
+  if (Object.hasOwn(payload, 'email') && payload.email !== '') {
+    const email = normalizedEmail(payload.email);
+    if (!email || email !== claimedEmail || !configuration.emails.includes(email)) return null;
+    actor = Object.freeze({ kind: 'human', email });
+  } else {
+    if (claimedEmail || configuration.serviceClientId === null || !isText(payload.common_name) ||
+        payload.common_name !== configuration.serviceClientId) return null;
+    actor = Object.freeze({ kind: 'service', clientId: payload.common_name });
+  }
   let response;
   try {
     response = await fetch(new Request(`${configuration.issuer}/cdn-cgi/access/certs`, {
       method: 'GET', headers: { accept: 'application/json' }, redirect: 'manual',
     }));
-  } catch { return false; }
+  } catch { return null; }
   if (!(response instanceof Response) || response.status !== 200 || response.redirected) {
     if (response instanceof Response) await discardBody(response);
-    return false;
+    return null;
   }
   let jwks;
-  try { jwks = await readBoundedProviderJson(response); } catch { return false; }
-  if (!isRecord(jwks) || !Array.isArray(jwks.keys)) return false;
+  try { jwks = await readBoundedProviderJson(response); } catch { return null; }
+  if (!isRecord(jwks) || !Array.isArray(jwks.keys)) return null;
   const keys = jwks.keys.filter((key) => isRecord(key) && key.kid === header.kid &&
     key.kty === 'RSA' && key.alg === 'RS256' && key.use === 'sig');
-  if (keys.length !== 1) return false;
+  if (keys.length !== 1) return null;
   try {
     const key = await crypto.subtle.importKey(
       'jwk', keys[0], { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
@@ -5183,9 +5252,9 @@ export async function verifyAccess(request, env, nowMs = Date.now()) {
       'RSASSA-PKCS1-v1_5', key, signature,
       new TextEncoder().encode(`${segments[0]}.${segments[1]}`),
     );
-    return verified ? email : false;
+    return verified ? actor : null;
   } catch {
-    return false;
+    return null;
   } finally {
     signature.fill(0);
   }
@@ -5290,9 +5359,8 @@ async function handleStatus(request, env) {
   if (request.method !== 'GET') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET' });
   }
-  if (!await verifyAccess(request, env)) {
-    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
-  }
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
   const environment = parseManagementEnvironment(env);
   if (!environment) return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   const stub = adminStateStub(env, 'v1:management');
@@ -5305,8 +5373,10 @@ async function handleStatus(request, env) {
     if (response.status !== 200) return response;
     let status;
     try { status = await response.json(); } catch { status = null; }
+    // The one machine identity this gateway admits, so an operator can see the opt-in without reading bindings.
+    const serviceClientId = accessConfiguration(env)?.serviceClientId ?? null;
     return isRecord(status)
-      ? fixedJson(200, { ...status, controlPlaneOrigin: CONTROL_PLANE_ORIGIN })
+      ? fixedJson(200, { ...status, controlPlaneOrigin: CONTROL_PLANE_ORIGIN, serviceIdentity: serviceClientId === null ? null : { clientId: serviceClientId } })
       : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   } catch {
     return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
@@ -5317,9 +5387,8 @@ async function handleRuntimeUpdate(request, env) {
   if (request.method !== 'GET') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET' });
   }
-  if (!await verifyAccess(request, env)) {
-    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
-  }
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
   const environment = parseManagementEnvironment(env);
   const stub = adminStateStub(env, 'v1:management');
   let updateState = null;
@@ -5395,9 +5464,8 @@ async function handleSourceDiscovery(request, env) {
   if (request.method !== 'POST') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
   }
-  if (!await verifyAccess(request, env)) {
-    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
-  }
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   const input = await readJsonInput(request);
   if (!exactKeys(input, ['url'])) return fixedJson(400, { schemaVersion: 1, error: 'source_url_invalid' });
@@ -5422,9 +5490,8 @@ async function handleSources(request, env) {
   if (request.method !== 'GET' && request.method !== 'PUT') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, PUT' });
   }
-  if (!await verifyAccess(request, env)) {
-    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
-  }
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
   if (request.method === 'PUT' && !sameOriginMutation(request)) {
     return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   }
@@ -5473,7 +5540,8 @@ function safeTeamAction(value, context) {
   if (!exactKeys(value, ['schemaVersion', 'actionId', 'actorEmail', 'issuedAt', 'expiresAt',
     'actionKeyHash', 'status', 'failureCode', 'request', 'sourceRevision', 'planHash', 'journal']) ||
       value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
-      normalizedEmail(value.actorEmail) !== value.actorEmail || !context.adminEmails.includes(value.actorEmail) ||
+      normalizedActor(value.actorEmail) !== value.actorEmail ||
+      !(context.adminEmails.includes(value.actorEmail) || value.actorEmail === context.serviceActor) ||
       !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
       value.expiresAt <= value.issuedAt || value.expiresAt - value.issuedAt > 600_000 ||
       !HASH.test(value.actionKeyHash) || !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
@@ -5494,12 +5562,12 @@ function safeTeamAction(value, context) {
   return Object.freeze(structuredClone(value));
 }
 
-function safeTeamState(value, control, sources, admins) {
+function safeTeamState(value, control, sources, admins, serviceActor = null) {
   if (!exactKeys(value, ['schemaVersion', 'revision', 'members', 'sourceBaselines', 'minimumRuntimeRelease', 'teardownDisabled', 'pendingAction']) ||
       value.schemaVersion !== 1 || !isBoolean(value.teardownDisabled) ||
       (value.minimumRuntimeRelease !== null && !updateSemver(value.minimumRuntimeRelease)) ||
       value.teardownDisabled !== (value.minimumRuntimeRelease !== null)) return null;
-  const context = { revision: value.revision, adminEmails: admins, sources: teamSources(sources) };
+  const context = { revision: value.revision, adminEmails: admins, serviceActor, sources: teamSources(sources) };
   let normalized;
   try { normalized = normalizeTeamAccessRequest({ schemaVersion: 1, expectedRevision: value.revision, members: value.members }, context); }
   catch { return null; }
@@ -5518,7 +5586,8 @@ async function readTeamState(storage, env) {
   if (!control || !sources || !admins || !environment ||
       control.accountId !== environment.accountId || control.zoneId !== environment.zoneId) return null;
   const raw = await storage.get(TEAM_KEY);
-  if (raw !== undefined) return safeTeamState(raw, control, sources, admins);
+  const serviceActor = serviceActorOf(accessConfiguration(env));
+  if (raw !== undefined) return safeTeamState(raw, control, sources, admins, serviceActor);
   const legacyAudienceHash = await sha256({ emails: control.audienceEmails });
   const emptyAudienceHash = await sha256({ emails: [] });
   const installed = sources.sources.filter((source) => source.status === 'installed');
@@ -5540,7 +5609,7 @@ async function readTeamState(storage, env) {
       email, sourceIds: control.audienceEmails.includes(email) ? sourceIds : [],
     })),
     pendingAction: null,
-  }, control, sources, admins);
+  }, control, sources, admins, serviceActor);
   if (initial) await storage.put(TEAM_KEY, initial);
   return initial;
 }
@@ -5651,7 +5720,7 @@ async function otherLifecycleBlocksTeam(storage, now) {
 }
 
 function publicTeamAction(action) {
-  return { schemaVersion: 1, action: 'access', actionId: action.actionId, status: action.status,
+  return { schemaVersion: 1, action: 'access', actionId: action.actionId, actorKind: actorKind(action.actorEmail), status: action.status,
     expiresAt: new Date(action.expiresAt).toISOString(), failureCode: action.failureCode,
     canCancel: ['authorization_required', 'recovery_required'].includes(action.status) && action.journal.length === 0 };
 }
@@ -5742,7 +5811,7 @@ async function teamRuntimeContext(storage, env) {
   const portal = target(portalResource);
   const sourceTargets = control.sourceOwnership.map((source) => target(source.resources[2], source.sourceId));
   return { team, control, sources, environment, authority,
-    planner: { revision: team.revision, adminEmails: admins, sources: teamSources(sources),
+    planner: { revision: team.revision, adminEmails: admins, serviceActor: serviceActorOf(accessConfiguration(env)), sources: teamSources(sources),
       currentMembers: team.members, portalTarget: portal, sourceTargets } };
 }
 
@@ -5752,7 +5821,7 @@ async function prepareTeamAction(storage, env, input) {
       !ACTION_ID.test(input.actionId) || !HASH.test(input.actionKeyHash) ||
       !Number.isSafeInteger(input.issuedAt) || !Number.isSafeInteger(input.expiresAt) ||
       input.expiresAt - input.issuedAt !== 600_000 ||
-      !accessConfiguration(env)?.emails.includes(input.actorEmail) ||
+      !teamActorAllowed(input.actorEmail, accessConfiguration(env)) ||
       await otherLifecycleBlocksTeam(storage, input.issuedAt)) return null;
   const context = await teamRuntimeContext(storage, env);
   if (!context) return null;
@@ -5886,8 +5955,9 @@ async function processTeamAction(env, storage, prepared, nowMs) {
 }
 
 async function handleTeam(request, env) {
-  const actorEmail = await verifyAccess(request, env);
-  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const { actorEmail } = access;
   const url = new URL(request.url);
   const environment = parseManagementEnvironment(env);
   if (!environment || url.hostname !== environment.managementHostname) {
@@ -5928,8 +5998,9 @@ async function handleTeam(request, env) {
 }
 
 async function handleSourceActions(request, env) {
-  const actorEmail = await verifyAccess(request, env);
-  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const { actorEmail } = access;
   const environment = parseManagementEnvironment(env);
   let url;
   try { url = new URL(request.url); } catch { return fixedJson(400, { schemaVersion: 1, error: 'source_action_invalid' }); }
@@ -6096,8 +6167,9 @@ async function handleSourceActionApply(request, env) {
 }
 
 async function handleRuntimeActions(request, env) {
-  const actorEmail = await verifyAccess(request, env);
-  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const { actorEmail } = access;
   const environment = parseManagementEnvironment(env);
   let url;
   try { url = new URL(request.url); } catch { return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_invalid' }); }
@@ -6233,8 +6305,9 @@ async function handleRuntimeActionApply(request, env) {
 }
 
 async function handleTeardownActions(request, env, currentPolicies = false) {
-  const actorEmail = await verifyAccess(request, env);
-  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const { actorEmail } = access;
   const environment = parseManagementEnvironment(env);
   let url;
   try { url = new URL(request.url); } catch {

@@ -11,7 +11,7 @@ import { gatewayRootProviderFixture, TOKEN } from './gateway-teardown-provider-f
 import { teardownSqliteFixture } from './gateway-teardown-sqlite-fixture';
 import { ENCRYPTION_KEY, CLIENT_ID, CLIENT_SECRET } from './fixtures';
 
-const viewSchema = v.object({ csrfToken: v.string(), canAuthorize: v.boolean(), revocationUnconfirmed: v.boolean(),
+const viewSchema = v.object({ csrfToken: v.string(), canAuthorize: v.boolean(), complete: v.boolean(), revocationUnconfirmed: v.boolean(),
   message: v.string(), failureReason: v.nullable(v.string()), steps: v.array(v.object({ done: v.boolean() })), handoff: v.string() });
 
 async function fixture() {
@@ -145,7 +145,7 @@ describe('hosted removal browser callback and durable recovery', () => {
     try {
       expect((await test.import()).status).toBe(200);
       const page = await test.send('/teardown'); expect(page.status).toBe(200);
-      expect((await test.view()).canAuthorize).toBe(true);
+      expect((await test.view()).canAuthorize).toBe(true); expect((await test.view()).complete).toBe(false);
       const callback = await test.start();
       const callbackCookie = test.cookie();
       const sealed = callbackCookie.slice(GATEWAY_TEARDOWN_COOKIE.length + 1);
@@ -156,11 +156,28 @@ describe('hosted removal browser callback and durable recovery', () => {
       expect(response.status).toBe(303);
       const view = await test.view();
       expect(view.steps.every((step) => step.done)).toBe(true);
-      expect(view.canAuthorize).toBe(false); expect(view.revocationUnconfirmed).toBe(false);
+      expect(view.canAuthorize).toBe(false); expect(view.revocationUnconfirmed).toBe(false); expect(view.complete).toBe(true);
       expect(test.grants()).toBe(1); expect(test.revoked()).toBe(1);
       expect((await test.send(callback.href, undefined, { cookie: callbackCookie })).status).toBe(409);
       expect(test.grants()).toBe(1);
       expect(JSON.stringify(await test.port.read())).not.toContain(TOKEN);
+    } finally { test.close(); }
+  });
+
+  it('accepts the scope Cloudflare echoes beside the code and rejects any other echo or parameter without spending the attempt', async () => {
+    const test = await fixture();
+    try {
+      await test.import();
+      const callback = await test.start();
+      const echoing = (scope: string) => { const url = new URL(callback.href); url.searchParams.set('scope', scope); return url.href; };
+      expect((await test.send(echoing('workers-scripts.write zone-access.write dns.write'))).status).toBe(409);
+      const extra = new URL(callback.href); extra.searchParams.set('iss', 'https://dash.cloudflare.com');
+      expect((await test.send(extra.href)).status).toBe(409);
+      expect(test.grants()).toBe(0); expect(test.mutations).toEqual([]);
+      expect((await test.port.read())?.phase).toBe('authorizing');
+      expect((await test.send(echoing('zone-access.write workers-scripts.write'))).status).toBe(303);
+      expect((await test.port.read())?.phase).toBe('removed');
+      expect(test.grants()).toBe(1); expect(test.mutations).toHaveLength(5);
     } finally { test.close(); }
   });
 

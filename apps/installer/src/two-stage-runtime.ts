@@ -47,6 +47,7 @@ import {
   type HostedStage1Session,
 } from './hosted-stage1-session';
 import type { CloudflareOauthConfig, FetchTransport } from './oauth';
+import { parseOauthCallbackQuery } from './oauth-callback-query';
 import { importOwnershipIssuerKey, type OwnershipIssuerKey } from './ownership-issuer-key';
 import {
   PinnedR2ReleaseBundleProvider,
@@ -56,7 +57,7 @@ import {
 } from './r2-release-provider';
 import type { VerifiedReleaseBundle } from './release';
 import type { ReviewedGatewayDeployActivation } from './reviewed-activation';
-import { buildStaticDeployPlan, parseDeploySelection } from './schema';
+import { buildStaticDeployPlan, parseDeploySelection , type DeployServiceAccess } from './schema';
 import { buildBootstrapDeployPlan, isBootstrapPlan } from './bootstrap-plan';
 import { certifyWorkerSetup, setupConfigurationRequestSchema, WORKER_SETUP_CERTIFY_PATH } from './worker-setup-permit';
 import { buildPublicUpdateChannel } from './update-channel';
@@ -122,8 +123,19 @@ const envSchema = v.object({
   CLOUDFLARE_OWNERSHIP_ISSUER_PRIVATE_KEY: v.pipe(v.string(), v.regex(TOKEN)),
   CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY: v.pipe(v.string(), v.regex(TOKEN)),
   CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID: v.pipe(v.string(), v.regex(/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u)),
+  // Set together only on an isolated installer deployment: every gateway it certifies opts into this one service
+  // identity. The hosted installer at deploy.ankka.ai sets neither.
+  ANKKA_SERVICE_ACCESS_CLIENT_ID: v.optional(v.pipe(v.string(), v.regex(/^[a-f0-9]{32}\.access$/u))),
+  ANKKA_SERVICE_ACCESS_TOKEN_ID: v.optional(v.pipe(v.string(), v.regex(/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u))),
 });
 const namespaceSchema = v.object({ idFromName: v.function(), get: v.function() });
+
+/** The service identity an installer deployment opts its gateways into, or undefined for the hosted installer. */
+export function installerServiceAccess(config: v.InferOutput<typeof envSchema>): DeployServiceAccess | undefined {
+  const { ANKKA_SERVICE_ACCESS_CLIENT_ID: clientId, ANKKA_SERVICE_ACCESS_TOKEN_ID: tokenId } = config;
+  if ((clientId === undefined) !== (tokenId === undefined)) throw new DeployError(500, 'internal_error', 'runtime_config_invalid');
+  return clientId === undefined || tokenId === undefined ? undefined : Object.freeze({ clientId, tokenId });
+}
 const releaseBucketSchema = v.object({ get: v.function(), list: v.function() });
 const activationSchema = v.union([
   v.strictObject({ enabled: v.literal(false), pin: v.null() }),
@@ -295,40 +307,11 @@ function createLazyReleaseSnapshot(
   };
 }
 
-function uniqueQuery(url: URL, key: string): string | null {
-  const values = url.searchParams.getAll(key);
-  if (values.length > 1) throw new DeployError(400, 'callback_invalid');
-  return values[0] ?? null;
-}
-
-function echoedScopeIsExact(value: string, kind: 'bootstrap' | 'cleanup'): boolean {
-  if (value.length > 1_024) return false;
-  const values = [...new Set(value.split(/\s+/u).filter(Boolean))].sort();
-  const expected = [...exactOperationScopes(kind === 'cleanup' ? 'uninstall-finalize' : 'bootstrap')].sort();
-  return values.length === expected.length && values.every((scope, index) => scope === expected[index]);
-}
-
 /** Accepts only `code`, `state`, the echoed exact scope, and the standard denial fields. */
 function parseCallbackQuery(url: URL, kind: 'bootstrap' | 'cleanup'): CallbackQuery {
-  const keys = [...url.searchParams.keys()];
-  const state = uniqueQuery(url, 'state');
-  const code = uniqueQuery(url, 'code');
-  const oauthError = uniqueQuery(url, 'error');
-  const echoedScope = uniqueQuery(url, 'scope');
-  const allowed = code !== null
-    ? new Set(['code', 'scope', 'state'])
-    : new Set(['error', 'error_description', 'error_uri', 'state']);
-  if (
-    keys.some((key) => !allowed.has(key)) ||
-    state === null || !TOKEN.test(state) ||
-    (code === null) === (oauthError === null) ||
-    (code !== null && (code.length < 8 || code.length > 4_096)) ||
-    (oauthError !== null && (oauthError.length < 1 || oauthError.length > 128)) ||
-    (echoedScope !== null && !echoedScopeIsExact(echoedScope, kind))
-  ) throw new DeployError(400, 'callback_invalid');
-  if (oauthError !== null) return Object.freeze({ state, code: null, denied: true });
-  if (code === null) throw new DeployError(400, 'callback_invalid');
-  return Object.freeze({ state, code, denied: false });
+  const query = parseOauthCallbackQuery(url, exactOperationScopes(kind === 'cleanup' ? 'uninstall-finalize' : 'bootstrap'));
+  if (query === null) throw new DeployError(400, 'callback_invalid');
+  return query;
 }
 
 function provisionFailureCode(error: DeployError): HostedStage1FailureCode {
@@ -468,6 +451,7 @@ export function createTwoStageDeployRuntime(
     }
     const current = now();
     if (!Number.isSafeInteger(current) || current < 0) throw new DeployError(500, 'internal_error');
+    installerServiceAccess(config.output);
     return Object.freeze({ env, config: config.output, now: current });
   }
 
@@ -783,11 +767,14 @@ export function createTwoStageDeployRuntime(
     const input = await readJsonBody(request, setupConfigurationRequestSchema, 64 * 1024);
     const issuer = await issuerKey(context);
     const snapshot = await loadSnapshot(context.env);
-    const result = await certifyWorkerSetup({
+    const serviceAccess = installerServiceAccess(context.config);
+    const certification: Parameters<typeof certifyWorkerSetup>[0] = {
       request: input, manifest: snapshot.bundle.manifest,
       issuerPublicKey: issuer.publicKey, issuerPrivateKey: issuer.privateKey, issuerKeyId: issuer.keyId,
       publicClientId: context.config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID, now: context.now,
-    });
+    };
+    if (serviceAccess !== undefined) certification.serviceAccess = serviceAccess;
+    const result = await certifyWorkerSetup(certification);
     return json(result);
   }
 

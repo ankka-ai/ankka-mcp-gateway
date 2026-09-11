@@ -62,7 +62,7 @@
     "test:payload": "npm run build:admin && node --test test/release-payload-layout.test.mjs test/worker-primary-payload.test.mjs test/worker-uninstall-payload.test.mjs",
     "typecheck": "tsc --noEmit",
     "validate": "node src/cli.ts",
-    "test:live": "node tools/provider-cycle-command.mjs",
+    "lifecycle": "node tools/lifecycle-command.mjs",
     "test:runtime": "node --test apps/installer/test-runtime/*.test.mjs",
     "dev:runtime": "node apps/installer/scripts/dev-runtime.mjs"
   },

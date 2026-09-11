@@ -12,12 +12,47 @@ import { executeGatewayRootRemoval, GatewayTeardownProviderError } from './gatew
 import { exchangeAuthorizationCode, type EphemeralCloudflareGrant, type CloudflareOauthConfig, type FetchTransport } from './oauth';
 import type { VerifiedReleaseBundle } from './release';
 
+export interface GatewayRootRemovalAttemptInput {
+  readonly port: GatewayTeardownJobPort;
+  readonly attemptId: string;
+  readonly trust: GatewayTeardownTrust;
+  readonly bundle: VerifiedReleaseBundle;
+  readonly transport: FetchTransport;
+  readonly now: () => number;
+  readonly wait?: (milliseconds: number) => Promise<void>;
+}
+
+/**
+ * One root-removal attempt with a credential already in hand: bind it to the
+ * installed account, then run the fixed removal against the durable job.
+ * Returns the secret-free failure reason, or null when every step verified.
+ * The caller owns the credential's lifecycle and settles the attempt; the
+ * hosted grant executor and the external runner share this body.
+ */
+export async function runGatewayRootRemovalAttempt(
+  input: GatewayRootRemovalAttemptInput & { readonly accessToken: string },
+): Promise<string | null> {
+  const current = await input.port.read();
+  if (current?.phase !== 'exchanging' || current.attempt?.id !== input.attemptId || current.attempt.expiresAt <= input.now()) {
+    throw new Error('teardown_callback_invalid');
+  }
+  try {
+    const authority = await verifyGatewayTeardownJobAuthority({ job: current, trust: input.trust });
+    const accountId = authority.certificate.statement.accountId;
+    await verifyCustomerCloudflareGrantAccountAccess({
+      accessToken: input.accessToken, expectedAccountId: accountId, workerName: authority.certificate.statement.worker.name,
+      operation: 'gateway-root-finalize', transport: input.transport,
+    });
+    await executeGatewayRootRemoval({ ...input, authorizedAccountId: accountId });
+    return null;
+  } catch (error) {
+    return error instanceof GatewayTeardownProviderError ? `${error.stage}_${error.code}` : 'finalization_failed';
+  }
+}
+
 /** A distinct fixed hosted operation; neither bootstrap cleanup nor its scopes change. */
-export async function executeGatewayTeardownGrant(input: {
+export async function executeGatewayTeardownGrant(input: GatewayRootRemovalAttemptInput & {
   readonly code: string; readonly verifier: string; readonly config: CloudflareOauthConfig;
-  readonly transport: FetchTransport; readonly port: GatewayTeardownJobPort;
-  readonly attemptId: string; readonly trust: GatewayTeardownTrust; readonly bundle: VerifiedReleaseBundle;
-  readonly now: () => number; readonly wait?: (milliseconds: number) => Promise<void>;
 }) {
   const current = await input.port.read();
   if (current?.phase !== 'exchanging' || current.attempt?.id !== input.attemptId || current.attempt.expiresAt <= input.now()) {
@@ -42,17 +77,9 @@ export async function executeGatewayTeardownGrant(input: {
     grant = await exchangeAuthorizationCode({ ...input, transport: inspectingTransport });
     grant.assertUsable(exactOperationScopes('gateway-root-finalize'));
     if (refreshTokenReturned) throw new Error('teardown_grant_invalid');
-    await grant.withAccessToken(async (accessToken) => {
-      const authority = await verifyGatewayTeardownJobAuthority({ job: current, trust: input.trust });
-      const accountId = authority.certificate.statement.accountId;
-      await verifyCustomerCloudflareGrantAccountAccess({
-        accessToken, expectedAccountId: accountId, workerName: authority.certificate.statement.worker.name,
-        operation: 'gateway-root-finalize', transport: input.transport,
-      });
-      await executeGatewayRootRemoval({ ...input, accessToken, authorizedAccountId: accountId });
-    });
-  } catch (error) {
-    reason = error instanceof GatewayTeardownProviderError ? `${error.stage}_${error.code}` : 'finalization_failed';
+    reason = await grant.withAccessToken((accessToken) => runGatewayRootRemovalAttempt({ ...input, accessToken }));
+  } catch {
+    reason = 'finalization_failed';
   } finally {
     if (grant !== null) {
       try { await grant.revoke(input.transport, input.config); revocation = 'confirmed'; }

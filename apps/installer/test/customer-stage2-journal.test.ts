@@ -4,6 +4,9 @@ import type { CustomerGatewayFreshPreflightAttestation } from
   '../src/cloudflare-gateway-fresh-preflight';
 import {
   CUSTOMER_STAGE2_ACTION_ORDER,
+  CUSTOMER_STAGE2_OPTIONAL_ACTION,
+  CustomerStage2JournalError,
+  customerStage2ActionSequence,
   acquireCustomerStage2Lease,
   armCustomerStage2Action,
   completeCustomerStage2Journal,
@@ -159,5 +162,53 @@ describe('customer Stage 2 convergence journal', () => {
       name: 'management_access_application',
       record: { accessToken: 'must-never-persist' },
     })).toThrowError(/invalid/u);
+  });
+});
+
+describe('the service policy slot', () => {
+  const advance = (journal: ReturnType<typeof initial>, name: (typeof CUSTOMER_STAGE2_ACTION_ORDER)[number], now: number) => {
+    let next = prepareCustomerStage2Action(journal, { attemptId: ATTEMPT, now, name, record: { schemaVersion: 1, kind: name } });
+    next = armCustomerStage2Action(next, { attemptId: ATTEMPT, now: now + 1, name });
+    next = submitCustomerStage2Action(next, { attemptId: ATTEMPT, now: now + 2, name, locator: { schemaVersion: 1, providerId: `${name}-id` } });
+    return verifyCustomerStage2Action(next, { attemptId: ATTEMPT, now: now + 3, name });
+  };
+
+  it('is taken only by a plan that opted in, and the journal completes at either length', () => {
+    const withoutService = CUSTOMER_STAGE2_ACTION_ORDER.filter((name) => name !== CUSTOMER_STAGE2_OPTIONAL_ACTION);
+    expect(customerStage2ActionSequence([])).toEqual(withoutService);
+    expect(customerStage2ActionSequence([{ name: CUSTOMER_STAGE2_OPTIONAL_ACTION }])).toEqual(CUSTOMER_STAGE2_ACTION_ORDER);
+    let now = NOW;
+    let skipped = initial();
+    for (const name of withoutService) { skipped = advance(skipped, name, now += 10); }
+    expect(skipped.actions).toHaveLength(withoutService.length);
+    skipped = completeCustomerStage2Journal(skipped, { attemptId: ATTEMPT, now: now += 10 });
+    expect(parseCustomerStage2Journal(JSON.parse(JSON.stringify(skipped)))).toEqual(skipped);
+    let taken = initial();
+    now = NOW;
+    for (const name of CUSTOMER_STAGE2_ACTION_ORDER) { taken = advance(taken, name, now += 10); }
+    expect(taken.actions.map((action) => action.name)).toEqual([...CUSTOMER_STAGE2_ACTION_ORDER]);
+    taken = completeCustomerStage2Journal(taken, { attemptId: ATTEMPT, now: now += 10 });
+    expect(parseCustomerStage2Journal(JSON.parse(JSON.stringify(taken)))).toEqual(taken);
+  });
+
+  it('cannot be taken late or completed early', () => {
+    let now = NOW;
+    let journal = initial();
+    journal = advance(journal, 'management_access_application', now += 10);
+    journal = advance(journal, 'management_admin_policy', now += 10);
+    journal = advance(journal, 'gateway_resources', now += 10);
+    expect(() => prepareCustomerStage2Action(journal, { attemptId: ATTEMPT, now: now += 10, name: CUSTOMER_STAGE2_OPTIONAL_ACTION, record: { schemaVersion: 1 } }))
+      .toThrow(CustomerStage2JournalError);
+    let opted = initial();
+    now = NOW;
+    opted = advance(opted, 'management_access_application', now += 10);
+    opted = advance(opted, 'management_admin_policy', now += 10);
+    opted = advance(opted, CUSTOMER_STAGE2_OPTIONAL_ACTION, now += 10);
+    expect(() => prepareCustomerStage2Action(opted, { attemptId: ATTEMPT, now: now += 10, name: 'management_custom_domain', record: { schemaVersion: 1 } }))
+      .toThrow(CustomerStage2JournalError);
+    for (const name of ['gateway_resources', 'management_custom_domain', 'workers_dev_disable', 'terminal_verify'] as const) {
+      opted = advance(opted, name, now += 10);
+    }
+    expect(() => completeCustomerStage2Journal(opted, { attemptId: ATTEMPT, now: now += 10 })).toThrow(CustomerStage2JournalError);
   });
 });
