@@ -31,6 +31,13 @@ export async function hostnameResolvesDirectly(hostname, { zone, servers, resolv
   return served > 0;
 }
 
+/** A resolver bound to one server, asked once with a short timeout; exported so the default path stays under test. */
+export function createResolver(server) {
+  const instance = new dns.Resolver({ timeout: 3_000, tries: 1 });
+  instance.setServers([server]);
+  return (hostname, type) => type === 'A' ? instance.resolve4(hostname) : instance.resolve6(hostname);
+}
+
 const NEGATIVE = new Set(['ENOTFOUND', 'ENODATA']);
 
 /** 'records' when a type answers, 'negative' when the server denies the name for both types, else 'unreachable'. */

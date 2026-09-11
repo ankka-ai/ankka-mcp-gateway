@@ -51,3 +51,10 @@ test('waiting for system resolution notifies once about a negatively cached name
   const expired = await awaitSystemResolution('manage.example.com', { seconds: 10, direct: async () => false, system: async () => false, sleep: async () => { clock += 5_000; }, now: () => clock });
   assert.equal(expired, false);
 });
+
+test('the default resolver factory is wired: a server that refuses the query counts as unreachable, never as served', async () => {
+  const { createResolver } = await import('../tools/live-gateway-dns.mjs');
+  assert.equal(typeof createResolver('127.0.0.1'), 'function');
+  // 127.0.0.1:53 refuses or times out on a developer machine; either way the name is not served and nothing throws.
+  assert.equal(await hostnameResolvesDirectly('never.example.invalid', { zone: 'example.invalid', servers: ['127.0.0.1'] }), false);
+});
