@@ -72,7 +72,7 @@
     "oxlint": "1.80.0",
     "playwright-core": "1.63.0",
     "typescript": "7.0.2",
-    "miniflare": "5.20260826.0-alpha"
+    "miniflare": "5.20260910.0-alpha"
   },
   "dependencies": {
     "valibot": "^1.4.2"
