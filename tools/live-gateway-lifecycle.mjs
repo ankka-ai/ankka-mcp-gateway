@@ -51,14 +51,21 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   await checkpoint({ stage: 'installation', status: 'configured', plan: configured.plan });
   const setup = await browser.request(bootstrapOrigin, '/__ankka/install/oauth/start', { method: 'POST', body: {} });
   // The consent callback sends the browser to the management hostname before its record exists, and a negative
-  // answer is cached for the zone's negative TTL. The runner therefore reads the provider until the custom domain is
-  // attached and only then touches the hostname; the browser is held off that origin for the same window.
-  // The custom domain is listed a few seconds before its record is served; the first system lookup in that gap
-  // would be cached negatively, so the hostname must also resolve when the DNS servers are asked directly.
+  // answer is cached for the zone's negative TTL. The browser is therefore held off that origin, and the consent
+  // window (the operator's ten minutes) ends when the provider lists the custom domain: the operator approved and
+  // the converger finished. The record the custom domain creates is served by the zone's authoritative nameservers
+  // only later, more than ten minutes after its creation at times, so the platform gets its own window, up to the
+  // zone's negative TTL, before the first read; nothing but those authoritative servers is asked meanwhile.
   const managementHostname = new URL(config.managementOrigin).hostname;
-  await browser.consent(setup.authorizationUrl,
-    async () => (await provider.managementDomainReady(provision) && await resolves(managementHostname) ? management('/api/status') : null),
-    (value) => value?.schemaVersion === 1, { holdOrigin: config.managementOrigin });
+  await browser.consent(setup.authorizationUrl, () => provider.managementDomainReady(provision), (ready) => ready === true,
+    { holdOrigin: config.managementOrigin, keepHold: true });
+  try {
+    await browser.waitFor(async () => await resolves(managementHostname, { zone: config.basics.zoneName }) ? management('/api/status') : null,
+      (value) => value?.schemaVersion === 1,
+      { seconds: 1_900, instruction: `Waiting for ${managementHostname} to be served by the zone's nameservers (up to 30 minutes).` });
+  } finally {
+    browser.release();
+  }
   // The first reads after convergence can meet a transient 503 while the new runtime and its Access application
   // settle; a read is retried until it answers, and only then is the installed release judged.
   const updateA = await browser.waitFor(() => management('/api/update'), (value) => value?.current !== undefined);

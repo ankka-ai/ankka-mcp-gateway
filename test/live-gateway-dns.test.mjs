@@ -2,26 +2,38 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { awaitSystemResolution, hostnameResolvesDirectly } from '../tools/live-gateway-dns.mjs';
 
-test('direct resolution needs every configured server to answer, tries A and AAAA, falls back to 1.1.1.1 only when none is configured, and never throws', async () => {
+test('direct resolution asks only the zone\'s authoritative servers: a negative answer from any of them is not served, an unreachable one is skipped', async () => {
   const asked = [];
-  const answering = new Set();
+  const behaviour = new Map();
   const resolver = (server) => async (hostname, type) => {
-    asked.push(`${server} ${type} ${hostname}`);
-    if (answering.has(server) && type === 'AAAA') return ['2606:4700::1'];
-    const error = new Error('queryA ENOTFOUND'); error.code = 'ENOTFOUND'; throw error;
+    asked.push(`${server} ${type}`);
+    const mode = behaviour.get(server) ?? 'negative';
+    if (mode === 'records') return type === 'AAAA' ? ['2606:4700::1'] : ['104.16.0.1'];
+    const error = new Error(mode === 'negative' ? 'queryA ENOTFOUND' : 'queryA ETIMEOUT'); error.code = mode === 'negative' ? 'ENOTFOUND' : 'ETIMEOUT'; throw error;
   };
-  // A local forwarder that still answers negatively is what the system will ask: not resolved yet, and the public
-  // resolver is not consulted in its place.
-  answering.add('1.1.1.1');
-  assert.equal(await hostnameResolvesDirectly('manage.example.com', { servers: ['100.100.100.100', 'fd7a::53', '1.1.1.1'], resolver }), false);
-  assert.deepEqual(asked, ['100.100.100.100 A manage.example.com', '100.100.100.100 AAAA manage.example.com']);
-  asked.length = 0; answering.add('100.100.100.100');
-  assert.equal(await hostnameResolvesDirectly('manage.example.com', { servers: ['100.100.100.100', 'fd7a::53', '1.1.1.1'], resolver }), true);
-  assert.deepEqual(asked, ['100.100.100.100 A manage.example.com', '100.100.100.100 AAAA manage.example.com', '1.1.1.1 A manage.example.com', '1.1.1.1 AAAA manage.example.com']);
-  asked.length = 0;
-  assert.equal(await hostnameResolvesDirectly('manage.example.com', { servers: [], resolver }), true);
-  assert.deepEqual(asked, ['1.1.1.1 A manage.example.com', '1.1.1.1 AAAA manage.example.com']);
-  assert.equal(await hostnameResolvesDirectly('missing.example.com', { servers: [], resolver: () => async () => { throw new Error('timeout'); } }), false);
+  const nameservers = async (zone) => { asked.push(`ns ${zone}`); return ['173.245.58.1', '173.245.59.1']; };
+  behaviour.set('173.245.58.1', 'records');
+  // One authoritative server still denies the name: not served yet, and the second server is not even asked.
+  assert.equal(await hostnameResolvesDirectly('manage.example.com', { zone: 'example.com', resolver, nameservers, servers: ['173.245.59.1', '173.245.58.1'] }), false);
+  assert.deepEqual(asked, ['173.245.59.1 A', '173.245.59.1 AAAA']);
+  asked.length = 0; behaviour.set('173.245.59.1', 'records');
+  assert.equal(await hostnameResolvesDirectly('manage.example.com', { zone: 'example.com', resolver, nameservers }), true);
+  assert.deepEqual(asked, ['ns example.com', '173.245.58.1 A', '173.245.59.1 A']);
+  // An unreachable server is skipped; a served answer from the other suffices, but no answer at all does not.
+  asked.length = 0; behaviour.set('173.245.59.1', 'unreachable');
+  assert.equal(await hostnameResolvesDirectly('manage.example.com', { zone: 'example.com', resolver, nameservers }), true);
+  behaviour.set('173.245.58.1', 'unreachable');
+  assert.equal(await hostnameResolvesDirectly('manage.example.com', { zone: 'example.com', resolver, nameservers }), false);
+  assert.equal(await hostnameResolvesDirectly('manage.example.com', { zone: 'example.com', resolver, nameservers: async () => [] }), false);
+});
+
+test('the authoritative servers come from the zone\'s NS records, skipping a nameserver without an address', async () => {
+  const { authoritativeServers } = await import('../tools/live-gateway-dns.mjs');
+  const servers = await authoritativeServers('example.com', {
+    resolveNs: async (zone) => { assert.equal(zone, 'example.com'); return ['a.ns.example.net', 'b.ns.example.net', 'c.ns.example.net']; },
+    resolve4: async (name) => { if (name === 'c.ns.example.net') throw new Error('ENOTFOUND'); return name === 'a.ns.example.net' ? ['173.245.58.1'] : ['173.245.59.1', '173.245.58.1']; },
+  });
+  assert.deepEqual(servers, ['173.245.58.1', '173.245.59.1']);
 });
 
 test('waiting for system resolution notifies once about a negatively cached name and returns when the system resolves', async () => {

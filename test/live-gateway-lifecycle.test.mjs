@@ -109,6 +109,7 @@ test('complete orchestration proves token management, distinct update, lost call
   const browser = {
     login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
     adoptBootstrap: () => provision.bootstrapOrigin,
+    release: () => evidence.push('hold_released'),
     waitFor: async (read, accepts) => { const result = await read(); assert.ok(accepts(result)); return result; },
     consent: async (_url, read, accepts) => {
       consentCount += 1;
@@ -160,7 +161,7 @@ test('complete orchestration proves token management, distinct update, lost call
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
-  assert.deepEqual(evidence, ['release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
+  assert.deepEqual(evidence, ['hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
   assert.equal(events.find((event) => event.status === 'receipt_saved').revocationUnconfirmed, false);
@@ -190,20 +191,21 @@ test('an attached browser holding a handed-off installer session gets a fresh dr
 });
 
 
-test('the Stage 2 consent holds the management origin and waits for the provider before the first management read', async () => {
+test('the Stage 2 consent ends when the provider lists the domain, the hold stays for the DNS window, and only then comes the first management read', async () => {
   const provision = { installId: `acg-${'3'.repeat(24)}`, workerName: `ankka-gateway-acg-${'3'.repeat(24)}`, bootstrapOrigin: `https://ankka-gateway-acg-${'3'.repeat(24)}.synthetic.workers.dev` };
-  const consents = [], managementReads = [];
+  const consents = [], managementReads = [], order = [];
   let ready = false;
   const browser = {
     login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
     adoptBootstrap: () => provision.bootstrapOrigin,
-    waitFor: async (read) => read(),
+    release: () => order.push('hold_released'),
+    waitFor: async (read, _accepts, options) => { if (options?.seconds) order.push(`dns_window:${options.seconds}`); return read(); },
     consent: async (_url, read, accepts, options) => {
       consents.push(options);
       if (consents.length === 1) return { session: { phase: 'handed_off', provision } };
-      assert.equal(await read(), null); // not ready: no management request
+      assert.equal(await read(), false); // the domain is not listed yet: no management request, no DNS question
       ready = true;
-      const value = await read(); assert.ok(accepts(value)); return value;
+      const value = await read(); assert.ok(accepts(value)); order.push('consent_done'); return value;
     },
     request: async (origin, path) => {
       if (origin === config.installerOrigin) {
@@ -222,9 +224,11 @@ test('the Stage 2 consent holds the management origin and waits for the provider
   const provider = { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => ready };
   const resolutions = [];
   await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider, checkpoint: async () => {}, notify: () => {},
-    resolves: async (hostname) => { resolutions.push(hostname); return true; } }), /stop_here/u);
+    resolves: async (hostname, options) => { assert.equal(options.zone, config.basics.zoneName); resolutions.push(hostname); return true; } }), /stop_here/u);
   assert.deepEqual(resolutions, [new URL(config.managementOrigin).hostname]);
   assert.deepEqual(consents.map((options) => options?.holdOrigin), [undefined, config.managementOrigin]);
+  assert.equal(consents[1].keepHold, true);
+  assert.deepEqual(order, ['consent_done', 'dns_window:1900', 'hold_released']);
   assert.deepEqual(managementReads, ['/api/status', '/api/update']);
 });
 

@@ -190,7 +190,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       return waitFor(() => request(origin, origin === installerOrigin ? '/api/session' : '/api/status'),
         (value) => value.schemaVersion === 1);
     },
-    async consent(authorizationUrl, read, accepts, { holdOrigin } = {}) {
+    async consent(authorizationUrl, read, accepts, { holdOrigin, keepHold = false } = {}) {
       const url = new URL(authorizationUrl);
       if (url.origin !== 'https://dash.cloudflare.com' || url.pathname !== '/oauth2/auth') {
         throw new LiveGatewayBrowserError('authorization_url_invalid');
@@ -200,9 +200,11 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
         await navigate(url.href);
         return await waitFor(read, accepts, { instruction: 'Review and approve the test operation in Cloudflare. The runner will continue after the callback.' });
       } finally {
-        hold.origin = null;
+        // A caller that keeps the hold (the hostname is not served yet) releases it itself.
+        if (!keepHold) hold.origin = null;
       }
     },
+    release() { hold.origin = null; },
     async loseNextTeardownCallbackResponse() {
       if (interruptionArmed) throw new LiveGatewayBrowserError('interruption_already_armed');
       interruptionArmed = true;

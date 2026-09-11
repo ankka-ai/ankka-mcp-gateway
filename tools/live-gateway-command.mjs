@@ -311,7 +311,7 @@ export async function runLiveLifecycleCommand(args) {
         // not the journal, says whether the installation completed; the installation checks then run as usual.
         const managementHostname = new URL(config.managementOrigin).hostname;
         requireCondition(await provider.managementDomainReady(provision), 'installation_not_completed');
-        requireCondition(await awaitSystemResolution(managementHostname, { notify: console.log }), 'management_hostname_unresolved');
+        requireCondition(await awaitSystemResolution(managementHostname, { zone: config.basics.zoneName, notify: console.log }), 'management_hostname_unresolved');
         const updateA = await management('/api/update');
         requireCondition(updateA?.current?.release === config.releaseA.release &&
           updateA.current.artifactSha256 === `sha256:${config.releaseA.artifactSha256}`, 'installed_release_mismatch');
