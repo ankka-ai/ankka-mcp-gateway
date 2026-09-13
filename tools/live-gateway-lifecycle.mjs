@@ -36,9 +36,11 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   // The installer page spends the one-time handoff on its first hop to the shell; that hop is held back until the
   // shell answers from here, so an edge that does not serve the fresh Worker yet cannot swallow the handoff.
   browser.holdHandoff();
+  // The session is provisioned once the shell exists; it is handed off only when the page's handoff poll succeeds,
+  // which the hold defers, so the consent ends at the provisioned session.
   const installed = await browser.consent(started.authorizationUrl, () => installer('/api/session'),
-    (value) => ['handed_off', 'failed', 'cleanup_required'].includes(value?.session?.phase));
-  requireCondition(installed.session.phase === 'handed_off', 'bootstrap_not_completed');
+    (value) => ['provisioned', 'handed_off', 'failed', 'cleanup_required'].includes(value?.session?.phase));
+  requireCondition(['provisioned', 'handed_off'].includes(installed.session.phase) && installed.session.provision !== null, 'bootstrap_not_completed');
   const provision = installed.session.provision;
   await checkpoint({ stage: 'installation', status: 'shell_installed', provision });
   const bootstrapOrigin = browser.adoptBootstrap(provision);

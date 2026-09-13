@@ -335,7 +335,8 @@ test('the shell hop is held until the shell answers from here, and a 403 counts 
     login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
     adoptBootstrap: () => provision.bootstrapOrigin,
     holdHandoff: () => order.push('held'), releaseHandoff: () => order.push('released'),
-    consent: async () => ({ session: { phase: 'handed_off', provision } }),
+    // The consent ends at a provisioned session: the handoff, and with it the handed-off phase, is still held.
+    consent: async () => ({ session: { phase: 'provisioned', provision } }),
     waitFor: async (read, accepts) => {
       // The first wait polls until the shell is live: a 404 (not served yet) keeps waiting, a 403 ends it.
       for (;;) { try { const value = await read(); if (accepts(value)) return value; } catch (error) { if (!['gateway_http_rejected'].includes(error.code)) throw error; } }
@@ -358,4 +359,16 @@ test('the shell hop is held until the shell answers from here, and a 403 counts 
   };
   await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider: { assertFresh: async () => {}, assertWorker: async () => {} }, checkpoint: async () => {}, notify: () => {} }), /stop_here/u);
   assert.deepEqual(order, ['held', 'released', 'page_hopped']);
+});
+
+test('a session that fails or needs cleanup before it is provisioned stops as bootstrap_not_completed', async () => {
+  for (const phase of ['failed', 'cleanup_required']) {
+    const browser = {
+      login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
+      holdHandoff: () => {}, releaseHandoff: () => assert.fail('the hold must not be released'),
+      consent: async () => ({ session: { phase, provision: null } }),
+      request: async (_origin, path) => path === '/api/plan' ? { session: { plan: { releaseId: config.releaseA.release } } } : { authorizationUrl: 'https://dash.cloudflare.com/oauth2/auth?synthetic' },
+    };
+    await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider: { assertFresh: async () => {} }, checkpoint: async () => {}, notify: () => {} }), { code: 'bootstrap_not_completed' });
+  }
 });
