@@ -68,6 +68,8 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   // only later, more than ten minutes after its creation at times, so the platform gets its own window, up to the
   // zone's negative TTL, before the first read; nothing but those authoritative servers is asked meanwhile.
   const managementHostname = new URL(config.managementOrigin).hostname;
+  // The shell's authorization cookie lives five minutes; an approval after that is refused by the shell itself.
+  notify?.('Approve the Stage 2 consent within five minutes of this notice: the shell refuses a later callback.');
   await browser.consent(setup.authorizationUrl, () => provider.managementDomainReady(provision), (ready) => ready === true,
     { holdOrigin: config.managementOrigin, keepHold: true });
   try {
