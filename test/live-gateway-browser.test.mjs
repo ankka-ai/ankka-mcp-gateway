@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BROWSER_REQUEST_TIMEOUT_MS, heldOriginMatcher } from '../tools/live-gateway-browser.mjs';
+import { BROWSER_REQUEST_TIMEOUT_MS, handoffHoldAnswer, heldOriginMatcher } from '../tools/live-gateway-browser.mjs';
 import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
 import { validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 
@@ -66,4 +66,13 @@ test('a held origin is matched only while held, so releasing it needs no route r
   hold.origin = null;
   // The update handoff after the Stage 2 consent must reach the real gateway page again.
   assert.equal(matches(management), false);
+});
+
+test('the held handoff answer is the installer\'s own not-ready body, and nothing while released', () => {
+  const hold = { active: false };
+  assert.equal(handoffHoldAnswer(hold), null);
+  hold.active = true;
+  const answer = handoffHoldAnswer(hold);
+  assert.equal(answer.status, 503);
+  assert.deepEqual(JSON.parse(answer.body), { schemaVersion: 1, code: 'bootstrap_not_ready', status: 'not_ready', retryAfterMs: 3000, reason: 'runner_waits_for_shell' });
 });

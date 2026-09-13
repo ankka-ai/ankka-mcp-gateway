@@ -29,6 +29,13 @@ to additionally validate the signed release pair and read the target provider
 inventory with the operator token. These checks cannot prove that all future
 write permissions or consent steps will succeed.
 
+After the Stage 1 consent the installer page hops to the new shell as soon as the
+installer's own readiness probe passes, spending the one-time handoff on that
+hop; an edge that does not serve the fresh Worker yet answers it 404 and the
+shell never receives its session. The runner therefore answers the page's
+handoff poll with the installer's own not-ready body until the shell answers
+the runner from its vantage point, then lets the page hop.
+
 After the Stage 2 consent the installer sends the browser to the new management
 hostname before its DNS record exists, and resolvers cache that negative answer
 for the zone's negative TTL (30 minutes on Cloudflare zones). The runner therefore

@@ -14,6 +14,13 @@ const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
  */
 export const BROWSER_REQUEST_TIMEOUT_MS = 120_000;
 
+/** The installer's own not-ready handoff answer, returned to the page while the hold is active; null otherwise. */
+export function handoffHoldAnswer(hold) {
+  if (!hold.active) return null;
+  return { status: 503, contentType: 'application/json; charset=utf-8',
+    body: JSON.stringify({ schemaVersion: 1, code: 'bootstrap_not_ready', status: 'not_ready', retryAfterMs: 3_000, reason: 'runner_waits_for_shell' }) };
+}
+
 /** Matches requests to the origin currently held (none when `hold.origin` is null); evaluated per request. */
 export function heldOriginMatcher(hold) {
   return (url) => hold.origin !== null && url.origin === hold.origin;
@@ -64,6 +71,14 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     status: 200, contentType: 'text/html; charset=utf-8',
     body: '<!doctype html><title>Ankka lifecycle</title><p>Installation is finishing. The runner continues by API.</p>',
   }));
+  // The installer page hops to the new shell the moment the installer's own readiness probe passes, spending the
+  // one-time handoff on that hop; an edge that does not serve the fresh Worker yet answers it 404 and the shell never
+  // gets its session. While held, the page's handoff poll gets the installer's own not-ready answer and keeps polling.
+  const handoffHold = { active: false };
+  await page.route((url) => url.origin === installerOrigin && url.pathname === '/api/bootstrap/handoff', (route) => {
+    const answer = handoffHoldAnswer(handoffHold);
+    return answer === null ? route.continue() : route.fulfill(answer);
+  });
   let interrupted = false;
   let interruptionArmed = false;
   let interruptionError = null;
@@ -205,6 +220,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       }
     },
     release() { hold.origin = null; },
+    holdHandoff() { handoffHold.active = true; },
+    releaseHandoff() { handoffHold.active = false; },
     async loseNextTeardownCallbackResponse() {
       if (interruptionArmed) throw new LiveGatewayBrowserError('interruption_already_armed');
       interruptionArmed = true;

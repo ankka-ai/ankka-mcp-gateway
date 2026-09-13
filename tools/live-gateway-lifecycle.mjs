@@ -33,6 +33,9 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   const planned = await installer('/api/plan', { method: 'POST', body: {}, csrfToken: session.csrfToken });
   requireCondition(planned?.session?.plan?.releaseId === config.releaseA.release, 'installer_release_mismatch');
   const started = await installer('/api/bootstrap', { method: 'POST', body: {}, csrfToken: session.csrfToken });
+  // The installer page spends the one-time handoff on its first hop to the shell; that hop is held back until the
+  // shell answers from here, so an edge that does not serve the fresh Worker yet cannot swallow the handoff.
+  browser.holdHandoff();
   const installed = await browser.consent(started.authorizationUrl, () => installer('/api/session'),
     (value) => ['handed_off', 'failed', 'cleanup_required'].includes(value?.session?.phase));
   requireCondition(installed.session.phase === 'handed_off', 'bootstrap_not_completed');
@@ -40,6 +43,12 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   await checkpoint({ stage: 'installation', status: 'shell_installed', provision });
   const bootstrapOrigin = browser.adoptBootstrap(provision);
   await provider.assertWorker(provision);
+  // Live from this vantage point: the shell refuses a sessionless read (403) or, once the page hopped, answers it.
+  await browser.waitFor(async () => {
+    try { return await browser.request(bootstrapOrigin, '/__ankka/install/setup'); }
+    catch (error) { if (error?.code === 'gateway_http_rejected' && error.status === 403) return 'live'; throw error; }
+  }, (value) => value === 'live' || Array.isArray(value?.availableZones));
+  browser.releaseHandoff();
   // The real installer page consumes its one-time handoff. Do not race it.
   await browser.waitFor(() => browser.request(bootstrapOrigin, '/__ankka/install/setup'),
     (value) => Array.isArray(value?.availableZones));

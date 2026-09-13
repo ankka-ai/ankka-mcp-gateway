@@ -110,6 +110,7 @@ test('complete orchestration proves token management, distinct update, lost call
     login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
     adoptBootstrap: () => provision.bootstrapOrigin,
     release: () => evidence.push('hold_released'),
+    holdHandoff: () => evidence.push('handoff_held'), releaseHandoff: () => evidence.push('handoff_released'),
     waitFor: async (read, accepts) => { const result = await read(); assert.ok(accepts(result)); return result; },
     consent: async (_url, read, accepts) => {
       consentCount += 1;
@@ -161,7 +162,7 @@ test('complete orchestration proves token management, distinct update, lost call
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
-  assert.deepEqual(evidence, ['hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
+  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
   assert.equal(events.find((event) => event.status === 'receipt_saved').revocationUnconfirmed, false);
@@ -198,7 +199,7 @@ test('the Stage 2 consent ends when the provider lists the domain, the hold stay
   const browser = {
     login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
     adoptBootstrap: () => provision.bootstrapOrigin,
-    release: () => order.push('hold_released'),
+    release: () => order.push('hold_released'), holdHandoff: () => {}, releaseHandoff: () => order.push('handoff_released'),
     waitFor: async (read, _accepts, options) => { if (options?.seconds) order.push(`dns_window:${options.seconds}`); return read(); },
     consent: async (_url, read, accepts, options) => {
       consents.push(options);
@@ -228,7 +229,7 @@ test('the Stage 2 consent ends when the provider lists the domain, the hold stay
   assert.deepEqual(resolutions, [new URL(config.managementOrigin).hostname]);
   assert.deepEqual(consents.map((options) => options?.holdOrigin), [undefined, config.managementOrigin]);
   assert.equal(consents[1].keepHold, true);
-  assert.deepEqual(order, ['consent_done', 'dns_window:1900', 'hold_released']);
+  assert.deepEqual(order, ['handoff_released', 'consent_done', 'dns_window:1900', 'hold_released']);
   assert.deepEqual(managementReads, ['/api/status', '/api/update']);
 });
 
@@ -323,4 +324,38 @@ test('a receipt the installer already holds is taken without opening another rem
   await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => events.push(event), phase: 'root' }), /stop_here/u);
   assert.deepEqual(calls, ['GET /api/teardown', 'POST /api/teardown/import']);
   assert.deepEqual(events, [{ stage: 'root_removal', status: 'receipt_saved', handoff: 'private-receipt', revocationUnconfirmed: false }]);
+});
+
+test('the shell hop is held until the shell answers from here, and a 403 counts as live while other rejections still wait', async () => {
+  const { LiveGatewayBrowserError } = await import('../tools/live-gateway-browser.mjs');
+  const provision = { installId: `acg-${'4'.repeat(24)}`, workerName: `ankka-gateway-acg-${'4'.repeat(24)}`, bootstrapOrigin: `https://ankka-gateway-acg-${'4'.repeat(24)}.synthetic.workers.dev` };
+  const order = [];
+  let shellReads = 0;
+  const browser = {
+    login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
+    adoptBootstrap: () => provision.bootstrapOrigin,
+    holdHandoff: () => order.push('held'), releaseHandoff: () => order.push('released'),
+    consent: async () => ({ session: { phase: 'handed_off', provision } }),
+    waitFor: async (read, accepts) => {
+      // The first wait polls until the shell is live: a 404 (not served yet) keeps waiting, a 403 ends it.
+      for (;;) { try { const value = await read(); if (accepts(value)) return value; } catch (error) { if (!['gateway_http_rejected'].includes(error.code)) throw error; } }
+    },
+    request: async (origin, path) => {
+      if (origin === config.installerOrigin) {
+        if (path === '/api/plan') return { session: { plan: { releaseId: config.releaseA.release } } };
+        if (path === '/api/bootstrap') return { authorizationUrl: 'https://dash.cloudflare.com/oauth2/auth?synthetic' };
+      }
+      if (origin === provision.bootstrapOrigin && path === '/__ankka/install/setup') {
+        shellReads += 1;
+        if (shellReads === 1) throw new LiveGatewayBrowserError('gateway_http_rejected', 404);
+        if (shellReads === 2) throw new LiveGatewayBrowserError('gateway_http_rejected', 403);
+        if (shellReads === 3) { order.push('page_hopped'); throw new LiveGatewayBrowserError('gateway_http_rejected', 403); }
+        return { availableZones: [{}] };
+      }
+      if (origin === provision.bootstrapOrigin && path === '/__ankka/install/configuration') throw new Error('stop_here');
+      throw new Error(`unexpected ${origin}${path}`);
+    },
+  };
+  await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider: { assertFresh: async () => {}, assertWorker: async () => {} }, checkpoint: async () => {}, notify: () => {} }), /stop_here/u);
+  assert.deepEqual(order, ['held', 'released', 'page_hopped']);
 });
