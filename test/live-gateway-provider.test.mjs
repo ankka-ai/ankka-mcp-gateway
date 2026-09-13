@@ -114,3 +114,21 @@ test('the management domain is ready only when it is a custom domain of the inst
   assert.equal(await provider([{ hostname: 'manage.example.com', service: 'ankka-gateway-other' }]).managementDomainReady(provision), false);
   assert.equal(await provider([{ hostname: 'manage.example.com', service: provision.workerName }]).managementDomainReady(provision), true);
 });
+
+test('a transient transport failure on a read is retried a bounded number of times; a rejection by status is not', async () => {
+  const { createLiveGatewayProvider } = await import('../tools/live-gateway-provider.mjs');
+  const config = { accountId: 'a'.repeat(32), zoneId: 'b'.repeat(32), basics: { managementHostname: 'manage.example.com', portalHostname: 'portal.example.com' } };
+  let calls = 0; const naps = [];
+  const flaky = createLiveGatewayProvider({ config, token: 'synthetic-test-token', sleep: async (ms) => { naps.push(ms); },
+    transport: async () => { calls += 1; if (calls < 3) throw new Error('socket hang up'); return Response.json({ success: true, result: [] }); } });
+  await flaky.assertFresh();
+  assert.equal(calls >= 3, true); assert.deepEqual(naps.slice(0, 2), [1000, 3000]);
+  let attempts = 0;
+  const dead = createLiveGatewayProvider({ config, token: 'synthetic-test-token', sleep: async () => {}, transport: async () => { attempts += 1; throw new Error('socket hang up'); } });
+  await assert.rejects(dead.assertFresh(), { code: 'provider_read_failed' });
+  assert.equal(attempts, 3);
+  let rejections = 0;
+  const denied = createLiveGatewayProvider({ config, token: 'synthetic-test-token', sleep: async () => assert.fail('no retry on a status'), transport: async () => { rejections += 1; return new Response('private', { status: 403 }); } });
+  await assert.rejects(denied.assertFresh(), { code: 'provider_read_rejected' });
+  assert.equal(rejections, 1);
+});

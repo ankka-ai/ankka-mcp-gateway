@@ -6,18 +6,29 @@ function requireCondition(value, code) { if (!value) throw new LiveLifecycleErro
 const id = (value) => v.is(v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/u)), value);
 
 /** Read-only provider evidence. No arbitrary URL, grant forwarding, or deletion. */
-export function createLiveGatewayProvider({ config, token, transport = fetch }) {
+// A read mutates nothing, so a transient transport failure (a timeout or a dropped connection) is retried this many
+// times before it is judged; a rejection by status is never retried.
+const READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
+
+export function createLiveGatewayProvider({ config, token, transport = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   requireCondition(/^[a-f0-9]{32}$/u.test(config.accountId) && /^[a-f0-9]{32}$/u.test(config.zoneId) && token, 'provider_config_invalid');
   const account = `/accounts/${config.accountId}`;
   const zone = `/zones/${config.zoneId}`;
+  async function send(url) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await transport(url, { headers: { authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
+      } catch {
+        if (attempt >= READ_RETRY_DELAYS_MS.length) throw new LiveLifecycleError('provider_read_failed');
+        await sleep(READ_RETRY_DELAYS_MS[attempt]);
+      }
+    }
+  }
   async function read(path, allowAbsent = false) {
     requireCondition(path.startsWith(`${account}/`) || path === zone || path.startsWith(`${zone}/`), 'provider_path_invalid');
     requireCondition(new URL(`https://api.cloudflare.com/client/v4${path}`).pathname === `/client/v4${path.split('?')[0]}` &&
       !path.includes('#') && !path.includes('%'), 'provider_path_invalid');
-    let response;
-    try { response = await transport(`https://api.cloudflare.com/client/v4${path}`, {
-      headers: { authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000),
-    }); } catch { throw new LiveLifecycleError('provider_read_failed'); }
+    const response = await send(`https://api.cloudflare.com/client/v4${path}`);
     if (allowAbsent && response.status === 404) { await response.body?.cancel(); return null; }
     if (!response.ok) { await response.body?.cancel(); throw new LiveLifecycleError('provider_read_rejected'); }
     let body;
