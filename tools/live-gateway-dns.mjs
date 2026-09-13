@@ -5,13 +5,23 @@ import { promises as dns } from 'node:dns';
  * nameservers are long-lived names whose answers every resolver already holds positively, so this lookup cannot
  * cache an absence anywhere.
  */
-export async function authoritativeServers(zone, { resolveNs = dns.resolveNs, resolve4 = dns.resolve4 } = {}) {
+export async function authoritativeServers(zone, { resolveNs = dns.resolveNs, resolve4 = dns.resolve4, cache = nameserverCache, now = Date.now } = {}) {
+  // A zone's nameservers do not change during a run; one lookup serves the whole wait, and a transient failure of
+  // that lookup means "not known yet", never a thrown error out of a wait loop.
+  const cached = cache.get(zone);
+  if (cached !== undefined && cached.until > now()) return cached.addresses;
+  let names;
+  try { names = await resolveNs(zone); } catch { return []; }
   const addresses = [];
-  for (const name of await resolveNs(zone)) {
+  for (const name of names) {
     try { addresses.push(...await resolve4(name)); } catch { /* A nameserver without a reachable address is skipped. */ }
   }
-  return [...new Set(addresses)];
+  const unique = [...new Set(addresses)];
+  if (unique.length > 0) cache.set(zone, { addresses: unique, until: now() + 10 * 60_000 });
+  return unique;
 }
+
+const nameserverCache = new Map();
 
 /**
  * Whether the zone's authoritative nameservers serve the hostname: every one that answers at all must answer with

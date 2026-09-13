@@ -229,7 +229,7 @@ test('the Stage 2 consent ends when the provider lists the domain, the hold stay
   assert.deepEqual(resolutions, [new URL(config.managementOrigin).hostname]);
   assert.deepEqual(consents.map((options) => options?.holdOrigin), [undefined, config.managementOrigin]);
   assert.equal(consents[1].keepHold, true);
-  assert.deepEqual(order, ['handoff_released', 'consent_done', 'dns_window:1900', 'hold_released']);
+  assert.deepEqual(order, ['handoff_released', 'consent_done', 'dns_window:2700', 'hold_released']);
   assert.deepEqual(managementReads, ['/api/status', '/api/update']);
 });
 

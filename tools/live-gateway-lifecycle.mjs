@@ -75,7 +75,7 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   try {
     await browser.waitFor(async () => await resolves(managementHostname, { zone: config.basics.zoneName }) ? management('/api/status') : null,
       (value) => value?.schemaVersion === 1,
-      { seconds: 1_900, instruction: `Waiting for ${managementHostname} to be served by the zone's nameservers (up to 30 minutes).` });
+      { seconds: 2_700, instruction: `Waiting for ${managementHostname} to be served by the zone's nameservers (up to 45 minutes; the record has taken 25 minutes live).` });
   } finally {
     browser.release();
   }

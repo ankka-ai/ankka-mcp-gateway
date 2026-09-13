@@ -27,13 +27,22 @@ test('direct resolution asks only the zone\'s authoritative servers: a negative 
   assert.equal(await hostnameResolvesDirectly('manage.example.com', { zone: 'example.com', resolver, nameservers: async () => [] }), false);
 });
 
-test('the authoritative servers come from the zone\'s NS records, skipping a nameserver without an address', async () => {
+test('the authoritative servers come from the zone\'s NS records, skipping a nameserver without an address, cached per zone, and a failed NS lookup means not known', async () => {
   const { authoritativeServers } = await import('../tools/live-gateway-dns.mjs');
-  const servers = await authoritativeServers('example.com', {
-    resolveNs: async (zone) => { assert.equal(zone, 'example.com'); return ['a.ns.example.net', 'b.ns.example.net', 'c.ns.example.net']; },
+  let lookups = 0; const cache = new Map(); let clock = 1_000;
+  const options = {
+    cache, now: () => clock,
+    resolveNs: async (zone) => { lookups += 1; assert.equal(zone, 'example.com'); return ['a.ns.example.net', 'b.ns.example.net', 'c.ns.example.net']; },
     resolve4: async (name) => { if (name === 'c.ns.example.net') throw new Error('ENOTFOUND'); return name === 'a.ns.example.net' ? ['173.245.58.1'] : ['173.245.59.1', '173.245.58.1']; },
-  });
-  assert.deepEqual(servers, ['173.245.58.1', '173.245.59.1']);
+  };
+  assert.deepEqual(await authoritativeServers('example.com', options), ['173.245.58.1', '173.245.59.1']);
+  assert.deepEqual(await authoritativeServers('example.com', options), ['173.245.58.1', '173.245.59.1']);
+  assert.equal(lookups, 1);
+  clock += 11 * 60_000;
+  await authoritativeServers('example.com', options); assert.equal(lookups, 2);
+  // A transient failure of the NS lookup itself is "not known yet", not an error thrown out of a wait loop.
+  assert.deepEqual(await authoritativeServers('other.example', { cache: new Map(), resolveNs: async () => { throw new Error('ETIMEOUT'); }, resolve4: async () => [] }), []);
+  assert.equal(await hostnameResolvesDirectly('manage.other.example', { zone: 'other.example', nameservers: async () => { throw new Error('ETIMEOUT'); } }).catch((error) => error.message), 'ETIMEOUT');
 });
 
 test('waiting for system resolution notifies once about a negatively cached name and returns when the system resolves', async () => {
