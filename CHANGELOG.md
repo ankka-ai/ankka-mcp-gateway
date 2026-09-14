@@ -9,6 +9,13 @@ Notable public product and repository changes are recorded here.
   as GHSA-rgj7-g3m4-5g8c. Miniflare pins the vulnerable version exactly, so
   the root manifest carries an npm override; the wrangler, esbuild, and
   Miniflare pins are unchanged.
+- Bound what one hosted root-removal attempt reads: scan other Workers once
+  per attempt and only those modified since the gateway was created, re-read
+  each resource by identity before its deletion, and re-read only the owner
+  side while a write settles. Count every provider and journal call against a
+  fixed budget and stop before the platform's cap with the resumable reason
+  `budget_exhausted`, so the grant is still revoked and the next consent
+  continues from the verified steps. No ownership check is weakened.
 
 - Keep admin license generation working when npm loses development flags on
   optional TypeScript, lightningcss, and fsevents binaries. Retain license

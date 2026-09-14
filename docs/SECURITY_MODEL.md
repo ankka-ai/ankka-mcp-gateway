@@ -187,6 +187,16 @@ foreign Portal mapping the gateway's server:
   recorded for another graph is never resumed.
 - Completion records exactly one applied deletion per resource and leaves the
   installation receipt unchanged.
+The hosted root finalizer bounds what one attempt reads without weakening
+these checks: the complete ownership preflight and the scan of other Workers
+in the account run once per attempt, and only Workers modified at or after
+the gateway's creation are read (a missing timestamp means read it); each
+deletion is preceded by an identity re-read of its own resource; a settling
+write is re-read on the owner-side resources it touched. Every provider and
+journal call counts against a fixed budget of fifty, and an attempt that would
+exceed it stops before the platform's cap with the resumable reason
+`budget_exhausted`, so its grant is still revoked and its pending step stays
+armed for the next consent.
 
 ## Software supply chain
 
