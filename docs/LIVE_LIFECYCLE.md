@@ -122,8 +122,10 @@ passed but whose later stages did not run (for example a runner stop while waiti
 for the management token), whose Stage 2 consent was given but whose first read
 of the new gateway never succeeded (the provider confirms the installation, and
 a negatively cached hostname is waited out with a notice), or whose last update
-action failed terminally on the gateway, in which case a new update action
-follows and both stay in the journal, or whose removal did not finish: an
+action failed terminally on the gateway or expired before anyone approved it
+(the gateway admits a new action once the old one's window has closed), in
+which case a new update action follows and both stay in the journal, or whose
+removal did not finish: an
 unauthorized or failed dependency-removal action expired without effect and the
 interrupted removal starts over, while a succeeded one leaves only the root
 removal. A journal with a saved removal receipt belongs to `--recover-removal`,

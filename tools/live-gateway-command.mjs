@@ -99,6 +99,17 @@ export function validateLiveManagementConfig(input) {
   return result.output;
 }
 
+/**
+ * The fixed reason a recorded update action no longer blocks a new one on the gateway: its terminal failure code, or
+ * `authorization_expired` for an action whose consent window closed before anyone approved it (the gateway keeps such
+ * an action as `authorization_required` but admits a new one once it has expired); null while it still blocks.
+ */
+export function supersededUpdateAction(action, now = Date.now()) {
+  if (action?.status === 'failed') return v.is(v.string(), action.failureCode) ? action.failureCode : 'failed';
+  if (action?.status === 'authorization_required' && v.is(v.string(), action.expiresAt) && Date.parse(action.expiresAt) <= now) return 'authorization_expired';
+  return null;
+}
+
 export function summarizeLiveJournal(state) {
   requireCondition(state?.schemaVersion === 1 && Array.isArray(state.events), 'journal_invalid');
   const passed = [...new Set(state.events.filter((event) => event.status === 'passed').map((event) => event.stage))];
@@ -353,14 +364,15 @@ export async function runLiveLifecycleCommand(args) {
         // An update action that failed terminally on the gateway may be followed by a new one; the journal keeps both, and
         // the inventory comes from the journal while the installed source and roster are read back from the gateway.
         const action = await management(`/api/update-actions/${recorded.actionId}`);
-        requireCondition(action?.status === 'failed', 'resume_point_unsupported');
+        const superseded = supersededUpdateAction(action);
+        requireCondition(superseded !== null, 'resume_point_unsupported');
         const inventory = state.events.findLast((event) => event.stage === 'inventory' && event.status === 'passed')?.inventory;
         requireCondition(inventory, 'inventory_required');
         const sources = await management('/api/sources');
         const installed = sources?.sources?.find((item) => item.url === config.source.url && item.status === 'installed');
         const team = await management('/api/team');
         requireCondition(installed !== undefined && Array.isArray(team?.members), 'resume_point_unsupported');
-        await checkpoint({ stage: 'resume', status: 'update', failedActionId: recorded.actionId, failureCode: action.failureCode ?? null });
+        await checkpoint({ stage: 'resume', status: 'update', failedActionId: recorded.actionId, failureCode: superseded });
         await finishLiveGatewayLifecycle({ config, browser, provider, inventory, source: { sourceId: installed.id, baselineMembers: team.members }, publishB, checkpoint, proveService });
       }
     } else await qualifyLiveGatewayLifecycle({ config, browser, provider, checkpoint, notify: console.log,

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createLiveGatewayApi, createLiveGatewayServiceApi } from '../tools/live-gateway-api.mjs';
-import { proveServiceIdentity, summarizeLiveJournal, validateLiveManagementConfig } from '../tools/live-gateway-command.mjs';
+import { proveServiceIdentity, summarizeLiveJournal, supersededUpdateAction, validateLiveManagementConfig } from '../tools/live-gateway-command.mjs';
 
 const origin = 'https://manage.example.com';
 const email = 'operator@example.com';
@@ -204,4 +204,15 @@ test('service mode observes an Access login redirect as refusal evidence and nev
   // A redirect anywhere other than the Access login page is not refusal evidence.
   await assert.rejects(redirecting('https://elsewhere.example.com/').probe('/api/status'), { code: 'access_session_rejected' });
   await assert.rejects(redirecting('not a url').probe('/api/status'), { code: 'access_session_rejected' });
+});
+
+test('a recorded update action is superseded once it failed or its consent window closed unapproved, never while it can still be approved', () => {
+  const now = Date.parse('2026-09-14T22:20:00.000Z');
+  assert.equal(supersededUpdateAction({ status: 'failed', failureCode: 'runtime_update_unconfirmed' }, now), 'runtime_update_unconfirmed');
+  assert.equal(supersededUpdateAction({ status: 'failed', failureCode: null }, now), 'failed');
+  assert.equal(supersededUpdateAction({ status: 'authorization_required', expiresAt: '2026-09-14T22:19:30.000Z' }, now), 'authorization_expired');
+  assert.equal(supersededUpdateAction({ status: 'authorization_required', expiresAt: '2026-09-14T22:25:00.000Z' }, now), null);
+  for (const action of [{ status: 'applying', expiresAt: '2026-09-14T22:19:30.000Z' }, { status: 'succeeded' }, { status: 'authorization_required' }, null, undefined]) {
+    assert.equal(supersededUpdateAction(action, now), null);
+  }
 });
