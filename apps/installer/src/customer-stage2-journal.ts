@@ -8,14 +8,20 @@ import { deepFreezePlainData } from './plain-data';
 import { jsonValueSchema, type JsonObject, type JsonValue } from './boundary';
 
 export const CUSTOMER_STAGE2_JOURNAL_KEY = 'ankka-mcp-gateway/stage2-journal/v1';
-// The final runtime comes last: its upload restarts the Durable Object on the
-// new code and refuses storage to the pass that uploaded it, so everything
-// that must be journaled happens before it.
+// The management hostname's placeholder record comes first, so the name exists
+// at the zone's nameservers minutes before a browser can be sent to it, and is
+// released right before the custom domain takes the hostname: Cloudflare
+// refuses to attach a custom domain over an externally managed record. The
+// final runtime comes last: its upload restarts the Durable Object on the new
+// code and refuses storage to the pass that uploaded it, so everything that
+// must be journaled happens before it.
 export const CUSTOMER_STAGE2_ACTION_ORDER = Object.freeze([
+  'management_dns_record',
   'management_access_application',
   'management_admin_policy',
   'management_service_policy',
   'gateway_resources',
+  'management_dns_record_release',
   'management_custom_domain',
   'workers_dev_disable',
   'terminal_verify',
@@ -24,16 +30,36 @@ export const CUSTOMER_STAGE2_ACTION_ORDER = Object.freeze([
 
 export type CustomerStage2ActionName = (typeof CUSTOMER_STAGE2_ACTION_ORDER)[number];
 
-/** The one action a plan may omit: the Service Auth policy exists only for a deployment configuration that opted in. */
+/** The action a plan may omit: the Service Auth policy exists only for a deployment configuration that opted in. */
 export const CUSTOMER_STAGE2_OPTIONAL_ACTION = 'management_service_policy' satisfies CustomerStage2ActionName;
 
-/** The sequence a journal follows: the fixed order, with the service policy slot only when the journal holds that action. */
+/**
+ * The management hostname's placeholder record and its release. Every journal
+ * created since these actions exist takes both; a journal written by an
+ * earlier release has neither, and its shape stays valid for verification,
+ * update and removal exactly as before.
+ */
+export const CUSTOMER_STAGE2_DNS_RECORD_ACTIONS = Object.freeze([
+  'management_dns_record',
+  'management_dns_record_release',
+] as const satisfies readonly CustomerStage2ActionName[]);
+
+function dnsRecordAction(name: CustomerStage2ActionName): boolean {
+  return CUSTOMER_STAGE2_DNS_RECORD_ACTIONS.some((candidate) => candidate === name);
+}
+
+/**
+ * The sequence a journal follows: the fixed order, with the service policy
+ * slot only when the journal holds that action, and the placeholder record
+ * pair only when the journal opened with the record.
+ */
 export function customerStage2ActionSequence(
   actions: readonly { readonly name: CustomerStage2ActionName }[],
 ): readonly CustomerStage2ActionName[] {
-  return actions.some((action) => action.name === CUSTOMER_STAGE2_OPTIONAL_ACTION)
-    ? CUSTOMER_STAGE2_ACTION_ORDER
-    : CUSTOMER_STAGE2_ACTION_ORDER.filter((name) => name !== CUSTOMER_STAGE2_OPTIONAL_ACTION);
+  const servicePolicy = actions.some((action) => action.name === CUSTOMER_STAGE2_OPTIONAL_ACTION);
+  const dnsRecord = actions.some((action) => action.name === 'management_dns_record');
+  return CUSTOMER_STAGE2_ACTION_ORDER.filter((name) =>
+    (name !== CUSTOMER_STAGE2_OPTIONAL_ACTION || servicePolicy) && (!dnsRecordAction(name) || dnsRecord));
 }
 export type CustomerStage2ActionPhase = 'prepared' | 'send_armed' | 'submitted' | 'verified';
 

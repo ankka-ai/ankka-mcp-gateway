@@ -484,6 +484,12 @@ to start or take over an installation.
    so no pass makes more than about 30 provider calls where a Workers Free
    account allows 50 per invocation; one invocation needed 113. It refuses
    foreign or ambiguous resources instead of adopting or overwriting them.
+   Its first write is a proxied placeholder record at the management
+   hostname, so the zone's nameservers serve the name from the first pass
+   rather than only once the custom domain publishes its own record;
+   Cloudflare refuses to attach a custom domain over an existing record, so
+   the placeholder is released as its own journaled step immediately before
+   the attachment and its absence is re-proven with the terminal resources.
    An object restart between passes loses the grant; the next pass then
    settles `INCOMPLETE` with `grant_lost` rather than resuming from anything
    durable, and an attempt older than fifteen minutes is revoked and settled
@@ -739,6 +745,8 @@ The candidate remains unwired. Before activation it still needs:
 - [Create an MCP server](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/ai_controls/subresources/mcp/subresources/servers/methods/create/)
 - [Create an MCP Portal](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/ai_controls/subresources/mcp/subresources/portals/methods/create/)
 - [Create a DNS record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/create/)
+- [DNS record details](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/get/)
+- [Delete a DNS record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/delete/)
 
 The relay boundary is modeled after the reviewed behavior in
 [HQBase/hqbase](https://github.com/HQBase/hqbase) and
