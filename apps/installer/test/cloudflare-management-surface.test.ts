@@ -5,6 +5,7 @@ import {
   attachManagementCustomDomain,
   createManagementAccessApplication,
   createManagementAdminAllowPolicy,
+  createManagementDnsRecord,
   createManagementServicePolicy,
   getAccountWorkersSubdomain,
   getZeroTrustOrganization,
@@ -18,11 +19,16 @@ import {
   prepareManagementAccessApplicationIntent,
   prepareManagementAdminPolicyIntent,
   prepareManagementCustomDomainIntent,
+  prepareManagementDnsRecordIntent,
+  prepareManagementDnsRecordReleaseIntent,
   prepareManagementServicePolicyIntent,
   recoverManagementAccessApplication,
   recoverManagementAdminAllowPolicy,
   recoverManagementCustomDomain,
+  recoverManagementDnsRecord,
+  recoverManagementDnsRecordRelease,
   recoverManagementServicePolicy,
+  releaseManagementDnsRecord,
   setWorkerBootstrapSubdomain,
   verifyManagementAccessApplicationGet,
   verifyManagementAccessApplicationList,
@@ -30,6 +36,9 @@ import {
   verifyManagementAdminAllowPolicyList,
   verifyManagementCustomDomainGet,
   verifyManagementCustomDomainList,
+  verifyManagementDnsRecordAbsent,
+  verifyManagementDnsRecordGet,
+  verifyManagementDnsRecordList,
   verifyManagementServicePolicyGet,
   verifyManagementServicePolicyList,
   verifyWorkerBootstrapSubdomain,
@@ -906,5 +915,113 @@ describe('receipt-owned Service Auth policy', () => {
       .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'foreign_policy', stage: 'admin_policy_list_verify', outcome: 'rejected' }));
     await expect(recoverManagementAdminAllowPolicy({ ...call(recorded(success([exactPolicy(), plainService])).transport), ...policySpec(), intent: prepareManagementAdminPolicyIntent(policySpec()) }))
       .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'foreign_policy', stage: 'admin_policy_recover', outcome: 'rejected' }));
+  });
+});
+
+describe('the management hostname placeholder record', () => {
+  const spec = () => ({ accountId: ACCOUNT_ID, plan: PLAN, zoneId: ZONE_ID } as const);
+  const record = (overrides: Record<string, JsonValue> = {}, id = DNS_ID) => ({
+    comment: JOURNAL_MARKER, content: '100::', id, name: MANAGEMENT_HOSTNAME, proxied: true, ttl: 1, type: 'AAAA',
+    zone_id: ZONE_ID, zone_name: ZONE_NAME, ...overrides,
+  });
+  const absent = () => failure(404, 'Record does not exist.');
+  const released = { schemaVersion: 1, kind: 'management_dns_record_released', recordId: DNS_ID };
+
+  it('journals the exact originless placeholder and creates it after one exact lookup', async () => {
+    const intent = prepareManagementDnsRecordIntent(spec());
+    expect(intent).toEqual({
+      schemaVersion: 1, kind: 'management_dns_record', planId: PLAN.planId, planHash: PLAN.planHash,
+      ownershipMarker: JOURNAL_MARKER, accountId: ACCOUNT_ID, zoneId: ZONE_ID,
+      request: { comment: JOURNAL_MARKER, content: '100::', name: MANAGEMENT_HOSTNAME, proxied: true, ttl: 1, type: 'AAAA' },
+    });
+    const provider = sequenced([success([]), success(record())]);
+    await expect(createManagementDnsRecord({ ...call(provider.transport), ...spec(), intent })).resolves.toEqual({ recordId: DNS_ID });
+    expect(provider.requests.map((request) => request.method)).toEqual(['GET', 'POST']);
+    const lookup = new URL(requiredFixture(provider.requests.at(0), 'lookup').url);
+    expect(lookup.pathname).toBe(`/client/v4/zones/${ZONE_ID}/dns_records`);
+    expect(lookup.searchParams.get('name.exact')).toBe(MANAGEMENT_HOSTNAME);
+    const create = requiredFixture(provider.requests.at(1), 'create');
+    expect(new URL(create.url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/dns_records`);
+    await expect(create.json()).resolves.toEqual(intent.request);
+    const taken = sequenced([success([{ id: OTHER_DOMAIN_ID, name: MANAGEMENT_HOSTNAME, type: 'CNAME' }])]);
+    await expect(createManagementDnsRecord({ ...call(taken.transport), ...spec(), intent })).rejects.toSatisfy((error: CloudflareManagementError) =>
+      expectManagementError(error, { code: 'dns_collision', stage: 'management_dns_record_collision', outcome: 'rejected' }));
+    expect(taken.requests.every((request) => request.method === 'GET')).toBe(true);
+    let calls = 0;
+    await expect(createManagementDnsRecord({ ...call(async () => { calls += 1; return success(record()); }), ...spec(),
+      intent: { ...intent, request: { ...intent.request, name: `other.${ZONE_NAME}` } } }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'invalid_input', stage: 'management_dns_record_create', outcome: 'not_sent' }));
+    expect(calls).toBe(0);
+  });
+
+  it('verifies only the exact placeholder by GET and list', async () => {
+    await expect(verifyManagementDnsRecordGet({ ...call(recorded(success(record())).transport), ...spec(), recordId: DNS_ID })).resolves.toEqual({ recordId: DNS_ID });
+    await expect(verifyManagementDnsRecordList({ ...call(recorded(success([record()])).transport), ...spec(), recordId: DNS_ID })).resolves.toEqual({ recordId: DNS_ID });
+    for (const drift of [{ proxied: false }, { comment: 'someone else' }, { content: '2001:db8::1' }, { type: 'A', content: '192.0.2.0' }, { name: `other.${ZONE_NAME}` }]) {
+      await expect(verifyManagementDnsRecordGet({ ...call(recorded(success(record(drift))).transport), ...spec(), recordId: DNS_ID }))
+        .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'late_drift', stage: 'management_dns_record_get', outcome: 'rejected' }));
+    }
+    await expect(verifyManagementDnsRecordList({ ...call(recorded(success([record(), record({}, OTHER_DOMAIN_ID)])).transport), ...spec(), recordId: DNS_ID }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_ambiguous', stage: 'management_dns_record_list_verify', outcome: 'rejected' }));
+    await expect(verifyManagementDnsRecordList({ ...call(recorded(success([])).transport), ...spec(), recordId: DNS_ID }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'late_drift', stage: 'management_dns_record_list_verify', outcome: 'rejected' }));
+  });
+
+  it('outcome-recovers the placeholder only from one exact relation', async () => {
+    const intent = prepareManagementDnsRecordIntent(spec());
+    await expect(recoverManagementDnsRecord({ ...call(recorded(success([record()])).transport), ...spec(), intent })).resolves.toEqual({
+      schemaVersion: 1, kind: 'management_dns_record_recovery', planId: PLAN.planId, planHash: PLAN.planHash,
+      ownershipMarker: JOURNAL_MARKER, locator: { recordId: DNS_ID },
+    });
+    await expect(recoverManagementDnsRecord({ ...call(recorded(success([record({ comment: 'foreign' })])).transport), ...spec(), intent }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_mismatch', stage: 'management_dns_record_recover', outcome: 'rejected' }));
+    await expect(recoverManagementDnsRecord({ ...call(recorded(success([])).transport), ...spec(), intent }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_unknown', stage: 'management_dns_record_recover', outcome: 'unknown' }));
+    await expect(recoverManagementDnsRecord({ ...call(recorded(success([record(), record({}, OTHER_DOMAIN_ID)])).transport), ...spec(), intent }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_ambiguous', stage: 'management_dns_record_recover', outcome: 'rejected' }));
+  });
+
+  it('releases the exact placeholder by identifier and resolves an interrupted release by reading it', async () => {
+    const intent = prepareManagementDnsRecordReleaseIntent({ ...spec(), recordId: DNS_ID });
+    expect(intent).toEqual({
+      schemaVersion: 1, kind: 'management_dns_record_release', planId: PLAN.planId, planHash: PLAN.planHash,
+      ownershipMarker: JOURNAL_MARKER, accountId: ACCOUNT_ID, zoneId: ZONE_ID, locator: { recordId: DNS_ID },
+      record: { comment: JOURNAL_MARKER, content: '100::', name: MANAGEMENT_HOSTNAME, proxied: true, ttl: 1, type: 'AAAA' },
+    });
+    const provider = sequenced([success(record()), success({ id: DNS_ID })]);
+    await expect(releaseManagementDnsRecord({ ...call(provider.transport), ...spec(), intent })).resolves.toEqual(released);
+    expect(provider.requests.map((request) => `${request.method} ${new URL(request.url).pathname}`)).toEqual([
+      `GET /client/v4/zones/${ZONE_ID}/dns_records/${DNS_ID}`, `DELETE /client/v4/zones/${ZONE_ID}/dns_records/${DNS_ID}`,
+    ]);
+    // The first send expects its record; a vanished or foreign record stops before any deletion.
+    const gone = sequenced([absent()]);
+    await expect(releaseManagementDnsRecord({ ...call(gone.transport), ...spec(), intent }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'late_drift', stage: 'management_dns_record_release', outcome: 'rejected' }));
+    const foreign = sequenced([success(record({ comment: 'foreign' }))]);
+    await expect(releaseManagementDnsRecord({ ...call(foreign.transport), ...spec(), intent }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_mismatch', stage: 'management_dns_record_release', outcome: 'rejected' }));
+    expect([...gone.requests, ...foreign.requests].every((request) => request.method === 'GET')).toBe(true);
+    // Recovery: absence is the earlier deletion's proof; a standing exact record is deleted again under the fresh consent.
+    const done = sequenced([absent()]);
+    await expect(recoverManagementDnsRecordRelease({ ...call(done.transport), ...spec(), intent })).resolves.toEqual(released);
+    expect(done.requests.map((request) => request.method)).toEqual(['GET']);
+    const standing = sequenced([success(record()), success({ id: DNS_ID })]);
+    await expect(recoverManagementDnsRecordRelease({ ...call(standing.transport), ...spec(), intent })).resolves.toEqual(released);
+    expect(standing.requests.map((request) => request.method)).toEqual(['GET', 'DELETE']);
+    await expect(recoverManagementDnsRecordRelease({ ...call(sequenced([success(record({ proxied: false }))]).transport), ...spec(), intent }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_mismatch', stage: 'management_dns_record_release_recover', outcome: 'rejected' }));
+    let calls = 0;
+    await expect(releaseManagementDnsRecord({ ...call(async () => { calls += 1; return absent(); }), ...spec(),
+      intent: { ...intent, zoneId: '9'.repeat(32) } }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'invalid_input', stage: 'management_dns_record_release', outcome: 'not_sent' }));
+    expect(calls).toBe(0);
+  });
+
+  it('proves the placeholder absent by identifier and treats a standing record as drift', async () => {
+    await expect(verifyManagementDnsRecordAbsent({ ...call(recorded(absent()).transport), ...spec(), recordId: DNS_ID })).resolves.toEqual(released);
+    await expect(verifyManagementDnsRecordAbsent({ ...call(recorded(success(record())).transport), ...spec(), recordId: DNS_ID }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'late_drift', stage: 'management_dns_record_absence_get', outcome: 'rejected' }));
+    await expect(verifyManagementDnsRecordAbsent({ ...call(recorded(failure(503, 'unavailable')).transport), ...spec(), recordId: DNS_ID }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_unknown', stage: 'management_dns_record_absence_get', outcome: 'unknown' }));
   });
 });

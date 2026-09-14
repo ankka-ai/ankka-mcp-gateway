@@ -114,6 +114,11 @@ Fresh-hostname checks are read-only and run in the second stage before final
 Gateway resources are created. The initial Worker already exists at this point. If the requested hostname already has a DNS
 record, that record is left untouched; start a new static plan with an unused
 hostname, or intentionally retire the old hostname outside the installer.
+The second stage's own first write is a proxied placeholder record at the
+management hostname, released again right before the custom domain is
+attached. A second stage interrupted before that release leaves the record
+(its comment names the installation's ownership marker) in the zone, and it
+blocks a later installation at the same hostname until it is removed.
 
 After a write begins, exact journaled resources may remain for reviewed resume
 or reconciliation and are not blindly auto-deleted. Continue through the

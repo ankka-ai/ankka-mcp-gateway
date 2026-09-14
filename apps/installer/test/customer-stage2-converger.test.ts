@@ -63,6 +63,9 @@ const SERVICE_POLICY_ID = '99999999-9999-4999-8999-999999999999';
 const SERVICE_ACCESS = { clientId: `${'e'.repeat(32)}.access`, tokenId: '88888888-8888-4888-8888-888888888888' };
 const DOMAIN_ID = '7'.repeat(32);
 const IDP_ID = '8'.repeat(32);
+const DNS_RECORD_ID = 'd'.repeat(32);
+// Cloudflare's documented answer to attaching a custom domain over an externally managed record.
+const DNS_CONFLICT_MESSAGE = "Hostname already has externally managed DNS records (A, CNAME, etc). Either delete them, try a different hostname, or use the option 'override_existing_dns_record' to override.";
 const ACCESS_AUD = 'ankka-access-audience-v1';
 const ACCESS_TOKEN = `ephemeral_${'t'.repeat(48)}`;
 const FINAL_SOURCE = [
@@ -166,14 +169,24 @@ interface ProviderState {
   policy: BoundaryObject | null;
   servicePolicy: BoundaryObject | null;
   domain: BoundaryObject | null;
+  /** The management hostname's placeholder record, while it stands. */
+  dnsRecord: BoundaryObject | null;
   workersDevEnabled: boolean;
   finalActive: boolean;
   finalBindings: readonly BoundaryObject[] | null;
   appCreates: number;
   policyCreates: number;
   domainCreates: number;
+  dnsCreates: number;
+  dnsDeletes: number;
   finalUploads: number;
   nonceDeletes: number;
+  /** Fault injection for the placeholder's deletion: answer 503 without deleting, or 200 without deleting. */
+  dnsDeleteFault: 'unknown' | 'ignored' | null;
+}
+
+function rejected(status: number, code: number, message: string): Response {
+  return Response.json({ success: false, errors: [{ code, message }], messages: [], result: null }, { status });
 }
 
 function inheritedBinding(name: string): BoundaryObject {
@@ -190,19 +203,24 @@ function provider(plan: StaticDeployPlan) {
     plan.managementResources.find((resource) => resource.kind === 'management_worker')?.name,
     'management Worker',
   );
+  const managementHostname = plan.gatewayConfiguration.managementHostname;
   const state: ProviderState = {
     application: null,
     policy: null,
     servicePolicy: null,
     domain: null,
+    dnsRecord: null,
     workersDevEnabled: true,
     finalActive: false,
     finalBindings: null,
     appCreates: 0,
     policyCreates: 0,
     domainCreates: 0,
+    dnsCreates: 0,
+    dnsDeletes: 0,
     finalUploads: 0,
     nonceDeletes: 0,
+    dnsDeleteFault: null,
   };
   const calls: string[] = [];
 
@@ -271,6 +289,8 @@ function provider(plan: StaticDeployPlan) {
       return page(url, state.domain === null ? [] : [state.domain]);
     }
     if (url.pathname === domainsPath && request.method === 'PUT') {
+      // The provider refuses a custom domain over an externally managed record (code 100117).
+      if (state.dnsRecord !== null) return rejected(400, 100117, DNS_CONFLICT_MESSAGE);
       state.domainCreates += 1;
       const body = object(await request.json(), 'custom domain body');
       state.domain = { ...body, id: DOMAIN_ID, environment: 'production' };
@@ -283,8 +303,28 @@ function provider(plan: StaticDeployPlan) {
     if (url.pathname === `/client/v4/zones/${ZONE_ID}/workers/routes` && request.method === 'GET') {
       return page(url, []);
     }
-    if (url.pathname === `/client/v4/zones/${ZONE_ID}/dns_records` && request.method === 'GET') {
-      return page(url, [], 0);
+    const dnsPath = `/client/v4/zones/${ZONE_ID}/dns_records`;
+    if (url.pathname === dnsPath && request.method === 'GET') {
+      const atManagement = url.searchParams.get('name.exact') === managementHostname && state.dnsRecord !== null;
+      return page(url, atManagement && state.dnsRecord !== null ? [state.dnsRecord] : [], atManagement ? 1 : 0);
+    }
+    if (url.pathname === dnsPath && request.method === 'POST') {
+      state.dnsCreates += 1;
+      const body = object(await request.json(), 'DNS record body');
+      state.dnsRecord = { ...body, id: DNS_RECORD_ID, zone_id: ZONE_ID, zone_name: selectionInput.basics.zoneName };
+      return json(state.dnsRecord);
+    }
+    if (url.pathname === `${dnsPath}/${DNS_RECORD_ID}` && request.method === 'GET') {
+      return state.dnsRecord === null ? rejected(404, 81044, 'Record does not exist.') : json(state.dnsRecord);
+    }
+    if (url.pathname === `${dnsPath}/${DNS_RECORD_ID}` && request.method === 'DELETE') {
+      if (state.dnsDeleteFault === 'unknown') return rejected(503, 10000, 'temporarily unavailable');
+      if (state.dnsRecord === null) return rejected(404, 81044, 'Record does not exist.');
+      if (state.dnsDeleteFault !== 'ignored') {
+        state.dnsDeletes += 1;
+        state.dnsRecord = null;
+      }
+      return json({ id: DNS_RECORD_ID });
     }
     if (url.pathname === `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/servers` &&
         request.method === 'GET') {
@@ -635,15 +675,147 @@ describe('customer Stage 2 convergence', () => {
       appCreates: 1,
       policyCreates: 1,
       domainCreates: 1,
+      dnsCreates: 1,
+      dnsDeletes: 1,
+      dnsRecord: null,
       finalUploads: 1,
       workersDevEnabled: false,
       finalActive: true,
     });
     expect(test.payloadBootstrapCalls()).toBe(1);
+    // The placeholder record is the first Stage 2 mutation and is released
+    // right before the custom domain takes the hostname.
+    const mutations = test.cloudflare.calls.filter((call) => !call.startsWith('GET '));
+    expect(mutations.at(0)).toBe(`POST /client/v4/zones/${ZONE_ID}/dns_records`);
+    const release = mutations.indexOf(`DELETE /client/v4/zones/${ZONE_ID}/dns_records/${DNS_RECORD_ID}`);
+    const attach = mutations.indexOf(`PUT /client/v4/accounts/${ACCOUNT_ID}/workers/domains`);
+    expect(release).toBeGreaterThan(0);
+    expect(attach).toBe(release + 1);
+    expect(test.journal.value?.actions.map((action) => action.name)).toEqual([
+      'management_dns_record', 'management_access_application', 'management_admin_policy', 'gateway_resources',
+      'management_dns_record_release', 'management_custom_domain', 'workers_dev_disable', 'terminal_verify', 'final_runtime',
+    ]);
+    expect(customerStage2Action(required(test.journal.value ?? undefined, 'journal'), 'management_dns_record'))
+      .toMatchObject({ phase: 'verified', locator: { recordId: DNS_RECORD_ID } });
+    expect(customerStage2Action(required(test.journal.value ?? undefined, 'journal'), 'management_dns_record_release'))
+      .toMatchObject({ phase: 'verified', locator: { schemaVersion: 1, kind: 'management_dns_record_released', recordId: DNS_RECORD_ID } });
     const durableBytes = test.journal.serializedWrites.join('\n');
     expect(durableBytes).not.toContain(ACCESS_TOKEN);
     expect(durableBytes).not.toContain(BOOTSTRAP_NONCE_KEY);
     expect(durableBytes).not.toMatch(/code_verifier|authorization_code|access_token|refresh_token/iu);
+  });
+
+  it('creates the placeholder as a proxied originless record carrying the ownership marker', async () => {
+    const test = await fixture();
+    let placeholder: BoundaryObject | null = null;
+    await convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'j'.repeat(24)}`,
+      transport: async (input, init) => {
+        const response = await test.cloudflare.transport(input, init);
+        placeholder ??= test.cloudflare.state.dnsRecord;
+        return response;
+      },
+    });
+    const plan = await verifyStaticDeployPlanIntegrity(JSON.parse(required(
+      (await readCustomerGatewayOwnershipState(test.baseInput.storage)).serializedPlan ?? undefined, 'plan')));
+    expect(placeholder).toEqual({
+      comment: `ankka-mcp-gateway:${plan.managementOwnershipMarker}`,
+      content: '100::',
+      id: DNS_RECORD_ID,
+      name: plan.gatewayConfiguration.managementHostname,
+      proxied: true,
+      ttl: 1,
+      type: 'AAAA',
+      zone_id: ZONE_ID,
+      zone_name: selectionInput.basics.zoneName,
+    });
+  });
+
+  it('recovers a placeholder record created before its locator was journaled', async () => {
+    const test = await fixture('management_dns_record');
+    await expect(convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'k'.repeat(24)}`,
+    })).rejects.toMatchObject({ code: 'journal_conflict' });
+    expect(test.cloudflare.state.dnsCreates).toBe(1);
+    expect(customerStage2Action(required(test.journal.value ?? undefined, 'journal'), 'management_dns_record')?.phase)
+      .toBe('send_armed');
+    await expect(convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'l'.repeat(24)}`,
+    })).resolves.toMatchObject({ verified: true });
+    expect(test.cloudflare.state).toMatchObject({ dnsCreates: 1, dnsDeletes: 1, dnsRecord: null, domainCreates: 1 });
+  });
+
+  it('resolves a lost placeholder release by reading the identifier under the next consent', async () => {
+    const journaled = await fixture('management_dns_record_release');
+    await expect(convergeCustomerStage2({
+      ...journaled.baseInput,
+      attemptId: `attempt_${'m'.repeat(24)}`,
+    })).rejects.toMatchObject({ code: 'journal_conflict' });
+    expect(journaled.cloudflare.state).toMatchObject({ dnsDeletes: 1, dnsRecord: null, domainCreates: 0 });
+    await expect(convergeCustomerStage2({
+      ...journaled.baseInput,
+      attemptId: `attempt_${'n'.repeat(24)}`,
+    })).resolves.toMatchObject({ verified: true });
+    // The earlier deletion is the proof; nothing was sent twice.
+    expect(journaled.cloudflare.state).toMatchObject({ dnsDeletes: 1, dnsRecord: null, domainCreates: 1 });
+
+    // An unknown deletion outcome that left the record standing is sent again only by a fresh consent.
+    const unknown = await fixture();
+    unknown.cloudflare.state.dnsDeleteFault = 'unknown';
+    await expect(convergeCustomerStage2({
+      ...unknown.baseInput,
+      attemptId: `attempt_${'o'.repeat(24)}`,
+    })).rejects.toMatchObject({ code: 'provider_unknown', stage: 'management_dns_record_release' });
+    expect(unknown.cloudflare.state).toMatchObject({ dnsDeletes: 0, domainCreates: 0 });
+    expect(unknown.cloudflare.state.dnsRecord).not.toBeNull();
+    expect(customerStage2Action(required(unknown.journal.value ?? undefined, 'journal'), 'management_dns_record_release')?.phase)
+      .toBe('send_armed');
+    unknown.cloudflare.state.dnsDeleteFault = null;
+    await expect(convergeCustomerStage2({
+      ...unknown.baseInput,
+      attemptId: `attempt_${'p'.repeat(24)}`,
+    })).resolves.toMatchObject({ verified: true });
+    expect(unknown.cloudflare.state).toMatchObject({ dnsCreates: 1, dnsDeletes: 1, dnsRecord: null, domainCreates: 1 });
+  });
+
+  it('never attaches the custom domain while the placeholder still stands', async () => {
+    const test = await fixture();
+    test.cloudflare.state.dnsDeleteFault = 'ignored';
+    await expect(convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'x'.repeat(24)}`,
+    })).rejects.toMatchObject({ code: 'late_drift', stage: 'management_dns_record_absence_get' });
+    expect(test.cloudflare.state.domainCreates).toBe(0);
+    expect(test.cloudflare.state.dnsRecord).not.toBeNull();
+    expect(test.cloudflare.calls).not.toContain(`PUT /client/v4/accounts/${ACCOUNT_ID}/workers/domains`);
+  });
+
+  it('keeps a journal written before the placeholder record existed verifying without touching DNS', async () => {
+    const test = await fixture();
+    await convergeCustomerStage2({ ...test.baseInput, attemptId: `attempt_${'y'.repeat(24)}` });
+    const complete = required(test.journal.value ?? undefined, 'journal');
+    // The shape every installation before this release wrote: no placeholder record, no release.
+    const legacy: CustomerStage2Journal = {
+      ...complete,
+      actions: complete.actions.filter((action) =>
+        action.name !== 'management_dns_record' && action.name !== 'management_dns_record_release'),
+    };
+    expect(legacy.actions.map((action) => action.name)).toEqual([
+      'management_access_application', 'management_admin_policy', 'gateway_resources',
+      'management_custom_domain', 'workers_dev_disable', 'terminal_verify', 'final_runtime',
+    ]);
+    test.journal.value = legacy;
+    const before = test.cloudflare.calls.length;
+    await expect(convergeCustomerStage2({
+      ...withoutBootstrapRuntime(test.baseInput),
+      attemptId: `attempt_${'z'.repeat(24)}`,
+    })).resolves.toMatchObject({ verified: true });
+    expect(test.cloudflare.calls.slice(before).some((call) => call.includes('/dns_records'))).toBe(false);
+    expect(test.journal.serializedWrites.map((write) => JSON.parse(write).actions.length).at(-1)).toBe(9);
+    expect(test.cloudflare.state).toMatchObject({ dnsCreates: 1, dnsDeletes: 1, domainCreates: 1 });
   });
 
   it('creates the receipt-owned service policy only for an opted-in plan and hands the identity to the runtime', async () => {
@@ -882,6 +1054,23 @@ describe('gateway teardown handoff from a real installation journal', () => {
     statement.management.applicationId = 'foreign-application';
     tampered.statement = canonicalJson(statement);
     await expect(verifyGatewayTeardownHandoff({ handoff: canonicalJson(tampered), trust: input.trust, now: input.now })).rejects.toThrow();
+  });
+
+  it('certifies a journal written before the placeholder record existed exactly as one written after', async () => {
+    const { input } = await installed();
+    const current = await verifyGatewayTeardownHandoff({ handoff: await createGatewayTeardownHandoff(input), trust: input.trust, now: input.now });
+    const legacyJournal: CustomerStage2Journal = { ...input.journal, actions: input.journal.actions.filter((action) =>
+      action.name !== 'management_dns_record' && action.name !== 'management_dns_record_release') };
+    expect(legacyJournal.actions).toHaveLength(input.journal.actions.length - 2);
+    const legacy = await verifyGatewayTeardownHandoff({ handoff: await createGatewayTeardownHandoff({ ...input, journal: legacyJournal }),
+      trust: input.trust, now: input.now });
+    expect(legacy.statement.management).toEqual(current.statement.management);
+    expect(Object.keys(current.statement.management).sort()).toEqual([
+      'applicationAud', 'applicationId', 'applicationName', 'domainId', 'hostname', 'policyId', 'policyName', 'zoneId',
+    ]);
+    // A release without its record is no journal at all.
+    await expect(createGatewayTeardownHandoff({ ...input, journal: { ...input.journal, actions: input.journal.actions.filter((action) =>
+      action.name !== 'management_dns_record') } })).rejects.toThrow();
   });
 
   it('states the receipt-owned service policy beside the administrator policy for an opted-in installation', async () => {

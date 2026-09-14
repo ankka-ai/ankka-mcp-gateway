@@ -68,6 +68,22 @@ the account, selected zone, and hostname availability, then runs the existing
 installation and revocation flow. Updates and removal retain their existing
 operation-specific scope sets.
 
+The second stage's first write is a proxied placeholder DNS record (`AAAA`
+`100::`, its comment naming the installation's ownership marker) at the
+management hostname, journaled like every other receipt-owned resource. The
+zone's authoritative nameservers serve it seconds later, so a resolver asked
+for the name while the installation runs caches a name rather than its absence
+for the zone's negative TTL. Cloudflare refuses to attach a Worker custom
+domain over an externally managed record, so the record is released as its own
+journaled step immediately before the custom domain is attached; a lost release
+is resolved by reading the record's identifier under the next consent, its
+absence is re-proven with the other terminal resources, and the record never
+enters the teardown handoff. Between that release and the moment Cloudflare
+serves its own record for the custom domain the name is absent again; the
+shell still withholds READY until the hostname resolves. A second stage
+interrupted before the release can leave the placeholder in the zone, where a
+later installation at the same hostname refuses it like any other record.
+
 If the second approval expires before its callback reaches token exchange, the
 same browser can reopen the setup page and choose **Start a fresh approval**
 for the saved configuration. Reading the page does not clear the old attempt
