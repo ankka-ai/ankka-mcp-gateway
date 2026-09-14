@@ -189,9 +189,11 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
       return { review: null, action: await management(`/api/teardown-actions/${action.actionId}`) };
     }, (value) => value.review !== null || ['succeeded', 'recovery_required', 'failed'].includes(value.action?.status));
     if (outcome.review !== null) { receipt = outcome.review; break; }
-    requireCondition(outcome.action.status !== 'failed', 'dependency_removal_failed');
     if (outcome.action.status === 'succeeded') await provider.assertDependenciesAbsent(inventory);
-    await checkpoint({ stage: 'dependency_removal', status: outcome.action.status, actionId: action.actionId, failureCode: outcome.action.failureCode ?? null });
+    const landed = await landedRound(browser, heldReceipt);
+    await checkpoint({ stage: 'dependency_removal', status: outcome.action.status, actionId: action.actionId, failureCode: outcome.action.failureCode ?? null, landing: landed.landing });
+    requireCondition(outcome.action.status !== 'failed', 'dependency_removal_failed');
+    receipt = landed.review;
   }
   requireCondition(receipt !== null, 'removal_receipt_unavailable');
   requireCondition(receipt.hostname === config.basics.managementHostname, 'removal_receipt_invalid');
@@ -204,6 +206,25 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
   requireCondition(recovered.handoff === receipt.handoff && recovered.canAuthorize === true, 'receipt_recovery_failed');
   await finishLiveGatewayRemoval({ browser, installer, provider, inventory, checkpoint });
   await checkpoint({ stage: 'lifecycle', status: 'passed' });
+}
+
+/** How long a settled round may take to land: the redirect, the installer page and its import, or the recovery page. */
+export const LANDING_GRACE_SECONDS = 60;
+
+/**
+ * The gateway settles a consent attempt before the browser has followed the callback's redirect, so the action reads
+ * `recovery_required` moments before the receipt reaches the installer or the recovery page names its reason. The
+ * round ends only once the tab has landed; a consent opened earlier would cut a receipt on its way.
+ */
+async function landedRound(browser, heldReceipt) {
+  const read = async () => ({ review: await heldReceipt(), landing: browser.landing() });
+  const landed = (value) => value.review !== null || value.landing.result !== null;
+  try {
+    return await browser.waitFor(read, landed, { seconds: LANDING_GRACE_SECONDS });
+  } catch (error) {
+    if (!(error instanceof LiveGatewayBrowserError) || error.code !== 'interactive_step_timed_out') throw error;
+    return read();
+  }
 }
 
 async function beginRemoval(management, browser, checkpoint) {

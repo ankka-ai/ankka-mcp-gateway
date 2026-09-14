@@ -25,10 +25,24 @@ export async function lifecycleFailureReport({ events, failureCode, httpStatus, 
     schemaVersion: 1, httpStatus: Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? httpStatus : null, failedStage: last?.stage ?? 'preflight', failureCode,
     lastMutationStage: pending?.stage ?? null,
     removalReceiptAvailable: events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
+    dependencyRemoval: dependencyRemovalSummary(events),
     rootRemoval: rootRemovalSummary(events),
     recovery: 'inspect_private_journal_before_retry',
     metricsStatus: runtimeMetrics === null ? 'unavailable' : 'available', runtimeMetrics,
   };
+}
+
+const label = (value) => v.is(v.pipe(v.string(), v.regex(/^[a-z_]{1,32}$/u)), value) ? value : null;
+
+/** The consented dependency-removal rounds: how many were opened, the last one's status and fixed failure code, and
+ * where the test tab landed after it, so a receipt lost on its way can be told from a consent the gateway refused. */
+export function dependencyRemovalSummary(events) {
+  const rounds = events.filter((event) => event.stage === 'dependency_removal' && event.status === 'recorded').length;
+  const last = events.findLast((event) => event.stage === 'dependency_removal' && ['recovery_required', 'failed', 'succeeded'].includes(event.status));
+  if (rounds === 0 && last === undefined) return null;
+  const landing = last?.landing ?? null;
+  return { rounds, lastStatus: last?.status ?? null, lastFailureCode: label(last?.failureCode),
+    lastLanding: landing === null ? null : { site: label(landing.site), page: label(landing.page), result: label(landing.result), reason: label(landing.reason) } };
 }
 
 /** The hosted root job's recorded outcome: its status, the steps done, the fixed reason word and the revocation flag; null before any outcome. */

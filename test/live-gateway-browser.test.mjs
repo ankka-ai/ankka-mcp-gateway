@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BROWSER_REQUEST_TIMEOUT_MS, handoffHoldAnswer, heldOriginMatcher } from '../tools/live-gateway-browser.mjs';
 import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
-import { validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
+import { landingOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 
 test('live browser API requests are confined to exact configured origins and lifecycle routes', () => {
   const origin = 'https://manage.example.com';
@@ -75,4 +75,26 @@ test('the held handoff answer is the installer\'s own not-ready body, and nothin
   const answer = handoffHoldAnswer(hold);
   assert.equal(answer.status, 503);
   assert.deepEqual(JSON.parse(answer.body), { schemaVersion: 1, code: 'bootstrap_not_ready', status: 'not_ready', retryAfterMs: 3000, reason: 'runner_waits_for_shell' });
+});
+
+test('a landing is fixed labels only: site, page, and the removal page\'s result and reason words; never the fragment or other query values', () => {
+  const origins = { installerOrigin: 'https://installer.example.com', managementOrigin: 'https://manage.example.com' };
+  const fragment = 'A'.repeat(48);
+  for (const [value, expected] of [
+    [`https://installer.example.com/teardown#${fragment}`, { site: 'installer', page: 'receipt', result: null, reason: null }],
+    ['https://manage.example.com/__ankka/operation/teardown?result=recovery_required&reason=removal', { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' }],
+    [`https://manage.example.com/__ankka/operation/teardown#${fragment}`, { site: 'gateway', page: 'removal', result: null, reason: null }],
+    ['https://manage.example.com/__ankka/operation/teardown?result=recovery_required&reason=Not%20a%20word&code=secret', { site: 'gateway', page: 'removal', result: 'recovery_required', reason: null }],
+    ['https://manage.example.com/__ankka/install/oauth/callback?code=secret&state=secret', { site: 'gateway', page: 'callback', result: null, reason: null }],
+    ['https://dash.cloudflare.com/oauth2/auth?client_id=secret', { site: 'cloudflare', page: 'consent', result: null, reason: null }],
+    ['https://installer.example.com/api/session?result=recovery_required', { site: 'installer', page: 'other', result: null, reason: null }],
+    ['https://accounts.google.com/signin?reason=removal', { site: 'other', page: 'other', result: null, reason: null }],
+    ['chrome-error://chromewebdata/', { site: 'other', page: 'other', result: null, reason: null }],
+    ['', { site: 'other', page: 'other', result: null, reason: null }],
+  ]) {
+    const landing = landingOf(value, origins);
+    assert.deepEqual(landing, expected);
+    assert.equal(JSON.stringify(landing).includes('secret'), false);
+    assert.equal(JSON.stringify(landing).includes(fragment), false);
+  }
 });

@@ -213,6 +213,16 @@ receipt. A root removal passes only once the installer's job has settled
 settlement, for example by a browser that gave up on a long callback, are
 recorded as not verified and finish on the next authorization.
 
+The gateway settles each consent attempt before the browser has followed the
+callback's redirect, so a dependency-removal action reads `recovery_required`
+moments before the receipt reaches the installer or the gateway's removal page
+names its reason. A round therefore ends only once the tab has landed: the
+runner waits up to a minute for the installer to hold the receipt or for that
+page to show its `result` and `reason`, records the landing in the journal in
+fixed labels (site, page, result word, reason word; never the fragment or any
+other query value), and only then opens the next round. `--status` and the
+failure report summarize the rounds and the last landing.
+
 A receipt the gateway hands over with its unconfirmed-revocation warning is
 saved with that warning recorded; the root removal still runs and is verified,
 and the run then stops as `root_removal_revocation_unconfirmed` rather than

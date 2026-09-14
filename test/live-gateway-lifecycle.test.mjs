@@ -372,3 +372,52 @@ test('a session that fails or needs cleanup before it is provisioned stops as bo
     await assert.rejects(qualifyLiveGatewayLifecycle({ config, browser, provider: { assertFresh: async () => {} }, checkpoint: async () => {}, notify: () => {} }), { code: 'bootstrap_not_completed' });
   }
 });
+
+test('a settled round ends only once the tab has landed: a receipt arriving during the grace is taken, a recovery page\'s reason is recorded, and an exhausted grace records where the tab sits', async () => {
+  const { removeLiveGateway, LANDING_GRACE_SECONDS } = await import('../tools/live-gateway-lifecycle.mjs');
+  const { LiveGatewayBrowserError } = await import('../tools/live-gateway-origin.mjs');
+  assert.ok(LANDING_GRACE_SECONDS >= 30);
+  const actionId = `action_${'A'.repeat(32)}`;
+  const callback = { site: 'gateway', page: 'callback', result: null, reason: null };
+  const receiptPage = { site: 'installer', page: 'receipt', result: null, reason: null };
+  const recoveryPage = { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' };
+  const deniedPage = { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'denied' };
+  const cases = [
+    // The action settles first; the installer holds the receipt two polls later. No second round is opened.
+    { status: 'recovery_required', landings: [callback, receiptPage, receiptPage], receiptAfterPoll: 2, ends: /stop_at_import/u, landing: receiptPage, rounds: 1 },
+    // The tab lands on the recovery page with its reason; the next round opens only after that.
+    { status: 'recovery_required', landings: [callback, recoveryPage], receiptAfterPoll: null, ends: /stop_at_next_round/u, landing: recoveryPage, rounds: 2 },
+    // The grace runs out while the tab sits on the installer page without a receipt: that landing is recorded as is.
+    { status: 'recovery_required', landings: [callback, receiptPage, receiptPage, receiptPage, receiptPage], receiptAfterPoll: null, ends: /stop_at_next_round/u, landing: receiptPage, rounds: 2 },
+    // A failed action still records its landing before the run stops.
+    { status: 'failed', landings: [deniedPage], receiptAfterPoll: null, ends: { code: 'dependency_removal_failed' }, landing: deniedPage, rounds: 1 },
+  ];
+  for (const scenario of cases) {
+    const events = []; let polls = 0, posts = 0, held = null, landings = 0;
+    const browser = {
+      clearRemovalSession: async () => {}, continueHandoff: async () => {},
+      landing: () => scenario.landings[Math.min(landings++, scenario.landings.length - 1)],
+      waitFor: async (read, accepts, { seconds } = {}) => {
+        for (let attempt = 0; attempt < (seconds === undefined ? 1 : 4); attempt += 1) {
+          const value = await read();
+          if (accepts(value)) return value;
+          polls += 1;
+          if (scenario.receiptAfterPoll === polls) held = { canAuthorize: true, hostname: config.basics.managementHostname, handoff: 'private-receipt', revocationUnconfirmed: false };
+        }
+        throw new LiveGatewayBrowserError('interactive_step_timed_out');
+      },
+      request: async (origin, path, options = {}) => {
+        if (origin === config.installerOrigin && path === '/api/teardown') return held ?? { canAuthorize: false };
+        if (path === '/api/teardown/import') throw new Error('stop_at_import');
+        if (path === '/api/teardown-actions' && options.method === 'POST') { posts += 1; if (posts > 1) throw new Error('stop_at_next_round'); return { actionId, handoffUrl: 'synthetic' }; }
+        if (path === `/api/teardown-actions/${actionId}`) return { status: scenario.status, failureCode: 'fresh_authorization_required' };
+        throw new Error('unexpected_request');
+      },
+    };
+    await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => events.push(event), phase: 'root' }), scenario.ends);
+    const settled = events.find((event) => event.stage === 'dependency_removal' && event.status === scenario.status);
+    assert.deepEqual(settled, { stage: 'dependency_removal', status: scenario.status, actionId, failureCode: 'fresh_authorization_required', landing: scenario.landing });
+    assert.equal(posts, scenario.rounds);
+    assert.equal(events.some((event) => event.status === 'receipt_saved'), scenario.receiptAfterPoll !== null);
+  }
+});

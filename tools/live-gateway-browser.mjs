@@ -40,6 +40,27 @@ export function validateLiveHandoff(value, origin, path) {
   return url.href;
 }
 
+const LANDING_WORD = /^[a-z_]{1,32}$/u;
+
+/** Where the test tab is, in fixed labels only: the site, the lifecycle page it shows, and for the gateway's removal
+ * page the `result` and `reason` words it was sent with. Never the fragment, which carries handoffs, and never a query
+ * value outside that vocabulary. */
+export function landingOf(value, { installerOrigin, managementOrigin }) {
+  let url;
+  try { url = new URL(value); } catch { return { site: 'other', page: 'other', result: null, reason: null }; }
+  const site = url.origin === installerOrigin ? 'installer' : url.origin === managementOrigin ? 'gateway' :
+    url.origin === 'https://dash.cloudflare.com' ? 'cloudflare' : 'other';
+  const page = site === 'installer' && url.pathname === '/teardown' ? 'receipt' :
+    site === 'gateway' && url.pathname === '/__ankka/operation/teardown' ? 'removal' :
+    site === 'gateway' && url.pathname === '/__ankka/install/oauth/callback' ? 'callback' :
+    site === 'cloudflare' && url.pathname === '/oauth2/auth' ? 'consent' : 'other';
+  const word = (name) => {
+    const item = page === 'removal' ? url.searchParams.get(name) : null;
+    return item !== null && LANDING_WORD.test(item) ? item : null;
+  };
+  return { site, page, result: word('result'), reason: word('reason') };
+}
+
 /** An explicitly authorized Chrome connection borrows its context and owns only
  * a new tab. Never close that context or export browser storage, traces or HAR. */
 export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify }) {
@@ -173,6 +194,12 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   return {
     request, navigate, waitFor,
     cancel() { cancelled = true; accessCancellation.abort(); },
+    /** The tab's current landing in fixed labels; a closed tab lands nowhere. */
+    landing() {
+      let url;
+      try { url = page.url(); } catch { url = ''; }
+      return landingOf(url, { installerOrigin, managementOrigin });
+    },
     async clearRemovalSession() {
       await context.clearCookies({ name: '__Host-ankka_gateway_teardown', domain: new URL(installerOrigin).hostname });
     },
