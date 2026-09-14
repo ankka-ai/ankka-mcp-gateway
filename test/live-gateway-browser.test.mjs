@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback } from '../tools/live-gateway-browser.mjs';
+import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, SESSION_PROPAGATION_MS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
 import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
 import { landingOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 
@@ -122,4 +122,16 @@ test('a pending hosted callback is known by request identity on the lifecycle\'s
   tracker.ended(callback);
   assert.equal(tracker.inFlight(), false);
   assert.ok(CALLBACK_CLOSE_WAIT_MS >= 600_000);
+});
+
+test('a refusal of a just-installed gateway session is retried inside the propagation window and final after it', () => {
+  const installedAt = 1_000_000;
+  for (const status of [302, 303, 401, 403]) {
+    assert.equal(rejectedSessionOutcome({ status, installedAt, now: installedAt + SESSION_PROPAGATION_MS - 1 }), 'retry');
+    assert.equal(rejectedSessionOutcome({ status, installedAt, now: installedAt + SESSION_PROPAGATION_MS }), 'rejected');
+    // The installer's session has no window: its application is old and a refusal there is final at once.
+    assert.equal(rejectedSessionOutcome({ status, installedAt: undefined, now: installedAt }), 'rejected');
+  }
+  for (const status of [200, 404, 409, 500]) assert.equal(rejectedSessionOutcome({ status, installedAt, now: installedAt }), null);
+  assert.ok(SESSION_PROPAGATION_MS >= 5 * 60_000);
 });

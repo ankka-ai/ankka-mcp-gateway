@@ -206,6 +206,13 @@ config and `--recover-removal`. Recovery does not turn an incomplete lifecycle r
 into a passing lifecycle result. Before a receipt exists, use the product's existing
 setup/removal recovery flow and the recorded action references.
 
+Right after an installation the gateway's management Access application is
+minutes old, and some edges still refuse a freshly installed session while its
+policy propagates. For ten minutes after the runner installs that session, such
+a refusal is retried like any other rejected read; a refusal after that window,
+or any refusal of the installer's session, stops the run as
+`access_session_rejected`.
+
 A hosted OAuth callback runs its whole operation inside one response, and a tab
 closed while that response is pending cuts the operation's revoke and
 settlement. On a stop the runner therefore leaves an attached Chrome's tab open

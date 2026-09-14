@@ -13,6 +13,16 @@ const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
  * thirty seconds live. A write is never retried, so the runner waits for it as long as the API client does.
  */
 export const BROWSER_REQUEST_TIMEOUT_MS = 120_000;
+/** A management Access application created minutes ago can still refuse a valid session at some edges while its
+ * policy propagates; within this window after the session install such a refusal is retried, not final. */
+export const SESSION_PROPAGATION_MS = 10 * 60_000;
+
+/** What an authenticated origin's refusal means: null for an accepted status, `retry` inside the propagation
+ * window of a just-installed session, `rejected` otherwise. */
+export function rejectedSessionOutcome({ status, installedAt, now = Date.now() }) {
+  if (![302, 303, 401, 403].includes(status)) return null;
+  return installedAt !== undefined && now < installedAt + SESSION_PROPAGATION_MS ? 'retry' : 'rejected';
+}
 /** A hosted attempt lives ten minutes; an owned browser waits no longer than that for a pending callback on a stop. */
 export const CALLBACK_CLOSE_WAIT_MS = 600_000;
 
@@ -88,7 +98,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
   const accessCancellation = new AbortController();
   const installAccess = createLiveGatewayAccess({ origins, email: basics.adminEmail, notify, signal: accessCancellation.signal });
-  const authenticated = new Set();
+  // Origins whose Access session the runner installed, with the time of that install.
+  const authenticated = new Map();
   if (browserConnection !== undefined && (browserConnection !== 'chrome' || browserProfile)) {
     throw new LiveGatewayBrowserError('browser_connection_invalid');
   }
@@ -175,12 +186,16 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
           [302, 303].includes(status) && location &&
           new URL(location, origin).hostname.endsWith('.cloudflareaccess.com')) {
         await installAccess(context, origin, { allowLogin: true });
-        authenticated.add(origin);
+        if (!authenticated.has(origin)) authenticated.set(origin, Date.now());
         await response.dispose(); response = null;
         return await request(origin, path, { method, body, csrfToken }, false);
       }
-      if (authenticated.has(origin) && [302, 303, 401, 403].includes(status)) {
-        throw new LiveGatewayAccessError('access_session_rejected');
+      if (authenticated.has(origin)) {
+        // The gateway's application is minutes old right after an installation; a refusal of the fresh session there
+        // is retried like any other rejected read until the window closes, and only the installer's is final at once.
+        const outcome = rejectedSessionOutcome({ status, installedAt: origin === managementOrigin ? authenticated.get(origin) : undefined });
+        if (outcome === 'retry') throw new LiveGatewayBrowserError('gateway_http_rejected', status);
+        if (outcome === 'rejected') throw new LiveGatewayAccessError('access_session_rejected');
       }
       if (status !== 200) throw new LiveGatewayBrowserError('gateway_http_rejected', status);
       const bytes = await response.body();
@@ -252,7 +267,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     async login(origin) {
       if (!origins.includes(origin)) throw new LiveGatewayBrowserError('origin_invalid');
       await installAccess(context, origin);
-      authenticated.add(origin);
+      authenticated.set(origin, Date.now());
       await navigate(origin);
       return waitFor(() => request(origin, origin === installerOrigin ? '/api/session' : '/api/status'),
         (value) => value.schemaVersion === 1);
