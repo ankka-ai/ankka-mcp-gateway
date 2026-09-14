@@ -164,7 +164,11 @@ The private config has these fields:
   your profile or export stored cookies. After each approval leave the runner's
   tab alone: the installer page in it consumes the one-time handoff to the new
   shell, and a closed or navigated tab leaves the shell refusing the runner
-  until its window expires. A machine whose first resolver is a caching
+  until its window expires. Turn Chrome's Memory Saver off
+  (`chrome://settings/performance`) for an attended run, or keep the runner's
+  tab active: a tab Chrome discards after minutes in the background is gone for
+  the runner, which replaces it as described below but cannot recover what the
+  discarded tab had in flight. A machine whose first resolver is a caching
   forwarder (Tailscale MagicDNS, for example) can cache the new management
   hostname's absence for the zone's negative TTL; take it out of the path for
   the run. A previous installation's installer session
@@ -225,6 +229,21 @@ while a hosted callback is in flight (it tells the operator to close it once the
 page has loaded), and an owned browser waits for the callback to end, at most
 for the hosted attempt's ten-minute window, before it closes.
 
+A tab the browser discarded after minutes in the background (Chrome's Memory
+Saver) or whose renderer crashed reads to the runner as a closed page: its next
+navigation fails within a second. The runner classifies every failed navigation
+in fixed labels, `closed` (the page or its target is gone), `crashed`, `timeout`
+or `other`, never the browser's error text. For a closed or crashed tab it
+opens a new tab in the same context, whether attached or owned, attaches to it
+everything it attaches to a tab (the held-origin and handoff-hold routes, the
+callback tracking, and the teardown callback interception while it is armed and
+not yet spent), records `browser: tab_reopened` with the label in the journal,
+and retries the navigation once. A navigation that still fails, or a
+replacement the browser refuses to open, stops the run as `navigation_failed`
+with the label. What the lost tab still had in flight, such as a hosted
+callback the browser cut with it, is not waited for on a stop. In an attached
+Chrome the discarded tab's placeholder stays in the tab strip; leave it alone.
+
 Before the removal phase the runner clears any hosted removal session its
 browser still holds, so an earlier gateway's job is never read as this one's
 receipt. A root removal passes only once the installer's job has settled
@@ -266,6 +285,9 @@ distinct: `root_removal_failed` when the job reports a reason word,
 `root_removal_revocation_unconfirmed` when all five steps finished under an
 unconfirmed grant revocation (independent absence is still checked first, and
 the run is not a pass), and `root_removal_not_verified` for anything else.
+A `navigation_failed` stop carries why under `navigation` (`closed`, `crashed`,
+`timeout` or `other`), and `tabsReopened` counts the test tabs the runner
+replaced, in the report and in `--status`.
 When a shell was recorded and the operator credential can query Workers
 analytics, it includes numeric request/error counts and CPU/memory quantiles
 from the preceding 30 minutes. Missing permissions, unavailable metrics, or a

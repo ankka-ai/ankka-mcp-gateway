@@ -1,13 +1,21 @@
 import * as v from 'valibot';
 
-/** Origin and identity checks shared by the browser runner and the provider reads; no browser dependency. */
+/** Origin and identity checks shared by the browser runner and the provider reads, and the fixed vocabulary of a
+ * failed navigation shared with the diagnostics; no browser dependency. */
 export class LiveGatewayBrowserError extends Error {
-  constructor(code, status = null) {
+  constructor(code, status = null, navigation = null) {
     super(code);
     this.code = code;
     this.status = status;
+    /** Why a `navigation_failed` stop happened, as one of NAVIGATION_FAILURES; null for every other code. */
+    this.navigation = navigation;
   }
 }
+
+/** The fixed reasons a navigation fails: the page or its target is gone (a tab the browser discarded reads as a
+ * closed page), the renderer crashed, the navigation timed out, or anything else. Only these labels leave the runner;
+ * the error text, which can carry the URL, never does. */
+export const NAVIGATION_FAILURES = Object.freeze(['closed', 'crashed', 'timeout', 'other']);
 
 export function validateLiveBrowserOrigin(value) {
   let url;

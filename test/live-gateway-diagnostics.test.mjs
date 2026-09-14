@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { lifecycleFailureReport, checkSignedConfigurationEndpoint, dependencyRemovalSummary, rootRemovalSummary } from '../tools/live-gateway-diagnostics.mjs';
+import { lifecycleFailureReport, checkSignedConfigurationEndpoint, dependencyRemovalSummary, navigationFailureLabel, rootRemovalSummary, tabReopenings } from '../tools/live-gateway-diagnostics.mjs';
 
 test('failed stage and safe recovery evidence survive unavailable metrics', async () => {
   const result = await lifecycleFailureReport({ failureCode: 'update_not_verified', httpStatus: 503, events: [
@@ -66,4 +66,26 @@ test('the dependency-removal summary counts the rounds and keeps the last landin
   const report = await lifecycleFailureReport({ failureCode: 'removal_receipt_unavailable', events });
   assert.equal(report.dependencyRemoval.rounds, 2);
   assert.equal(report.dependencyRemoval.lastLanding.reason, 'removal');
+});
+
+test('the report names why a navigation failed in the fixed vocabulary and counts the test tabs the runner reopened', async () => {
+  const events = [
+    { stage: 'update', status: 'recorded', actionId: 'private-action' },
+    { stage: 'browser', status: 'tab_reopened', navigation: 'closed' },
+  ];
+  const result = await lifecycleFailureReport({ failureCode: 'navigation_failed', navigation: 'timeout', events });
+  assert.equal(result.navigation, 'timeout');
+  assert.equal(result.tabsReopened, 1);
+  // The replacement is the runner's event: the failed stage is still the lifecycle's.
+  assert.equal(result.failedStage, 'update');
+  assert.equal(result.lastMutationStage, 'update');
+  for (const value of ['https://x/?secret', 'Target closed', '', undefined, null]) {
+    assert.equal((await lifecycleFailureReport({ failureCode: 'navigation_failed', navigation: value, events: [] })).navigation, null);
+    assert.equal(navigationFailureLabel(value), null);
+  }
+  for (const value of ['closed', 'crashed', 'timeout', 'other']) assert.equal(navigationFailureLabel(value), value);
+  const other = await lifecycleFailureReport({ failureCode: 'update_not_verified', events: [] });
+  assert.equal(other.navigation, null);
+  assert.equal(other.tabsReopened, 0);
+  assert.equal(tabReopenings([{ stage: 'browser', status: 'tab_reopened' }, { stage: 'browser', status: 'tab_reopened' }, { stage: 'update', status: 'passed' }]), 2);
 });

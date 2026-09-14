@@ -1,8 +1,9 @@
 import { chromium } from 'playwright-core';
+import * as v from 'valibot';
 import { createLiveGatewayAccess, LiveGatewayAccessError } from './live-gateway-access.mjs';
 import { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
 
-export { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
+export { LiveGatewayBrowserError, NAVIGATION_FAILURES, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
 
 const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
 const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth\/start)$/u;
@@ -70,7 +71,23 @@ export function callbackTracker(origins) {
     started(request) { if (isHostedCallback(request.url(), origins)) pending.add(request); },
     ended(request) { pending.delete(request); },
     inFlight: () => pending.size > 0,
+    /** Forgets every pending request: what a tab that is gone still had in flight can neither end nor be waited for. */
+    reset() { pending.clear(); },
   };
+}
+
+/** Why a navigation failed, as one of NAVIGATION_FAILURES, from the page's state and the error's shape: a page that
+ * reads closed or a closed target (Playwright's TargetClosedError, which a tab the browser discarded produces) is
+ * `closed`, a crashed renderer `crashed`, an expired navigation `timeout`, anything else `other`. The error's text is
+ * only matched, never kept: it can carry the URL. */
+export function navigationFailureOf(error, { closed = false } = {}) {
+  if (closed) return 'closed';
+  const name = v.is(v.string(), error?.name) ? error.name : '';
+  const message = v.is(v.string(), error?.message) ? error.message : '';
+  if (name === 'TargetClosedError' || /Target closed|Target page, context or browser has been closed/u.test(message)) return 'closed';
+  if (/Target crashed|page crashed/u.test(message)) return 'crashed';
+  if (name === 'TimeoutError' || /Timeout \d+ms exceeded/u.test(message)) return 'timeout';
+  return 'other';
 }
 
 /** Where the test tab is, in fixed labels only: the site, the lifecycle page it shows, and for the gateway's removal
@@ -94,7 +111,7 @@ export function landingOf(value, { installerOrigin, managementOrigin }) {
 
 /** An explicitly authorized Chrome connection borrows its context and owns only
  * a new tab. Never close that context or export browser storage, traces or HAR. */
-export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify }) {
+export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify, checkpoint = async () => {}, browserType = chromium }) {
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
   const accessCancellation = new AbortController();
   const installAccess = createLiveGatewayAccess({ origins, email: basics.adminEmail, notify, signal: accessCancellation.signal });
@@ -104,49 +121,97 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     throw new LiveGatewayBrowserError('browser_connection_invalid');
   }
   const borrowed = browserConnection === 'chrome';
-  const browser = borrowed ? await chromium.connectOverCDP('chrome', { noDefaults: true, timeout: 120_000 }) :
-    browserProfile ? null : await chromium.launch({ channel: 'chrome', headless, chromiumSandbox: true });
+  const browser = borrowed ? await browserType.connectOverCDP('chrome', { noDefaults: true, timeout: 120_000 }) :
+    browserProfile ? null : await browserType.launch({ channel: 'chrome', headless, chromiumSandbox: true });
   const context = borrowed ? browser.contexts()[0] : browserProfile
-    ? await chromium.launchPersistentContext(browserProfile, {
+    ? await browserType.launchPersistentContext(browserProfile, {
       channel: 'chrome', headless, chromiumSandbox: true, acceptDownloads: false, serviceWorkers: 'block',
       // A manually authenticated Chrome profile uses the real OS keychain.
       // Mock/basic stores cannot decrypt that profile's existing login cookies.
       ignoreDefaultArgs: ['--use-mock-keychain', '--password-store=basic'],
     })
     : await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
-  const page = borrowed ? await context.newPage() : context.pages()[0] ?? await context.newPage();
   const callbacks = callbackTracker(origins);
-  page.on('request', (request) => callbacks.started(request));
-  page.on('requestfinished', (request) => callbacks.ended(request));
-  page.on('requestfailed', (request) => callbacks.ended(request));
-  page.setDefaultTimeout(30_000);
   // A held origin is answered locally so the browser never resolves a hostname whose record may not exist yet. The
   // route stays installed for the page's life and consults the held origin per request: releasing the hold changes
   // the variable, not the routes, because an attached browser can refuse to remove a route without saying so.
   const hold = { origin: null };
-  await page.route(heldOriginMatcher(hold), (route) => route.fulfill({
+  const answerHeldOrigin = (route) => route.fulfill({
     status: 200, contentType: 'text/html; charset=utf-8',
     body: '<!doctype html><title>Ankka lifecycle</title><p>Installation is finishing. The runner continues by API.</p>',
-  }));
+  });
   // The installer page hops to the new shell the moment the installer's own readiness probe passes, spending the
   // one-time handoff on that hop; an edge that does not serve the fresh Worker yet answers it 404 and the shell never
   // gets its session. While held, the page's handoff poll gets the installer's own not-ready answer and keeps polling.
   const handoffHold = { active: false };
-  await page.route((url) => url.origin === installerOrigin && url.pathname === '/api/bootstrap/handoff', (route) => {
+  const isHandoffPoll = (url) => url.origin === installerOrigin && url.pathname === '/api/bootstrap/handoff';
+  const answerHandoffPoll = (route) => {
     const answer = handoffHoldAnswer(handoffHold);
     return answer === null ? route.continue() : route.fulfill(answer);
-  });
+  };
   let interrupted = false;
   let interruptionArmed = false;
   let interruptionError = null;
   let cancelled = false;
+  const isTeardownCallback = (url) => url.origin === managementOrigin && url.pathname === '/__ankka/install/oauth/callback';
+  async function loseTeardownCallbackResponse(route) {
+    if (interrupted) { await route.continue(); return; }
+    // Execute the genuine callback but lose its response at the browser.
+    // Never save the code, cookie, grant, response body or redirect fragment.
+    let response;
+    try {
+      response = await route.fetch({ maxRedirects: 0, timeout: 180_000 });
+      if (response.status() !== 303) throw new LiveGatewayBrowserError('interruption_callback_incomplete');
+      // A redirect to an error/recovery page is not completed dependency removal.
+      validateLiveHandoff(response.headers().location, installerOrigin, '/teardown');
+      interrupted = true;
+      await route.abort('failed');
+    } catch {
+      interruptionError = new LiveGatewayBrowserError('interruption_callback_incomplete');
+      await route.abort('failed').catch(() => {});
+    } finally { await response?.dispose().catch(() => {}); }
+  }
 
-  async function navigate(url) {
-    const target = new URL(url);
-    const consent = target.origin === 'https://dash.cloudflare.com' && target.pathname === '/oauth2/auth';
-    if ((!origins.includes(target.origin) && !consent) || target.username || target.password) {
-      throw new LiveGatewayBrowserError('navigation_outside_lifecycle');
-    }
+  /**
+   * Everything the runner attaches to a tab, in one place so a replacement tab cannot drift from the first: the
+   * default timeout, the callback tracker's listeners, the held-origin and handoff-hold routes, and the teardown
+   * callback interception while it is armed and not yet spent. Routes are matched in reverse registration order.
+   */
+  async function attach(tab) {
+    tab.setDefaultTimeout(30_000);
+    tab.on('request', (request) => callbacks.started(request));
+    tab.on('requestfinished', (request) => callbacks.ended(request));
+    tab.on('requestfailed', (request) => callbacks.ended(request));
+    await tab.route(heldOriginMatcher(hold), answerHeldOrigin);
+    await tab.route(isHandoffPoll, answerHandoffPoll);
+    if (interruptionArmed && !interrupted) await tab.route(isTeardownCallback, loseTeardownCallbackResponse);
+  }
+  let page = borrowed ? await context.newPage() : context.pages()[0] ?? await context.newPage();
+  await attach(page);
+
+  /**
+   * A tab the browser discarded after minutes in the background (Chrome's Memory Saver) or whose renderer crashed
+   * reads as a closed page. A new tab in the same context takes its place, with everything the runner attaches per
+   * tab; the previous one is closed where the browser still lets the runner, and a discarded tab's placeholder stays
+   * with the operator. What the previous tab still had in flight is forgotten: it can neither end nor be waited for.
+   * The replacement is recorded in the journal with the failure that caused it.
+   */
+  async function reopen(failure) {
+    const previous = page;
+    let replacement;
+    try {
+      replacement = await context.newPage();
+      await attach(replacement);
+    } catch (error) { throw new LiveGatewayBrowserError('navigation_failed', null, navigationFailureOf(error)); }
+    page = replacement;
+    callbacks.reset();
+    await previous.close().catch(() => {});
+    await checkpoint({ stage: 'browser', status: 'tab_reopened', navigation: failure });
+    notify('Test tab reopened: the browser had discarded or crashed the previous one. Keep the runner\'s tab active, or turn Chrome\'s Memory Saver off for an attended run.');
+  }
+
+  /** One attempt at showing the target in the current tab: null once it shows, else the failure's fixed label. */
+  async function show(target) {
     try {
       await page.bringToFront();
       // The Cloudflare consent page is a heavy application; give any navigation well over the default 30 seconds.
@@ -159,8 +224,23 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
         visibleOrigin === 'https://accounts.google.com' ? 'Google sign-in' :
         visibleOrigin === 'https://dash.cloudflare.com' ? 'Cloudflare sign-in or consent' : 'external sign-in';
       notify(`Active test tab: ${location}.`);
+      return null;
+    } catch (error) { return navigationFailureOf(error, { closed: page.isClosed() }); }
+  }
+
+  async function navigate(url) {
+    const target = new URL(url);
+    const consent = target.origin === 'https://dash.cloudflare.com' && target.pathname === '/oauth2/auth';
+    if ((!origins.includes(target.origin) && !consent) || target.username || target.password) {
+      throw new LiveGatewayBrowserError('navigation_outside_lifecycle');
     }
-    catch { throw new LiveGatewayBrowserError('navigation_failed'); }
+    let failure = await show(target);
+    if (failure === 'closed' || failure === 'crashed') {
+      // The tab is gone, not the browser: a replacement takes its place and the navigation is retried once.
+      await reopen(failure);
+      failure = await show(target);
+    }
+    if (failure !== null) throw new LiveGatewayBrowserError('navigation_failed', null, failure);
   }
 
   async function request(origin, path, { method = 'GET', body, csrfToken } = {}, authenticate = true) {
@@ -292,23 +372,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     async loseNextTeardownCallbackResponse() {
       if (interruptionArmed) throw new LiveGatewayBrowserError('interruption_already_armed');
       interruptionArmed = true;
-      await page.route((url) => url.origin === managementOrigin && url.pathname === '/__ankka/install/oauth/callback', async (route) => {
-        if (interrupted) { await route.continue(); return; }
-        // Execute the genuine callback but lose its response at the browser.
-        // Never save the code, cookie, grant, response body or redirect fragment.
-        let response;
-        try {
-          response = await route.fetch({ maxRedirects: 0, timeout: 180_000 });
-          if (response.status() !== 303) throw new LiveGatewayBrowserError('interruption_callback_incomplete');
-          // A redirect to an error/recovery page is not completed dependency removal.
-          validateLiveHandoff(response.headers().location, installerOrigin, '/teardown');
-          interrupted = true;
-          await route.abort('failed');
-        } catch {
-          interruptionError = new LiveGatewayBrowserError('interruption_callback_incomplete');
-          await route.abort('failed').catch(() => {});
-        } finally { await response?.dispose().catch(() => {}); }
-      });
+      await page.route(isTeardownCallback, loseTeardownCallbackResponse);
     },
     interruptionObserved: () => interrupted,
     async close() {

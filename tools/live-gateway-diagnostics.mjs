@@ -1,4 +1,5 @@
 import * as v from 'valibot';
+import { NAVIGATION_FAILURES } from './live-gateway-origin.mjs';
 // Only fixed labels and numeric aggregates leave this boundary. Never emit raw
 // provider errors, request URLs, headers, cookies, bodies, or resource IDs.
 const stages = new Set(['preflight', 'access', 'installer_deployment', 'installation', 'source_draft', 'source_apply',
@@ -13,7 +14,7 @@ export function sanitizeRuntimeMetrics(rows) {
     memoryUsageBytesP99: numeric(row?.quantiles?.memoryUsageBytesP99),
   }));
 }
-export async function lifecycleFailureReport({ events, failureCode, httpStatus, metrics }) {
+export async function lifecycleFailureReport({ events, failureCode, httpStatus, navigation = null, metrics }) {
   const last = events.findLast((event) => stages.has(event.stage));
   const pending = events.findLast((event) => mutations.has(event.stage) && ['started', 'recorded', 'receipt_saved'].includes(event.status));
   const provision = events.findLast((event) => event.provision)?.provision;
@@ -23,8 +24,10 @@ export async function lifecycleFailureReport({ events, failureCode, httpStatus, 
   }
   return {
     schemaVersion: 1, httpStatus: Number.isInteger(httpStatus) && httpStatus >= 100 && httpStatus <= 599 ? httpStatus : null, failedStage: last?.stage ?? 'preflight', failureCode,
+    navigation: navigationFailureLabel(navigation),
     lastMutationStage: pending?.stage ?? null,
     removalReceiptAvailable: events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
+    tabsReopened: tabReopenings(events),
     dependencyRemoval: dependencyRemovalSummary(events),
     rootRemoval: rootRemovalSummary(events),
     recovery: 'inspect_private_journal_before_retry',
@@ -33,6 +36,12 @@ export async function lifecycleFailureReport({ events, failureCode, httpStatus, 
 }
 
 const label = (value) => v.is(v.pipe(v.string(), v.regex(/^[a-z_]{1,32}$/u)), value) ? value : null;
+
+/** Why a `navigation_failed` stop happened, within the fixed vocabulary; null outside it and for every other stop. */
+export const navigationFailureLabel = (value) => NAVIGATION_FAILURES.includes(value) ? value : null;
+
+/** How many times the runner replaced a test tab the browser had discarded or crashed, from the journal. */
+export const tabReopenings = (events) => events.filter((event) => event.stage === 'browser' && event.status === 'tab_reopened').length;
 
 /** The consented dependency-removal rounds: how many were opened, the last one's status and fixed failure code, and
  * where the test tab landed after it, so a receipt lost on its way can be told from a consent the gateway refused. */

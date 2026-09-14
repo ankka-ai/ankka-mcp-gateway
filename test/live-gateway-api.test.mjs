@@ -87,9 +87,23 @@ test('API passes and recovery receipts never imply full lifecycle qualification'
   assert.equal(JSON.stringify(result).includes('private-receipt'), false);
   assert.deepEqual(result.passed, ['management_api']);
   assert.equal(result.failureCode, 'api_request_failed');
+  assert.equal(result.navigation, null);
+  assert.equal(result.tabsReopened, 0);
   assert.equal(result.serviceIdentity, null);
   assert.equal(result.rootRemoval, null);
   assert.equal(result.dependencyRemoval, null);
+  // A stop on a failed navigation carries why in the fixed vocabulary, and a replaced test tab is counted but is
+  // never the last stage.
+  const lost = summarizeLiveJournal({ ...state, scope: 'browser_lifecycle', events: [
+    { stage: 'update', status: 'recorded', actionId: 'private-action' },
+    { stage: 'browser', status: 'tab_reopened', navigation: 'closed' },
+    { stage: 'command', status: 'stopped', failureCode: 'navigation_failed', navigation: 'timeout' },
+  ] });
+  assert.equal(lost.lastStage, 'update');
+  assert.equal(lost.failureCode, 'navigation_failed');
+  assert.equal(lost.navigation, 'timeout');
+  assert.equal(lost.tabsReopened, 1);
+  assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'command', status: 'stopped', failureCode: 'navigation_failed', navigation: 'https://x/?secret' }] }).navigation, null);
   assert.deepEqual(summarizeLiveJournal({ ...state, events: [...state.events,
     { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, revocationUnconfirmed: true }] }).rootRemoval,
   { status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', complete: false, revocationUnconfirmed: true });

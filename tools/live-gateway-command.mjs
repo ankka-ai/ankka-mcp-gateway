@@ -1,4 +1,4 @@
-import { lifecycleFailureReport, checkSignedConfigurationEndpoint, dependencyRemovalSummary, rootRemovalSummary } from './live-gateway-diagnostics.mjs';
+import { lifecycleFailureReport, checkSignedConfigurationEndpoint, dependencyRemovalSummary, navigationFailureLabel, rootRemovalSummary, tabReopenings } from './live-gateway-diagnostics.mjs';
 import { awaitSystemResolution } from './live-gateway-dns.mjs';
 import { readFile, realpath, lstat, open, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -114,14 +114,18 @@ export function summarizeLiveJournal(state) {
   requireCondition(state?.schemaVersion === 1 && Array.isArray(state.events), 'journal_invalid');
   const passed = [...new Set(state.events.filter((event) => event.status === 'passed').map((event) => event.stage))];
   const foreign = state.events.findLast((event) => event.stage === 'service_rejection' && event.status === 'foreign_identity_refused');
+  const stopped = state.events.findLast((event) => event.status === 'stopped');
   return {
     scope: state.scope ?? 'browser_lifecycle',
     qualified: (state.scope ?? 'browser_lifecycle') === 'browser_lifecycle' && state.qualified === true && passed.includes('lifecycle'),
     passed,
-    lastStage: state.events.findLast((event) => event.stage !== 'command')?.stage ?? null,
-    failureCode: state.events.findLast((event) => event.status === 'stopped')?.failureCode ?? null,
+    // A replaced test tab is the runner's event, not the lifecycle's: it never reads as the last stage.
+    lastStage: state.events.findLast((event) => !['command', 'browser'].includes(event.stage))?.stage ?? null,
+    failureCode: stopped?.failureCode ?? null,
+    navigation: navigationFailureLabel(stopped?.navigation),
     removalReceiptAvailable: state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
     resumed: state.events.some((event) => event.stage === 'resume'),
+    tabsReopened: tabReopenings(state.events),
     dependencyRemoval: dependencyRemovalSummary(state.events),
     rootRemoval: rootRemovalSummary(state.events),
     serviceIdentity: state.events.some((event) => event.stage === 'service_identity') ? {
@@ -292,7 +296,7 @@ export async function runLiveLifecycleCommand(args) {
     await checkpoint({ stage: 'preflight', status: 'passed' });
     // In the full lifecycle the service identity is proven over the updated runtime, before any removal begins.
     const proveService = config.serviceAccess === undefined ? null : () => proveServiceIdentity({ config, checkpoint, signal: cancellation.signal });
-    browser = await openLiveGatewayBrowser({ ...config, notify: console.log });
+    browser = await openLiveGatewayBrowser({ ...config, notify: console.log, checkpoint });
     await browser.login(config.installerOrigin);
     await checkpoint({ stage: 'access', status: 'passed' });
     if (!recover && !resumeInstalled) {
@@ -381,10 +385,12 @@ export async function runLiveLifecycleCommand(args) {
   } catch (error) {
     const failureCode = error instanceof LiveLifecycleError || error instanceof LiveGatewayBrowserError || error instanceof LiveGatewayAccessError || error instanceof LiveGatewayApiError ||
       error instanceof LiveManagementQualificationError ? error.code : 'unexpected_failure';
-    const diagnostics = await lifecycleFailureReport({ events: state.events, failureCode, httpStatus: error?.status, metrics: provider?.metrics });
-    await checkpoint({ stage: 'command', status: 'stopped', failureCode, diagnostics });
+    // Why a navigation failed travels as a fixed label beside the code, never as the browser's error text.
+    const navigation = error instanceof LiveGatewayBrowserError ? error.navigation : null;
+    const diagnostics = await lifecycleFailureReport({ events: state.events, failureCode, httpStatus: error?.status, navigation, metrics: provider?.metrics });
+    await checkpoint({ stage: 'command', status: 'stopped', failureCode, navigation, diagnostics });
     console.error(JSON.stringify(diagnostics));
-    console.error(`Failure reference: ${failureCode}`);
+    console.error(`Failure reference: ${failureCode}${navigation === null ? '' : ` (navigation: ${navigation})`}`);
     console.error('Live validation stopped. Keep the private journal and review the last recorded action before retrying. No automatic duplicate write or cleanup was attempted.');
     return 1;
   } finally {
