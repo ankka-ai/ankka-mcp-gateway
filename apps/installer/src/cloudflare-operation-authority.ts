@@ -57,7 +57,37 @@ export const LATER_CUSTOMER_CLOUDFLARE_OPERATIONS = Object.freeze([
 ] as const);
 export type LaterCustomerCloudflareOperation =
   (typeof LATER_CUSTOMER_CLOUDFLARE_OPERATIONS)[number];
-export type CloudflareOperationExecutor = 'ankka-installer' | 'customer-gateway';
+export type CloudflareOperationExecutor = 'ankka-installer' | 'customer-gateway' | 'external-runner';
+
+/**
+ * How an executor holds the Cloudflare credential for one operation.
+ *
+ * The OAuth executors hold a request-local grant and revoke it when the
+ * operation ends; an uncertain outcome waits for a fresh consent. The
+ * operator-controlled external runner holds an operator-managed credential
+ * whose storage, expiry, rotation and revocation belong to the operator:
+ * finishing an operation never revokes it, it never enters a gateway, and an
+ * uncertain outcome is resumed by the operator with the same credential.
+ */
+export interface RequestMemoryCredentialLifecycle {
+  readonly storage: 'request-memory-only';
+  readonly refreshTokens: false;
+  readonly revoke: 'attempt-after-success-or-failure';
+  readonly discard: 'always';
+  readonly retry: 'fresh-authorization';
+}
+
+export interface OperatorManagedCredentialLifecycle {
+  readonly storage: 'operator-credential-store';
+  readonly refreshTokens: false;
+  readonly revoke: 'never-by-operation';
+  readonly discard: 'at-process-exit';
+  readonly retry: 'operator-resume';
+}
+
+export type CloudflareCredentialLifecycle =
+  | RequestMemoryCredentialLifecycle
+  | OperatorManagedCredentialLifecycle;
 
 export interface CloudflareWorkerReleaseAuthority {
   /** Stable multipart script upload. The beta version-create endpoint is never an allowed mutation. */
@@ -154,13 +184,7 @@ export interface FixedCloudflareOperationAuthority {
   readonly ownershipStates: readonly CloudflareResourceOwnershipState[];
   readonly mutations: readonly CloudflareOperationMutation[];
   readonly postconditions: readonly CloudflareOperationPostcondition[];
-  readonly credentialLifecycle: {
-    readonly storage: 'request-memory-only';
-    readonly refreshTokens: false;
-    readonly revoke: 'attempt-after-success-or-failure';
-    readonly discard: 'always';
-    readonly retry: 'fresh-authorization';
-  };
+  readonly credentialLifecycle: CloudflareCredentialLifecycle;
 }
 
 const frozen = <Value extends string>(values: readonly Value[]): readonly Value[] =>
@@ -194,12 +218,20 @@ const UNINSTALL_SCOPE_CEILING = frozen([
   CLOUDFLARE_OAUTH_SCOPE.workersScriptsWrite,
 ]);
 
-const CREDENTIAL_LIFECYCLE = Object.freeze({
-  storage: 'request-memory-only' as const,
-  refreshTokens: false as const,
-  revoke: 'attempt-after-success-or-failure' as const,
-  discard: 'always' as const,
-  retry: 'fresh-authorization' as const,
+const CREDENTIAL_LIFECYCLE: RequestMemoryCredentialLifecycle = Object.freeze({
+  storage: 'request-memory-only',
+  refreshTokens: false,
+  revoke: 'attempt-after-success-or-failure',
+  discard: 'always',
+  retry: 'fresh-authorization',
+});
+
+export const OPERATOR_MANAGED_CREDENTIAL_LIFECYCLE: OperatorManagedCredentialLifecycle = Object.freeze({
+  storage: 'operator-credential-store',
+  refreshTokens: false,
+  revoke: 'never-by-operation',
+  discard: 'at-process-exit',
+  retry: 'operator-resume',
 });
 
 const NO_WORKER_RELEASE = Object.freeze({
@@ -464,3 +496,54 @@ export function exactOperationScopes(
   }
   return fixedCloudflareOperationAuthority(operation).scopes;
 }
+
+/**
+ * Fixed operations the operator-controlled external runner may execute with
+ * an operator-managed credential. Scopes, endpoint families, ownership
+ * states, mutations and postconditions are exactly those of the fixed
+ * operation; only the executor and the credential lifecycle differ. Routine
+ * source and Team operations are absent on purpose: they run in the gateway
+ * with its own limited management credential, never with deployment
+ * authority.
+ */
+export const EXTERNAL_RUNNER_OPERATIONS = Object.freeze([
+  'bootstrap',
+  'install',
+  'upgrade',
+  'uninstall',
+  'uninstall-finalize',
+  'gateway-root-finalize',
+] as const);
+
+export type ExternalRunnerOperation = (typeof EXTERNAL_RUNNER_OPERATIONS)[number];
+
+export function isExternalRunnerOperation(value: string): value is ExternalRunnerOperation {
+  return EXTERNAL_RUNNER_OPERATIONS.some((operation) => operation === value);
+}
+
+export function externalRunnerOperationAuthority(
+  operation: ExternalRunnerOperation,
+): FixedCloudflareOperationAuthority {
+  if (!isExternalRunnerOperation(operation)) throw new TypeError('operation is not available to the external runner');
+  return Object.freeze({
+    ...OPERATION_AUTHORITY[operation],
+    executor: 'external-runner' as const,
+    credentialLifecycle: OPERATOR_MANAGED_CREDENTIAL_LIFECYCLE,
+  });
+}
+
+/**
+ * Runner-only provisioning of the gateway's limited management credential:
+ * the operator-created account token becomes the Worker's encrypted
+ * `ANKKA_MANAGEMENT_TOKEN` secret through the runner's own deployment
+ * authority. This is not a Cloudflare OAuth operation. It is never available
+ * to the hosted installer or to a gateway, and the token value never passes
+ * through Ankka-hosted services.
+ */
+export const EXTERNAL_RUNNER_MANAGEMENT_CREDENTIAL_PROVISIONING = Object.freeze({
+  operation: 'install-management-credential' as const,
+  executor: 'external-runner' as const,
+  endpointFamilies: frozen<CloudflareApiEndpointFamily>(['workers-scripts']),
+  mutations: frozen(['write-worker-secret'] as const),
+  credentialLifecycle: OPERATOR_MANAGED_CREDENTIAL_LIFECYCLE,
+});

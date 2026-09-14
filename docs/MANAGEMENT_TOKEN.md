@@ -13,6 +13,13 @@ using Cloudflare's dashboard or local Wrangler. No token-entry form is served
 by Ankka. The token never passes through Ankka-hosted infrastructure, and the
 gateway never returns it to the dashboard or records it in Durable Object state.
 
+For disposable development gateways, the [lifecycle runner](AGENT_LIFECYCLE.md)
+is a third operator-controlled provisioning path: it reads the operator's
+token from the operator's credential store and writes it as the Worker
+secret with the operator's own deployment authority. The value still never
+passes through Ankka-hosted services, and removing the gateway does not
+revoke it.
+
 The token needs the Access application/policy and MCP Portal permissions used
 by the fixed operations below. It must not include Worker deployment, DNS,
 or token-creation authority. Cloudflare's token scope is broader than one

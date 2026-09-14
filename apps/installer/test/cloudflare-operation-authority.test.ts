@@ -170,3 +170,39 @@ describe('fixed Cloudflare OAuth operation authority', () => {
     }
   });
 });
+
+describe('external runner authority', () => {
+  it('reuses every fixed boundary and changes only the executor and credential lifecycle', async () => {
+    const { EXTERNAL_RUNNER_OPERATIONS, externalRunnerOperationAuthority, isExternalRunnerOperation,
+      OPERATOR_MANAGED_CREDENTIAL_LIFECYCLE } = await import('../src/cloudflare-operation-authority');
+    expect(EXTERNAL_RUNNER_OPERATIONS).toEqual(['bootstrap', 'install', 'upgrade', 'uninstall', 'uninstall-finalize', 'gateway-root-finalize']);
+    for (const operation of EXTERNAL_RUNNER_OPERATIONS) {
+      const fixed = fixedCloudflareOperationAuthority(operation);
+      const runner = externalRunnerOperationAuthority(operation);
+      expect(runner).toMatchObject({
+        operation, executor: 'external-runner', scopes: fixed.scopes, endpointFamilies: fixed.endpointFamilies,
+        ownershipStates: fixed.ownershipStates, mutations: fixed.mutations, postconditions: fixed.postconditions,
+        credentialLifecycle: {
+          storage: 'operator-credential-store', refreshTokens: false, revoke: 'never-by-operation',
+          discard: 'at-process-exit', retry: 'operator-resume',
+        },
+      });
+      expect(Object.isFrozen(runner)).toBe(true);
+      expect(fixed.credentialLifecycle.storage).toBe('request-memory-only');
+    }
+    expect(Object.isFrozen(OPERATOR_MANAGED_CREDENTIAL_LIFECYCLE)).toBe(true);
+    expect(isExternalRunnerOperation('source-add')).toBe(false);
+    expect(isExternalRunnerOperation('rollback')).toBe(false);
+  });
+
+  it('keeps management-credential provisioning a runner-only operation on the Workers scripts family', async () => {
+    const { EXTERNAL_RUNNER_MANAGEMENT_CREDENTIAL_PROVISIONING } = await import('../src/cloudflare-operation-authority');
+    expect(EXTERNAL_RUNNER_MANAGEMENT_CREDENTIAL_PROVISIONING).toMatchObject({
+      operation: 'install-management-credential', executor: 'external-runner',
+      endpointFamilies: ['workers-scripts'], mutations: ['write-worker-secret'],
+      credentialLifecycle: { storage: 'operator-credential-store', revoke: 'never-by-operation' },
+    });
+    expect(isFixedCloudflareOperation('install-management-credential')).toBe(false);
+    expect(isCustomerCloudflareOperation('install-management-credential')).toBe(false);
+  });
+});

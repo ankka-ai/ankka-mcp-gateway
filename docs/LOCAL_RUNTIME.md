@@ -6,8 +6,8 @@ Use the smallest loop that exercises the changed behavior:
 | --- | --- |
 | `npm run test:runtime` | Production bootstrap state and crypto code in workerd, with real SQLite Durable Object storage |
 | `npm run dev:runtime` | The same synthetic fixture with local traces and an agent-readable inspection API |
-| `npm run test:live -- --config /private/config.json` | Real provider create/read-back/cleanup through the existing API-only runner |
-| `npm run validate:lifecycle:live -- --config /private/config.json` | The separately prepared signed, deployed gateway lifecycle |
+| `npm run lifecycle -- run --job /private/job.json` | The unattended disposable lifecycle with an operator-managed credential: install, manage, update, interrupt, resume and remove through the production operations ([runner guide](AGENT_LIFECYCLE.md)) |
+| `npm run validate:lifecycle:live -- --config /private/config.json` | The separately prepared signed, deployed gateway lifecycle with browser consent |
 
 The runtime suite is part of `check:fast` and `test:apps`, so the existing CI
 app-test job runs it. It uses Node's existing test runner and the exact Miniflare

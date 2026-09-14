@@ -36,7 +36,7 @@ import {
   type CustomerStage2ActionName,
   type CustomerStage2Journal,
 } from '../src/customer-stage2-journal';
-import { buildStaticDeployPlan, parseDeploySelection, verifyStaticDeployPlanIntegrity, type StaticDeployPlan } from '../src/schema';
+import { buildStaticDeployPlan, parseDeploySelection, verifyStaticDeployPlanIntegrity, withDeployServiceAccess, type StaticDeployPlan } from '../src/schema';
 import {
   BOOTSTRAP_NONCE_KEY,
   CLIENT_ID,
@@ -59,6 +59,8 @@ const FINAL_VERSION = '33333333-3333-4333-8333-333333333333';
 const FINAL_DEPLOYMENT = '44444444-4444-4444-8444-444444444444';
 const APPLICATION_ID = '55555555-5555-4555-8555-555555555555';
 const POLICY_ID = '66666666-6666-4666-8666-666666666666';
+const SERVICE_POLICY_ID = '99999999-9999-4999-8999-999999999999';
+const SERVICE_ACCESS = { clientId: `${'e'.repeat(32)}.access`, tokenId: '88888888-8888-4888-8888-888888888888' };
 const DOMAIN_ID = '7'.repeat(32);
 const IDP_ID = '8'.repeat(32);
 const ACCESS_AUD = 'ankka-access-audience-v1';
@@ -162,6 +164,7 @@ class MemoryJournal implements CustomerStage2JournalPort {
 interface ProviderState {
   application: BoundaryObject | null;
   policy: BoundaryObject | null;
+  servicePolicy: BoundaryObject | null;
   domain: BoundaryObject | null;
   workersDevEnabled: boolean;
   finalActive: boolean;
@@ -190,6 +193,7 @@ function provider(plan: StaticDeployPlan) {
   const state: ProviderState = {
     application: null,
     policy: null,
+    servicePolicy: null,
     domain: null,
     workersDevEnabled: true,
     finalActive: false,
@@ -242,16 +246,24 @@ function provider(plan: StaticDeployPlan) {
 
     const policiesPath = `${appsPath}/${APPLICATION_ID}/policies`;
     if (url.pathname === policiesPath && request.method === 'GET') {
-      return page(url, state.policy === null ? [] : [state.policy]);
+      return page(url, [state.policy, state.servicePolicy].filter((policy) => policy !== null));
     }
     if (url.pathname === policiesPath && request.method === 'POST') {
       state.policyCreates += 1;
       const body = object(await request.json(), 'Access policy body');
+      // The Service Auth policy is the only non-identity policy the converger ever creates.
+      if (body.decision === 'non_identity') {
+        state.servicePolicy = { ...body, id: SERVICE_POLICY_ID };
+        return json({ id: SERVICE_POLICY_ID }, 201);
+      }
       state.policy = { ...body, id: POLICY_ID };
       return json({ id: POLICY_ID }, 201);
     }
     if (url.pathname === `${policiesPath}/${POLICY_ID}` && request.method === 'GET') {
       return json(required(state.policy ?? undefined, 'Access policy'));
+    }
+    if (url.pathname === `${policiesPath}/${SERVICE_POLICY_ID}` && request.method === 'GET') {
+      return json(required(state.servicePolicy ?? undefined, 'Service Auth policy'));
     }
 
     const domainsPath = `/client/v4/accounts/${ACCOUNT_ID}/workers/domains`;
@@ -394,8 +406,8 @@ function bootstrapBindings(input: {
   });
 }
 
-async function fixture(fault: CustomerStage2ActionName | null = null, workerSetup = false) {
-  const selection = parseDeploySelection(selectionInput);
+async function fixture(fault: CustomerStage2ActionName | null = null, workerSetup = false, opted = false) {
+  const selection = opted ? withDeployServiceAccess(parseDeploySelection(selectionInput), SERVICE_ACCESS) : parseDeploySelection(selectionInput);
   const bootstrap = await buildBootstrapDeployPlan(manifest, NOW + 60 * 60_000);
   const identity = workerSetup ? { planId: bootstrap.planId, planHash: bootstrap.planHash, workerName: bootstrap.workerName, installId: bootstrap.managementOwnershipMarker } : undefined;
   const plan = await buildStaticDeployPlan(selection, manifest, NOW + 60 * 60_000, identity);
@@ -549,6 +561,7 @@ async function fixture(fault: CustomerStage2ActionName | null = null, workerSetu
     storage,
     journal,
     runtime: {
+      controlPlaneOrigin: 'https://deploy.ankka.ai',
       updateChannel: 'stable',
       updateKeyId: UPDATE_KEY_ID,
       updatePublicKey: UPDATE_PUBLIC_KEY,
@@ -631,6 +644,25 @@ describe('customer Stage 2 convergence', () => {
     expect(durableBytes).not.toContain(ACCESS_TOKEN);
     expect(durableBytes).not.toContain(BOOTSTRAP_NONCE_KEY);
     expect(durableBytes).not.toMatch(/code_verifier|authorization_code|access_token|refresh_token/iu);
+  });
+
+  it('creates the receipt-owned service policy only for an opted-in plan and hands the identity to the runtime', async () => {
+    const plain = await fixture();
+    await convergeCustomerStage2({ ...plain.baseInput, attemptId: `attempt_${'s'.repeat(24)}` });
+    expect(plain.journal.value?.actions.map((action) => action.name)).not.toContain('management_service_policy');
+    expect(plain.cloudflare.state.finalBindings?.some((binding) => object(binding, 'binding').name === 'ANKKA_SERVICE_CLIENT_ID')).toBe(false);
+    const test = await fixture(null, false, true);
+    await expect(convergeCustomerStage2({ ...test.baseInput, attemptId: `attempt_${'t'.repeat(24)}` })).resolves.toMatchObject({ verified: true });
+    expect(test.cloudflare.state).toMatchObject({ appCreates: 1, policyCreates: 2, domainCreates: 1, finalUploads: 1, finalActive: true });
+    const service = test.journal.value?.actions.find((action) => action.name === 'management_service_policy');
+    expect(service).toMatchObject({ phase: 'verified', locator: { policyId: SERVICE_POLICY_ID } });
+    expect(test.cloudflare.state.servicePolicy).toMatchObject({
+      decision: 'non_identity', include: [{ service_token: { token_id: SERVICE_ACCESS.tokenId } }], precedence: 2,
+    });
+    expect(test.cloudflare.state.finalBindings).toContainEqual({ name: 'ANKKA_SERVICE_CLIENT_ID', type: 'plain_text', text: SERVICE_ACCESS.clientId });
+    // The completed journal re-proves the service policy without mutating again.
+    await expect(convergeCustomerStage2({ ...test.baseInput, attemptId: `attempt_${'u'.repeat(24)}` })).resolves.toMatchObject({ verified: true });
+    expect(test.cloudflare.state.policyCreates).toBe(2);
   });
 
   it('names the resource the payload could not re-verify', async () => {
@@ -806,8 +838,8 @@ describe('customer Stage 2 convergence', () => {
 
 
 describe('gateway teardown handoff from a real installation journal', () => {
-  async function installed(handover = false) {
-    const test = await fixture();
+  async function installed(handover = false, opted = false) {
+    const test = await fixture(null, false, opted);
     const common = { ...test.baseInput, attemptId: `attempt_${'q'.repeat(24)}` };
     await convergeCustomerStage2(handover ? { ...common, handover: async () => undefined } : common);
     const owner = await readCustomerGatewayOwnershipState(test.baseInput.storage);
@@ -850,6 +882,28 @@ describe('gateway teardown handoff from a real installation journal', () => {
     statement.management.applicationId = 'foreign-application';
     tampered.statement = canonicalJson(statement);
     await expect(verifyGatewayTeardownHandoff({ handoff: canonicalJson(tampered), trust: input.trust, now: input.now })).rejects.toThrow();
+  });
+
+  it('states the receipt-owned service policy beside the administrator policy for an opted-in installation', async () => {
+    const { input } = await installed(false, true);
+    const encoded = await createGatewayTeardownHandoff(input);
+    const verified = await verifyGatewayTeardownHandoff({ handoff: encoded, trust: input.trust, now: input.now });
+    expect(verified.statement.management).toMatchObject({
+      policyId: POLICY_ID, servicePolicyId: SERVICE_POLICY_ID,
+      servicePolicyName: `Example Gateway automation [${input.plan.managementOwnershipMarker}]`,
+    });
+    const plain = await installed();
+    const plainVerified = await verifyGatewayTeardownHandoff({ handoff: await createGatewayTeardownHandoff(plain.input), trust: plain.input.trust, now: plain.input.now });
+    expect(plainVerified.statement.management).not.toHaveProperty('servicePolicyId');
+  });
+
+  it('signs an operator-managed statement that verifies but never claims a revoked grant', async () => {
+    const { input } = await installed();
+    const encoded = await createGatewayTeardownHandoff({ ...input, customerGrantRevocation: 'operator-managed' });
+    const verified = await verifyGatewayTeardownHandoff({ handoff: encoded, trust: input.trust, now: input.now });
+    expect(verified.statement.customerGrantRevocation).toBe('operator-managed');
+    expect(verified.statement.dependentResourcesAbsent).toBe(true);
+    expect(encoded).not.toContain(ACCESS_TOKEN);
   });
 
   it('refuses an unrelated receipt, incomplete management action, foreign root, or wrong signing key', async () => {

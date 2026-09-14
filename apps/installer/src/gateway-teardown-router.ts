@@ -13,6 +13,7 @@ import { authorizeGatewayTeardownJob, consumeGatewayTeardownCallback, createGate
 import { GatewayTeardownStoreClient } from './gateway-teardown-store-client';
 import { readBoundedText } from './http';
 import { buildAuthorizationUrl, type CloudflareOauthConfig, type FetchTransport } from './oauth';
+import { parseOauthCallbackQuery } from './oauth-callback-query';
 import type { VerifiedReleaseBundle } from './release';
 import type { TwoStageDeploySessionNamespace } from './two-stage-deploy-session';
 
@@ -87,7 +88,8 @@ export function createGatewayTeardownRouter(config: {
       hostname: authority.statement.management.hostname, handoff: job.handoff,
       csrfToken: await deriveCsrfToken(config.encryptionKey, `gateway-teardown:${jobId}`),
       canAuthorize: !terminal && !active, started: job.phase !== 'review',
-      revocationUnconfirmed: job.revocation === 'unconfirmed', failureReason: job.failureReason,
+      // `complete` is the settled end of the job; five verified steps with an attempt still running are not it.
+      complete: terminal, revocationUnconfirmed: job.revocation === 'unconfirmed', failureReason: job.failureReason,
       message: terminal ? 'Gateway removal is complete.' : active ? 'Cloudflare authorization is in progress. Return here if it is interrupted.'
         : job.phase === 'review' ? 'Review the final removal, then authorize it in Cloudflare.' : 'Removal is incomplete. Authorize again to resume from the verified progress.',
       steps: labels.map((label, index) => ({ label, done: index < job.verifiedSteps.length })),
@@ -102,7 +104,9 @@ export function createGatewayTeardownRouter(config: {
     const port = portFor(jobId);
     let job = await port.read();
     if (job === null) {
-      await verifyGatewayTeardownHandoff({ handoff: body.handoff, trust: config.trust, now: dependencies.now() });
+      const offered = await verifyGatewayTeardownHandoff({ handoff: body.handoff, trust: config.trust, now: dependencies.now() });
+      // A runner-signed handoff belongs to the operator's own record; the hosted finalizer never adopts it.
+      if (offered.statement.customerGrantRevocation !== 'confirmed') throw new Error('teardown_handoff_conflict');
       const bundle = await dependencies.loadBundle(config.release);
       const retirement = bundle.manifest.components.workerRetirement.files[0];
       if (retirement?.path !== 'payload/worker-retirement/index.js') throw new Error('retirement_missing');
@@ -159,24 +163,21 @@ export function createGatewayTeardownRouter(config: {
   const callback = async (request: Request): Promise<Response> => {
     const cookie = await readCookie(request), attempt = cookie.attempt;
     if (attempt === null) throw new Error('teardown_callback_invalid');
-    const query = new URL(request.url).searchParams;
-    const code = query.get('code');
-    if (query.size !== 2 || (query.has('code') === query.has('error')) ||
-        (code !== null && (code.length === 0 || code.length > 4096)) ||
-        query.getAll('state').length !== 1 || query.getAll('code').length > 1 || query.getAll('error').length > 1 ||
-        !constantTimeEqual(query.get('state') ?? '', attempt.state)) throw new Error('teardown_callback_invalid');
+    // Cloudflare echoes the granted scope beside the code; only this operation's exact scope set is admitted.
+    const query = parseOauthCallbackQuery(new URL(request.url), exactOperationScopes('gateway-root-finalize'));
+    if (query === null || !constantTimeEqual(query.state, attempt.state)) throw new Error('teardown_callback_invalid');
     await dependencies.rateLimit(request, cookie.jobId);
     const port = portFor(cookie.jobId), current = await port.read();
     if (current === null) throw new Error('teardown_state_missing');
     const job = consumeGatewayTeardownCallback({ job: current, attemptId: attempt.id, stateHash: await sha256(attempt.state),
       verifierHash: await sha256(attempt.verifier), now: dependencies.now() });
     await commit(port, current, job);
-    if (query.has('error') || !code) {
+    if (query.denied) {
       const denied = settleGatewayTeardownAttempt({ job, attemptId: attempt.id, revocation: 'confirmed', now: dependencies.now() });
       await commit(port, job, denied);
     } else {
       const bundle = await dependencies.loadBundle(job.release);
-      await executeGatewayTeardownGrant({ code, verifier: attempt.verifier, config: config.oauth,
+      await executeGatewayTeardownGrant({ code: query.code, verifier: attempt.verifier, config: config.oauth,
         transport: dependencies.transport, port, attemptId: attempt.id, trust: config.trust, bundle, now: dependencies.now });
     }
     return redirect(await cookieFor({ ...cookie, attempt: null }));

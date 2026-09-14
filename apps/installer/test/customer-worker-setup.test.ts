@@ -19,7 +19,7 @@ class MemoryStorage implements CustomerGatewayOwnershipStorage {
   async put<Value>(key: string, value: Value): Promise<void> { this.values.set(key, structuredClone(value)); }
 }
 
-async function fixture(availableZones: readonly SetupZone[] = [{ id: 'e'.repeat(32), name: 'example.com' }]) {
+async function fixture(availableZones: readonly SetupZone[] = [{ id: 'e'.repeat(32), name: 'example.com' }], installerServiceAccess?: { clientId: string; tokenId: string }) {
   const issuer = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
   const issuerPublicKey = base64UrlEncode(new Uint8Array(await crypto.subtle.exportKey('raw', issuer.publicKey)));
   const bootstrapPlan = await buildBootstrapDeployPlan(manifest, NOW + 600_000, 'd'.repeat(32));
@@ -45,9 +45,13 @@ async function fixture(availableZones: readonly SetupZone[] = [{ id: 'e'.repeat(
     publicClientId: CLIENT_ID, issuerKeyId: config.issuerKeyId,
   }, issuer.privateKey);
   const calls: string[] = [];
-  const certify = (request: v.InferOutput<typeof setupConfigurationRequestSchema>, now = NOW + 1) => certifyWorkerSetup({
-    request, now, manifest, issuerPublicKey, issuerPrivateKey: issuer.privateKey, issuerKeyId: config.issuerKeyId, publicClientId: CLIENT_ID,
-  });
+  const certify = (request: v.InferOutput<typeof setupConfigurationRequestSchema>, now = NOW + 1) => {
+    const input: Parameters<typeof certifyWorkerSetup>[0] = {
+      request, now, manifest, issuerPublicKey, issuerPrivateKey: issuer.privateKey, issuerKeyId: config.issuerKeyId, publicClientId: CLIENT_ID,
+    };
+    if (installerServiceAccess !== undefined) input.serviceAccess = installerServiceAccess;
+    return certifyWorkerSetup(input);
+  };
   const setup = createCustomerWorkerSetup({ storage, config, now: () => NOW + 1, transport: async (input, init) => {
     const request = new Request(input, init);
     calls.push(request.url);
@@ -141,5 +145,20 @@ describe('configuration in the customer Worker', () => {
     altered.statement = altered.statement.replace('example.com', 'another.com');
     await expect(f.setup.accept(JSON.stringify(altered))).rejects.toThrow();
     expect(await f.setup.configured()).toBeNull();
+  });
+});
+
+describe('an installer deployment that opted into a service identity', () => {
+  const serviceAccess = { clientId: `${'d'.repeat(32)}.access`, tokenId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' };
+
+  it('certifies the browser basics into a plan that carries the identity, which the Worker accepts as its own configuration', async () => {
+    const f = await fixture(undefined, serviceAccess);
+    await f.setup.accept(f.permit);
+    const configured = await f.setup.configure(f.selection);
+    expect(configured.plan?.gatewayConfiguration.serviceAccess).toEqual(serviceAccess);
+    expect(configured.plan?.managementResources.some((resource) => resource.kind === 'management_service_policy')).toBe(true);
+    // The Worker reports the selection the browser chose; the identity is the deployment's, not the browser's.
+    expect(configured.selection?.serviceAccess).toEqual(serviceAccess);
+    expect(configured.selection?.basics).toEqual(f.selection.basics);
   });
 });

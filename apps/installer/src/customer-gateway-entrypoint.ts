@@ -1,4 +1,5 @@
 import * as v from 'valibot';
+import { PUBLIC_ORIGIN } from './constants';
 import { createBigQuerySetup } from './customer-bigquery-setup';
 import { bigQuerySetupAvailable } from './customer-bigquery-deployment';
 import { createBigQueryTeardown } from './customer-bigquery-teardown';
@@ -93,6 +94,7 @@ const envSchema = v.object({
   CLOUDFLARE_ZONE_NAME: v.pipe(v.string(), v.minLength(3), v.maxLength(253)),
   ZERO_TRUST_READY: v.literal('true'),
   ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY: v.pipe(v.string(), v.regex(TOKEN)),
+  ANKKA_SERVICE_CLIENT_ID: v.optional(v.pipe(v.string(), v.regex(/^[a-f0-9]{32}\.access$/u))),
 });
 
 const OPERATION_ATTEMPT_KEY = 'ankka-mcp-gateway/customer-operation-attempt/v1';
@@ -306,6 +308,7 @@ export class AdminState extends RuntimeAdminState {
       storage: this.finalState.storage,
       journal: new CustomerStage2DurableStatePort(this.finalState.storage),
       runtime: {
+        controlPlaneOrigin: PUBLIC_ORIGIN,
         updateChannel: config.ANKKA_UPDATE_CHANNEL,
         updateKeyId: config.ANKKA_UPDATE_KEY_ID,
         updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,

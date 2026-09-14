@@ -6,8 +6,14 @@
     "strict": true,
     "exactOptionalPropertyTypes": true,
     "forceConsistentCasingInFileNames": true,
-    "types": ["@cloudflare/workers-types", "vitest/globals"],
-    "lib": ["ES2022", "WebWorker"],
+    "types": [
+      "@cloudflare/workers-types",
+      "vitest/globals"
+    ],
+    "lib": [
+      "ES2022",
+      "WebWorker"
+    ],
     "noEmit": true,
     "isolatedModules": true,
     "noFallthroughCasesInSwitch": true,
@@ -18,5 +24,10 @@
     "skipLibCheck": true,
     "useUnknownInCatchVariables": true
   },
-  "include": ["src/**/*.ts", "test/**/*.ts", "test-runtime/**/*.ts"]
+  "include": [
+    "src/**/*.ts",
+    "test/**/*.ts",
+    "test-runtime/**/*.ts",
+    "lifecycle/**/*.ts"
+  ]
 }

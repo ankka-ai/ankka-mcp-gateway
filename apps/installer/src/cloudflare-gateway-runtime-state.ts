@@ -24,7 +24,8 @@ export const GATEWAY_RUNTIME_BINDING_NAMES = Object.freeze([
   'ZERO_TRUST_READY',
 ] as const);
 
-type BindingName = (typeof GATEWAY_RUNTIME_BINDING_NAMES)[number];
+type BindingName = (typeof GATEWAY_RUNTIME_BINDING_NAMES)[number] | 'ANKKA_SERVICE_CLIENT_ID';
+const SERVICE_CLIENT_ID_PATTERN = /^[a-f0-9]{32}\.access$/u;
 
 const activeRuntimeSchema = v.strictObject({
   deployments: v.pipe(v.array(v.looseObject({
@@ -114,14 +115,17 @@ function plainTextBinding(bindings: ReadonlyMap<string, BoundaryObject>, name: B
 
 export function parseGatewayRuntimeBindings(value: BoundaryValue): GatewayWorkerPlainTextBindings | null {
   const result = v.safeParse(currentRuntimeSchema, value);
-  if (!result.success || result.output.bindings.length !== GATEWAY_RUNTIME_BINDING_NAMES.length + 2 ||
-      Object.hasOwn(result.output, 'migrations') || Object.hasOwn(result.output, 'migration_tag')) return null;
+  if (!result.success || Object.hasOwn(result.output, 'migrations') || Object.hasOwn(result.output, 'migration_tag')) return null;
   const bindings = new Map<string, BoundaryObject>();
   for (const binding of result.output.bindings) {
     const named = v.safeParse(namedBindingSchema, binding);
     if (!named.success || bindings.has(named.output.name)) return null;
     bindings.set(named.output.name, binding);
   }
+  // Exactly the fixed bindings, plus the service identity binding only when the gateway opted into one.
+  const ANKKA_SERVICE_CLIENT_ID = bindings.has('ANKKA_SERVICE_CLIENT_ID') ? plainTextBinding(bindings, 'ANKKA_SERVICE_CLIENT_ID') : undefined;
+  if (ANKKA_SERVICE_CLIENT_ID === null || (ANKKA_SERVICE_CLIENT_ID !== undefined && !SERVICE_CLIENT_ID_PATTERN.test(ANKKA_SERVICE_CLIENT_ID)) ||
+      bindings.size !== GATEWAY_RUNTIME_BINDING_NAMES.length + 2 + (ANKKA_SERVICE_CLIENT_ID === undefined ? 0 : 1)) return null;
   if (!v.safeParse(adminBindingSchema, bindings.get('ADMIN_STATE')).success ||
       !v.safeParse(assetsBindingSchema, bindings.get('ASSETS')).success) return null;
 
@@ -147,7 +151,7 @@ export function parseGatewayRuntimeBindings(value: BoundaryValue): GatewayWorker
       ANKKA_UPDATE_PUBLIC_KEY === null || ANKKA_WORKERS_SUBDOMAIN === null || ANKKA_WORKER_NAME === null ||
       CF_ACCESS_AUD === null || CF_ACCESS_ISSUER === null || CLOUDFLARE_ACCOUNT_ID === null ||
       CLOUDFLARE_ZONE_ID === null || CLOUDFLARE_ZONE_NAME === null || ZERO_TRUST_READY === null) return null;
-  return Object.freeze({
+  const required = {
     ADMIN_EMAILS,
     ANKKA_INSTALL_ID,
     ANKKA_GATEWAY_RELEASE,
@@ -164,7 +168,8 @@ export function parseGatewayRuntimeBindings(value: BoundaryValue): GatewayWorker
     CLOUDFLARE_ZONE_ID,
     CLOUDFLARE_ZONE_NAME,
     ZERO_TRUST_READY,
-  });
+  };
+  return Object.freeze(ANKKA_SERVICE_CLIENT_ID === undefined ? required : { ...required, ANKKA_SERVICE_CLIENT_ID });
 }
 
 export function parseCurrentGatewayWorker(value: BoundaryValue): CurrentGatewayWorker | null {

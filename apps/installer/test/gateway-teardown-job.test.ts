@@ -120,3 +120,41 @@ describe('hosted gateway teardown recovery journal', () => {
     expect(() => authorizeGatewayTeardownJob({ job: stored(), attemptId, ...hashes, now: NOW - 1 })).toThrow();
   });
 });
+
+describe('operator-managed credential policy', () => {
+  function operatorJob(): GatewayTeardownJob {
+    return parseGatewayTeardownJob({ ...stored(), credentialPolicy: 'operator-managed' });
+  }
+
+  it('completes with no revocation attempted and never claims a revoked grant', () => {
+    let job = exchanged(operatorJob());
+    for (const step of GATEWAY_ROOT_REMOVAL_STEPS) {
+      job = armGatewayRootRemoval({ job, attemptId, step, now: NOW });
+      job = verifyGatewayRootRemoval({ job, attemptId, step, now: NOW });
+    }
+    expect(() => settleGatewayTeardownAttempt({ job, attemptId, revocation: 'confirmed', now: NOW + 1 })).toThrow();
+    const settled = settleGatewayTeardownAttempt({ job, attemptId, revocation: 'not_attempted', now: NOW + 1 });
+    expect(settled.phase).toBe('removed');
+    expect(settled.revocation).toBe('not_attempted');
+    expect(settled.credentialPolicy).toBe('operator-managed');
+    expect(() => parseGatewayTeardownJob({ ...settled, revocation: 'confirmed' })).toThrow();
+  });
+
+  it('keeps hosted jobs on the request-memory policy: stored records stay canonical and refuse not_attempted', () => {
+    const hosted = stored();
+    expect(hosted.credentialPolicy).toBeUndefined();
+    expect(JSON.stringify(hosted)).not.toContain('credentialPolicy');
+    const job = exchanged(hosted);
+    expect(() => settleGatewayTeardownAttempt({ job, attemptId, revocation: 'not_attempted', now: NOW + 1 })).toThrow();
+    expect(() => parseGatewayTeardownJob({ ...stored(), phase: 'removed', verifiedSteps: [...GATEWAY_ROOT_REMOVAL_STEPS], revocation: 'not_attempted' })).toThrow();
+  });
+
+  it('retains an interrupted operator attempt as recovery with its pending boundary', () => {
+    let job = exchanged(operatorJob());
+    job = armGatewayRootRemoval({ job, attemptId, step: 'retire_namespace', now: NOW });
+    job = settleGatewayTeardownAttempt({ job, attemptId, revocation: 'not_attempted', reason: 'attempt_interrupted', now: NOW + 1 });
+    expect(job.phase).toBe('recovery_required');
+    expect(job.pendingStep).toBe('retire_namespace');
+    expect(job.failureReason).toBe('attempt_interrupted');
+  });
+});

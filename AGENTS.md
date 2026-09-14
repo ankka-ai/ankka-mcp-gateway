@@ -71,6 +71,10 @@ they are explicitly documented as non-secret.
 
 ## Development
 
+- Use `npm run lifecycle` for unattended disposable gateway runs with an
+  operator-managed credential (install, manage, update, interrupt, resume,
+  remove); read `docs/AGENT_LIFECYCLE.md` for the job file, credential custody
+  and what it does not prove.
 - Use `npm run test:runtime` for bootstrap state, SQLite, and crypto runtime
   changes. `npm run dev:runtime` prints a synthetic localhost fixture and its
   inspection API; query traces before adding temporary logs. Read

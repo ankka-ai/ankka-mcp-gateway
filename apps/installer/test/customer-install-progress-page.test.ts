@@ -42,14 +42,16 @@ describe('customer install final navigation', () => {
   it('continues to management after the temporary address retires without claiming readiness', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockRejectedValue(new Error('temporary_address_closed'));
     const page = await openPage(converging, fetch);
-    await vi.advanceTimersByTimeAsync(6_000);
+    // Quick misses are not proof that the temporary address retired: a name that does not exist yet would be cached.
+    await vi.advanceTimersByTimeAsync(9_000);
     expect(page.navigate).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(3_000);
+    expect(page.nodes.get('#message')?.textContent).toContain('Still finishing');
+    await vi.advanceTimersByTimeAsync(51_000);
     expect(page.navigate).toHaveBeenCalledExactlyOnceWith('https://manage.example.com/?setup=finishing');
     expect(page.nodes.get('#title')?.textContent).toBe('Opening your management page');
     expect(page.nodes.get('#message')?.textContent).toContain('will check that setup finished');
     await vi.advanceTimersByTimeAsync(60_000);
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(fetch).toHaveBeenCalledTimes(20);
     expect(fetch.mock.calls[0]).toEqual(['/__ankka/install/status', {
       credentials: 'same-origin', cache: 'no-store', redirect: 'manual', signal: expect.any(AbortSignal),
     }]);

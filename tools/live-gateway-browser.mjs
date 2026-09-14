@@ -1,49 +1,47 @@
 import { chromium } from 'playwright-core';
-import * as v from 'valibot';
 import { createLiveGatewayAccess, LiveGatewayAccessError } from './live-gateway-access.mjs';
+import { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
+
+export { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
 
 const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
 const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth\/start)$/u;
 const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
 
-export class LiveGatewayBrowserError extends Error {
-  constructor(code, status = null) {
-    super(code);
-    this.code = code;
-    this.status = status;
-  }
+/**
+ * A gateway action applies Portal and Access policy changes before it answers, and a Team write has taken more than
+ * thirty seconds live. A write is never retried, so the runner waits for it as long as the API client does.
+ */
+export const BROWSER_REQUEST_TIMEOUT_MS = 120_000;
+/** A management Access application created minutes ago can still refuse a valid session at some edges while its
+ * policy propagates; within this window after the session install such a refusal is retried, not final. */
+export const SESSION_PROPAGATION_MS = 10 * 60_000;
+
+/** What an authenticated origin's refusal means: null for an accepted status, `retry` inside the propagation
+ * window of a just-installed session, `rejected` otherwise. */
+export function rejectedSessionOutcome({ status, installedAt, now = Date.now() }) {
+  if (![302, 303, 401, 403].includes(status)) return null;
+  return installedAt !== undefined && now < installedAt + SESSION_PROPAGATION_MS ? 'retry' : 'rejected';
+}
+/** A hosted attempt lives ten minutes; an owned browser waits no longer than that for a pending callback on a stop. */
+export const CALLBACK_CLOSE_WAIT_MS = 600_000;
+
+/** The installer's own not-ready handoff answer, returned to the page while the hold is active; null otherwise. */
+export function handoffHoldAnswer(hold) {
+  if (!hold.active) return null;
+  return { status: 503, contentType: 'application/json; charset=utf-8',
+    body: JSON.stringify({ schemaVersion: 1, code: 'bootstrap_not_ready', status: 'not_ready', retryAfterMs: 3_000, reason: 'runner_waits_for_shell' }) };
 }
 
-export function validateLiveBrowserOrigin(value) {
-  let url;
-  try { url = new URL(value); } catch { throw new LiveGatewayBrowserError('origin_invalid'); }
-  if (url.protocol !== 'https:' || url.origin !== value || url.username || url.password) {
-    throw new LiveGatewayBrowserError('origin_invalid');
-  }
-  return url.origin;
+/** Matches requests to the origin currently held (none when `hold.origin` is null); evaluated per request. */
+export function heldOriginMatcher(hold) {
+  return (url) => hold.origin !== null && url.origin === hold.origin;
 }
 
 export function validateLiveBrowserRequest(origins, origin, path, method) {
   if (!origins.includes(origin) || !(API_PATH.test(path) || BOOTSTRAP_PATH.test(path)) || !METHODS.has(method)) {
     throw new LiveGatewayBrowserError('request_outside_lifecycle');
   }
-}
-
-export function validateLiveBootstrapOrigin(provision) {
-  if (!/^acg-[a-f0-9]{24}$/u.test(provision?.installId) ||
-      provision.workerName !== `ankka-gateway-${provision.installId}`) {
-    throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
-  }
-  // The installer publishes its bootstrap base URL with a root slash.
-  // Normalize only that documented form; paths, queries and fragments stay invalid.
-  const base = provision.bootstrapOrigin;
-  const origin = validateLiveBrowserOrigin(v.is(v.string(), base) && base.endsWith('/') ? base.slice(0, -1) : base);
-  const labels = new URL(origin).hostname.split('.');
-  if (labels.length !== 4 || labels[0] !== provision.workerName ||
-      !/^[a-z0-9-]{1,63}$/u.test(labels[1]) || labels.slice(2).join('.') !== 'workers.dev') {
-    throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
-  }
-  return origin;
 }
 
 export function validateLiveHandoff(value, origin, path) {
@@ -54,13 +52,54 @@ export function validateLiveHandoff(value, origin, path) {
   return url.href;
 }
 
+const LANDING_WORD = /^[a-z_]{1,32}$/u;
+const HOSTED_CALLBACK_PATH = /^\/(?:oauth\/callback|__ankka\/install\/oauth\/callback)$/u;
+
+/** A hosted OAuth callback on one of the lifecycle's origins: its whole operation runs inside that one response. */
+export function isHostedCallback(value, origins) {
+  let url;
+  try { url = new URL(value); } catch { return false; }
+  return origins.includes(url.origin) && HOSTED_CALLBACK_PATH.test(url.pathname);
+}
+
+/** Knows while a hosted callback's response is pending in the tab, since closing the tab then cuts the operation's
+ * revoke and settlement. Requests are tracked by identity; their URLs are never kept. */
+export function callbackTracker(origins) {
+  const pending = new Set();
+  return {
+    started(request) { if (isHostedCallback(request.url(), origins)) pending.add(request); },
+    ended(request) { pending.delete(request); },
+    inFlight: () => pending.size > 0,
+  };
+}
+
+/** Where the test tab is, in fixed labels only: the site, the lifecycle page it shows, and for the gateway's removal
+ * page the `result` and `reason` words it was sent with. Never the fragment, which carries handoffs, and never a query
+ * value outside that vocabulary. */
+export function landingOf(value, { installerOrigin, managementOrigin }) {
+  let url;
+  try { url = new URL(value); } catch { return { site: 'other', page: 'other', result: null, reason: null }; }
+  const site = url.origin === installerOrigin ? 'installer' : url.origin === managementOrigin ? 'gateway' :
+    url.origin === 'https://dash.cloudflare.com' ? 'cloudflare' : 'other';
+  const page = site === 'installer' && url.pathname === '/teardown' ? 'receipt' :
+    site === 'gateway' && url.pathname === '/__ankka/operation/teardown' ? 'removal' :
+    site === 'gateway' && url.pathname === '/__ankka/install/oauth/callback' ? 'callback' :
+    site === 'cloudflare' && url.pathname === '/oauth2/auth' ? 'consent' : 'other';
+  const word = (name) => {
+    const item = page === 'removal' ? url.searchParams.get(name) : null;
+    return item !== null && LANDING_WORD.test(item) ? item : null;
+  };
+  return { site, page, result: word('result'), reason: word('reason') };
+}
+
 /** An explicitly authorized Chrome connection borrows its context and owns only
  * a new tab. Never close that context or export browser storage, traces or HAR. */
 export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify }) {
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
   const accessCancellation = new AbortController();
   const installAccess = createLiveGatewayAccess({ origins, email: basics.adminEmail, notify, signal: accessCancellation.signal });
-  const authenticated = new Set();
+  // Origins whose Access session the runner installed, with the time of that install.
+  const authenticated = new Map();
   if (browserConnection !== undefined && (browserConnection !== 'chrome' || browserProfile)) {
     throw new LiveGatewayBrowserError('browser_connection_invalid');
   }
@@ -76,7 +115,27 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     })
     : await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
   const page = borrowed ? await context.newPage() : context.pages()[0] ?? await context.newPage();
+  const callbacks = callbackTracker(origins);
+  page.on('request', (request) => callbacks.started(request));
+  page.on('requestfinished', (request) => callbacks.ended(request));
+  page.on('requestfailed', (request) => callbacks.ended(request));
   page.setDefaultTimeout(30_000);
+  // A held origin is answered locally so the browser never resolves a hostname whose record may not exist yet. The
+  // route stays installed for the page's life and consults the held origin per request: releasing the hold changes
+  // the variable, not the routes, because an attached browser can refuse to remove a route without saying so.
+  const hold = { origin: null };
+  await page.route(heldOriginMatcher(hold), (route) => route.fulfill({
+    status: 200, contentType: 'text/html; charset=utf-8',
+    body: '<!doctype html><title>Ankka lifecycle</title><p>Installation is finishing. The runner continues by API.</p>',
+  }));
+  // The installer page hops to the new shell the moment the installer's own readiness probe passes, spending the
+  // one-time handoff on that hop; an edge that does not serve the fresh Worker yet answers it 404 and the shell never
+  // gets its session. While held, the page's handoff poll gets the installer's own not-ready answer and keeps polling.
+  const handoffHold = { active: false };
+  await page.route((url) => url.origin === installerOrigin && url.pathname === '/api/bootstrap/handoff', (route) => {
+    const answer = handoffHoldAnswer(handoffHold);
+    return answer === null ? route.continue() : route.fulfill(answer);
+  });
   let interrupted = false;
   let interruptionArmed = false;
   let interruptionError = null;
@@ -90,7 +149,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     }
     try {
       await page.bringToFront();
-      await page.goto(target.href, { waitUntil: 'domcontentloaded' });
+      // The Cloudflare consent page is a heavy application; give any navigation well over the default 30 seconds.
+      await page.goto(target.href, { waitUntil: 'domcontentloaded', timeout: 90_000 });
       await page.bringToFront();
       if (page.url() === 'about:blank') throw new Error();
       const visibleOrigin = new URL(page.url()).origin;
@@ -109,7 +169,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     let response;
     try {
       const options = {
-        method, maxRedirects: 0, timeout: 30_000,
+        method, maxRedirects: 0, timeout: BROWSER_REQUEST_TIMEOUT_MS,
         headers: { origin, accept: 'application/json' },
       };
       if (body !== undefined) {
@@ -126,12 +186,16 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
           [302, 303].includes(status) && location &&
           new URL(location, origin).hostname.endsWith('.cloudflareaccess.com')) {
         await installAccess(context, origin, { allowLogin: true });
-        authenticated.add(origin);
+        if (!authenticated.has(origin)) authenticated.set(origin, Date.now());
         await response.dispose(); response = null;
         return await request(origin, path, { method, body, csrfToken }, false);
       }
-      if (authenticated.has(origin) && [302, 303, 401, 403].includes(status)) {
-        throw new LiveGatewayAccessError('access_session_rejected');
+      if (authenticated.has(origin)) {
+        // The gateway's application is minutes old right after an installation; a refusal of the fresh session there
+        // is retried like any other rejected read until the window closes, and only the installer's is final at once.
+        const outcome = rejectedSessionOutcome({ status, installedAt: origin === managementOrigin ? authenticated.get(origin) : undefined });
+        if (outcome === 'retry') throw new LiveGatewayBrowserError('gateway_http_rejected', status);
+        if (outcome === 'rejected') throw new LiveGatewayAccessError('access_session_rejected');
       }
       if (status !== 200) throw new LiveGatewayBrowserError('gateway_http_rejected', status);
       const bytes = await response.body();
@@ -170,6 +234,12 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   return {
     request, navigate, waitFor,
     cancel() { cancelled = true; accessCancellation.abort(); },
+    /** The tab's current landing in fixed labels; a closed tab lands nowhere. */
+    landing() {
+      let url;
+      try { url = page.url(); } catch { url = ''; }
+      return landingOf(url, { installerOrigin, managementOrigin });
+    },
     async clearRemovalSession() {
       await context.clearCookies({ name: '__Host-ankka_gateway_teardown', domain: new URL(installerOrigin).hostname });
     },
@@ -197,19 +267,28 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     async login(origin) {
       if (!origins.includes(origin)) throw new LiveGatewayBrowserError('origin_invalid');
       await installAccess(context, origin);
-      authenticated.add(origin);
+      authenticated.set(origin, Date.now());
       await navigate(origin);
       return waitFor(() => request(origin, origin === installerOrigin ? '/api/session' : '/api/status'),
         (value) => value.schemaVersion === 1);
     },
-    async consent(authorizationUrl, read, accepts) {
+    async consent(authorizationUrl, read, accepts, { holdOrigin, keepHold = false } = {}) {
       const url = new URL(authorizationUrl);
       if (url.origin !== 'https://dash.cloudflare.com' || url.pathname !== '/oauth2/auth') {
         throw new LiveGatewayBrowserError('authorization_url_invalid');
       }
-      await navigate(url.href);
-      return waitFor(read, accepts, { instruction: 'Review and approve the test operation in Cloudflare. The runner will continue after the callback.' });
+      hold.origin = holdOrigin ?? null;
+      try {
+        await navigate(url.href);
+        return await waitFor(read, accepts, { instruction: 'Review and approve the test operation in Cloudflare. The runner will continue after the callback.' });
+      } finally {
+        // A caller that keeps the hold (the hostname is not served yet) releases it itself.
+        if (!keepHold) hold.origin = null;
+      }
     },
+    release() { hold.origin = null; },
+    holdHandoff() { handoffHold.active = true; },
+    releaseHandoff() { handoffHold.active = false; },
     async loseNextTeardownCallbackResponse() {
       if (interruptionArmed) throw new LiveGatewayBrowserError('interruption_already_armed');
       interruptionArmed = true;
@@ -234,8 +313,20 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     interruptionObserved: () => interrupted,
     async close() {
       accessCancellation.abort();
-      try { if (borrowed) await page.close(); else await context.close(); }
-      finally { await browser?.close(); } // CDP close disconnects; it does not quit Chrome.
+      try {
+        // A stop while a hosted callback is pending must not cut it: a borrowed tab is left to the operator, and an
+        // owned browser waits for the callback to end, at most for the hosted attempt's own window.
+        if (callbacks.inFlight() && borrowed) {
+          notify('Test tab left open: a hosted callback is still in flight. Close it once the page has loaded.');
+        } else {
+          if (callbacks.inFlight()) {
+            notify('A hosted callback is still in flight. The test browser closes once it has ended.');
+            const deadline = Date.now() + CALLBACK_CLOSE_WAIT_MS;
+            while (callbacks.inFlight() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          if (borrowed) await page.close(); else await context.close();
+        }
+      } finally { await browser?.close(); } // CDP close disconnects; it does not quit Chrome.
     },
   };
 }

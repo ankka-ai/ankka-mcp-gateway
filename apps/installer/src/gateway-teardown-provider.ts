@@ -40,15 +40,26 @@ const policySchema = v.looseObject({
   approval_required: v.optional(v.literal(false)), isolation_required: v.optional(v.literal(false)),
   purpose_justification_required: v.optional(v.literal(false)),
 });
+/** The receipt-owned Service Auth policy an opted-in installation declares: one service token, no identity. */
+const servicePolicySchema = v.looseObject({
+  id: v.string(), name: v.string(), decision: v.literal('non_identity'), precedence: v.literal(2),
+  include: v.pipe(v.array(v.strictObject({ service_token: v.strictObject({ token_id: v.string() }) })), v.length(1)),
+  require: v.pipe(v.array(boundaryValueSchema), v.length(0)), exclude: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+  approval_required: v.optional(v.literal(false)), isolation_required: v.optional(v.literal(false)),
+  purpose_justification_required: v.optional(v.literal(false)),
+});
 const bindingSchema = v.looseObject({ type: v.string(), name: v.string(), namespace_id: v.optional(v.string()), script_name: v.optional(v.string()), service: v.optional(v.string()), class_name: v.optional(v.string()) });
 const settingsSchema = v.looseObject({ bindings: v.array(bindingSchema) });
 const deploymentsSchema = v.looseObject({ deployments: v.array(v.looseObject({
   versions: v.array(v.looseObject({ version_id: v.string(), percentage: v.number() })),
 })) });
+// Secrets outlive a deployment: the retirement upload sends no bindings, yet
+// the Worker's inherited secrets stay attached to the retirement version until
+// the Worker itself is deleted. Any binding of another type is a foreign version.
 const versionSchema = v.looseObject({
   id: v.string(), main_module: v.literal('index.js'), compatibility_date: v.literal(COMPATIBILITY_DATE),
   compatibility_flags: v.optional(v.pipe(v.array(v.string()), v.length(0))),
-  bindings: v.pipe(v.array(boundaryValueSchema), v.length(0)),
+  bindings: v.array(v.looseObject({ type: v.literal('secret_text'), name: v.string() })),
   modules: v.pipe(v.array(v.looseObject({ name: v.literal('index.js'), content_type: v.string(), content_base64: v.string() })), v.length(1)),
 });
 
@@ -64,6 +75,7 @@ interface Call {
   readonly accessToken: string;
   readonly transport: FetchTransport;
   readonly authority: VerifiedGatewayTeardownHandoff;
+  readonly wait?: (milliseconds: number) => Promise<void>;
 }
 function account(call: Call, path: string): URL {
   return new URL(`/client/v4/accounts/${call.authority.certificate.statement.accountId}${path}`, CLOUDFLARE_API_ORIGIN);
@@ -73,7 +85,10 @@ function applicationUrl(call: Call, suffix = ''): URL {
   return new URL(`/client/v4/zones/${management.zoneId}/access/apps/${management.applicationId}${suffix}`, CLOUDFLARE_API_ORIGIN);
 }
 
-async function request(call: Call, stage: string, url: URL, init: RequestInit = {}, missing = false) {
+// A read mutates nothing, so a transient provider error (a 5xx or a timeout) is retried this many times.
+const READ_RETRY_DELAYS_MS = Object.freeze([400, 1_200]);
+
+async function requestOnce(call: Call, stage: string, url: URL, init: RequestInit, missing: boolean) {
   try {
     return await withDeadline(async (signal) => {
       const response = await call.transport(url, { ...init, signal, redirect: 'manual',
@@ -81,7 +96,8 @@ async function request(call: Call, stage: string, url: URL, init: RequestInit = 
       const serialized = await readBoundedText(response, 'internal_error', 16 * 1024 * 1024);
       if (response.status === 404 && missing) return { absent: true, value: null, pages: 1, count: undefined };
       if (!response.ok) fail(stage, response.status >= 500 ? 'provider_unknown' : 'provider_rejected');
-      if (response.status === 204 && init.method === 'DELETE') return { absent: false, value: null, pages: 1, count: undefined };
+      // A successful deletion may answer 204, or 200 with no body (custom-domain detachment does); reads always carry an envelope.
+      if (init.method === 'DELETE' && (response.status === 204 || serialized === '')) return { absent: false, value: null, pages: 1, count: undefined };
       const parsed = v.safeParse(envelopeSchema, JSON.parse(serialized));
       if (!parsed.success || (parsed.output.errors?.length ?? 0) !== 0) fail(stage, 'provider_unknown');
       return { absent: false, value: parsed.output.result ?? null,
@@ -90,6 +106,28 @@ async function request(call: Call, stage: string, url: URL, init: RequestInit = 
   } catch (error) {
     if (error instanceof GatewayTeardownProviderError) throw error;
     fail(stage, 'provider_unknown');
+  }
+}
+
+/**
+ * A write is sent at most once: a rejected or unknown response leaves its boundary
+ * pending for a fresh consent, never a silent retry that might apply twice. A read
+ * mutates nothing, and a transient provider error (a 5xx or a timeout, surfaced as
+ * provider_unknown) is no evidence of any resource, so a read is retried a bounded
+ * number of times before it is judged. A 4xx rejection and every deterministic
+ * mismatch (foreign_dependency, identity_mismatch) still fail at once.
+ */
+async function request(call: Call, stage: string, url: URL, init: RequestInit = {}, missing = false) {
+  const method = init.method ?? 'GET';
+  const delays = method === 'GET' || method === 'HEAD' ? READ_RETRY_DELAYS_MS : [];
+  const wait = call.wait ?? ((milliseconds: number) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await requestOnce(call, stage, url, init, missing);
+    } catch (error) {
+      if (attempt >= delays.length || !(error instanceof GatewayTeardownProviderError) || error.code !== 'provider_unknown') throw error;
+      await wait(delays[attempt] ?? 0);
+    }
   }
 }
 
@@ -148,35 +186,61 @@ async function namespacePresent(call: Call): Promise<boolean> {
   return found === 1;
 }
 
-async function scriptsUnshared(call: Call, rootPresent: boolean, namespaceExists: boolean, retirementSha256: string): Promise<void> {
+/**
+ * No other script may bind the namespace or the Worker. Returns false only
+ * while settling, when the owner Worker's own listing, settings or active
+ * version do not yet agree with the write that was just sent.
+ */
+async function scriptsUnshared(call: Call, rootPresent: boolean, namespaceExists: boolean, retirementSha256: string, settling: boolean): Promise<boolean> {
   const owner = call.authority.certificate.statement;
   const values = await list(call, 'worker_list', account(call, '/workers/scripts'));
   const seen = new Set<string>();
+  let consistent = true;
   for (const value of values) {
     const parsed = v.safeParse(scriptSchema, value);
     if (!parsed.success || !/^[A-Za-z0-9_-]{1,128}$/u.test(parsed.output.id) || seen.has(parsed.output.id)) fail('worker_list', 'provider_unknown');
     const name = parsed.output.id;
     seen.add(name);
-    const response = await request(call, 'worker_bindings', account(call, `/workers/scripts/${name}/settings`));
+    const owned = name === owner.worker.name;
+    let response;
+    try {
+      response = await request(call, 'worker_bindings', account(call, `/workers/scripts/${name}/settings`), {}, settling && owned);
+    } catch (error) {
+      // A just-written owner Worker can answer its settings read with a transient provider
+      // error (5xx or timeout) while the upload settles. Inside the caller's bounded settling
+      // loop this is re-read, not judged; the strict settling=false inventory still throws.
+      if (settling && owned && error instanceof GatewayTeardownProviderError && error.code === 'provider_unknown') { consistent = false; continue; }
+      throw error;
+    }
+    if (response.absent) { consistent = false; continue; }
     const settings = v.safeParse(settingsSchema, response.value);
     if (!settings.success) fail('worker_bindings', 'provider_unknown');
-    if (name !== owner.worker.name && settings.output.bindings.some((binding) =>
+    if (!owned && settings.output.bindings.some((binding) =>
       binding.type === 'service' && binding.service === owner.worker.name)) fail('worker_bindings', 'foreign_dependency');
     const bindings = settings.output.bindings.filter((binding) => binding.type === 'durable_object_namespace');
-    if (name === owner.worker.name) {
+    if (owned) {
       if (rootPresent && namespaceExists && bindings.length === 0) {
         // The deployment can be visible before the namespace listing catches
         // up. Only the exact signed retirement module explains this gap.
-        await retiredVersion(call, retirementSha256);
+        if (!await retiredVersion(call, retirementSha256, settling)) consistent = false;
       } else if (!rootPresent || (namespaceExists ? bindings.length !== 1 ||
           bindings[0]?.namespace_id !== owner.adminStateNamespaceId || bindings[0]?.class_name !== 'AdminState'
-        : bindings.length !== 0)) fail('worker_bindings', 'identity_mismatch');
-    } else if (bindings.some((binding) => (binding.namespace_id === undefined && binding.script_name === undefined) ||
+        : bindings.length !== 0)) {
+        if (!settling) fail('worker_bindings', 'identity_mismatch');
+        consistent = false;
+      }
+      continue;
+    }
+    if (bindings.some((binding) => (binding.namespace_id === undefined && binding.script_name === undefined) ||
       binding.namespace_id === owner.adminStateNamespaceId || binding.script_name === owner.worker.name)) {
       fail('worker_bindings', 'foreign_dependency');
     }
   }
-  if (seen.has(owner.worker.name) !== rootPresent) fail('worker_list', 'identity_mismatch');
+  if (seen.has(owner.worker.name) !== rootPresent) {
+    if (!settling) fail('worker_list', 'identity_mismatch');
+    consistent = false;
+  }
+  return consistent;
 }
 
 async function domainPresent(call: Call): Promise<boolean> {
@@ -207,14 +271,21 @@ async function managementPresent(call: Call): Promise<{ application: boolean; po
       result.output.aud !== expected.applicationAud || result.output.domain !== expected.hostname ||
       result.output.destinations?.some((destination) => destination.uri !== expected.hostname) ||
       result.output.self_hosted_domains?.some((domain) => domain !== expected.hostname)) fail('application_read', 'identity_mismatch');
+  // The application carries the administrators' policy and, when the handoff declares one, the receipt-owned
+  // Service Auth policy; the latter is removed with the application, never on its own. Anything else is foreign.
   const policies = await list(call, 'policy_list', applicationUrl(call, '/policies'));
-  if (policies.length > 1) fail('policy_list', 'foreign_dependency');
-  for (const item of policies) {
-    const policy = v.safeParse(policySchema, item);
-    if (!policy.success || policy.output.id !== expected.policyId || policy.output.name !== expected.policyName) fail('policy_list', 'foreign_dependency');
-  }
+  const declaredId = (item: BoundaryValue): string | null => {
+    const admin = v.safeParse(policySchema, item);
+    if (admin.success) return admin.output.id === expected.policyId && admin.output.name === expected.policyName ? admin.output.id : null;
+    const service = v.safeParse(servicePolicySchema, item);
+    if (!service.success || expected.servicePolicyId === undefined) return null;
+    return service.output.id === expected.servicePolicyId && service.output.name === expected.servicePolicyName ? service.output.id : null;
+  };
+  const declaredIds = policies.map(declaredId);
+  if (declaredIds.some((id) => id === null) || new Set(declaredIds).size !== declaredIds.length) fail('policy_list', 'foreign_dependency');
+  const listed = declaredIds.includes(expected.policyId);
   const byId = await request(call, 'policy_read', applicationUrl(call, `/policies/${expected.policyId}`), {}, true);
-  if (byId.absent !== (policies.length === 0)) fail('policy_read', 'identity_mismatch');
+  if (byId.absent === listed) fail('policy_read', 'identity_mismatch');
   if (!byId.absent) {
     const policy = v.safeParse(policySchema, byId.value);
     if (!policy.success || policy.output.id !== expected.policyId || policy.output.name !== expected.policyName) fail('policy_read', 'identity_mismatch');
@@ -222,39 +293,64 @@ async function managementPresent(call: Call): Promise<{ application: boolean; po
   return { application: true, policy: !byId.absent };
 }
 
-async function retiredVersion(call: Call, expectedSha256: string): Promise<void> {
+/** The read stage at which the active version is not the exact signed retirement module, or null when it is. */
+async function retirementMismatch(call: Call, expectedSha256: string): Promise<'retirement_deployment' | 'retirement_version' | null> {
   const owner = call.authority.certificate.statement;
   const response = await request(call, 'retirement_deployment', account(call, `/workers/scripts/${owner.worker.name}/deployments`));
   const deployments = v.safeParse(deploymentsSchema, response.value);
   const active = deployments.success ? deployments.output.deployments[0] : undefined;
   const versionId = active?.versions[0]?.version_id;
   if (active?.versions.length !== 1 || active.versions[0]?.percentage !== 100 ||
-      versionId === undefined || !/^[a-f0-9-]{36}$/u.test(versionId)) fail('retirement_deployment', 'identity_mismatch');
+      versionId === undefined || !/^[a-f0-9-]{36}$/u.test(versionId)) return 'retirement_deployment';
   const versionResponse = await request(call, 'retirement_version', account(call, `/workers/workers/${owner.worker.providerId}/versions/${versionId}?include=modules`));
   const version = v.safeParse(versionSchema, versionResponse.value);
-  if (!version.success || version.output.id !== versionId) fail('retirement_version', 'identity_mismatch');
+  if (!version.success || version.output.id !== versionId) return 'retirement_version';
   const module = version.output.modules[0];
-  if (module === undefined || module.content_type !== 'application/javascript+module') fail('retirement_version', 'identity_mismatch');
+  if (module === undefined || module.content_type !== 'application/javascript+module') return 'retirement_version';
   try {
     const raw = atob(module.content_base64);
     const bytes = Uint8Array.from(raw, (character) => character.charCodeAt(0));
     const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', bytes));
-    if (Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('') !== expectedSha256) fail('retirement_version', 'identity_mismatch');
-  } catch { fail('retirement_version', 'identity_mismatch'); }
+    return Array.from(digest, (byte) => byte.toString(16).padStart(2, '0')).join('') === expectedSha256 ? null : 'retirement_version';
+  } catch { return 'retirement_version'; }
+}
+
+/**
+ * Whether the active version is the exact signed retirement module. Outside
+ * a settling window any other version is a foreign one and stops removal;
+ * while settling, the deployment listing may still show the previous version
+ * after the namespace listing has dropped the class, so the caller re-reads.
+ */
+async function retiredVersion(call: Call, expectedSha256: string, settling: boolean): Promise<boolean> {
+  const mismatch = await retirementMismatch(call, expectedSha256);
+  if (mismatch === null) return true;
+  if (settling) return false;
+  fail(mismatch, 'identity_mismatch');
 }
 
 interface Inventory { retire_namespace: boolean; management_domain: boolean; management_policy: boolean; management_application: boolean; worker: boolean }
-async function inventory(call: Call, job: GatewayTeardownJob): Promise<Inventory> {
+/** Null only while settling: the owner Worker's listings do not yet agree with the write just sent. */
+async function observeInventory(call: Call, job: GatewayTeardownJob, settling: boolean): Promise<Inventory | null> {
   const worker = await workerPresent(call);
   const namespace = await namespacePresent(call);
-  if (namespace && !worker) fail('namespace_read', 'identity_mismatch');
-  await scriptsUnshared(call, worker, namespace, job.retirementModuleSha256);
+  if (namespace && !worker) {
+    if (!settling) fail('namespace_read', 'identity_mismatch');
+    return null;
+  }
+  const unshared = await scriptsUnshared(call, worker, namespace, job.retirementModuleSha256, settling);
   const domain = await domainPresent(call);
   const management = await managementPresent(call);
-  if (!namespace && worker) await retiredVersion(call, job.retirementModuleSha256);
+  const retired = !namespace && worker ? await retiredVersion(call, job.retirementModuleSha256, settling) : true;
+  if (!unshared || !retired) return null;
   const present = { retire_namespace: namespace, management_domain: domain,
     management_policy: management.policy, management_application: management.application, worker };
   if (job.verifiedSteps.some((step) => present[step])) fail('preflight', 'identity_mismatch');
+  return present;
+}
+
+async function inventory(call: Call, job: GatewayTeardownJob): Promise<Inventory> {
+  const present = await observeInventory(call, job, false);
+  if (present === null) fail('preflight', 'identity_mismatch');
   return present;
 }
 
@@ -305,9 +401,9 @@ export async function executeGatewayRootRemoval(input: {
   if (job === null || job.phase !== 'exchanging' || job.attempt?.id !== input.attemptId || job.attempt.expiresAt <= input.now()) fail('start', 'job_conflict');
   const authority = await verifyGatewayTeardownJobAuthority({ job, trust: input.trust });
   if (authority.certificate.statement.accountId !== input.authorizedAccountId) fail('account', 'identity_mismatch');
-  const call = { authority, accessToken: input.accessToken, transport: input.transport };
-  const module = await retirementModule(job, input.bundle);
   const wait = input.wait ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
+  const call = { authority, accessToken: input.accessToken, transport: input.transport, wait };
+  const module = await retirementModule(job, input.bundle);
   const commit = async (previous: GatewayTeardownJob, next: GatewayTeardownJob): Promise<GatewayTeardownJob> => {
     if (!await input.port.compareAndSet(previous.revision, next)) fail('persist', 'job_conflict');
     return next;
@@ -324,10 +420,16 @@ export async function executeGatewayRootRemoval(input: {
       // this boundary pending; only a fresh consent can try the write again.
       if (job.attempt === null || job.attempt.expiresAt <= input.now()) fail('send', 'job_conflict');
       await remove(call, step, module);
+      // Provider listings settle in no fixed order after a write: the namespace
+      // listing can drop the class before the deployment listing shows the
+      // retirement version. An owner-side disagreement is re-read, not judged.
       let absent = false;
       for (let attempt = 0; attempt < 8; attempt += 1) {
-        present = await inventory(call, job);
-        if (!present[step]) { absent = true; break; }
+        const observed = await observeInventory(call, job, true);
+        if (observed !== null) {
+          present = observed;
+          if (!present[step]) { absent = true; break; }
+        }
         await wait(300 * (attempt + 1));
       }
       if (!absent) fail(step, 'absence_not_proven');

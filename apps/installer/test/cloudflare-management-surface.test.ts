@@ -5,20 +5,24 @@ import {
   attachManagementCustomDomain,
   createManagementAccessApplication,
   createManagementAdminAllowPolicy,
+  createManagementServicePolicy,
   getAccountWorkersSubdomain,
   getZeroTrustOrganization,
   listAccessIdentityProviders,
   managementAccessApplicationName,
   managementAdminPolicyName,
   managementOwnershipMarker,
+  managementServicePolicyName,
   preflightFreshManagementAccessApplication,
   preflightFreshManagementCustomDomain,
   prepareManagementAccessApplicationIntent,
   prepareManagementAdminPolicyIntent,
   prepareManagementCustomDomainIntent,
+  prepareManagementServicePolicyIntent,
   recoverManagementAccessApplication,
   recoverManagementAdminAllowPolicy,
   recoverManagementCustomDomain,
+  recoverManagementServicePolicy,
   setWorkerBootstrapSubdomain,
   verifyManagementAccessApplicationGet,
   verifyManagementAccessApplicationList,
@@ -26,10 +30,12 @@ import {
   verifyManagementAdminAllowPolicyList,
   verifyManagementCustomDomainGet,
   verifyManagementCustomDomainList,
+  verifyManagementServicePolicyGet,
+  verifyManagementServicePolicyList,
   verifyWorkerBootstrapSubdomain,
   type CloudflareManagementTransport,
 } from '../src/cloudflare-management-surface';
-import { buildStaticDeployPlan, parseDeploySelection } from '../src/schema';
+import { buildStaticDeployPlan, parseDeploySelection, withDeployServiceAccess } from '../src/schema';
 import { manifest, NOW, requiredFixture, selectionInput } from './fixtures';
 
 const ACCOUNT_ID = 'a'.repeat(32);
@@ -817,5 +823,88 @@ describe('Cloudflare management-surface prerequisite', () => {
       outcome: 'unknown',
     }));
     expect(calls).toBe(1);
+  });
+});
+
+describe('receipt-owned Service Auth policy', () => {
+  const SERVICE_CLIENT_ID = `${'5'.repeat(32)}.access`;
+  const SERVICE_TOKEN_ID = '5174e90a-fafe-4643-bbbc-4a0ed4fc8415';
+  const SERVICE_POLICY_ID = 'a174e90a-fafe-4643-bbbc-4a0ed4fc8415';
+  let OPTED_PLAN: typeof PLAN;
+  const opted = () => ({ accountId: ACCOUNT_ID, zoneId: ZONE_ID, applicationId: APP_ID, plan: OPTED_PLAN }) as const;
+  const adminOf = (plan: typeof PLAN, id = POLICY_ID) => ({ ...exactPolicy(id), name: managementAdminPolicyName(plan) });
+  const service = (id = SERVICE_POLICY_ID) => ({
+    approval_required: false, decision: 'non_identity', exclude: [], id,
+    include: [{ service_token: { token_id: SERVICE_TOKEN_ID } }], isolation_required: false,
+    name: managementServicePolicyName(OPTED_PLAN), precedence: 2, purpose_justification_required: false, require: [],
+  });
+
+  beforeAll(async () => {
+    OPTED_PLAN = await buildStaticDeployPlan(
+      withDeployServiceAccess(parseDeploySelection(selectionInput), { clientId: SERVICE_CLIENT_ID, tokenId: SERVICE_TOKEN_ID }),
+      manifest, NOW + 600_000,
+    );
+  });
+
+  it('exists only for a plan that opted in, admits one service token and no identity, and is created from its exact intent', async () => {
+    expect(managementServicePolicyName(PLAN)).toBeNull();
+    expect(() => prepareManagementServicePolicyIntent(policySpec())).toThrow(CloudflareManagementError);
+    const intent = prepareManagementServicePolicyIntent(opted());
+    expect(intent).toEqual({
+      schemaVersion: 1, kind: 'management_service_policy', planId: OPTED_PLAN.planId, planHash: OPTED_PLAN.planHash,
+      ownershipMarker: `ankka-mcp-gateway:${OPTED_PLAN.managementOwnershipMarker}`, accountId: ACCOUNT_ID, zoneId: ZONE_ID, applicationId: APP_ID,
+      request: {
+        approval_required: false, decision: 'non_identity', exclude: [], include: [{ service_token: { token_id: SERVICE_TOKEN_ID } }],
+        isolation_required: false, name: `Example Gateway automation [${OPTED_PLAN.managementOwnershipMarker}]`, precedence: 2,
+        purpose_justification_required: false, require: [],
+      },
+    });
+    const create = recorded(success({ id: SERVICE_POLICY_ID }));
+    await expect(createManagementServicePolicy({ ...call(create.transport), ...opted(), intent })).resolves.toEqual({ policyId: SERVICE_POLICY_ID });
+    const request = requiredFixture(create.requests.at(0), 'service policy create request');
+    expect(new URL(request.url).pathname).toBe(`/client/v4/zones/${ZONE_ID}/access/apps/${APP_ID}/policies`);
+    await expect(request.json()).resolves.toEqual(intent.request);
+  });
+
+  it('verifies the service policy beside the administrator policy and refuses anything foreign', async () => {
+    await expect(verifyManagementServicePolicyGet({ ...call(recorded(success(service())).transport), ...opted(), policyId: SERVICE_POLICY_ID }))
+      .resolves.toEqual({ policyId: SERVICE_POLICY_ID });
+    await expect(verifyManagementServicePolicyGet({ ...call(recorded(success({ ...service(), decision: 'allow' })).transport), ...opted(), policyId: SERVICE_POLICY_ID }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'late_drift', stage: 'service_policy_get', outcome: 'rejected' }));
+    await expect(verifyManagementServicePolicyList({ ...call(recorded(success([adminOf(OPTED_PLAN), service()])).transport), ...opted(), policyId: SERVICE_POLICY_ID }))
+      .resolves.toEqual({ policyId: SERVICE_POLICY_ID });
+    await expect(verifyManagementServicePolicyList({ ...call(recorded(success([service()])).transport), ...opted(), policyId: SERVICE_POLICY_ID }))
+      .resolves.toEqual({ policyId: SERVICE_POLICY_ID });
+    await expect(verifyManagementServicePolicyList({ ...call(recorded(success([service(), { ...adminOf(OPTED_PLAN), name: 'Foreign' }])).transport), ...opted(), policyId: SERVICE_POLICY_ID }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'foreign_policy', stage: 'service_policy_list_verify', outcome: 'rejected' }));
+    await expect(verifyManagementServicePolicyList({ ...call(recorded(success([adminOf(OPTED_PLAN), service(), service(OTHER_POLICY_ID)])).transport), ...opted(), policyId: SERVICE_POLICY_ID }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'foreign_policy', stage: 'service_policy_list_verify', outcome: 'rejected' }));
+  });
+
+  it('recovers the service policy by exact shape and stays ambiguous on duplicates', async () => {
+    const intent = prepareManagementServicePolicyIntent(opted());
+    await expect(recoverManagementServicePolicy({ ...call(recorded(success([adminOf(OPTED_PLAN), service()])).transport), ...opted(), intent }))
+      .resolves.toEqual({
+        schemaVersion: 1, kind: 'management_service_policy_recovery', planId: OPTED_PLAN.planId, planHash: OPTED_PLAN.planHash,
+        ownershipMarker: `ankka-mcp-gateway:${OPTED_PLAN.managementOwnershipMarker}`, locator: { policyId: SERVICE_POLICY_ID },
+      });
+    await expect(recoverManagementServicePolicy({ ...call(recorded(success([service(), service(OTHER_POLICY_ID)])).transport), ...opted(), intent }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_ambiguous', stage: 'service_policy_recover', outcome: 'rejected' }));
+    await expect(recoverManagementServicePolicy({ ...call(recorded(success([adminOf(OPTED_PLAN)])).transport), ...opted(), intent }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'provider_unknown', stage: 'service_policy_recover', outcome: 'unknown' }));
+  });
+
+  it('lets the administrator policy be verified and recovered beside the service policy only under an opted-in plan', async () => {
+    await expect(verifyManagementAdminAllowPolicyList({ ...call(recorded(success([adminOf(OPTED_PLAN), service()])).transport), ...opted(), policyId: POLICY_ID }))
+      .resolves.toEqual({ policyId: POLICY_ID });
+    const adminIntent = prepareManagementAdminPolicyIntent(opted());
+    await expect(recoverManagementAdminAllowPolicy({ ...call(recorded(success([service(), adminOf(OPTED_PLAN)])).transport), ...opted(), intent: adminIntent }))
+      .resolves.toMatchObject({ kind: 'management_admin_policy_recovery', locator: { policyId: POLICY_ID } });
+    // A plan without a service identity still refuses a second policy of any shape.
+    const plainService = { ...service(), name: `Example Gateway automation [${PLAN.managementOwnershipMarker}]` };
+    await expect(verifyManagementAdminAllowPolicyList({ ...call(recorded(success([exactPolicy(), plainService])).transport), ...policySpec(), policyId: POLICY_ID }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'foreign_policy', stage: 'admin_policy_list_verify', outcome: 'rejected' }));
+    await expect(recoverManagementAdminAllowPolicy({ ...call(recorded(success([exactPolicy(), plainService])).transport), ...policySpec(), intent: prepareManagementAdminPolicyIntent(policySpec()) }))
+      .rejects.toSatisfy((error: CloudflareManagementError) => expectManagementError(error, { code: 'foreign_policy', stage: 'admin_policy_recover', outcome: 'rejected' }));
   });
 });

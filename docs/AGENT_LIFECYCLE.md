@@ -1,0 +1,258 @@
+# Agent-operable lifecycle runner
+
+The lifecycle runner is the supported entry point for development, CI and
+operator automation over a disposable gateway. After one credential setup and
+one approval per job it installs, manages, updates, interrupts, resumes and
+removes a gateway in the test account without browser consent or a cached
+human Access session, and it can finish removal after the gateway is gone.
+It reuses the production operations; it is not a second implementation.
+
+```sh
+npm run lifecycle -- approve --job /private/job.json --approved-by <administrator email>
+npm run lifecycle -- run --job /private/job.json
+npm run lifecycle -- run --job /private/job.json --resume --from update
+npm run lifecycle -- status --job /private/job.json
+npm run lifecycle -- cancel --job /private/job.json
+npm run lifecycle -- credentials --job /private/job.json
+```
+
+## Three separate concerns
+
+| Concern | Where it lives | Lifetime |
+| --- | --- | --- |
+| Cloudflare credential | The operator's credential store (macOS keychain item or an environment variable in CI). The job carries a reference by name only. | Managed by the operator: expiry, rotation and revocation happen in Cloudflare. Finishing a job never revokes it. |
+| Job approval | The job file. `approve` records who approved and a digest of the target, both release identities, the source, the operations and the credential references. | Until any of those values change. A changed target or release makes the runner stop with `job_target_changed`. |
+| Execution state | The private run directory: `record.json` (events, stage results, the Durable Object storage the production code wrote, provider inventory, removal evidence) and `installation-secrets.json` (installation-owned key material). | Survives process restarts and the removal of the gateway. Never contains a Cloudflare credential. |
+
+A process restart therefore reloads the job and the record, checks provider
+state through the production reconciliation, and continues with the same
+credential. Cancellation (`cancel`), a revoked or rejected credential, a
+changed target and an ownership conflict stop execution with a fixed code.
+
+## Credentials
+
+| Credential | Purpose | Custody |
+| --- | --- | --- |
+| Deployment API token | The fixed lifecycle operations (`bootstrap`, `install`, `upgrade`, `uninstall`, `gateway-root-finalize`) under the catalogue's `operator-managed` credential lifecycle. | Account-owned token on the test account with an expiry. Read into the runner's processes only. Never installed into a gateway, never passed through Ankka-hosted services. |
+| Management API token | The gateway's own routine source and Team operations. | Created by the operator with exactly the permissions in [Management token](MANAGEMENT_TOKEN.md); the runner installs it as the disposable gateway's encrypted Worker secret using the deployment token. Removing the gateway does not revoke it. |
+| Access service token | Machine authentication to a gateway's protected management routes without a human session. | Created by the operator in Zero Trust. A job that names it under `credentials.service` (secret reference, client id, token id) opts the gateway into exactly that identity at install: the plan carries it, the final runtime gets `ANKKA_SERVICE_CLIENT_ID`, and the management application gets a receipt-owned Service Auth policy for that token. The hosted installer never opts in. The gateway verifies the Access token like an administrator's (issuer, audience, validity, signature) and then authorizes the exact `common_name` against a fixed method-and-route allowlist: status and update reads, source discovery, draft and apply, Team read and save. Update and teardown action creation and source action cancellation are denied to it. Action records name a service actor as `service:<client id>` and expose `actorKind`. |
+
+The operation authority catalogue in
+[cloudflare-operation-authority.ts](../apps/installer/src/cloudflare-operation-authority.ts)
+declares this policy. The runner may execute only the listed fixed operations
+with exactly their scopes, endpoint families, ownership states, mutations and
+postconditions; the transport guard refuses any provider call outside the
+current stage's families. Routine source and Team operations are not runner
+operations: they run in the release payload's own management code with the
+gateway's limited management credential.
+
+## Stages
+
+| Stage | Production operation | Evidence |
+| --- | --- | --- |
+| `preflight` | Read-only credential inventory, release pair validation, fresh-target check | families readable, releases distinct |
+| `bootstrap` | Hosted Stage 1 (`provisionHostedStage1WithOperatorCredential`), readiness handoff, ownership acceptance | shell Worker deployed, ownership state accepted |
+| `converge` | Stage 2 converger with the checkout payload in-process, one pass per chunk checkpoint; the signed release bundle is what it uploads | provider calls per pass (bounded to 45), handover armed |
+| `verify` | Provider read-back of the final runtime and the management object | `workers.dev` disabled, final bindings, management state served |
+| `manage` | Management token installed as the Worker secret; the same source and Team exercise the browser runner performs, over the payload's management object | source installed default-deny, synthetic member granted and removed, inventory captured |
+| `update` | The gateway's updater with release B served from the local publish directory | release B active, management secret inherited |
+| `remove-dependencies` | The payload's receipt-owned teardown commands (prepare, prove, apply, settle) and the signed handoff | dependencies absent by independent reads |
+| `remove-root` | The hosted finalizer's fixed root steps over a record-backed job under the `operator-managed` policy | five steps verified, job `removed` with `not_attempted` revocation |
+| `verify-absent` | Independent provider reads of every recorded resource | nothing owned remains; unrelated resources named |
+
+Every `run` records the checkout that executed it (`executedSource`: commit
+and whether the tree had uncommitted changes) separately from the release
+identities the stages deployed, which `preflight` and `update` record.
+
+Each stage runs in its own process over the shared record and exits with
+`passed`, `verified`, `failed` or `blocked`. `blocked` names a condition only
+the operator can change (an unapproved job, a missing or rejected credential,
+an expired bootstrap capability, a held Stage 2 lease). `interrupted` is
+recorded by the parent when a stage process dies. `not_run` marks stages after
+a stop. `qualified` is always `false`: nothing here is customer-path evidence.
+
+## Interruption and recovery
+
+`--interrupt-after <stage>:<n>` terminates the stage process with `SIGKILL`
+immediately after the n-th mutating provider response arrives and before any
+journal records it. The production code has already armed the mutation in the
+record, so `--resume --from <stage>` enters the same reconciliation path the
+gateway uses: the Stage 2 journal resumes from `send_armed`, the teardown
+installation object resolves its pending deletion boundary by an exact read,
+the root job resumes its pending step, and the updater reads the active
+release before deciding whether an upload is still needed. No mutation is
+retried blindly and no second installation is created.
+
+Uncertain provider outcomes stay uncertain: a missing permission, an
+authentication failure or an ambiguous ownership read stops the stage instead
+of being read as absence.
+
+Two rules keep the killed process's evidence intact. Every record write
+starts from the record as it is on disk, so the parent's own note that a
+stage died can never cover what the stage had already written (its
+provision, journal or trace). And a resumed `converge` first waits out the
+dead attempt's Stage 2 lease (at most five minutes): the journal lets a
+successor take the lease over only after expiry, and the run lock already
+proves the holder is gone.
+
+The parent process can die too. `run.lock` names the parent that owns the
+run and, once a stage child has registered, that child; a process counts as
+alive only if its pid exists on this host and started when the lock says it
+did, so a reused pid is a dead process. A new parent that meets a live owner
+stops with `run_lock_held`. If the owner is dead but its stage child is
+still running, the child still owns the run and the new parent stops with
+`run_child_active` naming the stage; the child finishes and records its
+result on its own. Only a lock whose owner and child are both dead is taken
+over, by atomic replacement that is then confirmed to be the taker's own;
+nothing removes a lock blindly, and a parent that finds its lock replaced
+stops with `run_lock_lost` without another write. A stage child runs only
+under its own live parent's lock.
+
+Re-entering `manage` continues from the management object's own journal. The
+existing draft is reused, an installed source is not applied again, and a
+source action that stopped after a provider write is renewed through the
+payload's renewal route, which re-enters the same reconciliation the gateway
+runs for a dashboard renewal: each recorded resource is verified by an exact
+read, and only the write the journal proves missing is sent. The gateway
+rotates the action key only after the stopped action's consent window has
+elapsed, so the stage waits for that window (at most ten minutes) before
+renewing. It reads the Team roster only after the source journal is
+reconciled, because the gateway withholds its team view while a stopped
+action leaves the Portal ahead of the committed ownership. A membership
+already in place is recorded as recovered rather than written again.
+
+## What a runner-installed gateway is and is not
+
+The Worker, Durable Object namespace, Access applications and policies, MCP
+Portal, DNS record, custom domain and the signed update are real. The
+gateway's ownership identity, Stage 2 journal, receipts and management state
+live in the runner's record, because only code running inside the deployed
+Durable Object could write its storage and the only credential entry into
+the deployed shell is its OAuth callback. Consequently the deployed
+management routes of a runner-installed gateway answer "unavailable", and the
+runner exercises the management code in-process instead. That in-process
+Durable Object code is the checkout's hand-authored `payload/worker/index.js`,
+the file every release bundles; the deployed Worker runs the signed release
+bundle, so the two differ by whatever `main` changed since that release.
+
+Coverage that stays outside the runner, by design:
+
+- the deployed management routes as the service identity: proven against a
+  gateway installed through an isolated installer (browser consent once per
+  release) with the browser runner's service mode, including the refusal of a
+  valid but unapproved identity recorded by the layer that answered, see
+  [live lifecycle](LIVE_LIFECYCLE.md);
+- browser onboarding, real OAuth permissions and consent screens;
+- the deployed Durable Object's update handover and its hosted removal job;
+- restricted-user OAuth behaviour (an API-token run is not evidence for it);
+- signed-release publication and the hosted control plane (release B is read
+  from the signer's local publish directory).
+
+Use the [live lifecycle command](LIVE_LIFECYCLE.md) for that layer, and
+[local runtime tests](LOCAL_RUNTIME.md) for fast regressions against
+production state code.
+
+## Job file
+
+The job is a private JSON file outside the checkout with mode `0600`.
+
+```json
+{
+  "schemaVersion": 1,
+  "jobId": "lifecycle-20260906-a",
+  "scope": "disposable_lifecycle",
+  "target": { "accountId": "…", "zoneId": "…", "zoneName": "example.com", "prefix": "run1", "gatewayName": "Ankka run1", "adminEmail": "you@example.com" },
+  "releases": { "a": { "publishDirectory": "/private/releases/A/publish", "pin": "/private/releases/A/pin.json" },
+                "b": { "publishDirectory": "/private/releases/B/publish", "pin": "/private/releases/B/pin.json" } },
+  "source": { "url": "https://synthetic.example.net/mcp", "tool": "synthetic_status" },
+  "credentials": { "deployment": { "keychain": { "service": "ankka-lifecycle-runner", "account": "deployment-token" } },
+                   "management": { "keychain": { "service": "ankka-lifecycle-runner", "account": "management-token" } },
+                   "service": { "secret": { "keychain": { "service": "ankka-lifecycle-runner", "account": "access-client-secret" } },
+                                "clientId": "<32 hex>.access", "tokenId": "<service token uuid>" } },
+  "operations": ["install", "manage", "update", "remove"],
+  "runDirectory": "/private/runs/lifecycle-20260906-a"
+}
+```
+
+The management hostname is `manage<prefix>.<zone>` and the Portal hostname is
+`mcp<prefix>.<zone>`; a job with a used prefix stops at `preflight`. The
+approver must be the gateway's administrator email. A credential reference is
+either a keychain item (`security find-generic-password -s <service> -a
+<account>`) or an environment variable whose name starts with `ANKKA_`.
+
+## What this replaced
+
+The four token-mode harnesses under `apps/installer/test-live`, their vitest
+configuration, `tools/provider-cycle-command.mjs` (`npm run test:live`) and
+`tools/live-test-record.mjs`. Their bodies became the stages above; the
+faked OAuth token endpoint and faked account list are gone, replaced by the
+declared operator-managed credential path in the hosted Stage 1 and root
+removal executors.
+
+## Orchestration
+
+The runner is a small parent process over a file record: one lock, atomic
+writes, one child process per stage. Cloudflare Workflows would replace the
+parent's sequencing and the record's event log with durable steps, but not the
+reconciliation, ownership checks or credential custody. The rule from the
+first milestone stands: a bounded prototype over the same stage functions is
+adopted only if it removes more coordination code than it adds, and it is
+looked at early only if the runner accumulates orchestration machinery.
+
+**Decision, 2026-09-07 (slice 5 of #152): the stages are not ported into
+Workflow steps and no prototype was started.** The early trigger has not fired. Since the runner landed, its
+coordination code changed in two places, the lock's liveness and takeover
+rules and the record's reload-before-write, both regressions for defects the
+live runs exposed; the stages gained bounded waits (the Stage 2 lease, the
+consent window), not sequencing. The prototype was costed on paper instead:
+
+- Replaced: the parent's loop and exit codes. One `step.do` per stage,
+  `restart({ from })` for `--resume --from`, `terminate` for `cancel`, a
+  unique instance id for the run lock, `step.sleep` for the bounded waits,
+  the instance status for `status`.
+- Not replaced: the record's Durable Object storage stand-in and the
+  installation secrets. The production code writes them between provider
+  calls, and a step persists only its return value, so they would move into a
+  real Durable Object of a runner Worker deployed into the disposable
+  account. The reconciliation, the transport guard, the stages and the
+  release loader stay; the publish directories become R2 objects and the
+  payload is bundled.
+- Lost: the interruption proof. `--interrupt-after` kills the process between
+  a mutating response and the write that would journal it. A Worker cannot
+  end itself; a thrown error lets the code after the mutation run, so the
+  journal or the stage result records a failure, a different recovery state;
+  `restart` cancels an in-flight step from outside but not at a chosen
+  response. The armed-but-unrecorded class would be proven only by the local
+  runner and the workerd fixtures.
+- Changed custody: the deployment, management and service credentials become
+  Worker secrets in the account they act on, resting there between runs
+  instead of being read from the keychain for one run; installation key
+  material rests in Durable Object storage. That amends the credential table
+  in #152 and is the operator's decision, not a slice's side effect.
+- Added: a runner Worker with a Workflow class, a Durable Object class and
+  its migrations, an R2 release path, a secret provisioning path, and a
+  deployed-runner identity to record beside `executedSource` and the release
+  identities. That is more coordination code than the parent and the lock it
+  removes.
+
+The one thing the local runner cannot do is run with no operator host awake.
+That is a hosting question, not an orchestration one, and the runner does not
+change for it: the job file already accepts `env:` credential references, and
+the lock, the release candidate build and the signing script run headless on
+Linux. The first off-host host is a CI job in a private repository that checks
+out this public repository at one commit, builds and dev-signs the release
+pair, writes and approves a job with a fresh prefix, runs it, and stores the
+encrypted run directory for resume. It cannot run in this repository's own
+Actions: a public repository's logs and artifacts are readable by anyone, and
+the record names test-account hostnames. The same command moves into a
+Cloudflare sandbox when secrets and logs should stay inside the disposable
+account; a Workflow around that one sandboxed command, which is the shape
+`@cloudflare/ci` (August 2026) gives a pipeline, then adds a schedule, an
+approval gate and a status API. That is the point at which Workflows earn a
+place here. Cloudflare Artifacts is storage for agent workspaces, not a system
+of record: GitHub keeps the review, the required checks, the immutable
+releases and the issues. Workflows are not a candidate for the hosted
+customer path: persisted step state would persist the operation-scoped grant.
+
+Reconsider the port itself only when the runner needs a scheduler, a queue,
+parallel stages or coordination across jobs.

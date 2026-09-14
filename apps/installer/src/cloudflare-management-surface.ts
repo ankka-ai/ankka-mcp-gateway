@@ -111,6 +111,18 @@ const policySchema = v.looseObject({
   exclude: v.array(boundaryValueSchema),
   require: v.array(boundaryValueSchema),
 });
+const servicePolicySchema = v.looseObject({
+  id: providerIdSchema,
+  name: v.string(),
+  decision: v.literal('non_identity'),
+  precedence: v.literal(2),
+  approval_required: v.optional(v.literal(false)),
+  isolation_required: v.optional(v.literal(false)),
+  purpose_justification_required: v.optional(v.literal(false)),
+  include: v.array(v.strictObject({ service_token: v.strictObject({ token_id: v.string() }) })),
+  exclude: v.array(boundaryValueSchema),
+  require: v.array(boundaryValueSchema),
+});
 const customDomainSchema = v.looseObject({
   id: customDomainIdSchema,
   hostname: v.string(),
@@ -138,6 +150,10 @@ export type CloudflareManagementStage =
   | 'admin_policy_get'
   | 'admin_policy_list_verify'
   | 'admin_policy_recover'
+  | 'service_policy_create'
+  | 'service_policy_get'
+  | 'service_policy_list_verify'
+  | 'service_policy_recover'
   | 'worker_subdomain_set'
   | 'worker_subdomain_get'
   | 'management_domain_baseline'
@@ -306,6 +322,44 @@ export interface ManagementAdminPolicyIntent {
   readonly request: ManagementAdminPolicyRequestSpec;
 }
 
+export interface ManagementServicePolicyLocator {
+  readonly policyId: string;
+}
+
+/** Service Auth on the management application for the one client the plan opted into; no identity is admitted. */
+export interface ManagementServicePolicyRequestSpec {
+  readonly approval_required: false;
+  readonly decision: 'non_identity';
+  readonly exclude: readonly [];
+  readonly include: readonly [{ readonly service_token: { readonly token_id: string } }];
+  readonly isolation_required: false;
+  readonly name: string;
+  readonly precedence: 2;
+  readonly purpose_justification_required: false;
+  readonly require: readonly [];
+}
+
+export interface ManagementServicePolicyIntent {
+  readonly schemaVersion: 1;
+  readonly kind: 'management_service_policy';
+  readonly planId: string;
+  readonly planHash: string;
+  readonly ownershipMarker: string;
+  readonly accountId: string;
+  readonly zoneId: string;
+  readonly applicationId: string;
+  readonly request: ManagementServicePolicyRequestSpec;
+}
+
+export interface ManagementServicePolicyRecoveryRecord {
+  readonly schemaVersion: 1;
+  readonly kind: 'management_service_policy_recovery';
+  readonly planId: string;
+  readonly planHash: string;
+  readonly ownershipMarker: string;
+  readonly locator: ManagementServicePolicyLocator;
+}
+
 export interface ManagementCustomDomainIntent {
   readonly schemaVersion: 1;
   readonly kind: 'management_custom_domain';
@@ -386,6 +440,17 @@ interface ExpectedPolicy {
   readonly policyId: string;
   readonly name: string;
   readonly adminEmails: readonly string[];
+}
+
+interface ExpectedServicePolicy {
+  readonly accountId: string;
+  readonly zoneId: string;
+  readonly planId: string;
+  readonly planHash: string;
+  readonly applicationId: string;
+  readonly policyId: string;
+  readonly name: string;
+  readonly tokenId: string;
 }
 
 interface ExpectedDomain {
@@ -751,6 +816,9 @@ interface ReviewedManagementProjection {
   readonly applicationName: string;
   readonly policyName: string;
   readonly adminEmails: readonly string[];
+  /** The service identity the plan opted into, with its receipt-owned policy name; null for every other plan. */
+  readonly serviceAccess: { readonly clientId: string; readonly tokenId: string } | null;
+  readonly servicePolicyName: string | null;
 }
 
 function reviewedManagementProjection(
@@ -777,6 +845,14 @@ function reviewedManagementProjection(
   const expectedWorkerName = parsed.bootstrapIdentity?.workerName ?? `ankka-gateway-${slug}-${ownershipMarker}`;
   const expectedApplicationName = `${parsed.gatewayConfiguration.gatewayName} management [${ownershipMarker}]`;
   const expectedPolicyName = `${parsed.gatewayConfiguration.gatewayName} administrators [${ownershipMarker}]`;
+  const servicePolicy = parsed.managementResources.find((resource) => resource.kind === 'management_service_policy');
+  const serviceAccess = parsed.gatewayConfiguration.serviceAccess ?? null;
+  const expectedServicePolicyName = `${parsed.gatewayConfiguration.gatewayName} automation [${ownershipMarker}]`;
+  if ((servicePolicy === undefined) !== (serviceAccess === null) ||
+      (servicePolicy !== undefined && (servicePolicy.key !== 'management-service-policy' ||
+        servicePolicy.name !== expectedServicePolicyName || servicePolicy.hostname !== parsed.gatewayConfiguration.managementHostname))) {
+    fail('invalid_input', stage, 'not_sent');
+  }
   if (
     !worker || worker.key !== 'management-worker' || worker.name !== expectedWorkerName ||
     worker.hostname !== parsed.gatewayConfiguration.managementHostname ||
@@ -796,6 +872,8 @@ function reviewedManagementProjection(
     applicationName: app.name,
     policyName: policy.name,
     adminEmails: parsed.managementAdminEmails,
+    serviceAccess: serviceAccess === null ? null : Object.freeze({ clientId: serviceAccess.clientId, tokenId: serviceAccess.tokenId }),
+    servicePolicyName: servicePolicy?.name ?? null,
   });
 }
 
@@ -813,6 +891,11 @@ export function managementAccessApplicationName(plan: StaticDeployPlan): string 
 
 export function managementAdminPolicyName(plan: StaticDeployPlan): string {
   return reviewedManagementProjection(plan, 'admin_policy_create').policyName;
+}
+
+/** The receipt-owned Service Auth policy name, or null for a plan that opted into no service identity. */
+export function managementServicePolicyName(plan: StaticDeployPlan): string | null {
+  return reviewedManagementProjection(plan, 'service_policy_create').servicePolicyName;
 }
 
 export async function getZeroTrustOrganization(
@@ -1108,6 +1191,43 @@ export async function recoverManagementAccessApplication(
   });
 }
 
+/** A policy that is exactly the plan's administrator policy, whatever its id. */
+function isPlanAdminPolicy(value: BoundaryValue, expected: Omit<ExpectedPolicy, 'policyId'>): boolean {
+  const parsed = v.safeParse(providerIdResultSchema, value);
+  return parsed.success && exactPolicy(value, { ...expected, policyId: parsed.output.id });
+}
+
+/** A policy that is exactly the plan's Service Auth policy, whatever its id. */
+function isPlanServicePolicy(value: BoundaryValue, expected: Omit<ExpectedServicePolicy, 'policyId'>): boolean {
+  const parsed = v.safeParse(providerIdResultSchema, value);
+  return parsed.success && exactServicePolicy(value, { ...expected, policyId: parsed.output.id });
+}
+
+/**
+ * The management application carries at most two receipt-owned policies. Beside
+ * the one being verified, only the plan's other one may exist, once; anything
+ * else is foreign and stops the operation.
+ */
+function requireOnlyExpectedCompanions(
+  values: readonly BoundaryValue[],
+  own: (value: BoundaryValue) => boolean,
+  companion: (value: BoundaryValue) => boolean,
+  stage: CloudflareManagementStage,
+): void {
+  const companions = values.filter((value) => !own(value));
+  if (companions.length > 1 || companions.some((value) => !companion(value))) fail('foreign_policy', stage, 'rejected');
+}
+
+function adminCompanion(input: ManagementAdminPolicySpec, stage: CloudflareManagementStage): (value: BoundaryValue) => boolean {
+  const projection = reviewedManagementProjection(input.plan, stage);
+  if (projection.serviceAccess === null || projection.servicePolicyName === null) return () => false;
+  const expected = {
+    accountId: input.accountId, zoneId: input.zoneId, planId: projection.planId, planHash: projection.planHash,
+    applicationId: input.applicationId, name: projection.servicePolicyName, tokenId: projection.serviceAccess.tokenId,
+  };
+  return (value) => isPlanServicePolicy(value, expected);
+}
+
 function validatePolicySpec(
   input: ManagementAdminPolicySpec,
   stage: CloudflareManagementStage,
@@ -1253,10 +1373,8 @@ export async function verifyManagementAdminAllowPolicyList(
     url.searchParams.set('per_page', String(perPage));
     return url;
   }, true);
-  if (values.length > 1) fail('foreign_policy', stage, 'rejected');
-  if (values.length !== 1 || !exactPolicy(values[0], expected)) {
-    fail('late_drift', stage, 'rejected');
-  }
+  requireOnlyExpectedCompanions(values, (value) => exactPolicy(value, expected), adminCompanion(input, stage), stage);
+  if (values.filter((value) => exactPolicy(value, expected)).length !== 1) fail('late_drift', stage, 'rejected');
   return Object.freeze({ policyId: expected.policyId });
 }
 
@@ -1283,15 +1401,179 @@ export async function recoverManagementAdminAllowPolicy(
     }
   }
   if (matches.length > 1) fail('provider_ambiguous', stage, 'rejected');
-  if (values.length > 1 || (values.length === 1 && matches.length === 0)) {
-    fail('foreign_policy', stage, 'rejected');
-  }
+  requireOnlyExpectedCompanions(values, (value) => isPlanAdminPolicy(value, expected), adminCompanion(input, stage), stage);
   if (matches.length === 0) fail('provider_unknown', stage, 'unknown');
   const locator = matches.at(0);
   if (locator === undefined) fail('provider_unknown', stage, 'unknown');
   return Object.freeze({
     schemaVersion: 1,
     kind: 'management_admin_policy_recovery',
+    planId: input.intent.planId,
+    planHash: input.intent.planHash,
+    ownershipMarker: input.intent.ownershipMarker,
+    locator,
+  });
+}
+
+function validateServicePolicySpec(
+  input: ManagementAdminPolicySpec,
+  stage: CloudflareManagementStage,
+): Omit<ExpectedServicePolicy, 'policyId'> {
+  if (
+    !ACCOUNT_ID_PATTERN.test(input.accountId) ||
+    !ZONE_ID_PATTERN.test(input.zoneId) ||
+    !providerId(input.applicationId)
+  ) fail('invalid_input', stage, 'not_sent');
+  const plan = reviewedManagementProjection(input.plan, stage);
+  if (plan.serviceAccess === null || plan.servicePolicyName === null) fail('invalid_input', stage, 'not_sent');
+  return {
+    accountId: input.accountId,
+    zoneId: input.zoneId,
+    planId: plan.planId,
+    planHash: plan.planHash,
+    applicationId: input.applicationId,
+    name: plan.servicePolicyName,
+    tokenId: plan.serviceAccess.tokenId,
+  };
+}
+
+function servicePolicyBody(expected: Omit<ExpectedServicePolicy, 'policyId'>): ManagementServicePolicyRequestSpec {
+  return {
+    approval_required: false,
+    decision: 'non_identity',
+    exclude: [],
+    include: [{ service_token: { token_id: expected.tokenId } }],
+    isolation_required: false,
+    name: expected.name,
+    precedence: 2,
+    purpose_justification_required: false,
+    require: [],
+  };
+}
+
+function exactServicePolicy(value: BoundaryValue, expected: ExpectedServicePolicy): boolean {
+  const result = v.safeParse(servicePolicySchema, value);
+  if (!result.success) return false;
+  const policy = result.output;
+  return policy.id === expected.policyId && policy.name === expected.name && policy.exclude.length === 0 &&
+    policy.require.length === 0 && policy.include.length === 1 && policy.include[0]?.service_token.token_id === expected.tokenId;
+}
+
+function serviceCompanion(input: ManagementAdminPolicySpec, stage: CloudflareManagementStage): (value: BoundaryValue) => boolean {
+  const expected = validatePolicySpec(input, stage);
+  return (value) => isPlanAdminPolicy(value, expected);
+}
+
+export function prepareManagementServicePolicyIntent(input: ManagementAdminPolicySpec): ManagementServicePolicyIntent {
+  const expected = validateServicePolicySpec(input, 'service_policy_create');
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'management_service_policy',
+    planId: expected.planId,
+    planHash: expected.planHash,
+    ownershipMarker: managementOwnershipMarker(input.plan),
+    accountId: expected.accountId,
+    zoneId: expected.zoneId,
+    applicationId: expected.applicationId,
+    request: Object.freeze(servicePolicyBody(expected)),
+  });
+}
+
+function requireServicePolicyIntent(
+  input: ManagementAdminPolicySpec & { readonly intent: ManagementServicePolicyIntent },
+  stage: CloudflareManagementStage,
+) {
+  const expected = validateServicePolicySpec(input, stage);
+  const canonical = prepareManagementServicePolicyIntent(input);
+  if (!exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
+  return { expected, intent: canonical };
+}
+
+export async function createManagementServicePolicy(
+  input: CloudflareManagementCall & ManagementAdminPolicySpec & { readonly intent: ManagementServicePolicyIntent },
+): Promise<ManagementServicePolicyLocator> {
+  const stage = 'service_policy_create';
+  const call = commonInput(input, stage);
+  const { intent } = requireServicePolicyIntent(input, stage);
+  const response = await performRequest(
+    call,
+    stage,
+    zoneUrl(input.zoneId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`),
+    { method: 'POST', headers: jsonHeaders(call.accessToken), body: JSON.stringify(intent.request) },
+  );
+  const result = v.safeParse(providerIdResultSchema, requireSuccess(response, stage, CREATED_STATUSES).result);
+  if (!result.success) fail('provider_unknown', stage, 'unknown');
+  return Object.freeze({ policyId: result.output.id });
+}
+
+function expectedServicePolicy(
+  input: ManagementAdminPolicySpec & ManagementServicePolicyLocator,
+  stage: CloudflareManagementStage,
+): ExpectedServicePolicy {
+  const expected = validateServicePolicySpec(input, stage);
+  if (!providerId(input.policyId)) fail('invalid_input', stage, 'not_sent');
+  return { ...expected, policyId: input.policyId };
+}
+
+export async function verifyManagementServicePolicyGet(
+  input: CloudflareManagementCall & ManagementAdminPolicySpec & ManagementServicePolicyLocator,
+): Promise<ManagementServicePolicyLocator> {
+  const stage = 'service_policy_get';
+  const call = commonInput(input, stage);
+  const expected = expectedServicePolicy(input, stage);
+  const response = await performRequest(
+    call,
+    stage,
+    zoneUrl(input.zoneId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies/${encodeURIComponent(input.policyId)}`),
+    { method: 'GET', headers: authHeaders(call.accessToken) },
+  );
+  if (!exactServicePolicy(requireSuccess(response, stage).result, expected)) fail('late_drift', stage, 'rejected');
+  return Object.freeze({ policyId: expected.policyId });
+}
+
+export async function verifyManagementServicePolicyList(
+  input: CloudflareManagementCall & ManagementAdminPolicySpec & ManagementServicePolicyLocator,
+): Promise<ManagementServicePolicyLocator> {
+  const stage = 'service_policy_list_verify';
+  const call = commonInput(input, stage);
+  const expected = expectedServicePolicy(input, stage);
+  const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) => {
+    const url = zoneUrl(input.zoneId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`);
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('per_page', String(perPage));
+    return url;
+  }, true);
+  requireOnlyExpectedCompanions(values, (value) => exactServicePolicy(value, expected), serviceCompanion(input, stage), stage);
+  if (values.filter((value) => exactServicePolicy(value, expected)).length !== 1) fail('late_drift', stage, 'rejected');
+  return Object.freeze({ policyId: expected.policyId });
+}
+
+export async function recoverManagementServicePolicy(
+  input: CloudflareManagementCall & ManagementAdminPolicySpec & { readonly intent: ManagementServicePolicyIntent },
+): Promise<ManagementServicePolicyRecoveryRecord> {
+  const stage = 'service_policy_recover';
+  const call = commonInput(input, stage);
+  const { expected } = requireServicePolicyIntent(input, stage);
+  const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) => {
+    const url = zoneUrl(input.zoneId, `/access/apps/${encodeURIComponent(input.applicationId)}/policies`);
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('per_page', String(perPage));
+    return url;
+  }, true);
+  const matches: ManagementServicePolicyLocator[] = [];
+  for (const value of values) {
+    const parsed = v.safeParse(providerIdResultSchema, value);
+    if (!parsed.success) fail('provider_mismatch', stage, 'rejected');
+    if (exactServicePolicy(value, { ...expected, policyId: parsed.output.id })) matches.push(Object.freeze({ policyId: parsed.output.id }));
+  }
+  if (matches.length > 1) fail('provider_ambiguous', stage, 'rejected');
+  requireOnlyExpectedCompanions(values, (value) => isPlanServicePolicy(value, expected), serviceCompanion(input, stage), stage);
+  if (matches.length === 0) fail('provider_unknown', stage, 'unknown');
+  const locator = matches.at(0);
+  if (locator === undefined) fail('provider_unknown', stage, 'unknown');
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'management_service_policy_recovery',
     planId: input.intent.planId,
     planHash: input.intent.planHash,
     ownershipMarker: input.intent.ownershipMarker,

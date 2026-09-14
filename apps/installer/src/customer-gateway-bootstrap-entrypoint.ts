@@ -191,6 +191,7 @@ export class AdminState extends RuntimeAdminState {
       storage: this.bootstrapState.storage,
       journal: new CustomerStage2DurableStatePort(this.bootstrapState.storage),
       runtime: {
+        controlPlaneOrigin: config.ANKKA_INSTALLER_ORIGIN,
         updateChannel: config.ANKKA_UPDATE_CHANNEL,
         updateKeyId: config.ANKKA_UPDATE_KEY_ID,
         updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,
@@ -364,6 +365,7 @@ export class AdminState extends RuntimeAdminState {
       secretCommitment: config.ANKKA_BOOTSTRAP_SECRET_SHA256,
       capabilityExpiresAt: config.expiresAt,
       publicClientId: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
+      managementHostname: config.ANKKA_MANAGEMENT_HOSTNAME,
     }, {
       state: new CustomerBootstrapDurableStatePort(this.bootstrapState.storage),
       transport: (input, init) => fetch(input, init),

@@ -966,9 +966,10 @@ test('management status requires a verified Access JWT and exposes no provider o
     assert.equal(response.status, 200);
     const status = await response.json();
     assert.deepEqual(Object.keys(status).sort(), [
-      'access', 'controlPlaneOrigin', 'gateway', 'release', 'schemaVersion', 'source', 'status', 'updatedAt',
+      'access', 'controlPlaneOrigin', 'gateway', 'release', 'schemaVersion', 'serviceIdentity', 'source', 'status', 'updatedAt',
     ]);
     assert.equal(status.controlPlaneOrigin, 'https://deploy.ankka.ai');
+    assert.equal(status.serviceIdentity, null); // no service identity configured for this deployment
     const serialized = JSON.stringify(status);
     assert.doesNotMatch(serialized, /(?:provider|receipt|journal|tombstone|installationId|accountId|zoneId)/iu);
     assert.doesNotMatch(serialized, /synthetic-cloudflare-grant-never-store/u);

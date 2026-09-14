@@ -184,6 +184,7 @@ function envelope(result: BoundaryValue, status = 200): Response {
 function providerFake(release: SignedRelease, options: {
   readonly currentRelease?: string;
   readonly managementBinding?: { name: string; type: string };
+  readonly serviceBinding?: { name: string; type: string; text?: string };
   readonly controlPlane?: (request: Request) => Promise<Response>;
 } = {}): ProviderFake {
   const requests: Recorded[] = [];
@@ -239,6 +240,7 @@ function providerFake(release: SignedRelease, options: {
           { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
           { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'secret_text' },
           ...(options.managementBinding ? [options.managementBinding] : []),
+          ...(options.serviceBinding ? [options.serviceBinding] : []),
           { name: 'ASSETS', type: 'assets' },
           ...Object.entries(bindings).map(([name, text]) => ({ name, type: 'plain_text', text })),
         ],
@@ -533,6 +535,39 @@ describe('gateway-local runtime update', () => {
     });
     expect(handovers).toEqual([]);
     expect(fake.events).not.toContain('asset-session');
+    expect(fake.events).not.toContain('script-upload');
+  });
+
+  it('carries the optional service identity across an update as the same plain-text binding', async () => {
+    const release = await signedRelease();
+    const clientId = `${'d'.repeat(32)}.access`;
+    const fake = providerFake(release, { serviceBinding: { name: 'ANKKA_SERVICE_CLIENT_ID', type: 'plain_text', text: clientId },
+      managementBinding: { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' } });
+    const commands: CustomerRuntimeControlCommand[] = [];
+    const handovers: string[] = [];
+    await expect(runCustomerRuntimeUpdate(input(fake, release, commands, handovers))).resolves.toEqual({ status: 'uploaded', fromVersionId: OLD_VERSION });
+    const upload = fake.requests.find((entry) => entry.method === 'PUT');
+    if (upload === undefined || upload.form === null) throw new Error('script upload missing');
+    const metadataFile = upload.form.get('metadata');
+    if (!(metadataFile instanceof Blob)) throw new Error('metadata missing');
+    const metadata = v.parse(metadataSchema, JSON.parse(await metadataFile.text()));
+    expect(metadata.bindings).toHaveLength(21);
+    expect(metadata.bindings.find((binding) => binding.name === 'ANKKA_SERVICE_CLIENT_ID')).toEqual({ name: 'ANKKA_SERVICE_CLIENT_ID', type: 'plain_text', text: clientId });
+  });
+
+  it.each([
+    { name: 'ANKKA_SERVICE_CLIENT_ID', type: 'plain_text', text: 'not-a-common-name' },
+    { name: 'ANKKA_SERVICE_CLIENT_ID', type: 'secret_text' },
+    { name: 'ANKKA_SERVICE_TOKEN_ID', type: 'plain_text', text: '11111111-2222-3333-4444-555555555555' },
+  ])('rejects a malformed or unreviewed service binding: $name ($type)', async (serviceBinding) => {
+    const release = await signedRelease();
+    const fake = providerFake(release, { serviceBinding });
+    const commands: CustomerRuntimeControlCommand[] = [];
+    const handovers: string[] = [];
+    await expect(runCustomerRuntimeUpdate(input(fake, release, commands, handovers))).rejects.toMatchObject({
+      code: 'provider_rejected', stage: 'current_read',
+    });
+    expect(handovers).toEqual([]);
     expect(fake.events).not.toContain('script-upload');
   });
 

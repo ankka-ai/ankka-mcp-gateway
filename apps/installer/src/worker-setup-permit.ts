@@ -9,7 +9,9 @@ import { CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH } from './customer-install-paths';
 import { DeployError } from './errors';
 import { setupZonesSchema, type SetupZone } from './hosted-account-setup';
 import type { ReleaseManifest } from './release-manifest';
-import { buildStaticDeployPlan, parseDeploySelection, type DeploySelection } from './schema';
+import { buildStaticDeployPlan, parseDeploySelection,
+  withDeployServiceAccess, type DeployServiceAccess,
+  type DeploySelection } from './schema';
 
 export const WORKER_SETUP_CERTIFY_PATH = '/api/bootstrap/configure';
 const CONTEXT = 'ankka-worker-setup-permit-v1';
@@ -106,6 +108,8 @@ export async function certifyWorkerSetup(input: {
   issuerPrivateKey: CryptoKey;
   issuerKeyId: string;
   publicClientId: string;
+  /** The one service identity this installer deployment opts every gateway into; the hosted installer sets none. */
+  serviceAccess?: DeployServiceAccess;
   now: number;
 }): Promise<ConfiguredSetup> {
   const permit = await verifyWorkerSetupPermit(input.request.permit, input.issuerPublicKey, input.now);
@@ -116,7 +120,9 @@ export async function certifyWorkerSetup(input: {
   const bootstrap = permit.bootstrapPlan;
   const rebuilt = await buildBootstrapDeployPlan(input.manifest, bootstrap.expiresAt, bootstrap.installSeed);
   if (canonicalJson(rebuilt) !== canonicalJson(bootstrap)) invalid();
-  const plan = await buildStaticDeployPlan(selection, input.manifest, bootstrap.expiresAt, {
+  // The browser chose the basics; the deployment configuration alone decides the service identity.
+  const configured = input.serviceAccess === undefined ? selection : withDeployServiceAccess(selection, input.serviceAccess);
+  const plan = await buildStaticDeployPlan(configured, input.manifest, bootstrap.expiresAt, {
     planId: bootstrap.planId, planHash: bootstrap.planHash,
     installId: bootstrap.managementOwnershipMarker, workerName: bootstrap.workerName,
   });

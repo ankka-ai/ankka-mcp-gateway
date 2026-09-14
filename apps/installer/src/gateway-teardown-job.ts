@@ -39,11 +39,28 @@ const jobSchema = v.strictObject({
   pendingAttemptId: v.union([v.pipe(v.string(), v.regex(/^attempt_[A-Za-z0-9_-]{24}$/u)), v.null()]),
   revocation: v.picklist(['not_attempted', 'confirmed', 'unconfirmed']),
   failureReason: v.nullable(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,95}$/u))),
+  /**
+   * Absent for every hosted job: the finalizer holds a request-local grant
+   * and a removed job proves its revocation. The operator-controlled
+   * external runner records `operator-managed`: its credential is never
+   * revoked by the job, so a removed job carries `not_attempted`.
+   */
+  credentialPolicy: v.optional(v.picklist(['request-memory-only', 'operator-managed'])),
 });
 export type GatewayTeardownJob = v.InferOutput<typeof jobSchema>;
 export type GatewayTeardownAttempt = v.InferOutput<typeof attemptSchema>;
+export type GatewayTeardownCredentialPolicy = 'request-memory-only' | 'operator-managed';
 
 function conflict(): never { throw new Error('teardown_job_conflict'); }
+
+export function gatewayTeardownCredentialPolicy(job: Pick<GatewayTeardownJob, 'credentialPolicy'>): GatewayTeardownCredentialPolicy {
+  return job.credentialPolicy ?? 'request-memory-only';
+}
+
+/** The revocation state a job must show once it is removed under its credential policy. */
+function removedRevocation(job: Pick<GatewayTeardownJob, 'credentialPolicy'>): GatewayTeardownJob['revocation'] {
+  return gatewayTeardownCredentialPolicy(job) === 'operator-managed' ? 'not_attempted' : 'confirmed';
+}
 
 /** Stored authority is secret-free; raw OAuth state, verifier, code, and grant are not fields. */
 export function parseGatewayTeardownJob<Input>(value: Input): GatewayTeardownJob {
@@ -54,7 +71,7 @@ export function parseGatewayTeardownJob<Input>(value: Input): GatewayTeardownJob
       (job.pendingStep !== null && job.pendingStep !== GATEWAY_ROOT_REMOVAL_STEPS[job.verifiedSteps.length]) ||
       (terminal && (job.verifiedSteps.length !== GATEWAY_ROOT_REMOVAL_STEPS.length ||
         job.pendingStep !== null || job.attempt !== null ||
-        job.revocation !== (job.phase === 'removed' ? 'confirmed' : 'unconfirmed'))) ||
+        job.revocation !== (job.phase === 'removed' ? removedRevocation(job) : 'unconfirmed'))) ||
       ((job.pendingStep === null) !== (job.pendingAttemptId === null)) ||
       (['authorizing', 'exchanging'].includes(job.phase) !== (job.attempt !== null)) ||
       (job.phase === 'review' && (job.verifiedSteps.length !== 0 || job.pendingStep !== null)) ||
@@ -69,16 +86,19 @@ export async function createGatewayTeardownJob(input: {
   readonly release: ExactReleaseBundleIdentity;
   readonly retirementModuleSha256: string;
   readonly now: number;
+  /** Only the external runner sets `operator-managed`; hosted jobs never carry the field. */
+  readonly credentialPolicy?: 'operator-managed';
 }): Promise<GatewayTeardownJob> {
   const verified = await verifyGatewayTeardownHandoff(input);
-  return parseGatewayTeardownJob({
+  const job = {
     schemaVersion: 1, revision: 1,
     handoff: input.handoff, handoffSha256: verified.handoffSha256,
     release: input.release, retirementModuleSha256: input.retirementModuleSha256,
     acceptedAt: input.now, updatedAt: input.now, phase: 'review', attempt: null,
     verifiedSteps: [], pendingStep: null, pendingAttemptId: null,
     revocation: verified.statement.priorGrantRevocationUnconfirmed ? 'unconfirmed' : 'not_attempted', failureReason: null,
-  });
+  };
+  return parseGatewayTeardownJob(input.credentialPolicy === undefined ? job : { ...job, credentialPolicy: input.credentialPolicy });
 }
 
 /**
@@ -173,17 +193,20 @@ export function verifyGatewayRootRemoval(input: {
 export function settleGatewayTeardownAttempt(input: {
   readonly job: GatewayTeardownJob;
   readonly attemptId: string;
-  readonly revocation: 'confirmed' | 'unconfirmed';
+  /** `not_attempted` is accepted only under the operator-managed policy, whose credential no job revokes. */
+  readonly revocation: 'confirmed' | 'unconfirmed' | 'not_attempted';
   readonly reason?: string | null;
   readonly now: number;
 }): GatewayTeardownJob {
   const { job } = input;
   if (job.attempt?.id !== input.attemptId) conflict();
+  const policy = gatewayTeardownCredentialPolicy(job);
+  if ((input.revocation === 'not_attempted') !== (policy === 'operator-managed')) conflict();
   const complete = job.phase === 'exchanging' && job.pendingStep === null &&
     job.verifiedSteps.length === GATEWAY_ROOT_REMOVAL_STEPS.length;
   const revocation = job.revocation === 'unconfirmed' ? 'unconfirmed' : input.revocation;
   let phase: GatewayTeardownJob['phase'] = 'recovery_required';
-  if (complete) phase = revocation === 'confirmed' ? 'removed' : 'removed_revocation_unconfirmed';
+  if (complete) phase = revocation === removedRevocation(job) ? 'removed' : 'removed_revocation_unconfirmed';
   return next(job, { phase, attempt: null, revocation, failureReason: complete ? null : input.reason ?? null }, input.now);
 }
 

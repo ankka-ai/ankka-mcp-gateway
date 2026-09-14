@@ -50,6 +50,15 @@ Cloudflare API operations and is never persisted in Durable Object records or
 returned to the browser. Deployment, updates, DNS, teardown and upstream
 credentials retain separate authority. See [Management token](MANAGEMENT_TOKEN.md).
 
+An operator-controlled external runner executes the same fixed lifecycle
+operations for disposable development gateways with an operator-managed
+credential. The operation authority catalogue declares that lifecycle
+separately: the credential lives in the operator's store, is never exchanged,
+persisted or revoked by an operation, and never enters a gateway or an
+Ankka-hosted service. Its runner records and signed removal handoffs are its
+own; the hosted finalizer refuses a handoff that did not come from a revoked
+gateway grant. See [the runner guide](AGENT_LIFECYCLE.md).
+
 Cloudflare support confirmed that account-owned and user-owned API tokens can
 scope resources only at User, Account, or Zone level. **Access: Policies
 Write** on one account therefore authorizes every Access policy in that account;
@@ -83,6 +92,30 @@ hostname separate from the MCP Portal. Cloudflare Access protects the origin,
 and the Worker independently verifies the Access JWT issuer, audience,
 signature, expiry, verified email, and deployment administrator allowlist.
 Cross-origin API requests are rejected.
+
+A gateway can additionally accept exactly one machine identity: the Access
+service token whose client id its deployment configuration opted into. The
+hosted installer never opts in, so customer installations accept only
+administrators. The Worker verifies a service token exactly like an
+administrator's token and then authorizes the exact `common_name` claim
+(`type: app` appears on both kinds of token and distinguishes nothing): a
+token with an email claim is an administrator or nothing, and a token without
+one must carry no identity header and the configured client id. The service
+identity acts only within a fixed method-and-route allowlist (status and
+update reads, source discovery, draft and apply, Team read and save); update
+and teardown action creation and source action cancellation are denied to it,
+as is every other route. Action records name it `service:<client id>` and
+public views expose the actor kind. A malformed opt-in fails closed for every
+caller rather than widening access.
+
+The opt-in is part of the plan's identity (ownership marker and plan hash).
+It reaches the runtime as one optional binding and the Access application as
+one more receipt-owned policy: a Service Auth policy that admits exactly the
+named service token and no identity, created and verified by Stage 2 like the
+administrators' policy and stated in the signed teardown handoff. The hosted
+finalizer accepts exactly the policies the handoff declares; the Service Auth
+policy leaves with the management application, and any other policy stays
+foreign and stops removal.
 
 The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
@@ -188,8 +221,10 @@ guarantee does not claim that those providers process no metadata.
 - Read-only tool policy depends on both gateway configuration and upstream
   enforcement.
 - Worker rollback does not roll back Durable Object data.
-- Automatic teardown is unavailable after a potentially applied Team policy
-  write or new-profile source creation. Revoking a retired preview token or
-  restoring the original roster does not clear the recorded restriction.
+- Automatic teardown is unavailable while a source, Team, update or removal
+  action is unsettled, and for installations whose Team state was written
+  under the retired legacy policy profile. The current receipt-owned executor
+  accepts changed policy audiences. Revoking a retired preview token or
+  restoring the original roster does not clear a recorded legacy restriction.
 - Provider APIs can return ambiguous outcomes; the system stops for recovery
   instead of claiming success.

@@ -1,23 +1,34 @@
 import * as v from 'valibot';
-import { validateLiveBootstrapOrigin } from './live-gateway-browser.mjs';
+import { validateLiveBootstrapOrigin } from './live-gateway-origin.mjs';
 import { LiveLifecycleError } from './live-gateway-lifecycle.mjs';
 
 function requireCondition(value, code) { if (!value) throw new LiveLifecycleError(code); }
 const id = (value) => v.is(v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/u)), value);
 
 /** Read-only provider evidence. No arbitrary URL, grant forwarding, or deletion. */
-export function createLiveGatewayProvider({ config, token, transport = fetch }) {
+// A read mutates nothing, so a transient transport failure (a timeout or a dropped connection) is retried this many
+// times before it is judged; a rejection by status is never retried.
+const READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
+
+export function createLiveGatewayProvider({ config, token, transport = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   requireCondition(/^[a-f0-9]{32}$/u.test(config.accountId) && /^[a-f0-9]{32}$/u.test(config.zoneId) && token, 'provider_config_invalid');
   const account = `/accounts/${config.accountId}`;
   const zone = `/zones/${config.zoneId}`;
+  async function send(url) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await transport(url, { headers: { authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
+      } catch {
+        if (attempt >= READ_RETRY_DELAYS_MS.length) throw new LiveLifecycleError('provider_read_failed');
+        await sleep(READ_RETRY_DELAYS_MS[attempt]);
+      }
+    }
+  }
   async function read(path, allowAbsent = false) {
     requireCondition(path.startsWith(`${account}/`) || path === zone || path.startsWith(`${zone}/`), 'provider_path_invalid');
     requireCondition(new URL(`https://api.cloudflare.com/client/v4${path}`).pathname === `/client/v4${path.split('?')[0]}` &&
       !path.includes('#') && !path.includes('%'), 'provider_path_invalid');
-    let response;
-    try { response = await transport(`https://api.cloudflare.com/client/v4${path}`, {
-      headers: { authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000),
-    }); } catch { throw new LiveLifecycleError('provider_read_failed'); }
+    const response = await send(`https://api.cloudflare.com/client/v4${path}`);
     if (allowAbsent && response.status === 404) { await response.body?.cancel(); return null; }
     if (!response.ok) { await response.body?.cancel(); throw new LiveLifecycleError('provider_read_rejected'); }
     let body;
@@ -111,6 +122,11 @@ export function createLiveGatewayProvider({ config, token, transport = fetch }) 
       validateLiveBootstrapOrigin(provision);
       requireCondition(await read(`${account}/workers/workers/${provision.workerName}`, true) !== null, 'worker_account_mismatch');
     },
+    /** True once the management hostname is a custom domain of this installation's Worker: the earliest safe moment to resolve it. */
+    async managementDomainReady(provision) {
+      validateLiveBootstrapOrigin(provision);
+      return (await domains()).some((item) => item.hostname === config.basics.managementHostname && item.service === provision.workerName);
+    },
     async capture(provision) {
       validateLiveBootstrapOrigin(provision);
       const ownedPortals = (await portals()).filter((item) => item.hostname === config.basics.portalHostname);
@@ -127,11 +143,18 @@ export function createLiveGatewayProvider({ config, token, transport = fetch }) 
       requireCondition(ownedApps.length === 3, 'access_inventory_incomplete');
       const resources = [locator(`${account}/access/ai-controls/mcp/portals`, ownedPortals[0], true),
         ...servers.map((item) => locator(`${account}/access/ai-controls/mcp/servers`, item, true))];
+      const serviceTokenId = config.serviceAccess?.tokenId ?? null;
       for (const app of ownedApps) {
         const dependency = app.domain !== config.basics.managementHostname;
         const appPath = `${account}/access/apps/${encodeURIComponent(app.id)}`;
         const policies = await list(`${appPath}/policies`);
-        requireCondition(policies.length === 1, 'policy_inventory_incomplete');
+        // Each application carries one policy, except that a management application whose deployment opted into a
+        // service identity also carries exactly one Service Auth policy admitting exactly that token.
+        const servicePolicies = policies.filter((item) => item.decision === 'non_identity');
+        const expectedServicePolicies = !dependency && serviceTokenId !== null ? 1 : 0;
+        requireCondition(policies.length === 1 + expectedServicePolicies && servicePolicies.length === expectedServicePolicies &&
+          servicePolicies.every((item) => item.include?.length === 1 && item.include[0]?.service_token?.token_id === serviceTokenId),
+        'policy_inventory_incomplete');
         resources.push(...policies.map((item) => locator(`${appPath}/policies`, item, dependency)), locator(`${account}/access/apps`, app, dependency));
       }
       const records = await dns();
