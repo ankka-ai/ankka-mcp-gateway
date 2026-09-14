@@ -4411,8 +4411,16 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
   const resources = authority?.resources ?? null;
   let resourcesHash = null;
   if (authority) {
-    const identity = { schemaVersion: 1, resources, control: authority.control, sources: authority.sources };
-    if (currentPolicies) identity.policyMode = 'receipt_owned';
+    // The journal binds to the exact dependency graph: the ordered
+    // receipt-owned resources under one policy mode and one set of partial
+    // bridge actions. The authority check above already pins every management
+    // field the graph depends on, so the mutable management records stay out
+    // of the identity: a source draft saved between consents must not strand
+    // a recorded removal or the replay of its completion. The retired
+    // executor keeps its historical identity.
+    const identity = currentPolicies
+      ? { schemaVersion: 2, resources, policyMode: 'receipt_owned' }
+      : { schemaVersion: 1, resources, control: authority.control, sources: authority.sources };
     if (input.managedSourceActions?.length > 0) identity.managedSourceActions = input.managedSourceActions;
     resourcesHash = await sha256(identity);
   }
