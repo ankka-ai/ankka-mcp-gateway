@@ -37,6 +37,7 @@ import {
   CUSTOMER_INSTALL_OAUTH_START_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
+import { parseOauthCallbackQuery, type OauthCallbackQuery } from './oauth-callback-query';
 
 const SESSION_COOKIE = '__Host-ankka_bootstrap_session';
 const PKCE_COOKIE = '__Host-ankka_bootstrap_pkce';
@@ -294,6 +295,21 @@ export function validCustomerBootstrapRelayAuthorization(
   }
 }
 
+/**
+ * Parses the query the relay sends to the certified install callback: the
+ * relayed `code` and `state`, or the relay's one fixed denial. Cloudflare
+ * echoes the granted scope beside a code, so an echo of exactly the install
+ * operation's scope set is admitted beside them, and the standard denial
+ * fields beside the denial; nothing else is. Rejecting here never consumes
+ * the armed attempt.
+ */
+export function parseCustomerBootstrapOauthCallback(url: URL): OauthCallbackQuery | null {
+  const query = parseOauthCallbackQuery(url, exactOperationScopes('install'));
+  if (query === null) return null;
+  if (query.denied) return url.searchParams.get('error') === 'authorization_rejected' ? query : null;
+  return AUTHORIZATION_CODE.test(query.code) ? query : null;
+}
+
 export function createCustomerBootstrapRouter(
   rawConfig: CustomerBootstrapRouterConfig,
   dependencies: CustomerBootstrapRouterDependencies,
@@ -496,18 +512,22 @@ export function createCustomerBootstrapRouter(
           const callbackAt = now();
           const sessionSecret = readSessionCookie(request);
           const pkce = readPkceCookie(request, callbackAt);
-          const code = url.searchParams.get('code') ?? '';
-          const oauthState = url.searchParams.get('state') ?? '';
-          const oauthError = url.searchParams.get('error');
+          const query = parseCustomerBootstrapOauthCallback(url);
           const matchingAttempt = pkce !== null && current.oauth?.attemptId === pkce.attemptId &&
             current.oauth.expiresAt === pkce.expiresAt;
-          if (sessionSecret !== null && matchingAttempt && oauthError === 'authorization_rejected' &&
-              code === '' && TOKEN.test(oauthState) && url.searchParams.size === 2) {
+          if (sessionSecret === null || !matchingAttempt || query === null) {
+            return json(
+              { schemaVersion: 1, error: 'oauth_callback_rejected' },
+              400,
+              [clearPkceCookie()],
+            );
+          }
+          if (query.denied) {
             const rejected = await rejectCustomerBootstrapOauthCallback({
               current,
               sessionSecret,
               attemptId: pkce.attemptId,
-              state: oauthState,
+              state: query.state,
               now: callbackAt,
             });
             await persistTransition(current, rejected);
@@ -523,22 +543,13 @@ export function createCustomerBootstrapRouter(
               failureCode: 'authorization_rejected',
             }, 200, cookies);
           }
-          if (sessionSecret === null || !matchingAttempt || oauthError !== null ||
-              !AUTHORIZATION_CODE.test(code) ||
-              !TOKEN.test(oauthState) || url.searchParams.size !== 2) {
-            return json(
-              { schemaVersion: 1, error: 'oauth_callback_rejected' },
-              400,
-              [clearPkceCookie()],
-            );
-          }
           const begun = await beginCustomerBootstrapCallback({
             current,
             sessionSecret,
             attemptId: pkce.attemptId,
             verifier: pkce.verifier,
-            oauthState,
-            code,
+            oauthState: query.state,
+            code: query.code,
             accountId: config.accountId,
             publicClientId: config.publicClientId,
             now: callbackAt,
