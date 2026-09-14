@@ -5,6 +5,7 @@ import type { BoundaryValue } from '../src/boundary';
 import {
   buildFixedRelayAuthorization,
   relayCloudflareAuthorizationCode,
+  relayCloudflareAuthorizationError,
 } from '../src/cloudflare-code-relay';
 import {
   CUSTOMER_BOOTSTRAP_OAUTH_TTL_MS,
@@ -104,6 +105,82 @@ function expectSessionCleared(response: Response): void {
   expect(serialized).toContain('Secure');
   expect(serialized).toContain('HttpOnly');
   expect(serialized).toContain('SameSite=Lax');
+}
+
+interface ArmedAttempt {
+  readonly relayState: string;
+  readonly stored: () => CustomerBootstrapState | undefined;
+  /** Sends the relay's redirect, amended the way a provider or a stray client might, with the attempt's cookies. */
+  readonly callback: (location: string, amend: (url: URL) => void) => Promise<Response>;
+}
+
+/** Consumes the capability and arms one OAuth attempt: the state a relay callback lands in. */
+async function armedAttempt(transport: CustomerCloudflareTransport): Promise<ArmedAttempt> {
+  const capability = await createCustomerBootstrapCapability({ now: NOW });
+  let stored: CustomerBootstrapState | undefined;
+  const statePort: CustomerBootstrapStatePort = {
+    read: async () => stored,
+    compareAndSet: async (expectedRevision, state) => {
+      if ((stored?.revision ?? null) !== expectedRevision) return false;
+      stored = state;
+      return true;
+    },
+  };
+  const router = createCustomerBootstrapRouter({
+    accountId: ACCOUNT_ID,
+    installId: INSTALL_ID,
+    bootstrapId: capability.bootstrapId,
+    secretCommitment: capability.secretCommitment,
+    capabilityExpiresAt: capability.expiresAt,
+    publicClientId: CLIENT_ID,
+  }, {
+    now: () => NOW + 1,
+    state: statePort,
+    acceptHandoff: async () => undefined,
+    issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 }),
+    transport,
+    beginRelay: async ({ gatewayState, pkceChallenge, gatewayCallback }) =>
+      buildFixedRelayAuthorization({
+        clientId: CLIENT_ID,
+        relayStateKey: RELAY_KEY,
+        gateway: { accountId: ACCOUNT_ID, installId: INSTALL_ID, callback: gatewayCallback },
+        operation: 'install', gatewayState, pkceChallenge,
+        nonce: base64UrlEncode(new Uint8Array(32).fill(7)), now: NOW + 1,
+      }),
+    startConvergence: inlineConvergence(statePort, transport, async () => COMPLETE_CONVERGENCE),
+  });
+  await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_STATUS_PATH}`));
+  const continued = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_CONTINUE_PATH}`, {
+    method: 'POST', headers: { origin: ORIGIN, 'content-type': 'application/json' },
+    body: JSON.stringify({
+      bootstrapId: capability.bootstrapId,
+      secret: capability.secret,
+      serializedHandoff: HANDOFF,
+      serializedPlan: SERIALIZED_PLAN,
+      ownershipCertificate: OWNERSHIP_CERTIFICATE,
+    }),
+  }));
+  const sessionCookie = cookieValue(continued, SESSION_COOKIE);
+  const started = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_OAUTH_START_PATH}`, {
+    method: 'POST', headers: { origin: ORIGIN, cookie: sessionCookie, 'content-type': 'application/json' },
+    body: '{}',
+  }));
+  const cookies = `${sessionCookie}; ${cookieValue(started, PKCE_COOKIE)}`;
+  const { authorizationUrl } = await responseJson(started, v.strictObject({
+    schemaVersion: v.literal(1),
+    authorizationUrl: v.string(),
+  }));
+  const relayState = new URL(authorizationUrl).searchParams.get('state');
+  if (relayState === null) throw new Error('relay state missing');
+  return {
+    relayState,
+    stored: () => stored,
+    callback: (location, amend) => {
+      const url = new URL(location);
+      amend(url);
+      return router.fetch(new Request(url.href, { headers: { cookie: cookies } }));
+    },
+  };
 }
 
 describe('restricted customer bootstrap router', () => {
@@ -539,5 +616,70 @@ describe('restricted customer bootstrap router', () => {
     expect(retried.status).toBe(200);
     expect(cookieValue(retried, PKCE_COOKIE)).not.toBe(firstPkceCookie);
     expect(relayStarts).toBe(2);
+  });
+
+  it('accepts the scope Cloudflare echoes beside the relayed code and rejects any other echo or parameter without spending the attempt', async () => {
+    let exchanges = 0;
+    const attempt = await armedAttempt(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/oauth2/token')) {
+        exchanges += 1;
+        return json({ access_token: ACCESS_TOKEN, token_type: 'bearer', scope: INSTALL_SCOPES.join(' ') });
+      }
+      if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
+        return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
+      }
+      if (url.endsWith('/oauth2/revoke')) return json({ revoked: true });
+      throw new Error('unexpected request');
+    });
+    const relayed = await relayCloudflareAuthorizationCode({
+      code: `code_${'e'.repeat(32)}`, state: attempt.relayState, relayStateKey: RELAY_KEY, now: NOW + 2,
+    });
+    const armed = attempt.stored()?.oauth;
+    expect(armed).toMatchObject({ phase: 'authorizing' });
+    for (const amend of [
+      (url: URL) => url.searchParams.set('iss', 'https://dash.cloudflare.com'),
+      (url: URL) => url.searchParams.set('scope', 'workers-scripts.write'),
+      (url: URL) => url.searchParams.set('scope', [...INSTALL_SCOPES, 'workers-routes.write'].join(' ')),
+      (url: URL) => url.searchParams.append('state', url.searchParams.get('state') ?? ''),
+    ]) {
+      const rejected = await attempt.callback(relayed.location, amend);
+      expect(rejected.status).toBe(400);
+      expect(await rejected.json()).toEqual({ schemaVersion: 1, error: 'oauth_callback_rejected' });
+      expectPkceCleared(rejected);
+    }
+    expect(exchanges).toBe(0);
+    expect(attempt.stored()?.oauth).toEqual(armed);
+
+    const accepted = await attempt.callback(relayed.location, (url) => {
+      url.searchParams.set('scope', [...INSTALL_SCOPES].reverse().join('  '));
+    });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({ schemaVersion: 1, status: 'READY', failureCode: null, failureReason: null });
+    expect(exchanges).toBe(1);
+    expect(attempt.stored()?.status).toBe('READY');
+  });
+
+  it('settles the relay denial with the standard error fields beside it and still rejects any other error', async () => {
+    const attempt = await armedAttempt(async () => { throw new Error('a denial must not exchange'); });
+    const denial = await relayCloudflareAuthorizationError({
+      error: 'access_denied', errorDescription: 'The user denied the request.', errorUri: null,
+      state: attempt.relayState, relayStateKey: RELAY_KEY, now: NOW + 2,
+    });
+    const armed = attempt.stored()?.oauth;
+    expect(armed).toMatchObject({ phase: 'authorizing' });
+    const foreign = await attempt.callback(denial.location, (url) => url.searchParams.set('error', 'access_denied'));
+    expect(foreign.status).toBe(400);
+    expect(await foreign.json()).toEqual({ schemaVersion: 1, error: 'oauth_callback_rejected' });
+    expect(attempt.stored()?.oauth).toEqual(armed);
+
+    const denied = await attempt.callback(denial.location, (url) => {
+      url.searchParams.set('error_description', 'The user denied the request.');
+      url.searchParams.set('error_uri', 'https://dash.cloudflare.com/');
+    });
+    expect(denied.status).toBe(200);
+    expectPkceCleared(denied);
+    expect(await denied.json()).toEqual({ schemaVersion: 1, status: 'INCOMPLETE', failureCode: 'authorization_rejected' });
+    expect(attempt.stored()).toMatchObject({ status: 'INCOMPLETE', failureCode: 'authorization_rejected', oauth: null });
   });
 });

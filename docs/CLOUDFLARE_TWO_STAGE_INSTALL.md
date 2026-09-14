@@ -470,7 +470,15 @@ to start or take over an installation.
    caller supplies scopes or arbitrary endpoint authority.
 4. Cloudflare redirects its code to `auth.ankka.ai`. The relay verifies state
    and redirects only the code and original Gateway state to the exact signed
-   Gateway callback. It has no token-exchange transport.
+   Gateway callback. It has no token-exchange transport. The Gateway callback
+   accepts `code` and `state`, alone or beside an echo of exactly the install
+   scope set (Cloudflare appends the granted scope to its code response), or
+   the relay's fixed `authorization_rejected` denial, with or without the
+   standard `error_description` and `error_uri` fields. Any other parameter,
+   scope echo, error, or repeated key is refused with `oauth_callback_rejected`
+   without consuming the attempt, so a stray hit cannot burn the callback the
+   browser is still carrying. The final runtime's recovery callback on the
+   same route admits the same query.
 5. The Gateway atomically arms the attempt before exchange, exchanges directly
    with Cloudflare, rejects refresh tokens or a non-exact scope set, and checks
    that `/accounts` returns only the handoff account.
