@@ -154,6 +154,40 @@ The receipt and journal preserve recovery authority after interruptions. A
 missing, corrupt, conflicting, or ambiguous record stops automatic mutation.
 Only receipt-owned resources are removed, in reverse dependency order.
 
+### Recovery of an interrupted dependency removal
+
+Dependency removal journals a prefix of removed resources in removal order and
+at most one pending deletion boundary (`send_armed`, `submitted`, or
+`not_applied`). The compiled gateway performs one provider step per callback
+pass and records its progress under the callback's request identity. The
+synthetic-provider regression `test/worker-teardown-recovery.test.mjs` proves
+these guarantees for an interruption at every pass boundary, an unknown
+provider answer at a read or a DELETE, an Access deletion accepted with HTTP
+202 that still reads present, a rejected DELETE, an ownership conflict, and a
+foreign Portal mapping the gateway's server:
+
+- Settling the interrupted attempt closes its action and leaves the receipt
+  and the journal unchanged; a fresh consent can start at once, or after the
+  unsettled action expires.
+- A fresh consent rechecks Portal sharing and reads every resource before any
+  mutation: removed resources must read absent, live resources must read
+  exactly, and only the pending boundary may read either way.
+- A resource that reads absent is recorded as removed and is never sent a
+  DELETE. A pending boundary is re-read before any DELETE, so a lost or
+  accepted-but-unfinished deletion is confirmed by reading, not repeated. A
+  boundary that still reads present is deleted again only under the fresh
+  grant; the grant that armed or submitted it never resends it.
+- An unknown answer is never absence. A conflicting read or a shared server
+  stops every consent without deleting anything until the resource reads
+  exactly again or the server is unmapped. This is recovery-required by design.
+- The journal is bound to the exact dependency graph: the ordered
+  receipt-owned resources, the policy mode, and any partial bridge actions. It
+  is not bound to the mutable management records, so a source draft saved
+  between consents does not strand the recorded removal, while a journal
+  recorded for another graph is never resumed.
+- Completion records exactly one applied deletion per resource and leaves the
+  installation receipt unchanged.
+
 ## Software supply chain
 
 The repository contains no private signing key, production deployment
