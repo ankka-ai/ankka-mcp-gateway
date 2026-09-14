@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import { PUBLIC_ORIGIN, OAUTH_CALLBACK_URL, OAUTH_EXCHANGE_URL, OAUTH_REVOKE_URL } from '../src/constants';
 import { openGatewayTeardownCookie } from '../src/crypto';
 import { gatewayTeardownJobId } from '../src/gateway-teardown-handoff';
+import { GATEWAY_ROOT_REMOVAL_STEPS } from '../src/gateway-teardown-job';
+import { GATEWAY_TEARDOWN_CALL_BUDGET } from '../src/gateway-teardown-provider';
 import { GatewayTeardownStoreClient } from '../src/gateway-teardown-store-client';
 import { createGatewayTeardownRouter, GATEWAY_TEARDOWN_COOKIE } from '../src/gateway-teardown-router';
 import { TwoStageDeploySession, type TwoStageDeploySessionNamespace, type TwoStageDeploySessionStub } from '../src/two-stage-deploy-session';
@@ -20,6 +22,9 @@ async function fixture() {
   let cookie = '';
   let csrf = '';
   let grants = 0, revoked = 0;
+  /** Every provider call and every Durable Object call since the last reset: what one invocation spends. */
+  let subrequests = 0;
+  const trace: string[] = [];
   let revokeFails = false, wrongAccount = false, extraScope = false, returnsRefresh = false;
   const instances = new Map<string, { sql: ReturnType<typeof teardownSqliteFixture>; stub: TwoStageDeploySessionStub }>();
   const namespace: TwoStageDeploySessionNamespace = {
@@ -36,22 +41,31 @@ async function fixture() {
         value = { sql, stub: new TwoStageDeploySession(sql.state, undefined, { now: () => time }) };
         instances.set(name, value);
       }
-      return value.stub;
+      const instance = value;
+      return { fetch: (request) => { subrequests += 1; trace.push(`journal ${new URL(request.url).pathname}`); return instance.stub.fetch(request); } };
     },
   };
   const jobId = await gatewayTeardownJobId(provider.handoff);
   const port = new GatewayTeardownStoreClient({ fetch: (request) => namespace.get(namespace.idFromName(`gateway-teardown:v1:${jobId}`)).fetch(request) });
-  provider.readJobFrom(() => port.read());
+  // The provider fixture reads the job before answering each call; that look is the test's, not the invocation's.
+  const uncounted = new GatewayTeardownStoreClient({ fetch: (request) => {
+    const instance = instances.get(`gateway-teardown:v1:${jobId}`);
+    if (instance === undefined) throw new Error('fixture_instance_missing');
+    return instance.stub.fetch(request);
+  } });
+  provider.readJobFrom(() => uncounted.read());
   const makeRouter = () => createGatewayTeardownRouter({ encryptionKey: ENCRYPTION_KEY,
     oauth: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET }, trust: provider.trust, release: provider.job.release, namespace }, {
     now: () => time,
     loadBundle: async (identity) => { expect(identity).toEqual(provider.job.release); return provider.bundle; },
     rateLimit: async () => undefined,
     transport: async (input, init) => {
+      subrequests += 1;
       const request = new Request(input, init), url = new URL(request.url);
+      trace.push(`${request.method} ${url.pathname}`);
       if (url.href === OAUTH_EXCHANGE_URL) {
         grants += 1;
-        const job = await port.read(); expect(job?.phase).toBe('exchanging');
+        const job = await uncounted.read(); expect(job?.phase).toBe('exchanging');
         const value = { access_token: TOKEN, token_type: 'bearer', scope: `workers-scripts.write zone-access.write${extraScope ? ' dns.write' : ''}` };
         return Response.json(returnsRefresh ? { ...value, refresh_token: 'synthetic-refresh-token' } : value);
       }
@@ -93,6 +107,7 @@ async function fixture() {
     return callback;
   };
   return { ...provider, send, view, start, port, grants: () => grants, revoked: () => revoked,
+    subrequests: () => subrequests, resetSubrequests: () => { subrequests = 0; trace.length = 0; }, trace: () => trace.join('\n'),
     cookie: () => cookie, router: () => router,
     import: () => send('/api/teardown/import', { handoff: provider.handoff }),
     advance: () => { time += 86_400_001; },
@@ -205,6 +220,40 @@ describe('hosted removal browser callback and durable recovery', () => {
       expect(test.mutations).toEqual([]);
       expect(test.revoked()).toBe(kind === 'refresh' ? 2 : 1);
       expect((await test.port.read())?.phase).toBe('recovery_required');
+    } finally { test.close(); }
+  });
+
+  it('stops an attempt at its call budget before the cap, keeps the pending step armed, and resumes on the next consent with a confirmed revocation', async () => {
+    const test = await fixture();
+    try {
+      await test.import();
+      test.createdOwner('2026-09-01T12:00:00.000000Z');
+      // Enough recently modified scripts that the scan, the preflight and the first steps spend the budget.
+      for (let index = 0; index < 12; index += 1) test.addForeignScript(`recent-script-${index}`, '2026-09-03T08:00:00.000000Z');
+      const first = await test.start();
+      test.resetSubrequests();
+      expect((await test.send(first.href)).status).toBe(303);
+      expect(test.subrequests(), test.trace()).toBeLessThanOrEqual(GATEWAY_TEARDOWN_CALL_BUDGET);
+      const paused = await test.port.read();
+      expect(paused?.phase).toBe('recovery_required');
+      expect(paused?.failureReason).toBe('budget_exhausted');
+      expect(paused?.revocation).toBe('confirmed');
+      // The stop lands on whichever call would exceed the budget: a step may be armed for the next consent, never sent twice.
+      expect(paused?.verifiedSteps.length).toBeGreaterThan(0);
+      expect(paused?.verifiedSteps.length).toBeLessThan(GATEWAY_ROOT_REMOVAL_STEPS.length);
+      expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS.slice(0, test.mutations.length));
+      expect(test.revoked()).toBe(1);
+      const view = await test.view();
+      expect(view.canAuthorize).toBe(true);
+      expect(view.failureReason).toBe('budget_exhausted');
+      expect(view.message).toBe('Removal paused at its per-attempt limit. Authorize again to continue.');
+      const second = await test.start();
+      test.resetSubrequests();
+      expect((await test.send(second.href)).status).toBe(303);
+      expect(test.subrequests(), test.trace()).toBeLessThanOrEqual(GATEWAY_TEARDOWN_CALL_BUDGET);
+      expect((await test.port.read())?.phase).toBe('removed');
+      expect(test.mutations).toEqual([...GATEWAY_ROOT_REMOVAL_STEPS]);
+      expect(test.grants()).toBe(2); expect(test.revoked()).toBe(2);
     } finally { test.close(); }
   });
 

@@ -91,7 +91,9 @@ export function createGatewayTeardownRouter(config: {
       // `complete` is the settled end of the job; five verified steps with an attempt still running are not it.
       complete: terminal, revocationUnconfirmed: job.revocation === 'unconfirmed', failureReason: job.failureReason,
       message: terminal ? 'Gateway removal is complete.' : active ? 'Cloudflare authorization is in progress. Return here if it is interrupted.'
-        : job.phase === 'review' ? 'Review the final removal, then authorize it in Cloudflare.' : 'Removal is incomplete. Authorize again to resume from the verified progress.',
+        : job.phase === 'review' ? 'Review the final removal, then authorize it in Cloudflare.'
+        : job.failureReason === 'budget_exhausted' ? 'Removal paused at its per-attempt limit. Authorize again to continue.'
+        : 'Removal is incomplete. Authorize again to resume from the verified progress.',
       steps: labels.map((label, index) => ({ label, done: index < job.verifiedSteps.length })),
     };
   };

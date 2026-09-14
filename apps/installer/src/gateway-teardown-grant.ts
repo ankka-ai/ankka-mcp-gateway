@@ -7,8 +7,10 @@ import { exactOperationScopes } from './cloudflare-operation-authority';
 import { verifyCustomerCloudflareGrantAccountAccess } from './customer-cloudflare-grant';
 import type { GatewayTeardownJobPort } from './gateway-teardown-durable-state';
 import type { GatewayTeardownTrust } from './gateway-teardown-handoff';
-import { settleGatewayTeardownAttempt, verifyGatewayTeardownJobAuthority } from './gateway-teardown-job';
-import { executeGatewayRootRemoval, GatewayTeardownProviderError } from './gateway-teardown-provider';
+import { settleGatewayTeardownAttempt, verifyGatewayTeardownJobAuthority, type GatewayTeardownJob } from './gateway-teardown-job';
+import {
+  executeGatewayRootRemoval, gatewayTeardownFailureReason, GatewayTeardownCallBudget, GatewayTeardownProviderError,
+} from './gateway-teardown-provider';
 import { exchangeAuthorizationCode, type EphemeralCloudflareGrant, type CloudflareOauthConfig, type FetchTransport } from './oauth';
 import type { VerifiedReleaseBundle } from './release';
 
@@ -27,12 +29,21 @@ export interface GatewayRootRemovalAttemptInput {
  * installed account, then run the fixed removal against the durable job.
  * Returns the secret-free failure reason, or null when every step verified.
  * The caller owns the credential's lifecycle and settles the attempt; the
- * hosted grant executor and the external runner share this body.
+ * hosted grant executor and the external runner share this body. A budget,
+ * when given, counts every provider and journal call of the attempt and
+ * stops it with the resumable `budget_exhausted` reason before the cap.
  */
 export async function runGatewayRootRemovalAttempt(
-  input: GatewayRootRemovalAttemptInput & { readonly accessToken: string },
+  input: GatewayRootRemovalAttemptInput & {
+    readonly accessToken: string;
+    readonly budget?: GatewayTeardownCallBudget;
+    /** The job as the caller just read it from the same port, so the attempt reads it once. */
+    readonly current?: GatewayTeardownJob;
+  },
 ): Promise<string | null> {
-  const current = await input.port.read();
+  const port = input.budget === undefined ? input.port : input.budget.port(input.port);
+  const transport = input.budget === undefined ? input.transport : input.budget.transport(input.transport);
+  const current = input.current ?? await port.read();
   if (current?.phase !== 'exchanging' || current.attempt?.id !== input.attemptId || current.attempt.expiresAt <= input.now()) {
     throw new Error('teardown_callback_invalid');
   }
@@ -41,12 +52,12 @@ export async function runGatewayRootRemovalAttempt(
     const accountId = authority.certificate.statement.accountId;
     await verifyCustomerCloudflareGrantAccountAccess({
       accessToken: input.accessToken, expectedAccountId: accountId, workerName: authority.certificate.statement.worker.name,
-      operation: 'gateway-root-finalize', transport: input.transport,
+      operation: 'gateway-root-finalize', transport,
     });
-    await executeGatewayRootRemoval({ ...input, authorizedAccountId: accountId });
+    await executeGatewayRootRemoval({ ...input, port, transport, current, authorizedAccountId: accountId });
     return null;
   } catch (error) {
-    return error instanceof GatewayTeardownProviderError ? `${error.stage}_${error.code}` : 'finalization_failed';
+    return error instanceof GatewayTeardownProviderError ? gatewayTeardownFailureReason(error) : 'finalization_failed';
   }
 }
 
@@ -62,6 +73,10 @@ export async function executeGatewayTeardownGrant(input: GatewayRootRemovalAttem
   let revocation: 'confirmed' | 'unconfirmed' = 'unconfirmed';
   let reason: string | null = null;
   let refreshTokenReturned = false;
+  // The exchange, the account check, every provider read and write, and every
+  // journal call of this attempt share one budget; the revoke and the
+  // settlement below spend its reserve.
+  const budget = new GatewayTeardownCallBudget();
   const inspectingTransport: FetchTransport = async (request, init) => {
     const response = await input.transport(request, init);
     const url = request instanceof Request ? request.url : request.toString();
@@ -74,10 +89,10 @@ export async function executeGatewayTeardownGrant(input: GatewayRootRemovalAttem
     return response;
   };
   try {
-    grant = await exchangeAuthorizationCode({ ...input, transport: inspectingTransport });
+    grant = await exchangeAuthorizationCode({ ...input, transport: budget.transport(inspectingTransport) });
     grant.assertUsable(exactOperationScopes('gateway-root-finalize'));
     if (refreshTokenReturned) throw new Error('teardown_grant_invalid');
-    reason = await grant.withAccessToken((accessToken) => runGatewayRootRemovalAttempt({ ...input, accessToken }));
+    reason = await grant.withAccessToken((accessToken) => runGatewayRootRemovalAttempt({ ...input, accessToken, budget, current }));
   } catch {
     reason = 'finalization_failed';
   } finally {
