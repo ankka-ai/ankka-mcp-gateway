@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BROWSER_REQUEST_TIMEOUT_MS, handoffHoldAnswer, heldOriginMatcher } from '../tools/live-gateway-browser.mjs';
+import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback } from '../tools/live-gateway-browser.mjs';
 import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
 import { landingOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 
@@ -97,4 +97,29 @@ test('a landing is fixed labels only: site, page, and the removal page\'s result
     assert.equal(JSON.stringify(landing).includes('secret'), false);
     assert.equal(JSON.stringify(landing).includes(fragment), false);
   }
+});
+
+test('a pending hosted callback is known by request identity on the lifecycle\'s origins only, so a stop never cuts it', () => {
+  const origins = ['https://installer.example.com', 'https://manage.example.com'];
+  for (const value of [
+    'https://manage.example.com/__ankka/install/oauth/callback?code=secret&state=secret',
+    'https://installer.example.com/oauth/callback?code=secret&state=secret',
+  ]) assert.equal(isHostedCallback(value, origins), true);
+  for (const value of [
+    'https://foreign.example.com/oauth/callback?code=secret', 'https://manage.example.com/api/status',
+    'https://manage.example.com/__ankka/operation/teardown?result=recovery_required', 'https://dash.cloudflare.com/oauth2/auth', '',
+  ]) assert.equal(isHostedCallback(value, origins), false);
+  const tracker = callbackTracker(origins);
+  const request = (url) => ({ url: () => url });
+  const callback = request('https://manage.example.com/__ankka/install/oauth/callback?code=secret&state=secret');
+  const read = request('https://manage.example.com/api/status');
+  tracker.started(read);
+  assert.equal(tracker.inFlight(), false);
+  tracker.started(callback);
+  assert.equal(tracker.inFlight(), true);
+  tracker.ended(read);
+  assert.equal(tracker.inFlight(), true);
+  tracker.ended(callback);
+  assert.equal(tracker.inFlight(), false);
+  assert.ok(CALLBACK_CLOSE_WAIT_MS >= 600_000);
 });

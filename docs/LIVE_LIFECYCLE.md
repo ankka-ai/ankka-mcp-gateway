@@ -206,6 +206,13 @@ config and `--recover-removal`. Recovery does not turn an incomplete lifecycle r
 into a passing lifecycle result. Before a receipt exists, use the product's existing
 setup/removal recovery flow and the recorded action references.
 
+A hosted OAuth callback runs its whole operation inside one response, and a tab
+closed while that response is pending cuts the operation's revoke and
+settlement. On a stop the runner therefore leaves an attached Chrome's tab open
+while a hosted callback is in flight (it tells the operator to close it once the
+page has loaded), and an owned browser waits for the callback to end, at most
+for the hosted attempt's ten-minute window, before it closes.
+
 Before the removal phase the runner clears any hosted removal session its
 browser still holds, so an earlier gateway's job is never read as this one's
 receipt. A root removal passes only once the installer's job has settled

@@ -13,6 +13,8 @@ const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
  * thirty seconds live. A write is never retried, so the runner waits for it as long as the API client does.
  */
 export const BROWSER_REQUEST_TIMEOUT_MS = 120_000;
+/** A hosted attempt lives ten minutes; an owned browser waits no longer than that for a pending callback on a stop. */
+export const CALLBACK_CLOSE_WAIT_MS = 600_000;
 
 /** The installer's own not-ready handoff answer, returned to the page while the hold is active; null otherwise. */
 export function handoffHoldAnswer(hold) {
@@ -41,6 +43,25 @@ export function validateLiveHandoff(value, origin, path) {
 }
 
 const LANDING_WORD = /^[a-z_]{1,32}$/u;
+const HOSTED_CALLBACK_PATH = /^\/(?:oauth\/callback|__ankka\/install\/oauth\/callback)$/u;
+
+/** A hosted OAuth callback on one of the lifecycle's origins: its whole operation runs inside that one response. */
+export function isHostedCallback(value, origins) {
+  let url;
+  try { url = new URL(value); } catch { return false; }
+  return origins.includes(url.origin) && HOSTED_CALLBACK_PATH.test(url.pathname);
+}
+
+/** Knows while a hosted callback's response is pending in the tab, since closing the tab then cuts the operation's
+ * revoke and settlement. Requests are tracked by identity; their URLs are never kept. */
+export function callbackTracker(origins) {
+  const pending = new Set();
+  return {
+    started(request) { if (isHostedCallback(request.url(), origins)) pending.add(request); },
+    ended(request) { pending.delete(request); },
+    inFlight: () => pending.size > 0,
+  };
+}
 
 /** Where the test tab is, in fixed labels only: the site, the lifecycle page it shows, and for the gateway's removal
  * page the `result` and `reason` words it was sent with. Never the fragment, which carries handoffs, and never a query
@@ -83,6 +104,10 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     })
     : await browser.newContext({ acceptDownloads: false, serviceWorkers: 'block' });
   const page = borrowed ? await context.newPage() : context.pages()[0] ?? await context.newPage();
+  const callbacks = callbackTracker(origins);
+  page.on('request', (request) => callbacks.started(request));
+  page.on('requestfinished', (request) => callbacks.ended(request));
+  page.on('requestfailed', (request) => callbacks.ended(request));
   page.setDefaultTimeout(30_000);
   // A held origin is answered locally so the browser never resolves a hostname whose record may not exist yet. The
   // route stays installed for the page's life and consults the held origin per request: releasing the hold changes
@@ -273,8 +298,20 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     interruptionObserved: () => interrupted,
     async close() {
       accessCancellation.abort();
-      try { if (borrowed) await page.close(); else await context.close(); }
-      finally { await browser?.close(); } // CDP close disconnects; it does not quit Chrome.
+      try {
+        // A stop while a hosted callback is pending must not cut it: a borrowed tab is left to the operator, and an
+        // owned browser waits for the callback to end, at most for the hosted attempt's own window.
+        if (callbacks.inFlight() && borrowed) {
+          notify('Test tab left open: a hosted callback is still in flight. Close it once the page has loaded.');
+        } else {
+          if (callbacks.inFlight()) {
+            notify('A hosted callback is still in flight. The test browser closes once it has ended.');
+            const deadline = Date.now() + CALLBACK_CLOSE_WAIT_MS;
+            while (callbacks.inFlight() && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 1000));
+          }
+          if (borrowed) await page.close(); else await context.close();
+        }
+      } finally { await browser?.close(); } // CDP close disconnects; it does not quit Chrome.
     },
   };
 }
