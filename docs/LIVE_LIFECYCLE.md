@@ -249,7 +249,11 @@ browser still holds, so an earlier gateway's job is never read as this one's
 receipt. A root removal passes only once the installer's job has settled
 (`complete`): five verified steps whose attempt was cut before its revoke and
 settlement, for example by a browser that gave up on a long callback, are
-recorded as not verified and finish on the next authorization.
+recorded as not verified and finish on the next authorization. The hosted job
+counts every provider and journal call of an attempt against a fixed budget
+and stops before the platform's cap with the reason word `budget_exhausted`,
+its grant revoked and its pending step armed; the runner records that stop and
+authorizes again, up to six consents, each resuming from the verified steps.
 
 The gateway settles each consent attempt before the browser has followed the
 callback's redirect, so a dependency-removal action reads `recovery_required`
