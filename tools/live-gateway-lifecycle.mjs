@@ -163,6 +163,18 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
       requireCondition(outcome.action?.status === 'recovery_required', 'interrupted_removal_not_completed');
       await checkpoint({ stage: 'interrupted_removal', status: 'recovery_required', actionId: first.actionId, failureCode: outcome.action.failureCode ?? null });
     }
+    // The gateway settles the cut action moments before the lost callback's answer reaches the browser, where the
+    // interception spends itself on it; a tab replaced before that would carry the armed interception into recovery.
+    try {
+      await browser.waitFor(async () => browser.interruptionObserved(), (observed) => observed === true, { seconds: INTERRUPTION_OBSERVATION_SECONDS });
+    } catch (error) {
+      if (error instanceof LiveGatewayBrowserError && error.code === 'interactive_step_timed_out') throw new LiveLifecycleError('interruption_not_observed');
+      throw error;
+    }
+    // Live, the tab that carried the interception met the installer's receipt page with an empty 403 in every
+    // recovery round, while a fresh process recovered the receipt at once on the same gateway with the same
+    // session: the recovery rounds run in a tab that never carried the route, as they do in a fresh process.
+    await browser.replaceTab('interruption_spent');
   }
   // Fresh consent must recover the durable completion without recreating anything. While dependencies remain, each
   // consent continues their removal on the gateway; once they are gone the gateway hands the receipt to the installer.
@@ -210,6 +222,9 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
 
 /** How long a settled round may take to land: the redirect, the installer page and its import, or the recovery page. */
 export const LANDING_GRACE_SECONDS = 60;
+/** How long the browser may take to observe the interruption once the gateway has settled the cut action: the lost
+ * callback's answer, on which the interception spends itself, follows that settle by moments. */
+export const INTERRUPTION_OBSERVATION_SECONDS = 60;
 
 /**
  * The gateway settles a consent attempt before the browser has followed the callback's redirect, so the action reads

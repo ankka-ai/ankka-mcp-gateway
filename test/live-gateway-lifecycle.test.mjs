@@ -152,6 +152,7 @@ test('complete orchestration proves token management, distinct update, lost call
     continueHandoff: async (_url, kind) => { if (kind === 'update') current = runtimeIdentity(config.releaseB); else interrupted = true; },
     loseNextTeardownCallbackResponse: async () => evidence.push('interruption_armed'),
     interruptionObserved: () => interrupted,
+    replaceTab: async (reason) => evidence.push(`tab_replaced:${reason}`),
     clearRemovalSession: async () => evidence.push('removal_cookie_cleared'),
   };
   await qualifyLiveGatewayLifecycle({ config, browser, notify: () => {}, resolves: async () => true,
@@ -162,7 +163,8 @@ test('complete orchestration proves token management, distinct update, lost call
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
-  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
+  // The test tab is replaced once the interrupted round is observed, before the recovery rounds.
+  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'tab_replaced:interruption_spent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
   assert.equal(events.find((event) => event.status === 'receipt_saved').revocationUnconfirmed, false);
@@ -280,6 +282,50 @@ test('the removal half starts with the interrupted sequence, or with the root re
     assert.deepEqual(calls, phase === 'interrupted'
       ? ['clear', 'interrupted_removal:started', 'arm', 'dependency_removal:started', '/api/teardown-actions']
       : ['clear', '/api/teardown']);
+  }
+});
+
+test('the test tab is replaced exactly once, after the browser has observed the interrupted round and before the first recovery round, never in the root phase', async () => {
+  const { removeLiveGateway, INTERRUPTION_OBSERVATION_SECONDS } = await import('../tools/live-gateway-lifecycle.mjs');
+  const { LiveGatewayBrowserError } = await import('../tools/live-gateway-origin.mjs');
+  assert.ok(INTERRUPTION_OBSERVATION_SECONDS >= 30);
+  const actionId = `action_${'A'.repeat(32)}`;
+  const round = ['dependency_removal:started', 'dependency_removal:recorded', 'consent'];
+  const settled = 'dependency_removal:recovery_required';
+  // The browser observes the lost callback before the gateway's settle is read, moments after it, or never.
+  for (const [phase, observedAfter, expected] of [
+    ['interrupted', 0, ['clear', 'interrupted_removal:started', 'arm', ...round, 'observed:true', 'interrupted_removal:recovery_required',
+      'observed:true', 'replace:interruption_spent', ...round, settled, 'dependency_removal:started']],
+    ['interrupted', 2, ['clear', 'interrupted_removal:started', 'arm', ...round, 'observed:false', 'interrupted_removal:recovery_required',
+      'observed:false', 'observed:true', 'replace:interruption_spent', ...round, settled, 'dependency_removal:started']],
+    ['interrupted', null, ['clear', 'interrupted_removal:started', 'arm', ...round, 'observed:false', 'interrupted_removal:recovery_required',
+      'observed:false', 'observed:false', 'observed:false', 'observed:false']],
+    ['root', null, ['clear', ...round, settled, ...round, settled, 'dependency_removal:started']],
+  ]) {
+    const calls = []; let reads = 0, posts = 0;
+    const browser = {
+      clearRemovalSession: async () => { calls.push('clear'); },
+      loseNextTeardownCallbackResponse: async () => { calls.push('arm'); },
+      continueHandoff: async () => { calls.push('consent'); },
+      interruptionObserved: () => { reads += 1; const observed = observedAfter !== null && reads > observedAfter; calls.push(`observed:${observed}`); return observed; },
+      replaceTab: async (reason) => { calls.push(`replace:${reason}`); },
+      landing: () => ({ site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' }),
+      waitFor: async (read, accepts, { seconds } = {}) => {
+        for (let attempt = 0; attempt < (seconds === undefined ? 1 : 4); attempt += 1) { const value = await read(); if (accepts(value)) return value; }
+        throw new LiveGatewayBrowserError('interactive_step_timed_out');
+      },
+      request: async (origin, path, options = {}) => {
+        if (origin === config.installerOrigin && path === '/api/teardown') return { canAuthorize: false };
+        if (path === '/api/teardown-actions' && options.method === 'POST') { posts += 1; if (posts > 2) throw new Error('stop_at_third_round'); return { actionId, handoffUrl: 'synthetic' }; }
+        if (path === `/api/teardown-actions/${actionId}`) return { status: 'recovery_required', failureCode: 'fresh_authorization_required' };
+        throw new Error('unexpected_request');
+      },
+    };
+    const run = removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => { calls.push(`${event.stage}:${event.status}`); }, phase });
+    // An interruption the browser never observes cannot be left armed on a new tab: the run stops instead.
+    await assert.rejects(run, phase === 'interrupted' && observedAfter === null ? { code: 'interruption_not_observed' } : /stop_at_third_round/u);
+    assert.deepEqual(calls, expected);
+    assert.equal(calls.filter((call) => call.startsWith('replace:')).length, phase === 'interrupted' && observedAfter !== null ? 1 : 0);
   }
 });
 
