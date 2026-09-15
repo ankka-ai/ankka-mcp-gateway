@@ -34,10 +34,14 @@ It is additionally bound to the selected account and target and is used only
 for the approved provider calls or one exact authenticated gateway Worker
 action.
 
-Both grant types are held only in request-local memory, are never written to
-Durable Object state, logs, analytics, browser output, or support evidence, and
-are subject to bounded revocation attempts before their local copies are
-discarded.
+Both grant types are held only in memory: in the callback request, or, for an
+operation that runs behind a progress page, in the owning Durable Object for
+one bounded attempt window. They are never written to Durable Object state,
+logs, analytics, browser output, or support evidence, and are subject to
+bounded revocation attempts before their local copies are discarded. An object
+restart between passes loses such a grant and stops the attempt as
+recovery-required with an unconfirmed revocation; a fresh consent resumes from
+the durable step receipts.
 
 Revocation is a provider operation and may be unconfirmed. Discarding a local
 copy does not prove provider-side revocation.
@@ -187,6 +191,16 @@ foreign Portal mapping the gateway's server:
   recorded for another graph is never resumed.
 - Completion records exactly one applied deletion per resource and leaves the
   installation receipt unchanged.
+The hosted root finalizer bounds what one attempt reads without weakening
+these checks: the complete ownership preflight and the scan of other Workers
+in the account run once per attempt, and only Workers modified at or after
+the gateway's creation are read (a missing timestamp means read it); each
+deletion is preceded by an identity re-read of its own resource; a settling
+write is re-read on the owner-side resources it touched. Every provider and
+journal call counts against a fixed budget of fifty, and an attempt that would
+exceed it stops before the platform's cap with the resumable reason
+`budget_exhausted`, so its grant is still revoked and its pending step stays
+armed for the next consent.
 
 ## Software supply chain
 

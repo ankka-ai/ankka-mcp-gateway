@@ -84,6 +84,10 @@ test('a landing is fixed labels only: site, page, and the removal page\'s result
     [`https://installer.example.com/teardown#${fragment}`, { site: 'installer', page: 'receipt', result: null, reason: null }],
     ['https://manage.example.com/__ankka/operation/teardown?result=recovery_required&reason=removal', { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' }],
     [`https://manage.example.com/__ankka/operation/teardown#${fragment}`, { site: 'gateway', page: 'removal', result: null, reason: null }],
+    // The removal page follows an attempt and records its result word; the attempt itself is never recorded.
+    [`https://manage.example.com/__ankka/operation/teardown?attempt=attempt_${'A'.repeat(24)}`, { site: 'gateway', page: 'removal', result: null, reason: null }],
+    [`https://manage.example.com/__ankka/operation/teardown?attempt=attempt_${'A'.repeat(24)}&result=removed`, { site: 'gateway', page: 'removal', result: 'removed', reason: null }],
+    [`https://manage.example.com/__ankka/operation/teardown?attempt=attempt_${'A'.repeat(24)}&result=recovery_required&reason=interrupted`, { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'interrupted' }],
     ['https://manage.example.com/__ankka/operation/teardown?result=recovery_required&reason=Not%20a%20word&code=secret', { site: 'gateway', page: 'removal', result: 'recovery_required', reason: null }],
     ['https://manage.example.com/__ankka/install/oauth/callback?code=secret&state=secret', { site: 'gateway', page: 'callback', result: null, reason: null }],
     ['https://dash.cloudflare.com/oauth2/auth?client_id=secret', { site: 'cloudflare', page: 'consent', result: null, reason: null }],
@@ -99,6 +103,7 @@ test('a landing is fixed labels only: site, page, and the removal page\'s result
     assert.deepEqual(landing, expected);
     assert.equal(JSON.stringify(landing).includes('secret'), false);
     assert.equal(JSON.stringify(landing).includes(fragment), false);
+    assert.equal(JSON.stringify(landing).includes('attempt_'), false);
   }
 });
 
@@ -210,7 +215,7 @@ test('a tab the browser discarded or crashed is replaced in the same context wit
     const [first] = tabs;
     assert.equal(tabs.length, 1);
     assert.deepEqual(attached(first), { events: ['request', 'requestfinished', 'requestfailed'], timeouts: [30_000], routes: 2 });
-    await runner.loseNextTeardownCallbackResponse();
+    await runner.loseNextTeardownReceiptHop();
     assert.equal(first.routes.length, 3);
     // A hosted callback the first tab was still waiting for when it was lost.
     first.listeners.request({ url: () => `${managementOrigin}/__ankka/install/oauth/callback?code=secret&state=secret` });
@@ -228,13 +233,14 @@ test('a tab the browser discarded or crashed is replaced in the same context wit
     // The landing is read from the replacement.
     assert.deepEqual(runner.landing(), { site: 'gateway', page: 'other', result: null, reason: null });
     // The replacement's routes are the runner's: the handoff hold answers the installer's not-ready body while held,
-    // the held origin is consulted per request, and the armed interception matches the gateway's callback.
+    // the held origin is consulted per request, and the armed interception matches the hop to the receipt page only.
     const answers = [];
     const route = { fulfill: async (answer) => answers.push(answer.status), continue: async () => answers.push('continue') };
     runner.holdHandoff(); await second.routes[1].handler(route); runner.releaseHandoff(); await second.routes[1].handler(route);
     assert.deepEqual(answers, [503, 'continue']);
     assert.equal(second.routes[1].matcher(new URL(`${installerOrigin}/api/bootstrap/handoff`)), true);
-    assert.equal(second.routes[2].matcher(new URL(`${managementOrigin}/__ankka/install/oauth/callback?code=secret`)), true);
+    assert.equal(second.routes[2].matcher(new URL(`${installerOrigin}/teardown`)), true);
+    assert.equal(second.routes[2].matcher(new URL(`${managementOrigin}/__ankka/install/oauth/callback?code=secret`)), false);
     assert.equal(second.routes[0].matcher(new URL(`${managementOrigin}/__ankka/update`)), false);
     await runner.consent('https://dash.cloudflare.com/oauth2/auth?client_id=synthetic', async () => true, (value) => value === true, { holdOrigin: managementOrigin, keepHold: true });
     assert.equal(second.routes[0].matcher(new URL(`${managementOrigin}/__ankka/update`)), true);
@@ -284,12 +290,12 @@ test('the test tab is replaced on purpose once the interception is spent: the ne
     const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection, headless: true,
       notify: (notice) => notices.push(notice), checkpoint: async (event) => events.push(event), browserType });
     const [first] = tabs;
-    await runner.loseNextTeardownCallbackResponse();
+    await runner.loseNextTeardownReceiptHop();
     assert.equal(first.routes.length, 3);
-    // The lost callback: the interception validates the completion handoff, aborts the answer and is spent.
+    // The dropped receipt hop: the interception aborts the document navigation to the installer once and is spent.
     const answers = [];
     const route = {
-      fetch: async () => ({ status: () => 303, headers: () => ({ location: `${installerOrigin}/teardown#${'B'.repeat(48)}` }), dispose: async () => {} }),
+      request: () => ({ resourceType: () => 'document' }),
       abort: async (code) => answers.push(`abort:${code}`), continue: async () => answers.push('continue'),
     };
     await first.routes[2].handler(route);
@@ -301,7 +307,7 @@ test('the test tab is replaced on purpose once the interception is spent: the ne
     // Everything but the spent interception route: the replacement is the tab of a fresh process.
     assert.deepEqual(attached(second), { events: ['request', 'requestfinished', 'requestfailed'], timeouts: [30_000], routes: 2 });
     assert.equal(second.routes[1].matcher(new URL(`${installerOrigin}/api/bootstrap/handoff`)), true);
-    assert.equal(second.routes.some((item) => item.matcher(new URL(`${managementOrigin}/__ankka/install/oauth/callback?code=secret`))), false);
+    assert.equal(second.routes.some((item) => item.matcher(new URL(`${installerOrigin}/teardown#${'B'.repeat(48)}`))), false);
     assert.equal(first.closed, true);
     assert.deepEqual(events, [{ stage: 'browser', status: 'tab_replaced', reason: 'interruption_spent' }]);
     assert.equal(notices.filter((notice) => notice.startsWith('Test tab replaced')).length, 1);

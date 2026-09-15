@@ -41,6 +41,9 @@ import { verifyStaticDeployPlanIntegrity } from './schema';
 import { createGatewayTeardownHandoff } from './gateway-teardown-handoff';
 import { DurableCustomerTeardownAttemptPort } from './customer-teardown-attempt';
 import { customerTeardownCommand } from './customer-teardown-command';
+import { CustomerTeardownRemovalDriver } from './customer-teardown-driver';
+import { CustomerRuntimeUpdateDriver, DurableCustomerUpdateOutcomePort } from './customer-update-driver';
+import { DurableCustomerTeardownOutcomePort, type CustomerTeardownCompletion } from './customer-teardown-progress';
 import { createCustomerTeardownRouter, customerTeardownCookiePresent, CUSTOMER_TEARDOWN_PATH } from './customer-teardown-router';
 import {
   createCustomerOperationRouter,
@@ -254,6 +257,10 @@ export class AdminState extends RuntimeAdminState {
   private readonly recoveryReady: Promise<void>;
   /** Grant and pass count of a running recovery attempt, in memory only. */
   private recovery: CustomerBootstrapConvergenceDriver | null = null;
+  /** Grant, action key and pass count of a running dependency removal, in memory only. */
+  private teardown: CustomerTeardownRemovalDriver | null = null;
+  /** Grant and action key of a running update, in memory only, until its upload replaces this version. */
+  private update: CustomerRuntimeUpdateDriver | null = null;
 
   constructor(
     private readonly finalState: FinalDurableObjectState,
@@ -465,7 +472,10 @@ export class AdminState extends RuntimeAdminState {
     config: ParsedFinalEnv,
     input: CustomerOperationRuntimeUpdateInput,
   ): Promise<CustomerOperationResult> {
-    const control = (command: CustomerRuntimeControlCommand) => this.signedRuntimeControl(input, command);
+    const control = (command: CustomerRuntimeControlCommand) => {
+      if (command.command === 'progress') input.onStage?.(command.stage);
+      return this.signedRuntimeControl(input, command);
+    };
     try {
       await runCustomerRuntimeUpdate({
         accessToken: input.accessToken,
@@ -479,6 +489,7 @@ export class AdminState extends RuntimeAdminState {
         transport: (target, init) => fetch(target, init),
         control,
         armHandover: async ({ fromVersionId }) => {
+          input.onStage?.('uploading');
           const armedAt = Date.now();
           const handover: RuntimeHandover = {
             schemaVersion: 1,
@@ -544,14 +555,56 @@ export class AdminState extends RuntimeAdminState {
     }
   }
 
+  /** The signed handoff to the hosted root finalizer, once the dependencies are gone. */
+  private async signTeardownHandoff(config: ParsedFinalEnv, completion: CustomerTeardownCompletion, priorGrantRevocationUnconfirmed: boolean): Promise<string> {
+    const ownership = await this.assertOperational(config);
+    if (ownership.trust === null || ownership.ownershipCertificate === null || ownership.serializedPlan === null) {
+      throw new Error('teardown_unavailable');
+    }
+    const journal = await new CustomerStage2DurableStatePort(this.finalState.storage).read();
+    if (journal === null) throw new Error('teardown_unavailable');
+    return createGatewayTeardownHandoff({
+      certificate: ownership.ownershipCertificate, privateKey: await openCustomerGatewayOwnershipPrivateKey({ storage: this.finalState.storage,
+        wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY }),
+      trust: { pinnedIssuerPublicKey: ownership.trust.pinnedIssuerPublicKey, expectedKeyId: ownership.trust.issuerKeyId,
+        expectedPublicClientId: ownership.trust.publicClientId },
+      plan: await verifyStaticDeployPlanIntegrity(JSON.parse(ownership.serializedPlan)), journal,
+      actionId: completion.actionId, nonce: randomBase64Url(32),
+      readyReceiptChecksum: completion.readyReceiptChecksum, dependencyResourcesHash: completion.dependencyResourcesHash,
+      customerGrantRevocation: 'confirmed', priorGrantRevocationUnconfirmed, now: Date.now(),
+    });
+  }
+
+  /**
+   * One driver per object: it keeps a consented removal's grant and action key
+   * in memory and runs the gateway's bounded apply passes by alarm, one per
+   * invocation, re-entering this object through its namespace for each.
+   */
+  private async teardownRemoval(config: ParsedFinalEnv): Promise<CustomerTeardownRemovalDriver> {
+    if (this.teardown !== null) return this.teardown;
+    const ownership = await this.assertOperational(config);
+    if (ownership.trust === null) throw new Error('teardown_unavailable');
+    this.teardown = new CustomerTeardownRemovalDriver({
+      attempts: new DurableCustomerTeardownAttemptPort(this.finalState.storage),
+      outcomes: new DurableCustomerTeardownOutcomePort(this.finalState.storage),
+      transport: (target, init) => fetch(target, init),
+      publicClientId: ownership.trust.publicClientId,
+      accountId: config.CLOUDFLARE_ACCOUNT_ID, installId: config.ANKKA_INSTALL_ID,
+      controlPlaneOrigin: gatewayControlPlaneOrigin(),
+      command: customerTeardownCommand(this.finalEnv.ADMIN_STATE),
+      signHandoff: (completion, priorGrantRevocationUnconfirmed) => this.signTeardownHandoff(config, completion, priorGrantRevocationUnconfirmed),
+      now: Date.now,
+      schedule: (delayMs) => this.finalState.storage.setAlarm(Date.now() + delayMs),
+    });
+    return this.teardown;
+  }
+
   private async teardownRouter(config: ParsedFinalEnv, managementOrigin: string) {
     const ownership = await this.assertOperational(config);
     if (ownership.trust === null || ownership.ownershipCertificate === null || ownership.serializedPlan === null) {
       throw new Error('teardown_unavailable');
     }
     const trust = ownership.trust;
-    const certificate = ownership.ownershipCertificate;
-    const serializedPlan = ownership.serializedPlan;
     return createCustomerTeardownRouter({
       accountId: config.CLOUDFLARE_ACCOUNT_ID, installId: config.ANKKA_INSTALL_ID,
       managementOrigin, controlPlaneOrigin: gatewayControlPlaneOrigin(),
@@ -559,27 +612,15 @@ export class AdminState extends RuntimeAdminState {
       publicClientId: trust.publicClientId, encryptionKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY,
     }, {
       attempts: new DurableCustomerTeardownAttemptPort(this.finalState.storage),
+      outcomes: new DurableCustomerTeardownOutcomePort(this.finalState.storage),
       transport: (target, init) => fetch(target, init),
       assertOperational: () => this.assertOperational(config).then(() => undefined),
-      // The callback is outside the payload's mutation queue. Re-enter the
-      // same object through its namespace so each signed pass receives a fresh
-      // invocation budget. The grant lives only in the active callback.
+      // The proof and the settlement run outside the payload's mutation queue. Re-enter the
+      // same object through its namespace so each signed command receives a fresh invocation.
       command: customerTeardownCommand(this.finalEnv.ADMIN_STATE),
       issueRelayTicket: (kinds) => this.issueOperationRelayTicket(config, 'uninstall', kinds),
-      signHandoff: async (completion, priorGrantRevocationUnconfirmed) => {
-        const journal = await new CustomerStage2DurableStatePort(this.finalState.storage).read();
-        if (journal === null) throw new Error('teardown_unavailable');
-        return createGatewayTeardownHandoff({
-          certificate, privateKey: await openCustomerGatewayOwnershipPrivateKey({ storage: this.finalState.storage,
-            wrappingKey: config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY }),
-          trust: { pinnedIssuerPublicKey: trust.pinnedIssuerPublicKey, expectedKeyId: trust.issuerKeyId,
-            expectedPublicClientId: trust.publicClientId },
-          plan: await verifyStaticDeployPlanIntegrity(JSON.parse(serializedPlan)), journal,
-          actionId: completion.actionId, nonce: randomBase64Url(32),
-          readyReceiptChecksum: completion.readyReceiptChecksum, dependencyResourcesHash: completion.dependencyResourcesHash,
-          customerGrantRevocation: 'confirmed', priorGrantRevocationUnconfirmed, now: Date.now(),
-        });
-      },
+      startRemoval: async (input) => (await this.teardownRemoval(config)).start(input),
+      liveProgress: (attemptId) => this.teardown?.live(attemptId) ?? null,
     });
   }
 
@@ -597,6 +638,26 @@ export class AdminState extends RuntimeAdminState {
     }, { storage: this.finalState.storage, runtime: (request) => super.fetch(request),
       fetch: (input, init) => fetch(input, init) });
 
+  }
+
+  /**
+   * One driver per object: it keeps an update's grant and action key in memory
+   * and runs the upload by alarm, in its own invocation, behind the page the
+   * consent lands on.
+   */
+  private async runtimeUpdateDriver(config: ParsedFinalEnv): Promise<CustomerRuntimeUpdateDriver> {
+    if (this.update !== null) return this.update;
+    const ownership = await this.assertOperational(config);
+    if (ownership.trust === null) throw new Error('operation_unavailable');
+    this.update = new CustomerRuntimeUpdateDriver({
+      outcomes: new DurableCustomerUpdateOutcomePort(this.finalState.storage),
+      transport: (target, init) => fetch(target, init),
+      publicClientId: ownership.trust.publicClientId,
+      runRuntimeUpdate: (input) => this.runRuntimeUpdate(config, input),
+      now: Date.now,
+      schedule: (delayMs) => this.finalState.storage.setAlarm(Date.now() + delayMs),
+    });
+    return this.update;
   }
 
   /** Authorizes and applies a later operation with the public client the trust names. */
@@ -625,7 +686,8 @@ export class AdminState extends RuntimeAdminState {
       },
       runBigQuerySetup: (input) => this.bigQuerySetup(config).run(input),
       readRuntimeAction: (actionId) => this.readRuntimeAction(actionId),
-      runRuntimeUpdate: (input) => this.runRuntimeUpdate(config, input),
+      startRuntimeUpdate: async (input) => (await this.runtimeUpdateDriver(config)).start(input),
+      updateView: async (attemptId) => (await this.runtimeUpdateDriver(config)).view(attemptId),
       issueRelayTicket: (operation) => this.issueOperationRelayTicket(config, operation),
       beginRelay: (input) => beginCustomerBootstrapRelay({
         ...input,
@@ -663,6 +725,18 @@ export class AdminState extends RuntimeAdminState {
       if (driver !== null) await driver.continue();
     } catch {
       // The driver settles what it can; a thrown port leaves the next look to the deadline.
+    }
+    // A consented dependency removal runs its bounded apply passes here, one alarm each.
+    try {
+      await (await this.teardownRemoval(parsedEnv(this.finalEnv))).continue();
+    } catch {
+      // An object without an operational gateway holds no removal; a thrown port leaves the attempt to its window.
+    }
+    // A consented update runs its one pass here: the upload that replaces this version.
+    try {
+      await (await this.runtimeUpdateDriver(parsedEnv(this.finalEnv))).continue();
+    } catch {
+      // An object without an operational gateway holds no update; the record and the dashboard say what happened.
     }
   }
 
