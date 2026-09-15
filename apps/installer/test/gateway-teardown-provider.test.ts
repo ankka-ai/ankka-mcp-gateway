@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { GATEWAY_ROOT_REMOVAL_STEPS } from '../src/gateway-teardown-job';
+import {
+  foreignScriptNeedsRead, gatewayTeardownFailureReason, GatewayTeardownCallBudget, GatewayTeardownProviderError,
+  GATEWAY_TEARDOWN_CALL_BUDGET, GATEWAY_TEARDOWN_SETTLEMENT_RESERVE,
+} from '../src/gateway-teardown-provider';
 import { ROOT_TEST } from './gateway-teardown-fixture';
 import { gatewayRootProviderFixture as fixture, ATTEMPT, NEXT_ATTEMPT, TOKEN } from './gateway-teardown-provider-fixture';
+
+const CREATED = '2026-09-01T12:00:00.000000Z';
+const BEFORE = '2026-08-31T23:59:59.000000Z';
+const AFTER = '2026-09-03T08:00:00.000000Z';
 
 describe('fixed hosted gateway root removal', () => {
   it('retires only the signed namespace and removes the recorded root in order', async () => {
@@ -122,6 +130,91 @@ describe('fixed hosted gateway root removal', () => {
     const bundle = Object.freeze({ ...test.bundle, payload: Object.freeze(test.bundle.payload.map((entry) => entry === test.retirement
       ? Object.freeze({ ...entry, bytes: new Blob(['arbitrary code']) }) : entry)) });
     await expect(test.run(ATTEMPT, ROOT_TEST.accountId, bundle)).rejects.toThrow();
+    expect(test.mutations).toEqual([]);
+  });
+});
+
+describe('bounded finalizer reads', () => {
+  it.each([
+    [BEFORE, CREATED, false], [CREATED, CREATED, true], [AFTER, CREATED, true],
+    [undefined, CREATED, true], [AFTER, undefined, true], [BEFORE, undefined, true],
+    ['not a time', CREATED, true], [BEFORE, 'not a time', true],
+  ])('reads a foreign script modified %s against an owner created %s: %s', (modifiedOn, createdOn, expected) => {
+    expect(foreignScriptNeedsRead(modifiedOn, createdOn)).toBe(expected);
+  });
+
+  it('scans foreign scripts once per attempt and skips those last modified before the owner Worker existed', async () => {
+    const test = await fixture(); test.createdOwner(CREATED);
+    // A script older than the gateway cannot bind it; the fixture gives it a binding to prove it is never read.
+    test.addForeignScript('older-script', BEFORE, 'namespace');
+    test.addForeignScript('newer-script', AFTER);
+    test.addForeignScript('undated-script', undefined);
+    expect((await test.run()).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    expect(test.readCount('/workers/scripts/older-script/settings')).toBe(0);
+    expect(test.readCount('/workers/scripts/newer-script/settings')).toBe(1);
+    expect(test.readCount('/workers/scripts/undated-script/settings')).toBe(1);
+    // The listing is read for the scan and again only when the Worker's own deletion settles.
+    expect(test.readCount('/workers/scripts')).toBe(2);
+  });
+
+  it.each(['namespace', 'service'] as const)('still refuses a newer script that binds the %s before any mutation', async (binding) => {
+    const test = await fixture(); test.createdOwner(CREATED);
+    test.addForeignScript('newer-script', AFTER, binding);
+    await expect(test.run()).rejects.toMatchObject({ stage: 'worker_bindings', code: 'foreign_dependency' });
+    expect(test.mutations).toEqual([]);
+  });
+
+  it('reads every foreign script when the owner listing carries no creation time', async () => {
+    const test = await fixture();
+    test.addForeignScript('older-script', BEFORE, 'namespace');
+    await expect(test.run()).rejects.toMatchObject({ stage: 'worker_bindings', code: 'foreign_dependency' });
+    expect(test.mutations).toEqual([]);
+  });
+
+  it('re-reads only the resource about to be deleted before each deletion and the owner side while a write settles', async () => {
+    const test = await fixture(); test.createdOwner(CREATED);
+    test.addForeignScript('newer-script', AFTER);
+    expect((await test.run()).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    const base = `/client/v4/accounts/${ROOT_TEST.accountId}`;
+    const application = `/client/v4/zones/${ROOT_TEST.zoneId}/access/apps/${ROOT_TEST.applicationId}`;
+    // Preflight, the identity re-read before the Worker deletion, and the settle after it.
+    expect(test.readCount(`${base}/workers/workers/${ROOT_TEST.workerName}`)).toBe(3);
+    // Preflight and the retirement's settle: the namespace listing and the owner's settings.
+    expect(test.readCount(`${base}/workers/durable_objects/namespaces`)).toBe(2);
+    expect(test.readCount(`${base}/workers/scripts/${ROOT_TEST.workerName}/settings`)).toBe(2);
+    // The retirement version is read once, when the namespace listing has dropped the class.
+    expect(test.readCount(`${base}/workers/scripts/${ROOT_TEST.workerName}/deployments`)).toBe(1);
+    // Preflight, the identity re-read before the deletion, and the settle after it; listings only in preflight and settle.
+    expect(test.readCount(`${base}/workers/domains/${ROOT_TEST.domainId}`)).toBe(3);
+    expect(test.readCount(`${base}/workers/domains`)).toBe(2);
+    expect(test.readCount(`${application}/policies/${ROOT_TEST.policyId}`)).toBe(3);
+    expect(test.readCount(`${application}/policies`)).toBe(2);
+    expect(test.readCount(application)).toBe(3);
+    expect(test.reads).toHaveLength(28);
+  });
+
+  it('counts every provider and journal call and stops before the cap with the one resumable reason', async () => {
+    const budget = new GatewayTeardownCallBudget(2);
+    expect(GATEWAY_TEARDOWN_CALL_BUDGET - GATEWAY_TEARDOWN_SETTLEMENT_RESERVE).toBe(new GatewayTeardownCallBudget().limit);
+    const calls: string[] = [];
+    const port = budget.port({ read: async () => { calls.push('read'); return null; }, compareAndSet: async () => { calls.push('write'); return true; } });
+    budget.charge('exchange');
+    await port.read();
+    expect(budget.spent).toBe(2);
+    await expect(port.compareAndSet(1, await (await fixture()).current())).rejects.toMatchObject({ code: 'budget_exhausted' });
+    expect(() => budget.charge('account')).toThrow(GatewayTeardownProviderError);
+    expect(calls).toEqual(['read']);
+    expect(gatewayTeardownFailureReason(new GatewayTeardownProviderError('worker_list', 'budget_exhausted'))).toBe('budget_exhausted');
+    expect(gatewayTeardownFailureReason(new GatewayTeardownProviderError('worker_read', 'identity_mismatch'))).toBe('worker_read_identity_mismatch');
+  });
+
+  it('stops at a provider read with the budget reason itself, never as a retried transport error', async () => {
+    const test = await fixture();
+    // Three reads fit (the Worker by name and id, the namespace listing); the script listing would be the fourth.
+    await expect(test.run(ATTEMPT, ROOT_TEST.accountId, test.bundle, new GatewayTeardownCallBudget(3)))
+      .rejects.toMatchObject({ stage: 'worker_list', code: 'budget_exhausted' });
+    expect(test.reads).toHaveLength(3);
     expect(test.mutations).toEqual([]);
   });
 });
