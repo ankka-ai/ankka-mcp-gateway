@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Update the transitive `sharp` dependency from 0.35.2 to 0.35.4 to resolve
+  the libheif advisories GHSA-g89c-p67h-r497 and GHSA-2jg2-4ch7-h545 reported
+  as GHSA-rgj7-g3m4-5g8c. Miniflare pins the vulnerable version exactly, so
+  the root manifest carries an npm override; the wrangler, esbuild, and
+  Miniflare pins are unchanged.
+
 - Keep admin license generation working when npm loses development flags on
   optional TypeScript, lightningcss, and fsevents binaries. Retain license
   checks for other dependencies and the existing esbuild/rolldown notices.
