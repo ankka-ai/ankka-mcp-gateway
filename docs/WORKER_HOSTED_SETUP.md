@@ -89,6 +89,23 @@ This prevents ordinary idle hibernation between alarm passes when the progress
 page is not being polled. Settlement releases the timer; unexpected restarts
 still lose the grant and stop the attempt. No credential is persisted.
 
+Every later consented operation follows the same shape, so the browser never
+waits on Cloudflare's authorize page for a running operation. The hosted root
+finalizer's callback exchanges the code, hands it to the removal job's Durable
+Object, which keeps the grant only in its memory, and answers at once with the
+`/teardown` page; the job runs its five steps and its settlement in alarm
+passes, each with its own call budget, and the page shows the steps live. The
+gateway's dependency removal and its update do the same on the management
+object behind `/__ankka/operation/teardown` and `/__ankka/operation/update`,
+each page polling a progress route that reports fixed labels and words only.
+Once the dependencies are gone the removal page hops to the installer with the
+signed receipt; once an update has uploaded, its page hands the browser to
+Settings, which follows the action through the existing handover alarm. An
+object restart between passes loses the grant and stops the attempt as
+recovery-required with an unconfirmed revocation; a fresh consent resumes from
+the durable step receipts. Workflows are not used for these paths: persisted
+step state would persist the grant.
+
 In-flight fully configured plans remain readable for recovery. Newly started
 deployments use the configuration-free bootstrap path. Hosted session evidence
 expires after one hour; the Worker owns its setup draft. No MCP source-provider

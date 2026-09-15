@@ -4,6 +4,16 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Run every consented operation behind a page of the gateway's or the
+  installer's own instead of inside Cloudflare's authorize callback. The
+  callback exchanges the code, keeps the grant only in the owning Durable
+  Object's memory, and answers at once with a page that shows the steps live;
+  the hosted root finalizer, the gateway's dependency removal and its update
+  then run by alarm, one bounded pass per invocation. An object restart loses
+  the grant and stops the attempt as recovery-required with an unconfirmed
+  revocation; a fresh consent resumes from the durable receipts. No grant is
+  ever persisted.
+
 - Bound what one hosted root-removal attempt reads: scan other Workers once
   per attempt and only those modified since the gateway was created, re-read
   each resource by identity before its deletion, and re-read only the owner

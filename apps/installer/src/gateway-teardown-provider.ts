@@ -267,19 +267,52 @@ export function foreignScriptNeedsRead(modifiedOn: string | undefined, ownerCrea
   return modified >= created;
 }
 
+/** The foreign-script scan of one attempt: the listing, the owner's creation time, and the next script to read. */
+interface ForeignScriptScan {
+  readonly scripts: readonly ListedScript[];
+  readonly ownerCreatedOn: string | undefined;
+  next: number;
+}
+
+export interface GatewayRootRemovalInventory {
+  retire_namespace: boolean; management_domain: boolean; management_policy: boolean; management_application: boolean; worker: boolean;
+}
+
+/**
+ * What one attempt keeps in memory between its passes, so the once-per-attempt
+ * work is never repeated within it: the foreign-script scan with its cursor,
+ * and the completed preflight. Secret-free and never persisted; it is lost
+ * with the attempt, whose next consent starts a new one.
+ */
+export interface GatewayRootRemovalAttemptMemory {
+  scan: ForeignScriptScan | null;
+  inventory: GatewayRootRemovalInventory | null;
+}
+
+export function createGatewayRootRemovalAttemptMemory(): GatewayRootRemovalAttemptMemory {
+  return { scan: null, inventory: null };
+}
+
 /**
  * No other script may bind the namespace or the Worker. Scanned once per
  * attempt: only scripts modified at or after the owner Worker's creation are
  * read, the rest cannot have bound it. The owner's own listing entry must
- * agree with its direct read.
+ * agree with its direct read. A pass that stops mid-scan resumes at the
+ * next unread script; no script is read twice.
  */
-async function foreignScriptsUnshared(call: Call, rootPresent: boolean): Promise<void> {
+async function foreignScriptsUnshared(call: Call, rootPresent: boolean, memory: GatewayRootRemovalAttemptMemory): Promise<void> {
   const owner = call.authority.certificate.statement;
-  const scripts = await listedScripts(call);
-  const ownerEntry = scripts.find((script) => script.name === owner.worker.name);
-  if ((ownerEntry !== undefined) !== rootPresent) fail('worker_list', 'identity_mismatch');
-  for (const script of scripts) {
-    if (script.name === owner.worker.name || !foreignScriptNeedsRead(script.modifiedOn, ownerEntry?.createdOn)) continue;
+  if (memory.scan === null) {
+    const scripts = await listedScripts(call);
+    const ownerEntry = scripts.find((script) => script.name === owner.worker.name);
+    if ((ownerEntry !== undefined) !== rootPresent) fail('worker_list', 'identity_mismatch');
+    memory.scan = { scripts, ownerCreatedOn: ownerEntry?.createdOn, next: 0 };
+  }
+  const scan = memory.scan;
+  for (; scan.next < scan.scripts.length; scan.next += 1) {
+    const script = scan.scripts[scan.next];
+    if (script === undefined) break;
+    if (script.name === owner.worker.name || !foreignScriptNeedsRead(script.modifiedOn, scan.ownerCreatedOn)) continue;
     const response = await request(call, 'worker_bindings', account(call, `/workers/scripts/${script.name}/settings`));
     const settings = v.safeParse(settingsSchema, response.value);
     if (!settings.success) fail('worker_bindings', 'provider_unknown');
@@ -452,18 +485,17 @@ async function retiredVersion(call: Call, expectedSha256: string, settling: bool
   fail(mismatch, 'identity_mismatch');
 }
 
-interface Inventory { retire_namespace: boolean; management_domain: boolean; management_policy: boolean; management_application: boolean; worker: boolean }
-
 /**
  * The complete strict ownership preflight, once per attempt: every owned
  * resource by identity, the foreign-script scan, and the proof that no
- * verified step's resource is back.
+ * verified step's resource is back. Kept in the attempt memory once
+ * complete; a pass stopped inside it repeats only the direct reads.
  */
-async function inventory(call: Call, job: GatewayTeardownJob): Promise<Inventory> {
+async function inventory(call: Call, job: GatewayTeardownJob, memory: GatewayRootRemovalAttemptMemory): Promise<GatewayRootRemovalInventory> {
   const worker = await workerPresent(call);
   const namespace = await namespacePresent(call);
   if (namespace && !worker) fail('namespace_read', 'identity_mismatch');
-  await foreignScriptsUnshared(call, worker);
+  await foreignScriptsUnshared(call, worker, memory);
   if (worker && !await ownerScriptConsistent(call, namespace, job.retirementModuleSha256, false)) fail('preflight', 'identity_mismatch');
   const domain = await domainPresent(call);
   const management = await managementPresent(call);
@@ -471,6 +503,7 @@ async function inventory(call: Call, job: GatewayTeardownJob): Promise<Inventory
   const present = { retire_namespace: namespace, management_domain: domain,
     management_policy: management.policy, management_application: management.application, worker };
   if (job.verifiedSteps.some((step) => present[step])) fail('preflight', 'identity_mismatch');
+  memory.inventory = present;
   return present;
 }
 
@@ -563,9 +596,12 @@ async function remove(call: Call, step: GatewayRootRemovalStep, module: Blob): P
 /**
  * One attempt's provider mutations, with the credential the caller holds;
  * this port persists only evidence. Reads are bounded: the complete
- * ownership preflight and the foreign-script scan run once, each deletion
- * is preceded by an identity re-read of its own resource, and a settling
- * write is re-read on the owner-side resources it touched.
+ * ownership preflight and the foreign-script scan run once per attempt,
+ * each deletion is preceded by an identity re-read of its own resource, and
+ * a settling write is re-read on the owner-side resources it touched.
+ * A pass stopped by its budget throws `budget_exhausted`; the same attempt
+ * continues in a later pass from the durable receipts and its memory, and a
+ * write it already sent is settled, never sent again.
  */
 export async function executeGatewayRootRemoval(input: {
   readonly port: GatewayTeardownJobPort; readonly trust: GatewayTeardownTrust;
@@ -577,6 +613,8 @@ export async function executeGatewayRootRemoval(input: {
   readonly current?: GatewayTeardownJob;
   /** Charged before each provider call; absent for an uncounted attempt. */
   readonly budget?: GatewayTeardownCallBudget;
+  /** The attempt's memory across passes; absent for a single-pass attempt. */
+  readonly memory?: GatewayRootRemovalAttemptMemory;
 }): Promise<GatewayTeardownJob> {
   let job = input.current ?? await input.port.read();
   if (job === null || job.phase !== 'exchanging' || job.attempt?.id !== input.attemptId || job.attempt.expiresAt <= input.now()) fail('start', 'job_conflict');
@@ -587,19 +625,29 @@ export async function executeGatewayRootRemoval(input: {
     ? { authority, accessToken: input.accessToken, transport: input.transport, wait }
     : { authority, accessToken: input.accessToken, transport: input.transport, wait, budget: input.budget };
   const module = await retirementModule(job, input.bundle);
+  const memory = input.memory ?? createGatewayRootRemovalAttemptMemory();
   const commit = async (previous: GatewayTeardownJob, next: GatewayTeardownJob): Promise<GatewayTeardownJob> => {
     if (!await input.port.compareAndSet(previous.revision, next)) fail('persist', 'job_conflict');
     return next;
   };
-  // Complete ownership preflight once, before the first destructive boundary.
-  const present = await inventory(call, job);
-  let fresh = true;
+  // Complete ownership preflight once per attempt, before the first destructive boundary.
+  let fresh = false;
+  if (memory.inventory === null) {
+    await inventory(call, job, memory);
+    fresh = true;
+  }
+  const present = memory.inventory;
+  if (present === null) fail('preflight', 'identity_mismatch');
   for (const step of GATEWAY_ROOT_REMOVAL_STEPS.slice(job.verifiedSteps.length)) {
     // The preflight just read this resource; every later deletion re-reads its
     // own resource to notice a concurrent manual policy/domain change.
     const resourcePresent = fresh ? present[step] : await stepPresent(call, job, step);
     fresh = false;
-    if (job.pendingStep === null || resourcePresent) {
+    // An earlier pass of this attempt may have armed the step and stopped at its budget
+    // before or after sending; the arming stands, and a still-present resource is sent
+    // for again under the same consent (every write here is idempotent).
+    const armedByThisAttempt = job.pendingStep === step && job.pendingAttemptId === input.attemptId;
+    if (!armedByThisAttempt && (job.pendingStep === null || resourcePresent)) {
       job = await commit(job, armGatewayRootRemoval({ job, attemptId: input.attemptId, step, now: input.now() }));
     }
     if (resourcePresent) {

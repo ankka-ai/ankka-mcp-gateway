@@ -283,6 +283,15 @@ const INTERNAL_CONTROL_PATH = '/management-control';
 const INTERNAL_ACTIONS_PATH = '/source-actions';
 const INTERNAL_UPDATES_PATH = '/runtime-updates';
 const INTERNAL_TEARDOWNS_PATH = '/teardown-actions';
+/** The receipt resource kind of each dependency the root journal tracks: the fixed words the installer and the removal page see. */
+const TEARDOWN_RECEIPT_KINDS = Object.freeze({
+  mcp_server: 'mcp_server', portal: 'mcp_portal', dns_record: 'dns_record',
+  source_access_application: 'access_application', portal_access_application: 'access_application',
+  source_access_policy: 'access_policy', portal_access_policy: 'access_policy',
+});
+/** The phases a bounded removal pass may report, in the order they run. */
+const TEARDOWN_PHASES = Object.freeze(['bridge_preflight', 'sharing_preflight', 'preflight', 'remove', 'sharing_delete', 'delete', 'verify', 'bridges']);
+const TEARDOWN_KIND_WORDS = new Set(['mcp_server', 'mcp_portal', 'access_application', 'access_policy', 'dns_record', 'worker', 'worker_custom_domain']);
 const INTERNAL_TEARDOWN_ROOT_PATH = '/teardown-root';
 const INTERNAL_STATUS_PATH = '/status';
 const INTERNAL_SOURCES_PATH = '/sources';
@@ -4295,8 +4304,11 @@ async function processBoundedRootTeardown(storage, root, teardown, authority, re
   const active = () => Date.now() < input.expiresAt;
   const pause = async () => {
     await storage.put(ROOT_TEARDOWN_PROGRESS_KEY, progress);
+    // Beside the opaque progress, the fixed words the removal page shows: the phase and the kinds already gone.
+    const removedKinds = [...new Set(resources.slice(0, teardown.removedKeys.length)
+      .map((resource) => TEARDOWN_RECEIPT_KINDS[resource.kind]).filter((kind) => kind !== undefined))];
     return Object.freeze({ schemaVersion: 1, status: 'removing', installationId: root.installationId,
-      progress: await sha256({ progress, teardown }) });
+      progress: await sha256({ progress, teardown }), phase: progress.phase, removedKinds });
   };
   const saveTeardown = async (next) => {
     teardown = next;
@@ -4619,13 +4631,8 @@ async function processTeardownActionProof(request, env, storage, nowMs = Date.no
   if (!authority) return null;
   const layout = currentPolicies ? teardownResources(authority.root, authority.control.sourceOwnership, true) : null;
   if (currentPolicies && !layout) return null;
-  const kinds = {
-    mcp_server: 'mcp_server', portal: 'mcp_portal', dns_record: 'dns_record',
-    source_access_application: 'access_application', portal_access_application: 'access_application',
-    source_access_policy: 'access_policy', portal_access_policy: 'access_policy',
-  };
   const receiptScopeEvidence = currentPolicies ? {
-    receiptResourceKinds: [...new Set([...layout.resources.map((resource) => kinds[resource.kind]),
+    receiptResourceKinds: [...new Set([...layout.resources.map((resource) => TEARDOWN_RECEIPT_KINDS[resource.kind]),
       ...(currentState?.bridges?.receiptResourceKinds ?? [])])].sort(compareText),
   } : {};
   // The proof response can be lost after the action is durably authorized but
@@ -4687,8 +4694,16 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
       ...(source.pending?.kind === 'mcp_server' ? [source.pending] : [])])]
     .filter((resource) => resource.kind === 'mcp_server').map((resource) => resource.provider.id);
   const bridgeGrant = { accessToken: value.cloudflareAccessToken, expiresAt: value.expiresAt, requestId: value.requestId };
-  const paused = async (phase, progress) => Object.freeze({ schemaVersion: 1, actionId: action.actionId,
-    status: 'removing', installationId: action.installationId, progress: await sha256({ phase, progress }) });
+  const paused = async (phase, progress, detail = null) => {
+    const result = { schemaVersion: 1, actionId: action.actionId, status: 'removing', installationId: action.installationId,
+      progress: await sha256({ phase, progress }) };
+    // The fixed words for the removal page: the root pass's own phase and removed kinds when it reported them, else this phase.
+    const reported = detail !== null && TEARDOWN_PHASES.includes(detail.phase) ? detail.phase : phase;
+    if (TEARDOWN_PHASES.includes(reported)) result.phase = reported;
+    if (detail !== null && Array.isArray(detail.removedKinds) && detail.removedKinds.length <= TEARDOWN_KIND_WORDS.size &&
+        detail.removedKinds.every((kind) => TEARDOWN_KIND_WORDS.has(kind))) result.removedKinds = [...detail.removedKinds];
+    return Object.freeze(result);
+  };
   try {
     const preflight = await currentState?.bridges?.preflight(bridgeGrant, ownedServerIds);
     if (preflight && !preflight.complete) return paused('bridge_preflight', preflight.progress);
@@ -4719,7 +4734,7 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   } catch { removed = null; }
   if (currentPolicies && managed?.bounded === true && removed?.schemaVersion === 1 &&
       removed.status === 'removing' && removed.installationId === action.installationId && HASH.test(removed.progress)) {
-    return paused('dependencies', removed.progress);
+    return paused('dependencies', removed.progress, removed);
   }
   if (!isRecord(removed) || removed.schemaVersion !== 1 || removed.status !== 'removed' ||
       removed.installationId !== action.installationId || !Number.isSafeInteger(removed.removedResourceCount) ||

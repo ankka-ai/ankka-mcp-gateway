@@ -34,10 +34,14 @@ It is additionally bound to the selected account and target and is used only
 for the approved provider calls or one exact authenticated gateway Worker
 action.
 
-Both grant types are held only in request-local memory, are never written to
-Durable Object state, logs, analytics, browser output, or support evidence, and
-are subject to bounded revocation attempts before their local copies are
-discarded.
+Both grant types are held only in memory: in the callback request, or, for an
+operation that runs behind a progress page, in the owning Durable Object for
+one bounded attempt window. They are never written to Durable Object state,
+logs, analytics, browser output, or support evidence, and are subject to
+bounded revocation attempts before their local copies are discarded. An object
+restart between passes loses such a grant and stops the attempt as
+recovery-required with an unconfirmed revocation; a fresh consent resumes from
+the durable step receipts.
 
 Revocation is a provider operation and may be unconfirmed. Discarding a local
 copy does not prove provider-side revocation.

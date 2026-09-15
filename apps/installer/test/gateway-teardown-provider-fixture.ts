@@ -2,7 +2,7 @@ import { expect } from 'vitest';
 import type { BoundaryObject } from '../src/boundary';
 import { authorizeGatewayTeardownJob, consumeGatewayTeardownCallback, settleGatewayTeardownAttempt,
   type GatewayTeardownJob, type GatewayRootRemovalStep } from '../src/gateway-teardown-job';
-import { executeGatewayRootRemoval, type GatewayTeardownCallBudget } from '../src/gateway-teardown-provider';
+import { executeGatewayRootRemoval, type GatewayRootRemovalAttemptMemory, type GatewayTeardownCallBudget } from '../src/gateway-teardown-provider';
 import type { FetchTransport } from '../src/oauth';
 import { gatewayTeardownFixture, ROOT_TEST } from './gateway-teardown-fixture';
 
@@ -172,6 +172,11 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
         now: () => clock++, wait: async () => undefined };
       return budget === undefined ? executeGatewayRootRemoval(input) : executeGatewayRootRemoval({ ...input, budget });
     },
+    /** One pass of a multi-pass attempt: its own provider budget, the attempt's memory carried across passes. */
+    pass: (memory: GatewayRootRemovalAttemptMemory, budget: GatewayTeardownCallBudget, attemptId = ATTEMPT) => executeGatewayRootRemoval({
+      port, trust: data.trust, bundle: data.bundle, attemptId, accessToken: TOKEN, authorizedAccountId: root.accountId,
+      transport, now: () => clock++, wait: async () => undefined, memory, budget,
+    }),
     current: () => job,
     failAfter: (step: GatewayRootRemovalStep | null) => { failAfter = step; },
     failBefore: (step: GatewayRootRemovalStep | null) => { failBefore = step; },
