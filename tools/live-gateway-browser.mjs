@@ -26,6 +26,9 @@ export function rejectedSessionOutcome({ status, installedAt, now = Date.now() }
 }
 /** A hosted attempt lives ten minutes; an owned browser waits no longer than that for a pending callback on a stop. */
 export const CALLBACK_CLOSE_WAIT_MS = 600_000;
+/** The fixed reasons the runner replaces its test tab on purpose, as the journal records them: the interception has
+ * spent itself on the lost callback, so what follows runs in a tab that never carried it. */
+export const TAB_REPLACEMENT_REASONS = Object.freeze(['interruption_spent']);
 
 /** The installer's own not-ready handoff answer, returned to the page while the hold is active; null otherwise. */
 export function handoffHoldAnswer(hold) {
@@ -96,6 +99,9 @@ export function navigationFailureOf(error, { closed = false } = {}) {
 export function landingOf(value, { installerOrigin, managementOrigin }) {
   let url;
   try { url = new URL(value); } catch { return { site: 'other', page: 'other', result: null, reason: null }; }
+  // Chrome commits its own error page for a navigation it could not render, an empty error response among them; a
+  // journal then shows an error page rather than an unknown site.
+  if (url.protocol === 'chrome-error:') return { site: 'other', page: 'error', result: null, reason: null };
   const site = url.origin === installerOrigin ? 'installer' : url.origin === managementOrigin ? 'gateway' :
     url.origin === 'https://dash.cloudflare.com' ? 'cloudflare' : 'other';
   const page = site === 'installer' && url.pathname === '/teardown' ? 'receipt' :
@@ -121,8 +127,13 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     throw new LiveGatewayBrowserError('browser_connection_invalid');
   }
   const borrowed = browserConnection === 'chrome';
-  const browser = borrowed ? await browserType.connectOverCDP('chrome', { noDefaults: true, timeout: 120_000 }) :
-    browserProfile ? null : await browserType.launch({ channel: 'chrome', headless, chromiumSandbox: true });
+  let browser = null;
+  if (borrowed) {
+    // Chrome refuses the attach with its remote debugging switched off, or when nobody allows the connection within
+    // the wait. The stop names the fixed code and the operator's remedy; the error's text is never kept.
+    try { browser = await browserType.connectOverCDP('chrome', { noDefaults: true, timeout: 120_000 }); }
+    catch { throw new LiveGatewayBrowserError('browser_attach_failed'); }
+  } else if (!browserProfile) browser = await browserType.launch({ channel: 'chrome', headless, chromiumSandbox: true });
   const context = borrowed ? browser.contexts()[0] : browserProfile
     ? await browserType.launchPersistentContext(browserProfile, {
       channel: 'chrome', headless, chromiumSandbox: true, acceptDownloads: false, serviceWorkers: 'block',
@@ -190,13 +201,12 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   await attach(page);
 
   /**
-   * A tab the browser discarded after minutes in the background (Chrome's Memory Saver) or whose renderer crashed
-   * reads as a closed page. A new tab in the same context takes its place, with everything the runner attaches per
-   * tab; the previous one is closed where the browser still lets the runner, and a discarded tab's placeholder stays
-   * with the operator. What the previous tab still had in flight is forgotten: it can neither end nor be waited for.
-   * The replacement is recorded in the journal with the failure that caused it.
+   * A new tab in the same context takes the current one's place, with everything the runner attaches per tab (the
+   * interception route only while it is still armed and not spent); the previous one is closed where the browser
+   * still lets the runner, only ever the runner's own tab, and a discarded tab's placeholder stays with the operator.
+   * What the previous tab still had in flight is forgotten: it can neither end nor be waited for.
    */
-  async function reopen(failure) {
+  async function replace() {
     const previous = page;
     let replacement;
     try {
@@ -206,6 +216,14 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     page = replacement;
     callbacks.reset();
     await previous.close().catch(() => {});
+  }
+
+  /**
+   * A tab the browser discarded after minutes in the background (Chrome's Memory Saver) or whose renderer crashed
+   * reads as a closed page. A replacement takes its place, recorded in the journal with the failure that caused it.
+   */
+  async function reopen(failure) {
+    await replace();
     await checkpoint({ stage: 'browser', status: 'tab_reopened', navigation: failure });
     notify('Test tab reopened: the browser had discarded or crashed the previous one. Keep the runner\'s tab active, or turn Chrome\'s Memory Saver off for an attended run.');
   }
@@ -375,6 +393,18 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       await page.route(isTeardownCallback, loseTeardownCallbackResponse);
     },
     interruptionObserved: () => interrupted,
+    /**
+     * Replaces the test tab on purpose, for one of the fixed reasons, and journals it. Live, the tab that had
+     * carried the interception met the installer's receipt page with an empty 403 in every recovery round, while a
+     * fresh process recovered the receipt at once on the same gateway: the rounds after the interruption therefore
+     * run in a tab that never carried the route, as they would in a fresh process.
+     */
+    async replaceTab(reason) {
+      if (!TAB_REPLACEMENT_REASONS.includes(reason)) throw new LiveGatewayBrowserError('tab_replacement_reason_invalid');
+      await replace();
+      await checkpoint({ stage: 'browser', status: 'tab_replaced', reason });
+      notify('Test tab replaced: the run continues in a new tab. Leave the runner\'s tabs alone.');
+    },
     async close() {
       accessCancellation.abort();
       try {

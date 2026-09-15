@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createLiveGatewayApi, createLiveGatewayServiceApi } from '../tools/live-gateway-api.mjs';
-import { proveServiceIdentity, summarizeLiveJournal, supersededUpdateAction, validateLiveManagementConfig } from '../tools/live-gateway-command.mjs';
+import { operatorHint, proveServiceIdentity, summarizeLiveJournal, supersededUpdateAction, validateLiveManagementConfig } from '../tools/live-gateway-command.mjs';
 
 const origin = 'https://manage.example.com';
 const email = 'operator@example.com';
@@ -93,16 +93,20 @@ test('API passes and recovery receipts never imply full lifecycle qualification'
   assert.equal(result.rootRemoval, null);
   assert.equal(result.dependencyRemoval, null);
   // A stop on a failed navigation carries why in the fixed vocabulary, and a replaced test tab is counted but is
-  // never the last stage.
+  // never the last stage; a tab replaced on purpose after the interruption is the runner's event too, not a reopen.
   const lost = summarizeLiveJournal({ ...state, scope: 'browser_lifecycle', events: [
     { stage: 'update', status: 'recorded', actionId: 'private-action' },
     { stage: 'browser', status: 'tab_reopened', navigation: 'closed' },
+    { stage: 'browser', status: 'tab_replaced', reason: 'interruption_spent' },
     { stage: 'command', status: 'stopped', failureCode: 'navigation_failed', navigation: 'timeout' },
   ] });
   assert.equal(lost.lastStage, 'update');
   assert.equal(lost.failureCode, 'navigation_failed');
   assert.equal(lost.navigation, 'timeout');
   assert.equal(lost.tabsReopened, 1);
+  // A refused Chrome attach is a fixed code with the operator's remedy in the stop output; other stops carry no hint.
+  assert.match(operatorHint('browser_attach_failed'), /chrome:\/\/inspect\/#remote-debugging/u);
+  for (const code of ['navigation_failed', 'unexpected_failure', 'update_not_verified']) assert.equal(operatorHint(code), null);
   assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'command', status: 'stopped', failureCode: 'navigation_failed', navigation: 'https://x/?secret' }] }).navigation, null);
   assert.deepEqual(summarizeLiveJournal({ ...state, events: [...state.events,
     { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, revocationUnconfirmed: true }] }).rootRemoval,

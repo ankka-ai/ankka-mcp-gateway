@@ -110,6 +110,14 @@ export function supersededUpdateAction(action, now = Date.now()) {
   return null;
 }
 
+/** The fixed operator remedy printed with a stop whose cause is the operator's setup; null for every other code.
+ * Chrome refuses the runner's attach with remote debugging switched off or the connection prompt not allowed. */
+export function operatorHint(failureCode) {
+  return failureCode === 'browser_attach_failed'
+    ? 'Chrome refused the attach: enable remote debugging at chrome://inspect/#remote-debugging ("Allow remote debugging for this browser instance") and allow the attach when Chrome asks, then rerun.'
+    : null;
+}
+
 export function summarizeLiveJournal(state) {
   requireCondition(state?.schemaVersion === 1 && Array.isArray(state.events), 'journal_invalid');
   const passed = [...new Set(state.events.filter((event) => event.status === 'passed').map((event) => event.stage))];
@@ -391,6 +399,8 @@ export async function runLiveLifecycleCommand(args) {
     await checkpoint({ stage: 'command', status: 'stopped', failureCode, navigation, diagnostics });
     console.error(JSON.stringify(diagnostics));
     console.error(`Failure reference: ${failureCode}${navigation === null ? '' : ` (navigation: ${navigation})`}`);
+    const hint = operatorHint(failureCode);
+    if (hint !== null) console.error(hint);
     console.error('Live validation stopped. Keep the private journal and review the last recorded action before retrying. No automatic duplicate write or cleanup was attempted.');
     return 1;
   } finally {
