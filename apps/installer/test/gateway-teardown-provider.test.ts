@@ -198,15 +198,23 @@ describe('bounded finalizer reads', () => {
     const budget = new GatewayTeardownCallBudget(2);
     expect(GATEWAY_TEARDOWN_CALL_BUDGET - GATEWAY_TEARDOWN_SETTLEMENT_RESERVE).toBe(new GatewayTeardownCallBudget().limit);
     const calls: string[] = [];
-    const transport = budget.transport(async (input) => { calls.push(String(input)); return new Response('{}'); });
     const port = budget.port({ read: async () => { calls.push('read'); return null; }, compareAndSet: async () => { calls.push('write'); return true; } });
-    await transport('https://api.example.test/one');
+    budget.charge('exchange');
     await port.read();
     expect(budget.spent).toBe(2);
     await expect(port.compareAndSet(1, await (await fixture()).current())).rejects.toMatchObject({ code: 'budget_exhausted' });
-    await expect(transport('https://api.example.test/two')).rejects.toMatchObject({ code: 'budget_exhausted' });
-    expect(calls).toEqual(['https://api.example.test/one', 'read']);
-    expect(gatewayTeardownFailureReason(new GatewayTeardownProviderError('provider', 'budget_exhausted'))).toBe('budget_exhausted');
+    expect(() => budget.charge('account')).toThrow(GatewayTeardownProviderError);
+    expect(calls).toEqual(['read']);
+    expect(gatewayTeardownFailureReason(new GatewayTeardownProviderError('worker_list', 'budget_exhausted'))).toBe('budget_exhausted');
     expect(gatewayTeardownFailureReason(new GatewayTeardownProviderError('worker_read', 'identity_mismatch'))).toBe('worker_read_identity_mismatch');
+  });
+
+  it('stops at a provider read with the budget reason itself, never as a retried transport error', async () => {
+    const test = await fixture();
+    // Three reads fit (the Worker by name and id, the namespace listing); the script listing would be the fourth.
+    await expect(test.run(ATTEMPT, ROOT_TEST.accountId, test.bundle, new GatewayTeardownCallBudget(3)))
+      .rejects.toMatchObject({ stage: 'worker_list', code: 'budget_exhausted' });
+    expect(test.reads).toHaveLength(3);
+    expect(test.mutations).toEqual([]);
   });
 });

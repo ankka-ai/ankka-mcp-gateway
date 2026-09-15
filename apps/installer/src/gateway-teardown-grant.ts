@@ -42,7 +42,6 @@ export async function runGatewayRootRemovalAttempt(
   },
 ): Promise<string | null> {
   const port = input.budget === undefined ? input.port : input.budget.port(input.port);
-  const transport = input.budget === undefined ? input.transport : input.budget.transport(input.transport);
   const current = input.current ?? await port.read();
   if (current?.phase !== 'exchanging' || current.attempt?.id !== input.attemptId || current.attempt.expiresAt <= input.now()) {
     throw new Error('teardown_callback_invalid');
@@ -50,11 +49,12 @@ export async function runGatewayRootRemovalAttempt(
   try {
     const authority = await verifyGatewayTeardownJobAuthority({ job: current, trust: input.trust });
     const accountId = authority.certificate.statement.accountId;
+    input.budget?.charge('account');
     await verifyCustomerCloudflareGrantAccountAccess({
       accessToken: input.accessToken, expectedAccountId: accountId, workerName: authority.certificate.statement.worker.name,
-      operation: 'gateway-root-finalize', transport,
+      operation: 'gateway-root-finalize', transport: input.transport,
     });
-    await executeGatewayRootRemoval({ ...input, port, transport, current, authorizedAccountId: accountId });
+    await executeGatewayRootRemoval({ ...input, port, current, authorizedAccountId: accountId });
     return null;
   } catch (error) {
     return error instanceof GatewayTeardownProviderError ? gatewayTeardownFailureReason(error) : 'finalization_failed';
@@ -89,7 +89,8 @@ export async function executeGatewayTeardownGrant(input: GatewayRootRemovalAttem
     return response;
   };
   try {
-    grant = await exchangeAuthorizationCode({ ...input, transport: budget.transport(inspectingTransport) });
+    budget.charge('exchange');
+    grant = await exchangeAuthorizationCode({ ...input, transport: inspectingTransport });
     grant.assertUsable(exactOperationScopes('gateway-root-finalize'));
     if (refreshTokenReturned) throw new Error('teardown_grant_invalid');
     reason = await grant.withAccessToken((accessToken) => runGatewayRootRemovalAttempt({ ...input, accessToken, budget, current }));

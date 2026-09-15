@@ -110,14 +110,6 @@ export class GatewayTeardownCallBudget {
     this.#spent += 1;
   }
 
-  /** The transport with every call charged before it is sent. */
-  transport(transport: FetchTransport): FetchTransport {
-    return async (input, init) => {
-      this.charge('provider');
-      return transport(input, init);
-    };
-  }
-
   /** The job port with every read and write charged before it is made. */
   port(port: GatewayTeardownJobPort): GatewayTeardownJobPort {
     return {
@@ -132,6 +124,8 @@ interface Call {
   readonly transport: FetchTransport;
   readonly authority: VerifiedGatewayTeardownHandoff;
   readonly wait?: (milliseconds: number) => Promise<void>;
+  /** Charged before each provider call; absent for an uncounted attempt. */
+  readonly budget?: GatewayTeardownCallBudget;
 }
 function account(call: Call, path: string): URL {
   return new URL(`/client/v4/accounts/${call.authority.certificate.statement.accountId}${path}`, CLOUDFLARE_API_ORIGIN);
@@ -145,6 +139,8 @@ function applicationUrl(call: Call, suffix = ''): URL {
 const READ_RETRY_DELAYS_MS = Object.freeze([400, 1_200]);
 
 async function requestOnce(call: Call, stage: string, url: URL, init: RequestInit, missing: boolean) {
+  // Charged before the deadline wrapper, which turns anything thrown inside it into a transport error.
+  call.budget?.charge(stage);
   try {
     return await withDeadline(async (signal) => {
       const response = await call.transport(url, { ...init, signal, redirect: 'manual',
@@ -579,13 +575,17 @@ export async function executeGatewayRootRemoval(input: {
   readonly wait?: (milliseconds: number) => Promise<void>;
   /** The job as the caller just read it from the same port, so the attempt reads it once. */
   readonly current?: GatewayTeardownJob;
+  /** Charged before each provider call; absent for an uncounted attempt. */
+  readonly budget?: GatewayTeardownCallBudget;
 }): Promise<GatewayTeardownJob> {
   let job = input.current ?? await input.port.read();
   if (job === null || job.phase !== 'exchanging' || job.attempt?.id !== input.attemptId || job.attempt.expiresAt <= input.now()) fail('start', 'job_conflict');
   const authority = await verifyGatewayTeardownJobAuthority({ job, trust: input.trust });
   if (authority.certificate.statement.accountId !== input.authorizedAccountId) fail('account', 'identity_mismatch');
   const wait = input.wait ?? ((milliseconds) => new Promise<void>((resolve) => setTimeout(resolve, milliseconds)));
-  const call = { authority, accessToken: input.accessToken, transport: input.transport, wait };
+  const call: Call = input.budget === undefined
+    ? { authority, accessToken: input.accessToken, transport: input.transport, wait }
+    : { authority, accessToken: input.accessToken, transport: input.transport, wait, budget: input.budget };
   const module = await retirementModule(job, input.bundle);
   const commit = async (previous: GatewayTeardownJob, next: GatewayTeardownJob): Promise<GatewayTeardownJob> => {
     if (!await input.port.compareAndSet(previous.revision, next)) fail('persist', 'job_conflict');
