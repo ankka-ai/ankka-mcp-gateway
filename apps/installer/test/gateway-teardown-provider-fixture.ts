@@ -2,7 +2,7 @@ import { expect } from 'vitest';
 import type { BoundaryObject } from '../src/boundary';
 import { authorizeGatewayTeardownJob, consumeGatewayTeardownCallback, settleGatewayTeardownAttempt,
   type GatewayTeardownJob, type GatewayRootRemovalStep } from '../src/gateway-teardown-job';
-import { executeGatewayRootRemoval } from '../src/gateway-teardown-provider';
+import { executeGatewayRootRemoval, type GatewayTeardownCallBudget } from '../src/gateway-teardown-provider';
 import type { FetchTransport } from '../src/oauth';
 import { gatewayTeardownFixture, ROOT_TEST } from './gateway-teardown-fixture';
 
@@ -167,10 +167,11 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
     },
     /** How many times one provider path was read. */
     readCount: (suffix: string) => reads.filter((path) => path.endsWith(suffix)).length,
-    run: (attemptId = ATTEMPT, accountId = root.accountId, bundle = data.bundle) => executeGatewayRootRemoval({
-      port, trust: data.trust, bundle, attemptId, accessToken: TOKEN, authorizedAccountId: accountId, transport,
-      now: () => clock++, wait: async () => undefined,
-    }),
+    run: (attemptId = ATTEMPT, accountId = root.accountId, bundle = data.bundle, budget?: GatewayTeardownCallBudget) => {
+      const input = { port, trust: data.trust, bundle, attemptId, accessToken: TOKEN, authorizedAccountId: accountId, transport,
+        now: () => clock++, wait: async () => undefined };
+      return budget === undefined ? executeGatewayRootRemoval(input) : executeGatewayRootRemoval({ ...input, budget });
+    },
     current: () => job,
     failAfter: (step: GatewayRootRemovalStep | null) => { failAfter = step; },
     failBefore: (step: GatewayRootRemovalStep | null) => { failBefore = step; },
