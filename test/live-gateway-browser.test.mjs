@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
+import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, TAB_REPLACEMENT_REASONS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
 import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
 import { landingOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 
@@ -89,7 +89,10 @@ test('a landing is fixed labels only: site, page, and the removal page\'s result
     ['https://dash.cloudflare.com/oauth2/auth?client_id=secret', { site: 'cloudflare', page: 'consent', result: null, reason: null }],
     ['https://installer.example.com/api/session?result=recovery_required', { site: 'installer', page: 'other', result: null, reason: null }],
     ['https://accounts.google.com/signin?reason=removal', { site: 'other', page: 'other', result: null, reason: null }],
-    ['chrome-error://chromewebdata/', { site: 'other', page: 'other', result: null, reason: null }],
+    // Chrome's own error page, committed for an empty error response among others, is a landing of its own.
+    ['chrome-error://chromewebdata/', { site: 'other', page: 'error', result: null, reason: null }],
+    [`chrome-error://chromewebdata/?result=recovery_required&code=secret#${fragment}`, { site: 'other', page: 'error', result: null, reason: null }],
+    ['chrome://newtab/', { site: 'other', page: 'other', result: null, reason: null }],
     ['', { site: 'other', page: 'other', result: null, reason: null }],
   ]) {
     const landing = landingOf(value, origins);
@@ -268,6 +271,69 @@ test('a navigation that fails otherwise, or whose replacement fails too, stops a
     });
     assert.equal(tabs.length, scenario.tabs);
     assert.deepEqual(events.map((event) => event.navigation), scenario.reopened);
+  }
+});
+
+test('the test tab is replaced on purpose once the interception is spent: the new tab carries no interception route, the old one is closed, and the journal names the fixed reason', async () => {
+  assert.deepEqual([...TAB_REPLACEMENT_REASONS], ['interruption_spent']);
+  const handoff = `${managementOrigin}/__ankka/operation#${'A'.repeat(48)}`;
+  const attached = (tab) => ({ events: tab.events, timeouts: tab.timeouts, routes: tab.routes.length });
+  for (const browserConnection of ['chrome', undefined]) {
+    const { tabs, context, browserType } = fakeBrowserType([[null], [null]]);
+    const notices = [], events = [];
+    const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection, headless: true,
+      notify: (notice) => notices.push(notice), checkpoint: async (event) => events.push(event), browserType });
+    const [first] = tabs;
+    await runner.loseNextTeardownCallbackResponse();
+    assert.equal(first.routes.length, 3);
+    // The lost callback: the interception validates the completion handoff, aborts the answer and is spent.
+    const answers = [];
+    const route = {
+      fetch: async () => ({ status: () => 303, headers: () => ({ location: `${installerOrigin}/teardown#${'B'.repeat(48)}` }), dispose: async () => {} }),
+      abort: async (code) => answers.push(`abort:${code}`), continue: async () => answers.push('continue'),
+    };
+    await first.routes[2].handler(route);
+    assert.deepEqual(answers, ['abort:failed']);
+    assert.equal(runner.interruptionObserved(), true);
+    await runner.replaceTab('interruption_spent');
+    assert.equal(tabs.length, 2);
+    const [, second] = tabs;
+    // Everything but the spent interception route: the replacement is the tab of a fresh process.
+    assert.deepEqual(attached(second), { events: ['request', 'requestfinished', 'requestfailed'], timeouts: [30_000], routes: 2 });
+    assert.equal(second.routes[1].matcher(new URL(`${installerOrigin}/api/bootstrap/handoff`)), true);
+    assert.equal(second.routes.some((item) => item.matcher(new URL(`${managementOrigin}/__ankka/install/oauth/callback?code=secret`))), false);
+    assert.equal(first.closed, true);
+    assert.deepEqual(events, [{ stage: 'browser', status: 'tab_replaced', reason: 'interruption_spent' }]);
+    assert.equal(notices.filter((notice) => notice.startsWith('Test tab replaced')).length, 1);
+    // What follows runs in the replacement, and the landing is read from it.
+    await runner.continueHandoff(handoff, 'update');
+    assert.deepEqual(second.navigations, [handoff]);
+    assert.deepEqual(first.navigations, []);
+    assert.deepEqual(runner.landing(), { site: 'gateway', page: 'other', result: null, reason: null });
+    // A reason outside the fixed vocabulary is refused before any tab is opened or journaled.
+    await assert.rejects(runner.replaceTab('secret reason'), { code: 'tab_replacement_reason_invalid' });
+    assert.equal(tabs.length, 2);
+    assert.equal(events.length, 1);
+    assert.equal(JSON.stringify([events, notices]).includes('B'.repeat(48)), false);
+    await runner.close();
+    assert.equal(second.closed, browserConnection === 'chrome');
+    assert.equal(context.closed, browserConnection !== 'chrome');
+  }
+});
+
+test('an attach Chrome refuses stops as browser_attach_failed, without the browser\'s error text', async () => {
+  for (const failure of [
+    new Error('browserType.connectOverCDP: connect ECONNREFUSED 127.0.0.1:9222 secret'),
+    Object.assign(new Error('browserType.connectOverCDP: Timeout 120000ms exceeded.'), { name: 'TimeoutError' }),
+  ]) {
+    const browserType = { connectOverCDP: async () => { throw failure; }, launch: async () => assert.fail('no launch is expected'), launchPersistentContext: async () => assert.fail('no profile is expected') };
+    await assert.rejects(openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection: 'chrome', notify: () => {}, browserType }), (error) => {
+      assert.equal(error.code, 'browser_attach_failed');
+      assert.equal(error.navigation, null);
+      assert.equal(error.message.includes('secret'), false);
+      assert.equal(error.message.includes('Timeout'), false);
+      return true;
+    });
   }
 });
 

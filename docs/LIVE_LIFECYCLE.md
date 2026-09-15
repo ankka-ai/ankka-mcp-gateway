@@ -157,7 +157,11 @@ The private config has these fields:
 - Optional `browserConnection`: `"chrome"` attaches to already running Chrome
   through its built-in remote debugging setting. This is mutually exclusive with
   `browserProfile`. Enable it explicitly at `chrome://inspect/#remote-debugging`
-  and approve Chrome's connection prompt. The runner waits up to two minutes for this approval. It grants browser-session access, so use
+  and approve Chrome's connection prompt. The runner waits up to two minutes for this approval. An attach Chrome
+  refuses, with remote debugging switched off or the prompt not allowed within
+  that wait, stops the run as `browser_attach_failed`: the stop output adds the
+  remedy (enable remote debugging there and allow the attach), and the journal
+  holds the code only, never the browser's error text. It grants browser-session access, so use
   it only for a trusted local runner. The runner opens and closes only its new test
   tab, preserves existing tabs and the context, and disconnects on exit. Disable
   debugging after the test if you enabled it only for this run. It does not copy
@@ -258,8 +262,28 @@ names its reason. A round therefore ends only once the tab has landed: the
 runner waits up to a minute for the installer to hold the receipt or for that
 page to show its `result` and `reason`, records the landing in the journal in
 fixed labels (site, page, result word, reason word; never the fragment or any
-other query value), and only then opens the next round. `--status` and the
-failure report summarize the rounds and the last landing.
+other query value; Chrome's own error page, which it commits for an empty error
+response, reads `page: error`), and only then opens the next round. `--status`
+and the failure report summarize the rounds and the last landing.
+
+Once the interrupted round is observed, the runner replaces its test tab before
+the first recovery round. The gateway settles the cut action moments before the
+lost callback's answer reaches the browser, where the interception spends itself
+on that answer; the runner therefore waits up to a minute for the browser's
+observation (stopping as `interruption_not_observed` otherwise, since a tab
+replaced earlier would carry the armed interception into recovery), then opens
+a new tab in the same context, attached like any other except for the spent
+interception route, and closes the previous one, only ever its own tab. The
+recovery rounds then run in a tab that never carried the interception, as they
+do in a fresh `--resume-installed` process. Live, the tab that had carried it
+met the installer's receipt page with an empty `403` in every recovery round,
+so Chrome showed its own error page, the page never imported the receipt and
+the run stopped as `removal_receipt_unavailable`, while a fresh process
+recovered the receipt on its first round on the same gateway, with the same
+session and no Access denial: the failure was bound to that tab. The
+replacement is recorded as `browser: tab_replaced` with the fixed reason
+`interruption_spent`; like a reopen it is the runner's event, never the last
+stage, and `tabsReopened` does not count it.
 
 A receipt the gateway hands over with its unconfirmed-revocation warning is
 saved with that warning recorded; the root removal still runs and is verified,
