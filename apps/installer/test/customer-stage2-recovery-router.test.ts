@@ -4,6 +4,7 @@ import type { BoundaryValue } from '../src/boundary';
 import {
   buildFixedRelayAuthorization,
   relayCloudflareAuthorizationCode,
+  relayCloudflareAuthorizationError,
 } from '../src/cloudflare-code-relay';
 import { base64UrlEncode } from '../src/crypto';
 import {
@@ -285,5 +286,119 @@ describe('final-runtime Stage 2 recovery router', () => {
     }));
     expect(denied.status).toBe(409);
     expect(ticketRequests).toBe(0);
+  });
+
+  it('admits the relay denial fields and the exact install scope echo on the recovery callback and refuses anything else', async () => {
+    let stored = await consumedState();
+    let exchanges = 0;
+    let relayStarts = 0;
+    const statePort: CustomerBootstrapStatePort = {
+      read: async () => stored,
+      compareAndSet: async (revision, state) => {
+        if (stored.revision !== revision) return false;
+        stored = state;
+        return true;
+      },
+    };
+    const transport: CustomerCloudflareTransport = async (input) => {
+      const url = String(input);
+      if (url.endsWith('/oauth2/token')) {
+        exchanges += 1;
+        return json({ access_token: ACCESS_TOKEN, token_type: 'bearer', scope: INSTALL_SCOPES.join(' ') });
+      }
+      if (url.startsWith('https://api.cloudflare.com/client/v4/accounts')) {
+        return json({ success: true, errors: [], messages: [], result: [{ id: ACCOUNT_ID }] });
+      }
+      if (url.endsWith('/oauth2/revoke')) return json({ revoked: true });
+      throw new Error('unexpected request');
+    };
+    const router = createCustomerStage2RecoveryRouter({
+      accountId: ACCOUNT_ID,
+      installId: INSTALL_ID,
+      publicClientId: CLIENT_ID,
+      managementOrigin: ORIGIN,
+    }, {
+      now: () => NOW + 2,
+      state: statePort,
+      assertRecoverable: async () => undefined,
+      issueRelayTicket: async () => ({ relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 }),
+      beginRelay: async ({ gatewayState, pkceChallenge, gatewayCallback }) => {
+        relayStarts += 1;
+        return buildFixedRelayAuthorization({
+          clientId: CLIENT_ID,
+          relayStateKey: RELAY_KEY,
+          gateway: { accountId: ACCOUNT_ID, installId: INSTALL_ID, callback: gatewayCallback },
+          operation: 'install',
+          gatewayState,
+          pkceChallenge,
+          nonce: base64UrlEncode(new Uint8Array(32).fill(relayStarts)),
+          now: NOW + 2,
+        });
+      },
+      transport,
+      startConvergence: inlineConvergence(statePort, transport, async () => COMPLETE_CONVERGENCE, () => NOW + 2),
+    });
+    const start = async () => {
+      const response = await router.fetch(new Request(`${ORIGIN}${CUSTOMER_INSTALL_OAUTH_START_PATH}`, {
+        method: 'POST',
+        headers: { origin: ORIGIN, 'content-type': 'application/json' },
+        body: '{}',
+      }));
+      expect(response.status).toBe(200);
+      const { authorizationUrl } = await responseJson(response, v.strictObject({
+        schemaVersion: v.literal(1),
+        authorizationUrl: v.string(),
+      }));
+      const relayState = new URL(authorizationUrl).searchParams.get('state');
+      if (relayState === null) throw new Error('relay state missing');
+      const cookies = `${cookieValue(response, SESSION_COOKIE)}; ${cookieValue(response, PKCE_COOKIE)}`;
+      return {
+        relayState,
+        callback: (location: string, amend: (url: URL) => void) => {
+          const url = new URL(location);
+          amend(url);
+          return router.fetch(new Request(url.href, { headers: { cookie: cookies } }));
+        },
+      };
+    };
+
+    const first = await start();
+    const denial = await relayCloudflareAuthorizationError({
+      error: 'access_denied', errorDescription: null, errorUri: null,
+      state: first.relayState, relayStateKey: RELAY_KEY, now: NOW + 3,
+    });
+    const denied = await first.callback(denial.location, (url) => {
+      url.searchParams.set('error_description', 'The user denied the request.');
+    });
+    expect(denied.status).toBe(200);
+    await expect(denied.json()).resolves.toEqual({
+      schemaVersion: 1, status: 'INCOMPLETE', failureCode: 'authorization_rejected',
+    });
+    expect(stored).toMatchObject({ status: 'INCOMPLETE', failureCode: 'authorization_rejected', oauth: null });
+
+    const second = await start();
+    const relayed = await relayCloudflareAuthorizationCode({
+      code: `code_${'f'.repeat(32)}`, state: second.relayState, relayStateKey: RELAY_KEY, now: NOW + 3,
+    });
+    const armed = stored.oauth;
+    expect(armed).toMatchObject({ phase: 'authorizing' });
+    for (const amend of [
+      (url: URL) => url.searchParams.set('iss', 'https://dash.cloudflare.com'),
+      (url: URL) => url.searchParams.set('scope', 'workers-scripts.write'),
+    ]) {
+      const rejected = await second.callback(relayed.location, amend);
+      expect(rejected.status).toBe(400);
+      await expect(rejected.json()).resolves.toEqual({ schemaVersion: 1, error: 'oauth_callback_rejected' });
+    }
+    expect(exchanges).toBe(0);
+    expect(stored.oauth).toEqual(armed);
+
+    const accepted = await second.callback(relayed.location, (url) => {
+      url.searchParams.set('scope', [...INSTALL_SCOPES].reverse().join(' '));
+    });
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toEqual({ schemaVersion: 1, status: 'READY', failureCode: null });
+    expect(exchanges).toBe(1);
+    expect(stored.status).toBe('READY');
   });
 });
