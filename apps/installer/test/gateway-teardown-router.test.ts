@@ -3,16 +3,20 @@ import { describe, expect, it } from 'vitest';
 import { PUBLIC_ORIGIN, OAUTH_CALLBACK_URL, OAUTH_EXCHANGE_URL, OAUTH_REVOKE_URL } from '../src/constants';
 import { openGatewayTeardownCookie } from '../src/crypto';
 import { gatewayTeardownJobId } from '../src/gateway-teardown-handoff';
+import { GATEWAY_ROOT_REMOVAL_STEPS } from '../src/gateway-teardown-job';
+import { GATEWAY_TEARDOWN_CALL_BUDGET } from '../src/gateway-teardown-provider';
 import { GatewayTeardownStoreClient } from '../src/gateway-teardown-store-client';
 import { createGatewayTeardownRouter, GATEWAY_TEARDOWN_COOKIE } from '../src/gateway-teardown-router';
-import { TwoStageDeploySession, type TwoStageDeploySessionNamespace, type TwoStageDeploySessionStub } from '../src/two-stage-deploy-session';
+import type { ExactReleaseBundleIdentity } from '../src/exact-release-bundle';
+import { TwoStageDeploySession, type TwoStageDeploySessionNamespace, type TwoStageDeploySessionTeardownDependencies } from '../src/two-stage-deploy-session';
 import { ROOT_TEST } from './gateway-teardown-fixture';
 import { gatewayRootProviderFixture, TOKEN } from './gateway-teardown-provider-fixture';
 import { teardownSqliteFixture } from './gateway-teardown-sqlite-fixture';
 import { ENCRYPTION_KEY, CLIENT_ID, CLIENT_SECRET } from './fixtures';
 
 const viewSchema = v.object({ csrfToken: v.string(), canAuthorize: v.boolean(), complete: v.boolean(), revocationUnconfirmed: v.boolean(),
-  message: v.string(), failureReason: v.nullable(v.string()), steps: v.array(v.object({ done: v.boolean() })), handoff: v.string() });
+  removing: v.boolean(), message: v.string(), failureReason: v.nullable(v.string()),
+  steps: v.array(v.object({ done: v.boolean(), current: v.boolean() })), handoff: v.string() });
 
 async function fixture() {
   const provider = await gatewayRootProviderFixture();
@@ -20,8 +24,44 @@ async function fixture() {
   let cookie = '';
   let csrf = '';
   let grants = 0, revoked = 0;
+  /** Every provider call and every Durable Object call since the last reset: what one invocation spends. */
+  let subrequests = 0;
+  const trace: string[] = [];
+  /** The subrequests each finalizer pass spent, one entry per alarm. */
+  const passes: number[] = [];
   let revokeFails = false, wrongAccount = false, extraScope = false, returnsRefresh = false;
-  const instances = new Map<string, { sql: ReturnType<typeof teardownSqliteFixture>; stub: TwoStageDeploySessionStub }>();
+  const instances = new Map<string, { sql: ReturnType<typeof teardownSqliteFixture>; stub: TwoStageDeploySession }>();
+  const jobId = await gatewayTeardownJobId(provider.handoff);
+  // The provider fixture reads the job before answering each call; that look is the test's, not the invocation's.
+  const uncounted = new GatewayTeardownStoreClient({ fetch: (request) => {
+    const instance = instances.get(`gateway-teardown:v1:${jobId}`);
+    if (instance === undefined) throw new Error('fixture_instance_missing');
+    return instance.stub.fetch(request);
+  } });
+  provider.readJobFrom(() => uncounted.read());
+  const transport = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    subrequests += 1;
+    const request = new Request(input, init), url = new URL(request.url);
+    trace.push(`${request.method} ${url.pathname}`);
+    if (url.href === OAUTH_EXCHANGE_URL) {
+      grants += 1;
+      const job = await uncounted.read(); expect(job?.phase).toBe('exchanging');
+      const value = { access_token: TOKEN, token_type: 'bearer', scope: `workers-scripts.write zone-access.write${extraScope ? ' dns.write' : ''}` };
+      return Response.json(returnsRefresh ? { ...value, refresh_token: 'synthetic-refresh-token' } : value);
+    }
+    if (url.href === OAUTH_REVOKE_URL) { revoked += 1; return new Response('', { status: revokeFails ? 503 : 200 }); }
+    if (url.pathname === '/client/v4/accounts') throw new Error('Final removal must not list accounts');
+    if (wrongAccount && url.pathname.startsWith(`/client/v4/accounts/${ROOT_TEST.accountId}/`)) {
+      return Response.json({ success: false, errors: [], result: null }, { status: 403 });
+    }
+    return provider.transport(request);
+  };
+  const loadBundle = async (identity: ExactReleaseBundleIdentity) => { expect(identity).toEqual(provider.job.release); return provider.bundle; };
+  // The job object's finalizer: the same OAuth client and trust the router carries, and the test transport.
+  const teardown: TwoStageDeploySessionTeardownDependencies = {
+    oauth: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET }, trust: provider.trust, transport, loadBundle, wait: async () => undefined,
+  };
+  const object = (sql: ReturnType<typeof teardownSqliteFixture>) => new TwoStageDeploySession(sql.state, undefined, { now: () => time, teardown });
   const namespace: TwoStageDeploySessionNamespace = {
     idFromName: (name) => {
       const id: DurableObjectId = Object.create(null);
@@ -33,35 +73,27 @@ async function fixture() {
       let value = instances.get(name);
       if (value === undefined) {
         const sql = teardownSqliteFixture();
-        value = { sql, stub: new TwoStageDeploySession(sql.state, undefined, { now: () => time }) };
+        value = { sql, stub: object(sql) };
         instances.set(name, value);
       }
-      return value.stub;
+      const instance = value;
+      return { fetch: (request) => { subrequests += 1; trace.push(`journal ${new URL(request.url).pathname}`); return instance.stub.fetch(request); } };
     },
   };
-  const jobId = await gatewayTeardownJobId(provider.handoff);
   const port = new GatewayTeardownStoreClient({ fetch: (request) => namespace.get(namespace.idFromName(`gateway-teardown:v1:${jobId}`)).fetch(request) });
-  provider.readJobFrom(() => port.read());
+  /** Runs one due alarm of the job object, as the platform would in its own invocation; false when none is due. */
+  const pass = async (): Promise<boolean> => {
+    const instance = instances.get(`gateway-teardown:v1:${jobId}`);
+    if (instance === undefined || instance.sql.alarm.at === null) return false;
+    instance.sql.alarm.at = null;
+    subrequests = 0; trace.length = 0;
+    await instance.stub.alarm();
+    passes.push(subrequests);
+    return true;
+  };
   const makeRouter = () => createGatewayTeardownRouter({ encryptionKey: ENCRYPTION_KEY,
     oauth: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET }, trust: provider.trust, release: provider.job.release, namespace }, {
-    now: () => time,
-    loadBundle: async (identity) => { expect(identity).toEqual(provider.job.release); return provider.bundle; },
-    rateLimit: async () => undefined,
-    transport: async (input, init) => {
-      const request = new Request(input, init), url = new URL(request.url);
-      if (url.href === OAUTH_EXCHANGE_URL) {
-        grants += 1;
-        const job = await port.read(); expect(job?.phase).toBe('exchanging');
-        const value = { access_token: TOKEN, token_type: 'bearer', scope: `workers-scripts.write zone-access.write${extraScope ? ' dns.write' : ''}` };
-        return Response.json(returnsRefresh ? { ...value, refresh_token: 'synthetic-refresh-token' } : value);
-      }
-      if (url.href === OAUTH_REVOKE_URL) { revoked += 1; return new Response('', { status: revokeFails ? 503 : 200 }); }
-      if (url.pathname === '/client/v4/accounts') throw new Error('Final removal must not list accounts');
-      if (wrongAccount && url.pathname.startsWith(`/client/v4/accounts/${ROOT_TEST.accountId}/`)) {
-        return Response.json({ success: false, errors: [], result: null }, { status: 403 });
-      }
-      return provider.transport(request);
-    },
+    now: () => time, loadBundle, rateLimit: async () => undefined, transport,
   });
   let router = makeRouter();
   const send = async (path: string, body?: { handoff: string } | Record<string, never>, options: { origin?: string; csrf?: string; cookie?: string } = {}) => {
@@ -93,13 +125,20 @@ async function fixture() {
     return callback;
   };
   return { ...provider, send, view, start, port, grants: () => grants, revoked: () => revoked,
+    subrequests: () => subrequests, resetSubrequests: () => { subrequests = 0; trace.length = 0; }, trace: () => trace.join('\n'),
+    passes, pass,
+    /** Runs the job object's alarms until none is due: the attempt's passes and its settlement. */
+    settle: async () => { for (let count = 0; await pass(); count += 1) expect(count).toBeLessThan(200); },
     cookie: () => cookie, router: () => router,
     import: () => send('/api/teardown/import', { handoff: provider.handoff }),
     advance: () => { time += 86_400_001; },
+    /** A new object instance over the same storage: memory, and with it any held grant, is gone. */
     reopen: () => {
-      for (const value of instances.values()) value.stub = new TwoStageDeploySession(value.sql.state, undefined, { now: () => time });
+      for (const value of instances.values()) value.stub = object(value.sql);
       router = makeRouter(); cookie = ''; csrf = '';
     },
+    /** Only the object instances restart; the browser session and router stay. */
+    restartObjects: () => { for (const value of instances.values()) value.stub = object(value.sql); },
     alterGrant: (kind: 'revoke' | 'account' | 'scope' | 'refresh') => {
       revokeFails = kind === 'revoke'; wrongAccount = kind === 'account'; extraScope = kind === 'scope'; returnsRefresh = kind === 'refresh';
     },
@@ -125,6 +164,7 @@ describe('hosted removal browser callback and durable recovery', () => {
       const drifted = await f.sign({ ...statement, management: { ...statement.management, policyId: 'foreign-policy' } });
       expect((await f.send('/api/teardown/import', { handoff: drifted })).status).toBe(409);
       const callback = await f.start(); expect((await f.send(callback.pathname + callback.search)).status).toBe(303);
+      await f.settle();
       expect((await f.port.read())?.phase).toBe('removed_revocation_unconfirmed');
     } finally { f.close(); }
   });
@@ -134,6 +174,7 @@ describe('hosted removal browser callback and durable recovery', () => {
     try {
       await f.import(); f.drift('policy');
       const callback = await f.start(); await f.send(callback.pathname + callback.search);
+      await f.settle();
       expect((await f.view()).failureReason).toBe('policy_list_foreign_dependency');
       expect(f.mutations).toEqual([]); expect(f.revoked()).toBe(1);
       const job = await f.port.read(); expect(job?.failureReason).not.toContain(TOKEN);
@@ -152,12 +193,24 @@ describe('hosted removal browser callback and durable recovery', () => {
       const opened = await openGatewayTeardownCookie(ENCRYPTION_KEY, sealed, ROOT_TEST.now);
       expect(callbackCookie).not.toContain(opened.attempt?.verifier);
       expect(JSON.stringify(await test.port.read())).not.toContain(opened.attempt?.verifier);
+      test.resetSubrequests();
       const response = await test.send(callback.href);
       expect(response.status).toBe(303);
+      expect(response.headers.get('location')).toBe(`${PUBLIC_ORIGIN}/teardown`);
+      // The callback exchanged the code and bound the grant to the account; every provider step waits for the alarm.
+      expect(test.subrequests(), test.trace()).toBeLessThanOrEqual(8);
+      expect(test.grants()).toBe(1); expect(test.mutations).toEqual([]);
+      const removing = await test.view();
+      expect(removing.removing).toBe(true); expect(removing.canAuthorize).toBe(false); expect(removing.complete).toBe(false);
+      expect(removing.message).toBe('Removing your gateway. This page updates itself.');
+      expect(removing.steps.map((step) => step.current)).toEqual([true, false, false, false, false]);
+      await test.settle();
       const view = await test.view();
       expect(view.steps.every((step) => step.done)).toBe(true);
+      expect(view.removing).toBe(false); expect(view.steps.some((step) => step.current)).toBe(false);
       expect(view.canAuthorize).toBe(false); expect(view.revocationUnconfirmed).toBe(false); expect(view.complete).toBe(true);
       expect(test.grants()).toBe(1); expect(test.revoked()).toBe(1);
+      for (const spent of test.passes) expect(spent).toBeLessThanOrEqual(GATEWAY_TEARDOWN_CALL_BUDGET);
       expect((await test.send(callback.href, undefined, { cookie: callbackCookie })).status).toBe(409);
       expect(test.grants()).toBe(1);
       expect(JSON.stringify(await test.port.read())).not.toContain(TOKEN);
@@ -176,6 +229,7 @@ describe('hosted removal browser callback and durable recovery', () => {
       expect(test.grants()).toBe(0); expect(test.mutations).toEqual([]);
       expect((await test.port.read())?.phase).toBe('authorizing');
       expect((await test.send(echoing('zone-access.write workers-scripts.write'))).status).toBe(303);
+      await test.settle();
       expect((await test.port.read())?.phase).toBe('removed');
       expect(test.grants()).toBe(1); expect(test.mutations).toHaveLength(5);
     } finally { test.close(); }
@@ -186,11 +240,13 @@ describe('hosted removal browser callback and durable recovery', () => {
     try {
       await test.import(); test.failAfter(step);
       expect((await test.send((await test.start()).href)).status).toBe(303);
+      await test.settle();
       expect((await test.port.read())?.phase).toBe('recovery_required');
       const acceptedAt = (await test.port.read())?.acceptedAt;
       test.advance(); test.reopen(); test.failAfter(null);
       expect((await test.import()).status).toBe(200); // Existing accepted authority survives import expiry.
       expect((await test.send((await test.start()).href)).status).toBe(303);
+      await test.settle();
       expect((await test.port.read())?.phase).toBe('removed');
       expect((await test.port.read())?.acceptedAt).toBe(acceptedAt);
       expect(test.mutations).toHaveLength(5); expect(new Set(test.mutations).size).toBe(5);
@@ -202,9 +258,60 @@ describe('hosted removal browser callback and durable recovery', () => {
     try {
       await test.import(); test.alterGrant(kind);
       expect((await test.send((await test.start()).href)).status).toBe(303);
+      // A grant that cannot be used is revoked and the attempt settled before the callback answers.
+      expect((await test.port.read())?.phase).toBe('recovery_required');
+      expect(await test.pass()).toBe(false);
       expect(test.mutations).toEqual([]);
       expect(test.revoked()).toBe(kind === 'refresh' ? 2 : 1);
-      expect((await test.port.read())?.phase).toBe('recovery_required');
+    } finally { test.close(); }
+  });
+
+  it('spends at most the call budget per pass and finishes a large account in one consent across passes', async () => {
+    const test = await fixture();
+    try {
+      await test.import();
+      test.createdOwner('2026-09-01T12:00:00.000000Z');
+      // Enough recently modified scripts that the scan alone outgrows one pass; every pass has its own budget.
+      for (let index = 0; index < 60; index += 1) test.addForeignScript(`recent-script-${index}`, '2026-09-03T08:00:00.000000Z');
+      expect((await test.send((await test.start()).href)).status).toBe(303);
+      await test.settle();
+      expect(test.passes.length).toBeGreaterThan(2);
+      for (const spent of test.passes) expect(spent).toBeLessThanOrEqual(GATEWAY_TEARDOWN_CALL_BUDGET);
+      const job = await test.port.read();
+      expect(job?.phase).toBe('removed');
+      expect(job?.failureReason).toBeNull();
+      for (let index = 0; index < 60; index += 1) expect(test.readCount(`/workers/scripts/recent-script-${index}/settings`)).toBe(1);
+      expect(test.mutations).toEqual([...GATEWAY_ROOT_REMOVAL_STEPS]);
+      expect(test.grants()).toBe(1); expect(test.revoked()).toBe(1);
+    } finally { test.close(); }
+  });
+
+  it('loses the grant with the object and settles the attempt as recovery-required with an unconfirmed revocation', async () => {
+    const test = await fixture();
+    try {
+      await test.import();
+      test.createdOwner('2026-09-01T12:00:00.000000Z');
+      for (let index = 0; index < 60; index += 1) test.addForeignScript(`recent-script-${index}`, '2026-09-03T08:00:00.000000Z');
+      expect((await test.send((await test.start()).href)).status).toBe(303);
+      expect(await test.pass()).toBe(true);
+      expect((await test.view()).removing).toBe(true);
+      // The object restarts between passes: nothing durable carries the grant, so the next alarm can only stop the attempt.
+      test.restartObjects();
+      await test.settle();
+      const job = await test.port.read();
+      expect(job?.phase).toBe('recovery_required');
+      expect(job?.failureReason).toBe('grant_lost');
+      expect(job?.revocation).toBe('unconfirmed');
+      expect(test.revoked()).toBe(0);
+      expect(test.mutations).toEqual([]);
+      const view = await test.view();
+      expect(view.canAuthorize).toBe(true); expect(view.revocationUnconfirmed).toBe(true);
+      // A fresh consent resumes from the durable receipts and keeps the warning.
+      expect((await test.send((await test.start()).href)).status).toBe(303);
+      await test.settle();
+      expect((await test.port.read())?.phase).toBe('removed_revocation_unconfirmed');
+      expect(test.mutations).toEqual([...GATEWAY_ROOT_REMOVAL_STEPS]);
+      expect(test.grants()).toBe(2); expect(test.revoked()).toBe(1);
     } finally { test.close(); }
   });
 
@@ -213,6 +320,7 @@ describe('hosted removal browser callback and durable recovery', () => {
     try {
       await test.import(); test.alterGrant('revoke');
       expect((await test.send((await test.start()).href)).status).toBe(303);
+      await test.settle();
       expect((await test.port.read())?.phase).toBe('removed_revocation_unconfirmed');
       expect((await test.view()).revocationUnconfirmed).toBe(true);
     } finally { test.close(); }

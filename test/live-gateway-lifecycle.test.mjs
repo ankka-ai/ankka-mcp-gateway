@@ -59,6 +59,36 @@ test('a failed final removal records the hosted job\'s reason word and steps don
   assert.equal(rootRemovalOutcome({ failureReason: 'Internal error: token abc' }).failureReason, null);
 });
 
+test('an attempt the hosted job stopped at its call budget is authorized again, up to a bounded number of consents', async () => {
+  const { ROOT_REMOVAL_MAX_CONSENTS } = await import('../tools/live-gateway-lifecycle.mjs');
+  assert.ok(ROOT_REMOVAL_MAX_CONSENTS >= 2);
+  const steps = (done) => Array.from({ length: 5 }, (_, index) => ({ done: index < done }));
+  const paused = (done) => ({ canAuthorize: true, complete: false, steps: steps(done), failureReason: 'budget_exhausted', revocationUnconfirmed: false, csrfToken: 'synthetic' });
+  const removed = { canAuthorize: false, complete: true, steps: steps(5), failureReason: null, revocationUnconfirmed: false, csrfToken: 'synthetic' };
+  const checkpoints = [], authorizations = [];
+  let consents = 0, view = paused(0);
+  await finishLiveGatewayRemoval({
+    browser: { consent: async () => { consents += 1; view = consents === 1 ? paused(2) : consents === 2 ? paused(4) : removed; return view; } },
+    installer: async (path, options) => { if (path === '/api/teardown/authorize') { authorizations.push(options.csrfToken); return { authorizationUrl: 'synthetic-consent' }; } return view; },
+    provider: { assertAllAbsent: async () => {} }, inventory: { synthetic: true },
+    checkpoint: async (event) => checkpoints.push(event),
+  });
+  assert.equal(consents, 3);
+  assert.deepEqual(authorizations, ['synthetic', 'synthetic', 'synthetic']);
+  assert.deepEqual(checkpoints.map((event) => `${event.status}:${event.stepsDone ?? ''}`),
+    ['started:', 'budget_exhausted:2', 'started:', 'budget_exhausted:4', 'started:', 'passed:']);
+  // A job that keeps stopping at its budget is still a failed removal once the consents are spent.
+  const endless = [];
+  await assert.rejects(finishLiveGatewayRemoval({
+    browser: { consent: async () => paused(1) },
+    installer: async (path) => path === '/api/teardown/authorize' ? { authorizationUrl: 'synthetic-consent' } : paused(1),
+    provider: { assertAllAbsent: async () => assert.fail('absence must not be read') },
+    checkpoint: async (event) => endless.push(event.status),
+  }), { code: 'root_removal_failed' });
+  assert.equal(endless.filter((status) => status === 'started').length, ROOT_REMOVAL_MAX_CONSENTS);
+  assert.equal(endless.at(-1), 'failed');
+});
+
 test('five finished steps under an unconfirmed revocation are verified absent and still stopped as such, never passed', async () => {
   const done = Array.from({ length: 5 }, () => ({ done: true }));
   for (const absent of [true, false]) {
@@ -150,7 +180,7 @@ test('complete orchestration proves token management, distinct update, lost call
       throw new Error('unexpected_request');
     },
     continueHandoff: async (_url, kind) => { if (kind === 'update') current = runtimeIdentity(config.releaseB); else interrupted = true; },
-    loseNextTeardownCallbackResponse: async () => evidence.push('interruption_armed'),
+    loseNextTeardownReceiptHop: async () => evidence.push('interruption_armed'),
     interruptionObserved: () => interrupted,
     clearRemovalSession: async () => evidence.push('removal_cookie_cleared'),
   };
@@ -272,7 +302,7 @@ test('the removal half starts with the interrupted sequence, or with the root re
     const calls = [];
     const browser = {
       clearRemovalSession: async () => { calls.push('clear'); },
-      loseNextTeardownCallbackResponse: async () => { calls.push('arm'); },
+      loseNextTeardownReceiptHop: async () => { calls.push('arm'); },
       request: async (_origin, path) => { calls.push(path); throw new Error('stop_here'); },
     };
     await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => { calls.push(`${event.stage}:${event.status}`); }, phase }), /stop_here/u);

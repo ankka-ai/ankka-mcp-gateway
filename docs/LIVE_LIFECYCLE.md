@@ -201,9 +201,10 @@ above runs over the updated runtime after the update passes and before the
 first removal write, so the journal holds the updated release's service binding
 and the refusals of a gateway that is still whole beside the removal evidence.
 
-After the signed A → B update, the command discards the browser response from a
-successful dependency-removal callback. It verifies that dependencies are absent,
-then uses fresh consent to recover the saved completion. It saves the signed
+After the signed A → B update, the command drops the gateway removal page's
+hop to the installer's receipt page once the gateway has removed the
+dependencies behind that page. It verifies that dependencies are absent, then
+uses fresh consent to recover the saved completion. It saves the signed
 removal receipt privately, clears only its hosted removal-session cookie, imports
 that receipt, and finishes root removal. A passing result requires direct provider
 checks for the captured resources, Worker, namespace, and exact hostnames.
@@ -222,12 +223,13 @@ a refusal is retried like any other rejected read; a refusal after that window,
 or any refusal of the installer's session, stops the run as
 `access_session_rejected`.
 
-A hosted OAuth callback runs its whole operation inside one response, and a tab
-closed while that response is pending cuts the operation's revoke and
-settlement. On a stop the runner therefore leaves an attached Chrome's tab open
-while a hosted callback is in flight (it tells the operator to close it once the
-page has loaded), and an owned browser waits for the callback to end, at most
-for the hosted attempt's ten-minute window, before it closes.
+A hosted OAuth callback exchanges the consent and answers at once with the
+page that follows the operation; the operation itself runs behind that page in
+the owning Durable Object, by alarm, so a closed tab no longer cuts its revoke
+or settlement. Only the exchange is in flight during the callback. On a stop
+the runner still leaves an attached Chrome's tab open while a callback is in
+flight (it tells the operator to close it once the page has loaded), and an
+owned browser waits for the callback to end before it closes.
 
 A tab the browser discarded after minutes in the background (Chrome's Memory
 Saver) or whose renderer crashed reads to the runner as a closed page: its next
@@ -236,8 +238,8 @@ in fixed labels, `closed` (the page or its target is gone), `crashed`, `timeout`
 or `other`, never the browser's error text. For a closed or crashed tab it
 opens a new tab in the same context, whether attached or owned, attaches to it
 everything it attaches to a tab (the held-origin and handoff-hold routes, the
-callback tracking, and the teardown callback interception while it is armed and
-not yet spent), records `browser: tab_reopened` with the label in the journal,
+callback tracking, and the receipt-hop interception while it is armed and not
+yet spent), records `browser: tab_reopened` with the label in the journal,
 and retries the navigation once. A navigation that still fails, or a
 replacement the browser refuses to open, stops the run as `navigation_failed`
 with the label. What the lost tab still had in flight, such as a hosted
@@ -249,17 +251,22 @@ browser still holds, so an earlier gateway's job is never read as this one's
 receipt. A root removal passes only once the installer's job has settled
 (`complete`): five verified steps whose attempt was cut before its revoke and
 settlement, for example by a browser that gave up on a long callback, are
-recorded as not verified and finish on the next authorization.
+recorded as not verified and finish on the next authorization. The hosted job
+counts every provider and journal call of an attempt against a fixed budget
+and stops before the platform's cap with the reason word `budget_exhausted`,
+its grant revoked and its pending step armed; the runner records that stop and
+authorizes again, up to six consents, each resuming from the verified steps.
 
-The gateway settles each consent attempt before the browser has followed the
-callback's redirect, so a dependency-removal action reads `recovery_required`
-moments before the receipt reaches the installer or the gateway's removal page
-names its reason. A round therefore ends only once the tab has landed: the
-runner waits up to a minute for the installer to hold the receipt or for that
-page to show its `result` and `reason`, records the landing in the journal in
-fixed labels (site, page, result word, reason word; never the fragment or any
-other query value), and only then opens the next round. `--status` and the
-failure report summarize the rounds and the last landing.
+The gateway settles each consent attempt by alarm behind its removal page,
+which then records the result word in its own address: `removed` before it hops
+to the installer with the signed receipt, or `recovery_required` with the
+reason word. A round therefore ends only once the tab has landed: the runner
+waits up to a minute for the installer to hold the receipt or for that page to
+show its `result` and `reason`, records the landing in the journal in fixed
+labels (site, page, result word, reason word; never the fragment, the attempt
+the page follows, or any other query value), and only then opens the next
+round. `--status` and the failure report summarize the rounds and the last
+landing.
 
 A receipt the gateway hands over with its unconfirmed-revocation warning is
 saved with that warning recorded; the root removal still runs and is verified,

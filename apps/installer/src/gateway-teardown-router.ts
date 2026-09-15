@@ -6,7 +6,6 @@ import { parseCookies } from './cookies';
 import { constantTimeEqual, deriveCsrfToken, openGatewayTeardownCookie, pkceChallenge,
   randomBase64Url, sealGatewayTeardownCookie, sha256, type GatewayTeardownCookie } from './crypto';
 import type { ExactReleaseBundleIdentity } from './exact-release-bundle';
-import { executeGatewayTeardownGrant } from './gateway-teardown-grant';
 import { gatewayTeardownJobId, verifyGatewayTeardownHandoff, type GatewayTeardownTrust } from './gateway-teardown-handoff';
 import { authorizeGatewayTeardownJob, consumeGatewayTeardownCallback, createGatewayTeardownJob,
   settleGatewayTeardownAttempt, retainGatewayTeardownRevocationWarning, verifyGatewayTeardownJobAuthority, type GatewayTeardownJob } from './gateway-teardown-job';
@@ -42,15 +41,16 @@ function page(): Response {
   const nonce = randomBase64Url(18);
   return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Remove your gateway · Ankka</title>
 <style>body{font:16px/1.55 system-ui,sans-serif;max-width:44rem;margin:4rem auto;padding:0 1.25rem;color:#171713;background:#fafaf7}h1{font-size:2rem;line-height:1.2}button,input{font:inherit}button{padding:.7rem 1rem;cursor:pointer}li{margin:.5rem 0}.warning{padding:1rem;background:#fff3d2}section{margin:2rem 0}small{display:block;margin-top:1rem}#receipt{max-width:100%}</style>
-<main><p>Ankka MCP Gateway</p><h1>Finish removing your gateway</h1><p id="message" role="status">Loading removal progress…</p><small id="failure" hidden></small>
+<main><p>Ankka MCP Gateway</p><h1>Finish removing your gateway</h1><p id="message" role="status" aria-live="polite">Loading removal progress…</p><small id="failure" hidden></small>
 <section id="review" hidden><p id="target"></p><p>Your sources and Portal have already been removed. A fresh Cloudflare approval lets Ankka finish removing the gateway's storage, management page, and Worker from your account.</p><ol id="steps"></ol>
 <p id="warning" class="warning" hidden>A previous temporary Cloudflare approval could not be confirmed revoked. Review Ankka MCP Gateway in Cloudflare → My Profile → Access Management → Connected Applications and revoke that approval.</p>
 <button id="authorize" hidden>Authorize final removal</button><p><button id="download">Download recovery receipt</button></p><small>Keep this receipt to resume if you lose this browser session. It contains resource references and signed removal evidence, but no credentials.</small></section>
 <section><label for="receipt">Resume from a saved recovery receipt</label><p><input id="receipt" type="file" accept="application/json,.json"></p></section></main>
-<script nonce="${nonce}">(()=>{const message=document.querySelector('#message'),review=document.querySelector('#review'),authorize=document.querySelector('#authorize');let current;
+<script nonce="${nonce}">(()=>{const message=document.querySelector('#message'),review=document.querySelector('#review'),authorize=document.querySelector('#authorize');let current,poll;
 const api=async(path,body)=>{const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'content-type':'application/json',...(current?{'x-csrf-token':current.csrfToken}:{})},body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error('Removal could not continue. Reload this page or use your saved recovery receipt.');return response.json()};
-const show=value=>{current=value;review.hidden=false;document.querySelector('#target').textContent='Gateway: '+value.hostname;message.textContent=value.message;const failure=document.querySelector('#failure');failure.hidden=!value.failureReason;failure.textContent=value.failureReason?'Removal reference: '+value.failureReason:'';document.querySelector('#warning').hidden=!value.revocationUnconfirmed;authorize.hidden=!value.canAuthorize;authorize.disabled=false;authorize.textContent=value.started?'Authorize and resume removal':'Authorize final removal';const steps=document.querySelector('#steps');steps.replaceChildren(...value.steps.map(step=>{const item=document.createElement('li');item.textContent=step.label+(step.done?' — Removed':'');return item}))};
+const show=value=>{current=value;review.hidden=false;document.querySelector('#target').textContent='Gateway: '+value.hostname;message.textContent=value.message;const failure=document.querySelector('#failure');failure.hidden=!value.failureReason;failure.textContent=value.failureReason?'Removal reference: '+value.failureReason:'';document.querySelector('#warning').hidden=!value.revocationUnconfirmed;authorize.hidden=!value.canAuthorize;authorize.disabled=false;authorize.textContent=value.started?'Authorize and resume removal':'Authorize final removal';const steps=document.querySelector('#steps');steps.replaceChildren(...value.steps.map(step=>{const item=document.createElement('li');item.textContent=step.label+(step.done?' — Removed':step.current?' — Removing…':'');return item}));clearTimeout(poll);if(value.removing)poll=setTimeout(()=>load().catch(error=>{message.textContent=error.message}),3000)};
 const load=async()=>show(await api('/api/teardown'));
+addEventListener('pagehide',()=>clearTimeout(poll));
 const accept=async(handoff)=>{await api('/api/teardown/import',{handoff});history.replaceState(null,'','/teardown');await load()};
 authorize.onclick=async()=>{authorize.disabled=true;try{const value=await api('/api/teardown/authorize',{});location.assign(value.authorizationUrl)}catch(error){message.textContent=error.message;authorize.disabled=false}};
 document.querySelector('#download').onclick=()=>{if(!current)return;const url=URL.createObjectURL(new Blob([current.handoff],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ankka-removal-receipt.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
@@ -83,16 +83,23 @@ export function createGatewayTeardownRouter(config: {
     const authority = await verifyGatewayTeardownJobAuthority({ job, trust: config.trust });
     const terminal = job.phase.startsWith('removed');
     const active = job.attempt !== null && job.attempt.expiresAt > dependencies.now();
+    // The consent was exchanged and the job object is removing the root by alarm; the page follows it.
+    const removing = active && job.phase === 'exchanging';
     const labels = ['Gateway storage', 'Management domain', 'Administrator policy', 'Management Access application', 'Gateway Worker'];
     return {
       hostname: authority.statement.management.hostname, handoff: job.handoff,
       csrfToken: await deriveCsrfToken(config.encryptionKey, `gateway-teardown:${jobId}`),
-      canAuthorize: !terminal && !active, started: job.phase !== 'review',
+      canAuthorize: !terminal && !active, started: job.phase !== 'review', removing,
       // `complete` is the settled end of the job; five verified steps with an attempt still running are not it.
       complete: terminal, revocationUnconfirmed: job.revocation === 'unconfirmed', failureReason: job.failureReason,
-      message: terminal ? 'Gateway removal is complete.' : active ? 'Cloudflare authorization is in progress. Return here if it is interrupted.'
-        : job.phase === 'review' ? 'Review the final removal, then authorize it in Cloudflare.' : 'Removal is incomplete. Authorize again to resume from the verified progress.',
-      steps: labels.map((label, index) => ({ label, done: index < job.verifiedSteps.length })),
+      message: terminal ? 'Gateway removal is complete.'
+        : removing ? 'Removing your gateway. This page updates itself.'
+        : active ? 'Cloudflare authorization is in progress. Return here if it is interrupted.'
+        : job.phase === 'review' ? 'Review the final removal, then authorize it in Cloudflare.'
+        : job.failureReason === 'budget_exhausted' ? 'Removal paused at its per-attempt limit. Authorize again to continue.'
+        : 'Removal is incomplete. Authorize again to resume from the verified progress.',
+      steps: labels.map((label, index) => ({ label, done: index < job.verifiedSteps.length,
+        current: removing && index === job.verifiedSteps.length })),
     };
   };
   const importJob = async (request: Request): Promise<Response> => {
@@ -176,9 +183,9 @@ export function createGatewayTeardownRouter(config: {
       const denied = settleGatewayTeardownAttempt({ job, attemptId: attempt.id, revocation: 'confirmed', now: dependencies.now() });
       await commit(port, job, denied);
     } else {
-      const bundle = await dependencies.loadBundle(job.release);
-      await executeGatewayTeardownGrant({ code: query.code, verifier: attempt.verifier, config: config.oauth,
-        transport: dependencies.transport, port, attemptId: attempt.id, trust: config.trust, bundle, now: dependencies.now });
+      // The job object exchanges the code, keeps the grant only in its memory and runs the
+      // removal by alarm; the browser goes to the removal page at once and follows it there.
+      await port.finalize({ attemptId: attempt.id, code: query.code, verifier: attempt.verifier });
     }
     return redirect(await cookieFor({ ...cookie, attempt: null }));
   };

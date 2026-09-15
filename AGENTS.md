@@ -22,8 +22,9 @@ they are explicitly documented as non-secret.
 
 - MCP source-provider credentials must never transit or be stored by Ankka.
   The distinct Cloudflare installer grant is operation-scoped: it exists only
-  in the connected callback's request-local memory and, where a reviewed relay
-  requires it, is forwarded once to the exact HMAC-authenticated gateway
+  in memory, in the connected callback's request or in the owning Durable
+  Object for one bounded attempt behind a progress page, and, where a reviewed
+  relay requires it, is forwarded once to the exact HMAC-authenticated gateway
   Worker. It is never persisted, logged, exposed to any other destination, or
   reused for another action.
 - The distinct optional `ANKKA_MANAGEMENT_TOKEN` is an account-owned secret

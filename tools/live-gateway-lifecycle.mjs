@@ -147,11 +147,11 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
   await browser.clearRemovalSession();
   if (phase === 'interrupted') {
     await checkpoint({ stage: 'interrupted_removal', status: 'started' });
-    await browser.loseNextTeardownCallbackResponse();
+    await browser.loseNextTeardownReceiptHop();
     const first = await beginRemoval(management, browser, checkpoint);
-    // The interruption is observed either at the browser (the lost callback response) or on the gateway, whose
-    // action ends in recovery_required when its completion was cut short; both leave a durable completion for a
-    // fresh consent to recover.
+    // The interruption is observed either at the browser (the removal page's dropped hop to the receipt page) or on
+    // the gateway, whose action ends in recovery_required when its completion was cut short; both leave a durable
+    // completion for a fresh consent to recover.
     const outcome = await browser.waitFor(async () => browser.interruptionObserved()
       ? { interrupted: true, action: await management(`/api/teardown-actions/${first.actionId}`) }
       : { interrupted: false, action: await management(`/api/teardown-actions/${first.actionId}`) },
@@ -212,9 +212,9 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
 export const LANDING_GRACE_SECONDS = 60;
 
 /**
- * The gateway settles a consent attempt before the browser has followed the callback's redirect, so the action reads
- * `recovery_required` moments before the receipt reaches the installer or the recovery page names its reason. The
- * round ends only once the tab has landed; a consent opened earlier would cut a receipt on its way.
+ * The gateway settles a consent attempt by alarm behind its removal page, which then records the result word in its
+ * own address (`removed` before it hops to the installer with the receipt, `recovery_required` with the reason word
+ * otherwise). The round ends only once the tab has landed; a consent opened earlier would cut a receipt on its way.
  */
 async function landedRound(browser, heldReceipt) {
   const read = async () => ({ review: await heldReceipt(), landing: browser.landing() });
@@ -236,24 +236,31 @@ async function beginRemoval(management, browser, checkpoint) {
   return action;
 }
 
+/** How many consents a root removal may take when each attempt stops at its call budget; the hosted job resumes each from its verified steps. */
+export const ROOT_REMOVAL_MAX_CONSENTS = 6;
+
 /**
  * Also used by the explicit recovery command with the saved receipt/inventory. The hosted job's outcome is recorded
  * before the stop code names it: a failed step keeps its reason word and the steps done, a job whose five steps
  * finished under an unconfirmed grant revocation is verified absent and still stopped as such (never a pass), and
- * anything else is not verified.
+ * anything else is not verified. An attempt the job stopped at its call budget (`budget_exhausted`) is not a failure:
+ * it asks for another authorization, and the next consent continues from the verified steps.
  */
 export async function finishLiveGatewayRemoval({ browser, installer, provider, inventory, checkpoint }) {
-  const review = await installer('/api/teardown');
-  if (review.canAuthorize) {
+  let removed = await installer('/api/teardown');
+  for (let consent = 0; consent < ROOT_REMOVAL_MAX_CONSENTS && removed.canAuthorize; consent += 1) {
     await checkpoint({ stage: 'root_removal', status: 'started' });
-    const authorization = await installer('/api/teardown/authorize', { method: 'POST', body: {}, csrfToken: review.csrfToken });
+    const authorization = await installer('/api/teardown/authorize', { method: 'POST', body: {}, csrfToken: removed.csrfToken });
     // The wait ends on the job's settled end, a failed step, or five verified steps whose attempt was cut before it
     // settled and has expired (the job then asks for another authorization).
     await browser.consent(authorization.authorizationUrl, () => installer('/api/teardown'), (value) =>
       value?.complete === true || Boolean(value?.failureReason) ||
       value?.steps?.length === 5 && value.steps.every((step) => step.done) && value.canAuthorize === true);
+    removed = await installer('/api/teardown');
+    const paused = rootRemovalOutcome(removed);
+    if (paused.failureReason !== 'budget_exhausted' || !paused.canAuthorize) break;
+    await checkpoint({ stage: 'root_removal', status: 'budget_exhausted', ...paused });
   }
-  const removed = await installer('/api/teardown');
   const outcome = rootRemovalOutcome(removed);
   if (outcome.failureReason !== null) {
     await checkpoint({ stage: 'root_removal', status: 'failed', ...outcome });
