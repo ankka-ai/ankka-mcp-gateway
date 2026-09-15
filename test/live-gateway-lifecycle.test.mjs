@@ -335,7 +335,7 @@ test('the test tab is replaced exactly once, after the browser has observed the 
     const calls = []; let reads = 0, posts = 0;
     const browser = {
       clearRemovalSession: async () => { calls.push('clear'); },
-      loseNextTeardownCallbackResponse: async () => { calls.push('arm'); },
+      loseNextTeardownReceiptHop: async () => { calls.push('arm'); },
       continueHandoff: async () => { calls.push('consent'); },
       interruptionObserved: () => { reads += 1; const observed = observedAfter !== null && reads > observedAfter; calls.push(`observed:${observed}`); return observed; },
       replaceTab: async (reason) => { calls.push(`replace:${reason}`); },

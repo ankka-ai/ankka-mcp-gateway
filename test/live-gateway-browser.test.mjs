@@ -290,12 +290,12 @@ test('the test tab is replaced on purpose once the interception is spent: the ne
     const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection, headless: true,
       notify: (notice) => notices.push(notice), checkpoint: async (event) => events.push(event), browserType });
     const [first] = tabs;
-    await runner.loseNextTeardownCallbackResponse();
+    await runner.loseNextTeardownReceiptHop();
     assert.equal(first.routes.length, 3);
-    // The lost callback: the interception validates the completion handoff, aborts the answer and is spent.
+    // The dropped receipt hop: the interception aborts the document navigation to the installer once and is spent.
     const answers = [];
     const route = {
-      fetch: async () => ({ status: () => 303, headers: () => ({ location: `${installerOrigin}/teardown#${'B'.repeat(48)}` }), dispose: async () => {} }),
+      request: () => ({ resourceType: () => 'document' }),
       abort: async (code) => answers.push(`abort:${code}`), continue: async () => answers.push('continue'),
     };
     await first.routes[2].handler(route);
@@ -307,7 +307,7 @@ test('the test tab is replaced on purpose once the interception is spent: the ne
     // Everything but the spent interception route: the replacement is the tab of a fresh process.
     assert.deepEqual(attached(second), { events: ['request', 'requestfinished', 'requestfailed'], timeouts: [30_000], routes: 2 });
     assert.equal(second.routes[1].matcher(new URL(`${installerOrigin}/api/bootstrap/handoff`)), true);
-    assert.equal(second.routes.some((item) => item.matcher(new URL(`${managementOrigin}/__ankka/install/oauth/callback?code=secret`))), false);
+    assert.equal(second.routes.some((item) => item.matcher(new URL(`${installerOrigin}/teardown#${'B'.repeat(48)}`))), false);
     assert.equal(first.closed, true);
     assert.deepEqual(events, [{ stage: 'browser', status: 'tab_replaced', reason: 'interruption_spent' }]);
     assert.equal(notices.filter((notice) => notice.startsWith('Test tab replaced')).length, 1);
