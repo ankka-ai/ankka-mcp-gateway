@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { GATEWAY_ROOT_REMOVAL_STEPS } from '../src/gateway-teardown-job';
 import {
-  foreignScriptNeedsRead, gatewayTeardownFailureReason, GatewayTeardownCallBudget, GatewayTeardownProviderError,
-  GATEWAY_TEARDOWN_CALL_BUDGET, GATEWAY_TEARDOWN_SETTLEMENT_RESERVE,
+  createGatewayRootRemovalAttemptMemory, foreignScriptNeedsRead, gatewayTeardownFailureReason, GatewayTeardownCallBudget,
+  GatewayTeardownProviderError, GATEWAY_TEARDOWN_CALL_BUDGET, GATEWAY_TEARDOWN_SETTLEMENT_RESERVE,
 } from '../src/gateway-teardown-provider';
 import { ROOT_TEST } from './gateway-teardown-fixture';
 import { gatewayRootProviderFixture as fixture, ATTEMPT, NEXT_ATTEMPT, TOKEN } from './gateway-teardown-provider-fixture';
@@ -33,11 +33,14 @@ describe('fixed hosted gateway root removal', () => {
     expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
   });
 
-  it('requires a fresh consent before retrying a write that left the resource present', async () => {
+  it('sends a still-present resource for again under the same consent without re-arming, and a fresh consent completes it', async () => {
     const test = await fixture();
     test.failBefore('management_domain');
     await expect(test.run()).rejects.toThrow('teardown_management_domain_provider_unknown');
-    await expect(test.run()).rejects.toThrow('teardown_job_conflict');
+    // A later pass of the same attempt finds the step armed by it and the domain present: the arming stands.
+    await expect(test.run()).rejects.toThrow('teardown_management_domain_provider_unknown');
+    expect(test.current().pendingStep).toBe('management_domain');
+    expect(test.current().pendingAttemptId).toBe(ATTEMPT);
     test.renew(); test.failBefore(null);
     expect((await test.run(NEXT_ATTEMPT)).verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
     expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
@@ -192,6 +195,26 @@ describe('bounded finalizer reads', () => {
     expect(test.readCount(`${application}/policies`)).toBe(2);
     expect(test.readCount(application)).toBe(3);
     expect(test.reads).toHaveLength(28);
+  });
+
+  it('continues one attempt across passes, each with its own budget, without repeating the scan or sending twice', async () => {
+    const test = await fixture(); test.createdOwner(CREATED);
+    for (let index = 0; index < 6; index += 1) test.addForeignScript(`recent-script-${index}`, AFTER);
+    const memory = createGatewayRootRemovalAttemptMemory();
+    let passes = 0;
+    for (;;) {
+      passes += 1;
+      try { await test.pass(memory, new GatewayTeardownCallBudget(9)); break; }
+      catch (error) {
+        if (!(error instanceof GatewayTeardownProviderError) || error.code !== 'budget_exhausted' || passes > 40) throw error;
+      }
+    }
+    expect(passes).toBeGreaterThan(3);
+    expect(test.current().verifiedSteps).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    for (let index = 0; index < 6; index += 1) expect(test.readCount(`/workers/scripts/recent-script-${index}/settings`)).toBe(1);
+    expect(test.readCount('/workers/scripts')).toBe(2);
+    expect(test.mutations).toEqual(GATEWAY_ROOT_REMOVAL_STEPS);
+    expect(memory.inventory).not.toBeNull();
   });
 
   it('counts every provider and journal call and stops before the cap with the one resumable reason', async () => {

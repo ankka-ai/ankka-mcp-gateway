@@ -147,11 +147,11 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
   await browser.clearRemovalSession();
   if (phase === 'interrupted') {
     await checkpoint({ stage: 'interrupted_removal', status: 'started' });
-    await browser.loseNextTeardownCallbackResponse();
+    await browser.loseNextTeardownReceiptHop();
     const first = await beginRemoval(management, browser, checkpoint);
-    // The interruption is observed either at the browser (the lost callback response) or on the gateway, whose
-    // action ends in recovery_required when its completion was cut short; both leave a durable completion for a
-    // fresh consent to recover.
+    // The interruption is observed either at the browser (the removal page's dropped hop to the receipt page) or on
+    // the gateway, whose action ends in recovery_required when its completion was cut short; both leave a durable
+    // completion for a fresh consent to recover.
     const outcome = await browser.waitFor(async () => browser.interruptionObserved()
       ? { interrupted: true, action: await management(`/api/teardown-actions/${first.actionId}`) }
       : { interrupted: false, action: await management(`/api/teardown-actions/${first.actionId}`) },
@@ -227,9 +227,9 @@ export const LANDING_GRACE_SECONDS = 60;
 export const INTERRUPTION_OBSERVATION_SECONDS = 60;
 
 /**
- * The gateway settles a consent attempt before the browser has followed the callback's redirect, so the action reads
- * `recovery_required` moments before the receipt reaches the installer or the recovery page names its reason. The
- * round ends only once the tab has landed; a consent opened earlier would cut a receipt on its way.
+ * The gateway settles a consent attempt by alarm behind its removal page, which then records the result word in its
+ * own address (`removed` before it hops to the installer with the receipt, `recovery_required` with the reason word
+ * otherwise). The round ends only once the tab has landed; a consent opened earlier would cut a receipt on its way.
  */
 async function landedRound(browser, heldReceipt) {
   const read = async () => ({ review: await heldReceipt(), landing: browser.landing() });

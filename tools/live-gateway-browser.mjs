@@ -59,15 +59,16 @@ export function validateLiveHandoff(value, origin, path) {
 const LANDING_WORD = /^[a-z_]{1,32}$/u;
 const HOSTED_CALLBACK_PATH = /^\/(?:oauth\/callback|__ankka\/install\/oauth\/callback)$/u;
 
-/** A hosted OAuth callback on one of the lifecycle's origins: its whole operation runs inside that one response. */
+/** A hosted OAuth callback on one of the lifecycle's origins: it exchanges the consent and answers at once with the
+ * page that follows the operation, which runs behind that page in the owning Durable Object. */
 export function isHostedCallback(value, origins) {
   let url;
   try { url = new URL(value); } catch { return false; }
   return origins.includes(url.origin) && HOSTED_CALLBACK_PATH.test(url.pathname);
 }
 
-/** Knows while a hosted callback's response is pending in the tab, since closing the tab then cuts the operation's
- * revoke and settlement. Requests are tracked by identity; their URLs are never kept. */
+/** Knows while a hosted callback's response is pending in the tab: a tab closed then can still cut the exchange before
+ * the object holds the grant. Requests are tracked by identity; their URLs are never kept. */
 export function callbackTracker(origins) {
   const pending = new Set();
   return {
@@ -94,8 +95,9 @@ export function navigationFailureOf(error, { closed = false } = {}) {
 }
 
 /** Where the test tab is, in fixed labels only: the site, the lifecycle page it shows, and for the gateway's removal
- * page the `result` and `reason` words it was sent with. Never the fragment, which carries handoffs, and never a query
- * value outside that vocabulary. */
+ * page the `result` and `reason` words in its address (`removed` once its removal settled and it hops to the receipt
+ * page, `recovery_required` with the reason word otherwise). Never the fragment, which carries handoffs, never the
+ * attempt the page follows, and never a query value outside that vocabulary. */
 export function landingOf(value, { installerOrigin, managementOrigin }) {
   let url;
   try { url = new URL(value); } catch { return { site: 'other', page: 'other', result: null, reason: null }; }
@@ -162,31 +164,22 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   };
   let interrupted = false;
   let interruptionArmed = false;
-  let interruptionError = null;
   let cancelled = false;
-  const isTeardownCallback = (url) => url.origin === managementOrigin && url.pathname === '/__ankka/install/oauth/callback';
-  async function loseTeardownCallbackResponse(route) {
-    if (interrupted) { await route.continue(); return; }
-    // Execute the genuine callback but lose its response at the browser.
-    // Never save the code, cookie, grant, response body or redirect fragment.
-    let response;
-    try {
-      response = await route.fetch({ maxRedirects: 0, timeout: 180_000 });
-      if (response.status() !== 303) throw new LiveGatewayBrowserError('interruption_callback_incomplete');
-      // A redirect to an error/recovery page is not completed dependency removal.
-      validateLiveHandoff(response.headers().location, installerOrigin, '/teardown');
-      interrupted = true;
-      await route.abort('failed');
-    } catch {
-      interruptionError = new LiveGatewayBrowserError('interruption_callback_incomplete');
-      await route.abort('failed').catch(() => {});
-    } finally { await response?.dispose().catch(() => {}); }
+  // Once the gateway has removed the dependencies behind its removal page, that page hops to the installer's receipt
+  // page with the signed receipt in its fragment. While armed, the hop is dropped at the browser, once: the receipt
+  // stays with the gateway's recorded outcome, the installer never imports it, and only a fresh consent recovers it.
+  // Never save the request, its address or the fragment.
+  const isReceiptHop = (url) => url.origin === installerOrigin && url.pathname === '/teardown';
+  async function loseTeardownReceiptHop(route) {
+    if (interrupted || route.request().resourceType() !== 'document') { await route.continue(); return; }
+    interrupted = true;
+    await route.abort('failed');
   }
 
   /**
    * Everything the runner attaches to a tab, in one place so a replacement tab cannot drift from the first: the
-   * default timeout, the callback tracker's listeners, the held-origin and handoff-hold routes, and the teardown
-   * callback interception while it is armed and not yet spent. Routes are matched in reverse registration order.
+   * default timeout, the callback tracker's listeners, the held-origin and handoff-hold routes, and the receipt-hop
+   * interception while it is armed and not yet spent. Routes are matched in reverse registration order.
    */
   async function attach(tab) {
     tab.setDefaultTimeout(30_000);
@@ -195,7 +188,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     tab.on('requestfailed', (request) => callbacks.ended(request));
     await tab.route(heldOriginMatcher(hold), answerHeldOrigin);
     await tab.route(isHandoffPoll, answerHandoffPoll);
-    if (interruptionArmed && !interrupted) await tab.route(isTeardownCallback, loseTeardownCallbackResponse);
+    if (interruptionArmed && !interrupted) await tab.route(isReceiptHop, loseTeardownReceiptHop);
   }
   let page = borrowed ? await context.newPage() : context.pages()[0] ?? await context.newPage();
   await attach(page);
@@ -314,7 +307,6 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     let lastNotice = '';
     while (Date.now() < deadline) {
       if (cancelled) throw new LiveGatewayBrowserError('validation_cancelled');
-      if (interruptionError) throw interruptionError;
       try {
         const value = await read();
         if (accepts(value)) return value;
@@ -387,10 +379,10 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     release() { hold.origin = null; },
     holdHandoff() { handoffHold.active = true; },
     releaseHandoff() { handoffHold.active = false; },
-    async loseNextTeardownCallbackResponse() {
+    async loseNextTeardownReceiptHop() {
       if (interruptionArmed) throw new LiveGatewayBrowserError('interruption_already_armed');
       interruptionArmed = true;
-      await page.route(isTeardownCallback, loseTeardownCallbackResponse);
+      await page.route(isReceiptHop, loseTeardownReceiptHop);
     },
     interruptionObserved: () => interrupted,
     /**

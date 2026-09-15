@@ -63,28 +63,34 @@ An update starts in the gateway dashboard and runs on the gateway itself:
    own `/__ankka/operation` page, which asks Cloudflare for a one-time
    `upgrade` grant (Workers scripts write only) through the public OAuth
    client and callback certified at install.
-2. The gateway confirms the grant reaches the installed account by reading
-   the gateway Worker, reads its active Worker version and current bindings, then
+2. The callback confirms the grant reaches the installed account by reading
+   the gateway Worker. Behind the page, the management object reads the
+   active Worker version and current bindings, then
    fetches the approved release descriptor from
    `/api/releases/<channel>/by-id/<release>/<artifact-sha256>` and its manifest
    files from that route's `/files/<path>` suffix, then verifies
    the signature and every digest with the update key it was installed with.
-3. It uploads the new management assets, records a handover (the action, the
-   target, and the action key sealed under the ownership wrap key), arms its
-   own alarm, and uploads the new Worker version with the existing secrets
-   and object namespace inherited. The upload activates at once and replaces
-   the version that ran the update.
-4. The grant is revoked and the browser returns to Settings, which polls the
-   action. The new version's alarm finds itself running the target release
-   and completes the journal with `finalize`; if the old version still runs
-   after five minutes, it marks the action as needing recovery instead.
+3. The callback answers at once with the gateway's own
+   `/__ankka/operation/update` page, and the management object runs the
+   update behind it in its own invocation: it uploads the new management
+   assets, records a handover (the action, the target, and the action key
+   sealed under the ownership wrap key), arms its own alarm, and uploads the
+   new Worker version with the existing secrets and object namespace
+   inherited. The upload activates at once and replaces the version that ran
+   the update; the page shows the stages as they are reached.
+4. The grant is revoked and the page hands the browser to Settings, which
+   polls the action. The new version's alarm finds itself running the target
+   release and completes the journal with `finalize`; if the old version still
+   runs after five minutes, it marks the action as needing recovery instead.
 
 Gateway traffic is not gradually split between versions, and no candidate is
 probed before activation: the bytes are the signed release the hosted
 installer would deploy for a fresh install, verified on the gateway before
-the upload. The grant remains request-local and is never persisted. The new
-version's Cloudflare version id is not recorded, because the version that
-could learn it no longer runs by then.
+the upload. The grant lives only in the management object's memory for the
+attempt and is never persisted; a restart before the upload loses it and the
+page hands the browser to Settings without a result. The new version's
+Cloudflare version id is not recorded, because the version that could learn
+it no longer runs by then.
 
 Anything that fails before the upload fails the action in the journal with
 the stage and cause as its code and leaves the running version untouched.

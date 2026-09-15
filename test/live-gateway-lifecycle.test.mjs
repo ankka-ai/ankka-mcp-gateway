@@ -180,7 +180,7 @@ test('complete orchestration proves token management, distinct update, lost call
       throw new Error('unexpected_request');
     },
     continueHandoff: async (_url, kind) => { if (kind === 'update') current = runtimeIdentity(config.releaseB); else interrupted = true; },
-    loseNextTeardownCallbackResponse: async () => evidence.push('interruption_armed'),
+    loseNextTeardownReceiptHop: async () => evidence.push('interruption_armed'),
     interruptionObserved: () => interrupted,
     replaceTab: async (reason) => evidence.push(`tab_replaced:${reason}`),
     clearRemovalSession: async () => evidence.push('removal_cookie_cleared'),
@@ -304,7 +304,7 @@ test('the removal half starts with the interrupted sequence, or with the root re
     const calls = [];
     const browser = {
       clearRemovalSession: async () => { calls.push('clear'); },
-      loseNextTeardownCallbackResponse: async () => { calls.push('arm'); },
+      loseNextTeardownReceiptHop: async () => { calls.push('arm'); },
       request: async (_origin, path) => { calls.push(path); throw new Error('stop_here'); },
     };
     await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => { calls.push(`${event.stage}:${event.status}`); }, phase }), /stop_here/u);
