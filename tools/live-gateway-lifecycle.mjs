@@ -203,7 +203,7 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
     if (outcome.review !== null) { receipt = outcome.review; break; }
     if (outcome.action.status === 'succeeded') await provider.assertDependenciesAbsent(inventory);
     const landed = await landedRound(browser, heldReceipt);
-    await checkpoint({ stage: 'dependency_removal', status: outcome.action.status, actionId: action.actionId, failureCode: outcome.action.failureCode ?? null, landing: landed.landing });
+    await checkpoint({ stage: 'dependency_removal', status: outcome.action.status, actionId: action.actionId, failureCode: outcome.action.failureCode ?? null, landing: landed.landing, receiptHop: browser.receiptHop?.() ?? null });
     requireCondition(outcome.action.status !== 'failed', 'dependency_removal_failed');
     receipt = landed.review;
   }
@@ -233,7 +233,9 @@ export const INTERRUPTION_OBSERVATION_SECONDS = 60;
  */
 async function landedRound(browser, heldReceipt) {
   const read = async () => ({ review: await heldReceipt(), landing: browser.landing() });
-  const landed = (value) => value.review !== null || value.landing.result !== null;
+  // The removal page names `removed` in its own address just before it hops to the installer with the receipt: that
+  // word means the receipt is on its way, and only the held receipt ends the wait. A recovery result is final.
+  const landed = (value) => value.review !== null || (value.landing.result !== null && value.landing.result !== 'removed');
   try {
     return await browser.waitFor(read, landed, { seconds: LANDING_GRACE_SECONDS });
   } catch (error) {

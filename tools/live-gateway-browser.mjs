@@ -56,6 +56,15 @@ export function validateLiveHandoff(value, origin, path) {
   return url.href;
 }
 
+const HOP_LABEL = /^[a-z0-9_-]{1,24}$/u;
+
+/** What answered the browser's navigation to the installer's receipt page, in fixed fields only: the HTTP status, the
+ * `server` label and Cloudflare's mitigation label when present. Tells an edge refusal from the application's. */
+export function receiptHopOf(status, headers) {
+  const word = (value) => v.is(v.string(), value) && HOP_LABEL.test(value.toLowerCase()) ? value.toLowerCase() : null;
+  return { status: Number.isInteger(status) && status >= 100 && status <= 599 ? status : null, server: word(headers?.server), mitigated: word(headers?.['cf-mitigated']) };
+}
+
 /** Whether an answer is the Access edge's redirect to its login: the request never reached the application. */
 export function refusedAtAccessEdge(status, location, origin) {
   if (![302, 303].includes(status) || !v.is(v.string(), location)) return false;
@@ -170,6 +179,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   };
   let interrupted = false;
   let interruptionArmed = false;
+  let lastReceiptHop = null;
   let cancelled = false;
   // Once the gateway has removed the dependencies behind its removal page, that page hops to the installer's receipt
   // page with the signed receipt in its fragment. While armed, the hop is dropped at the browser, once: the receipt
@@ -192,6 +202,13 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     tab.on('request', (request) => callbacks.started(request));
     tab.on('requestfinished', (request) => callbacks.ended(request));
     tab.on('requestfailed', (request) => callbacks.ended(request));
+    tab.on('response', (response) => {
+      let url;
+      try { url = new URL(response.url()); } catch { return; }
+      if (url.origin === installerOrigin && url.pathname === '/teardown' && response.request().resourceType() === 'document') {
+        lastReceiptHop = receiptHopOf(response.status(), response.headers());
+      }
+    });
     await tab.route(heldOriginMatcher(hold), answerHeldOrigin);
     await tab.route(isHandoffPoll, answerHandoffPoll);
     if (interruptionArmed && !interrupted) await tab.route(isReceiptHop, loseTeardownReceiptHop);
@@ -332,6 +349,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   return {
     request, navigate, waitFor,
     cancel() { cancelled = true; accessCancellation.abort(); },
+    /** The last answer to a navigation to the installer's receipt page, in fixed fields; null before any. */
+    receiptHop: () => lastReceiptHop,
     /** The tab's current landing in fixed labels; a closed tab lands nowhere. */
     landing() {
       let url;

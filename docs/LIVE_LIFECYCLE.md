@@ -220,6 +220,14 @@ config and `--recover-removal`. Recovery does not turn an incomplete lifecycle r
 into a passing lifecycle result. Before a receipt exists, use the product's existing
 setup/removal recovery flow and the recorded action references.
 
+The gateway's removal page names `removed` in its own address just before it
+hops to the installer with the receipt. For the runner that word means the
+receipt is on its way: the round keeps waiting for the installer to hold it, and
+only a recovery result ends the wait early. Each settled round also records what
+answered the browser's navigation to the installer's receipt page, in fixed
+fields (HTTP status, `server` label, Cloudflare's mitigation label), so an edge
+refusal can be told from the application's.
+
 A browser can lose an installed Access session cookie while the cached token
 is still valid (observed live: the cookie vanished from an attached Chrome
 minutes after the runner had installed it). The Access edge then redirects the
