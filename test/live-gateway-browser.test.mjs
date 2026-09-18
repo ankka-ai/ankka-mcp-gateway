@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, TAB_REPLACEMENT_REASONS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
+import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, receiptHopOf, refusedAtAccessEdge, TAB_REPLACEMENT_REASONS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
 import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
 import { landingOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 
@@ -214,7 +214,7 @@ test('a tab the browser discarded or crashed is replaced in the same context wit
       notify: (notice) => notices.push(notice), checkpoint: async (event) => events.push(event), browserType });
     const [first] = tabs;
     assert.equal(tabs.length, 1);
-    assert.deepEqual(attached(first), { events: ['request', 'requestfinished', 'requestfailed'], timeouts: [30_000], routes: 2 });
+    assert.deepEqual(attached(first), { events: ['request', 'requestfinished', 'requestfailed', 'response'], timeouts: [30_000], routes: 2 });
     await runner.loseNextTeardownReceiptHop();
     assert.equal(first.routes.length, 3);
     // A hosted callback the first tab was still waiting for when it was lost.
@@ -223,7 +223,7 @@ test('a tab the browser discarded or crashed is replaced in the same context wit
     await runner.continueHandoff(handoff, 'update');
     assert.equal(tabs.length, 2);
     const [, second] = tabs;
-    assert.deepEqual(attached(second), { events: ['request', 'requestfinished', 'requestfailed'], timeouts: [30_000], routes: 3 });
+    assert.deepEqual(attached(second), { events: ['request', 'requestfinished', 'requestfailed', 'response'], timeouts: [30_000], routes: 3 });
     assert.deepEqual(second.navigations, [handoff]);
     assert.deepEqual(first.navigations, lost === 'discarded' ? [] : [handoff]);
     assert.equal(first.closed, true);
@@ -305,7 +305,7 @@ test('the test tab is replaced on purpose once the interception is spent: the ne
     assert.equal(tabs.length, 2);
     const [, second] = tabs;
     // Everything but the spent interception route: the replacement is the tab of a fresh process.
-    assert.deepEqual(attached(second), { events: ['request', 'requestfinished', 'requestfailed'], timeouts: [30_000], routes: 2 });
+    assert.deepEqual(attached(second), { events: ['request', 'requestfinished', 'requestfailed', 'response'], timeouts: [30_000], routes: 2 });
     assert.equal(second.routes[1].matcher(new URL(`${installerOrigin}/api/bootstrap/handoff`)), true);
     assert.equal(second.routes.some((item) => item.matcher(new URL(`${installerOrigin}/teardown#${'B'.repeat(48)}`))), false);
     assert.equal(first.closed, true);
@@ -353,4 +353,56 @@ test('a refusal of a just-installed gateway session is retried inside the propag
   }
   for (const status of [200, 404, 409, 500]) assert.equal(rejectedSessionOutcome({ status, installedAt, now: installedAt }), null);
   assert.ok(SESSION_PROPAGATION_MS >= 5 * 60_000);
+});
+
+test('an installed session the Access edge refuses is put back from the cached token and the same request is sent once more', async () => {
+  for (const [status, location, expected] of [
+    [302, 'https://team.cloudflareaccess.com/cdn-cgi/access/login/manage.example.com?kid=secret', true],
+    [303, 'https://team.cloudflareaccess.com/login', true],
+    [302, 'https://manage.example.com/settings', false], [302, undefined, false], [302, 'http://[not-a-host', false],
+    [401, 'https://team.cloudflareaccess.com/login', false], [200, 'https://team.cloudflareaccess.com/login', false],
+  ]) assert.equal(refusedAtAccessEdge(status, location, managementOrigin), expected);
+  const answer = (status, headers, body) => ({ status: () => status, headers: () => headers, body: async () => Buffer.from(JSON.stringify(body ?? {})), dispose: async () => {} });
+  const login = { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login/installer.example.com?kid=secret' };
+  const json = { 'content-type': 'application/json' };
+  for (const method of ['GET', 'POST']) {
+    const { context, browserType } = fakeBrowserType([[null]]);
+    const installs = [], notices = [], sent = [];
+    // The session is installed at login; later the browser has lost the cookie and the edge redirects once.
+    const answers = [answer(200, json, { schemaVersion: 1 }), answer(302, login), answer(200, json, { schemaVersion: 1, ok: true })];
+    context.request.fetch = async (url, options) => { sent.push(`${options.method} ${new URL(url).pathname}`); return answers.shift(); };
+    const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection: 'chrome', headless: true,
+      notify: (notice) => notices.push(notice), browserType,
+      accessFactory: () => async (_context, origin, options = {}) => { installs.push({ origin, ...options }); } });
+    await runner.login(installerOrigin);
+    const result = await runner.request(installerOrigin, '/api/session', method === 'GET' ? {} : { method, body: {} });
+    assert.deepEqual(result, { schemaVersion: 1, ok: true });
+    assert.deepEqual(sent, ['GET /api/session', `${method} /api/session`, `${method} /api/session`]);
+    // Forced, and never a login: the installer's session is not one the runner may start.
+    assert.deepEqual(installs.filter((item) => item.force === true), [{ origin: installerOrigin, allowLogin: false, force: true }]);
+    assert.equal(notices.filter((notice) => notice.startsWith('Access session put back')).length, 1);
+    assert.equal(JSON.stringify(notices).includes('secret'), false);
+    // A second refusal of the same request is final: nothing loops.
+    answers.push(answer(302, login), answer(302, login));
+    await assert.rejects(runner.request(installerOrigin, '/api/session'), { code: 'access_session_rejected' });
+    await runner.close();
+  }
+});
+
+test('the answer to the receipt page navigation is kept in fixed fields only, for the installer document and nothing else', async () => {
+  assert.deepEqual(receiptHopOf(403, { server: 'cloudflare', 'cf-mitigated': 'challenge', 'set-cookie': 'secret=1' }), { status: 403, server: 'cloudflare', mitigated: 'challenge' });
+  assert.deepEqual(receiptHopOf(200, { server: 'Some Server/1.0 (secret)' }), { status: 200, server: null, mitigated: null });
+  assert.deepEqual(receiptHopOf(9999, undefined), { status: null, server: null, mitigated: null });
+  const { tabs, browserType } = fakeBrowserType([[null]]);
+  const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection: 'chrome', headless: true, notify: () => {}, browserType });
+  assert.equal(runner.receiptHop(), null);
+  const response = (url, type, status) => ({ url: () => url, status: () => status, headers: () => ({ server: 'cloudflare' }), request: () => ({ resourceType: () => type }) });
+  const listener = tabs[0].listeners.response;
+  listener(response(`${installerOrigin}/api/teardown`, 'fetch', 409));
+  listener(response(`${managementOrigin}/teardown`, 'document', 200));
+  listener(response(`${installerOrigin}/teardown`, 'script', 200));
+  assert.equal(runner.receiptHop(), null);
+  listener(response(`${installerOrigin}/teardown`, 'document', 403));
+  assert.deepEqual(runner.receiptHop(), { status: 403, server: 'cloudflare', mitigated: null });
+  await runner.close();
 });

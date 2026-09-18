@@ -458,6 +458,7 @@ test('a settled round ends only once the tab has landed: a receipt arriving duri
   const receiptPage = { site: 'installer', page: 'receipt', result: null, reason: null };
   const recoveryPage = { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' };
   const deniedPage = { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'denied' };
+  const removedPage = { site: 'gateway', page: 'removal', result: 'removed', reason: null };
   const cases = [
     // The action settles first; the installer holds the receipt two polls later. No second round is opened.
     { status: 'recovery_required', landings: [callback, receiptPage, receiptPage], receiptAfterPoll: 2, ends: /stop_at_import/u, landing: receiptPage, rounds: 1 },
@@ -465,6 +466,9 @@ test('a settled round ends only once the tab has landed: a receipt arriving duri
     { status: 'recovery_required', landings: [callback, recoveryPage], receiptAfterPoll: null, ends: /stop_at_next_round/u, landing: recoveryPage, rounds: 2 },
     // The grace runs out while the tab sits on the installer page without a receipt: that landing is recorded as is.
     { status: 'recovery_required', landings: [callback, receiptPage, receiptPage, receiptPage, receiptPage], receiptAfterPoll: null, ends: /stop_at_next_round/u, landing: receiptPage, rounds: 2 },
+    // The removal page names `removed` just before it hops to the installer: the receipt is on its way, so the round
+    // keeps waiting and takes it; opening the next consent on that word would cut the hop.
+    { status: 'recovery_required', landings: [removedPage, removedPage, receiptPage], receiptAfterPoll: 2, ends: /stop_at_import/u, landing: receiptPage, rounds: 1 },
     // A failed action still records its landing before the run stops.
     { status: 'failed', landings: [deniedPage], receiptAfterPoll: null, ends: { code: 'dependency_removal_failed' }, landing: deniedPage, rounds: 1 },
   ];
@@ -492,7 +496,7 @@ test('a settled round ends only once the tab has landed: a receipt arriving duri
     };
     await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => events.push(event), phase: 'root' }), scenario.ends);
     const settled = events.find((event) => event.stage === 'dependency_removal' && event.status === scenario.status);
-    assert.deepEqual(settled, { stage: 'dependency_removal', status: scenario.status, actionId, failureCode: 'fresh_authorization_required', landing: scenario.landing });
+    assert.deepEqual(settled, { stage: 'dependency_removal', status: scenario.status, actionId, failureCode: 'fresh_authorization_required', landing: scenario.landing, receiptHop: null });
     assert.equal(posts, scenario.rounds);
     assert.equal(events.some((event) => event.status === 'receipt_saved'), scenario.receiptAfterPoll !== null);
   }
