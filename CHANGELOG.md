@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Fix the dashboard refusing to load on gateway-v0.1.64 ("The gateway response could not be verified"). The gateway's
+  status gained `serviceIdentity`, and source and Team actions gained `actorKind`, without the dashboard's strict
+  response schemas learning them, so every status answer was rejected. The dashboard now accepts all three, and the
+  dashboard's real client runs against the real gateway Worker in the core suite, so a field added on one side only
+  fails there instead of in a customer's browser.
+
 - Update the transitive `sharp` dependency from 0.35.2 to 0.35.4 to resolve
   the libheif advisories GHSA-g89c-p67h-r497 and GHSA-2jg2-4ch7-h545 reported
   as GHSA-rgj7-g3m4-5g8c. Miniflare pins the vulnerable version exactly, so

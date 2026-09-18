@@ -51,6 +51,8 @@ const gatewayStatusSchema = v.strictObject({
     administratorCount: v.number(),
     memberCount: v.number(),
   }),
+  // The one machine identity the gateway admits; null on every gateway the hosted installer deploys.
+  serviceIdentity: v.optional(v.nullable(v.strictObject({ clientId: v.string() }))),
   updatedAt: v.string(),
 })
 const managedSourceSchema = v.strictObject({
@@ -114,10 +116,13 @@ const sourceActionFailureCodes = new Set([
   'source_action_authorization_failed', 'source_resource_collision', 'source_action_legacy_policy',
   'source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'bigquery_setup_required',
 ])
+/** Who prepared an action: an administrator, or the gateway's one configured service identity. */
+const actorKindSchema = v.optional(v.picklist(['human', 'service']))
 const sourceActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: v.string(),
   sourceId: v.string(),
+  actorKind: actorKindSchema,
   status: actionStatusSchema,
   expiresAt: v.string(),
   failureCode: v.nullable(v.pipe(v.string(), v.transform((code) => sourceActionFailureCodes.has(code) ? code : 'source_action_failed'))),
@@ -200,6 +205,7 @@ const teardownActionSchema = v.strictObject({
 const teamActionSchema = v.strictObject({
   ...teardownActionSchema.entries,
   action: v.optional(v.literal('access')),
+  actorKind: actorKindSchema,
   canCancel: v.optional(v.boolean(), false),
 })
 const teamActionResultSchema = v.strictObject({
