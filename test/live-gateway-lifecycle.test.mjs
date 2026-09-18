@@ -180,6 +180,7 @@ test('complete orchestration proves token management, distinct update, lost call
       throw new Error('unexpected_request');
     },
     continueHandoff: async (_url, kind) => { if (kind === 'update') current = runtimeIdentity(config.releaseB); else interrupted = true; },
+    openInstallerConnection: async () => evidence.push('installer_connection_opened'),
     loseNextTeardownReceiptHop: async () => evidence.push('interruption_armed'),
     interruptionObserved: () => interrupted,
     replaceTab: async (reason) => evidence.push(`tab_replaced:${reason}`),
@@ -193,8 +194,9 @@ test('complete orchestration proves token management, distinct update, lost call
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
-  // The test tab is replaced once the interrupted round is observed, before the recovery rounds.
-  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'tab_replaced:interruption_spent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
+  // The installer's own connection is opened ahead of the removal round, and the test tab is replaced once the
+  // interrupted round is observed, before the recovery rounds.
+  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'installer_connection_opened', 'dependencies_absent', 'tab_replaced:interruption_spent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
   assert.equal(events.find((event) => event.status === 'receipt_saved').revocationUnconfirmed, false);
@@ -320,7 +322,8 @@ test('the test tab is replaced exactly once, after the browser has observed the 
   const { LiveGatewayBrowserError } = await import('../tools/live-gateway-origin.mjs');
   assert.ok(INTERRUPTION_OBSERVATION_SECONDS >= 30);
   const actionId = `action_${'A'.repeat(32)}`;
-  const round = ['dependency_removal:started', 'dependency_removal:recorded', 'consent'];
+  // Every round opens the installer's own connection once its action is recorded, right before the consent.
+  const round = ['dependency_removal:started', 'dependency_removal:recorded', 'installer_connection', 'consent'];
   const settled = 'dependency_removal:recovery_required';
   // The browser observes the lost callback before the gateway's settle is read, moments after it, or never.
   for (const [phase, observedAfter, expected] of [
@@ -336,6 +339,7 @@ test('the test tab is replaced exactly once, after the browser has observed the 
     const browser = {
       clearRemovalSession: async () => { calls.push('clear'); },
       loseNextTeardownReceiptHop: async () => { calls.push('arm'); },
+      openInstallerConnection: async () => { calls.push('installer_connection'); },
       continueHandoff: async () => { calls.push('consent'); },
       interruptionObserved: () => { reads += 1; const observed = observedAfter !== null && reads > observedAfter; calls.push(`observed:${observed}`); return observed; },
       replaceTab: async (reason) => { calls.push(`replace:${reason}`); },
@@ -475,7 +479,7 @@ test('a settled round ends only once the tab has landed: a receipt arriving duri
   for (const scenario of cases) {
     const events = []; let polls = 0, posts = 0, held = null, landings = 0;
     const browser = {
-      clearRemovalSession: async () => {}, continueHandoff: async () => {},
+      clearRemovalSession: async () => {}, continueHandoff: async () => {}, openInstallerConnection: async () => {},
       landing: () => scenario.landings[Math.min(landings++, scenario.landings.length - 1)],
       waitFor: async (read, accepts, { seconds } = {}) => {
         for (let attempt = 0; attempt < (seconds === undefined ? 1 : 4); attempt += 1) {
@@ -499,5 +503,84 @@ test('a settled round ends only once the tab has landed: a receipt arriving duri
     assert.deepEqual(settled, { stage: 'dependency_removal', status: scenario.status, actionId, failureCode: 'fresh_authorization_required', landing: scenario.landing, receiptHop: null });
     assert.equal(posts, scenario.rounds);
     assert.equal(events.some((event) => event.status === 'receipt_saved'), scenario.receiptAfterPoll !== null);
+  }
+});
+
+test('a receipt travels by API only after the edge\'s refusal of the hop was observed: Chrome\'s error page, a 403 on the hop, and no receipt after the grace; the round says so before the import', async () => {
+  const { removeLiveGateway, RECORDED_RECEIPT_SECONDS } = await import('../tools/live-gateway-lifecycle.mjs');
+  const { LiveGatewayBrowserError } = await import('../tools/live-gateway-origin.mjs');
+  assert.ok(RECORDED_RECEIPT_SECONDS >= 10);
+  const actionId = `action_${'A'.repeat(32)}`;
+  const errorPage = { site: 'other', page: 'error', result: null, reason: null };
+  const recoveryPage = { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' };
+  const receiptPage = { site: 'installer', page: 'receipt', result: null, reason: null };
+  const refusal = { status: 403, server: 'cloudflare', mitigated: null };
+  const rejected = () => { throw new LiveGatewayBrowserError('gateway_http_rejected', 404); };
+  const cases = [
+    // The refusal was observed and the gateway recorded the receipt: it is imported by API and the run goes on to the root removal.
+    { status: 'recovery_required', landing: errorPage, hop: refusal, recorded: () => 'signed-receipt', reads: 1, label: 'runner_after_edge_refusal', imports: 2, ends: /stop_at_root_consent/u },
+    { status: 'succeeded', landing: errorPage, hop: refusal, recorded: () => 'signed-receipt', reads: 1, label: 'runner_after_edge_refusal', imports: 2, ends: /stop_at_root_consent/u },
+    // A recovery result, the installer's own page, or a hop that was not refused: the browser's path is the only one.
+    { status: 'recovery_required', landing: recoveryPage, hop: refusal, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: receiptPage, hop: refusal, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: { status: 200, server: 'cloudflare', mitigated: null }, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: { status: 503, server: 'cloudflare', mitigated: null }, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: { status: null, server: null, mitigated: null }, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: null, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    // A receipt the page still imported during the grace is taken from the installer as always.
+    { status: 'recovery_required', landing: errorPage, hop: refusal, heldDuringGrace: true, reads: 0, imports: 1, ends: /stop_at_root_consent/u },
+    // A failed action has no receipt to recover.
+    { status: 'failed', landing: errorPage, hop: refusal, reads: 0, imports: 0, ends: { code: 'dependency_removal_failed' } },
+    // The gateway holds no receipt for the attempt, or its record keeps being refused: the round says so and the next one opens.
+    { status: 'recovery_required', landing: errorPage, hop: refusal, recorded: () => null, reads: 1, label: 'unavailable_after_edge_refusal', imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: refusal, recorded: rejected, reads: 4, label: 'unavailable_after_edge_refusal', imports: 0, ends: /stop_at_next_round/u },
+    // Any other failure of that read stops the run like every other read.
+    { status: 'recovery_required', landing: errorPage, hop: refusal, recorded: () => { throw new Error('unexpected_read_failure'); }, reads: 1, imports: 0, ends: /unexpected_read_failure/u, unsettled: true },
+  ];
+  for (const scenario of cases) {
+    const order = [], imports = []; let held = null, posts = 0, reads = 0, polls = 0;
+    const browser = {
+      clearRemovalSession: async () => {}, continueHandoff: async () => {}, openInstallerConnection: async () => {},
+      landing: () => scenario.landing, receiptHop: () => scenario.hop,
+      recordedReceipt: async () => { reads += 1; return scenario.recorded(); },
+      // Like the runner's own wait: a rejected read is retried until the deadline, anything else is thrown.
+      waitFor: async (read, accepts, { seconds } = {}) => {
+        for (let attempt = 0; attempt < (seconds === undefined ? 1 : 4); attempt += 1) {
+          try { const value = await read(); if (accepts(value)) return value; }
+          catch (error) { if (error.code !== 'gateway_http_rejected') throw error; }
+          polls += 1;
+          if (scenario.heldDuringGrace === true && polls === 2) held = { canAuthorize: true, hostname: config.basics.managementHostname, handoff: 'page-imported-receipt', revocationUnconfirmed: false };
+        }
+        throw new LiveGatewayBrowserError('interactive_step_timed_out');
+      },
+      request: async (origin, path, options = {}) => {
+        if (origin === config.installerOrigin && path === '/api/teardown') return held ?? { canAuthorize: false };
+        if (path === '/api/teardown/import') {
+          order.push('import'); imports.push(options.body.handoff);
+          held = { canAuthorize: true, hostname: config.basics.managementHostname, handoff: options.body.handoff, revocationUnconfirmed: false };
+          return { imported: true };
+        }
+        if (path === '/api/teardown/authorize') throw new Error('stop_at_root_consent');
+        if (path === '/api/teardown-actions' && options.method === 'POST') { posts += 1; if (posts > 1) throw new Error('stop_at_next_round'); return { actionId, handoffUrl: 'synthetic' }; }
+        if (path === `/api/teardown-actions/${actionId}`) return { status: scenario.status, failureCode: 'fresh_authorization_required' };
+        throw new Error('unexpected_request');
+      },
+    };
+    const events = [];
+    const provider = { assertDependenciesAbsent: async () => {} };
+    await assert.rejects(removeLiveGateway({ config, browser, provider, inventory: {}, phase: 'root',
+      checkpoint: async (event) => { events.push(event); order.push(`${event.stage}:${event.status}`); } }), scenario.ends);
+    assert.equal(reads, scenario.reads);
+    const settled = events.find((event) => event.stage === 'dependency_removal' && event.status === scenario.status);
+    const expected = { stage: 'dependency_removal', status: scenario.status, actionId, failureCode: 'fresh_authorization_required', landing: scenario.landing, receiptHop: scenario.hop };
+    if (scenario.label !== undefined) expected.receiptImport = scenario.label;
+    assert.deepEqual(settled, scenario.unsettled === true ? undefined : expected);
+    assert.equal(imports.length, scenario.imports);
+    if (scenario.label === 'runner_after_edge_refusal') {
+      // The round's checkpoint precedes the import, and the receipt is then saved and imported as always.
+      assert.deepEqual(imports, ['signed-receipt', 'signed-receipt']);
+      assert.deepEqual(order.slice(2), [`dependency_removal:${scenario.status}`, 'import', 'root_removal:receipt_saved', 'import', 'root_removal:started']);
+      assert.deepEqual(events.find((event) => event.status === 'receipt_saved'), { stage: 'root_removal', status: 'receipt_saved', handoff: 'signed-receipt', revocationUnconfirmed: false });
+    }
   }
 });

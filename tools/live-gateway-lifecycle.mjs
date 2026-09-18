@@ -171,9 +171,9 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
       if (error instanceof LiveGatewayBrowserError && error.code === 'interactive_step_timed_out') throw new LiveLifecycleError('interruption_not_observed');
       throw error;
     }
-    // Live, the tab that carried the interception met the installer's receipt page with an empty 403 in every
-    // recovery round, while a fresh process recovered the receipt at once on the same gateway with the same
-    // session: the recovery rounds run in a tab that never carried the route, as they do in a fresh process.
+    // The recovery rounds run in a tab that never carried the route, as they do in a fresh process. The replacement
+    // is harmless, and it is not the remedy for the empty 403 the receipt hop met in recovery rounds: that refusal
+    // comes from the fixture's connection reuse (see the recovery below), not from the tab.
     await browser.replaceTab('interruption_spent');
   }
   // Fresh consent must recover the durable completion without recreating anything. While dependencies remain, each
@@ -203,9 +203,26 @@ export async function removeLiveGateway({ config, browser, provider, inventory, 
     if (outcome.review !== null) { receipt = outcome.review; break; }
     if (outcome.action.status === 'succeeded') await provider.assertDependenciesAbsent(inventory);
     const landed = await landedRound(browser, heldReceipt);
-    await checkpoint({ stage: 'dependency_removal', status: outcome.action.status, actionId: action.actionId, failureCode: outcome.action.failureCode ?? null, landing: landed.landing, receiptHop: browser.receiptHop?.() ?? null });
+    const receiptHop = browser.receiptHop?.() ?? null;
+    const settled = { stage: 'dependency_removal', status: outcome.action.status, actionId: action.actionId, failureCode: outcome.action.failureCode ?? null, landing: landed.landing, receiptHop };
+    // In the isolated fixture the gateway's hostname and the installer's are in the same zone under one certificate.
+    // A browser that holds a live connection to the gateway reuses it for the removal page's hop to the installer,
+    // and the edge refuses a request whose TLS name differs from its Host: an empty 403 that never reaches the
+    // installer, for which Chrome commits its own error page. A customer's gateway never shares a zone with the
+    // hosted installer (an installation on the installer's own zone would). Only once that refusal was observed and
+    // the landing grace left the installer without a receipt does the receipt travel without the browser: from the
+    // gateway's own record of the attempt to the installer's import, as the receipt page would have sent it. The
+    // checkpoint says so before the import is written.
+    const refused = outcome.action.status !== 'failed' && landed.review === null && landed.landing.page === 'error' && receiptHop?.status === 403;
+    const recorded = refused ? await recordedReceipt(browser) : null;
+    if (refused) settled.receiptImport = recorded === null ? 'unavailable_after_edge_refusal' : 'runner_after_edge_refusal';
+    await checkpoint(settled);
     requireCondition(outcome.action.status !== 'failed', 'dependency_removal_failed');
-    receipt = landed.review;
+    if (recorded === null) receipt = landed.review;
+    else {
+      await installer('/api/teardown/import', { method: 'POST', body: { handoff: recorded } });
+      receipt = await heldReceipt();
+    }
   }
   requireCondition(receipt !== null, 'removal_receipt_unavailable');
   requireCondition(receipt.hostname === config.basics.managementHostname, 'removal_receipt_invalid');
@@ -244,11 +261,33 @@ async function landedRound(browser, heldReceipt) {
   }
 }
 
+/** How long the gateway's record of a refused hop's attempt may take to answer; a read that keeps failing leaves the
+ * receipt to the next round. */
+export const RECORDED_RECEIPT_SECONDS = 30;
+
+/**
+ * The receipt behind a hop the edge refused, from the gateway's own record of the attempt. The browser port keeps
+ * the attempt to itself, so nothing here can journal it. A read that keeps being rejected ends without a receipt, as
+ * a round without one always has, and the next round opens.
+ */
+async function recordedReceipt(browser) {
+  try {
+    return await browser.waitFor(() => browser.recordedReceipt(), () => true, { seconds: RECORDED_RECEIPT_SECONDS });
+  } catch (error) {
+    if (!(error instanceof LiveGatewayBrowserError) || error.code !== 'interactive_step_timed_out') throw error;
+    return null;
+  }
+}
+
 async function beginRemoval(management, browser, checkpoint) {
   await checkpoint({ stage: 'dependency_removal', status: 'started' });
   const action = await management('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 } });
   requireCondition(/^action_[A-Za-z0-9_-]{32}$/u.test(action?.actionId), 'removal_action_invalid');
   await checkpoint({ stage: 'dependency_removal', status: 'recorded', actionId: action.actionId });
+  // The round ends with the removal page's hop to the installer. A browser that holds a connection of the
+  // installer's own uses it for that hop instead of reusing the gateway's, which the edge would refuse; a load that
+  // fails is tolerated there and never stops the round.
+  await browser.openInstallerConnection();
   await browser.continueHandoff(action.handoffUrl, 'teardown');
   return action;
 }

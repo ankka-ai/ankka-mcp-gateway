@@ -43,15 +43,17 @@ export const navigationFailureLabel = (value) => NAVIGATION_FAILURES.includes(va
 /** How many times the runner replaced a test tab the browser had discarded or crashed, from the journal. */
 export const tabReopenings = (events) => events.filter((event) => event.stage === 'browser' && event.status === 'tab_reopened').length;
 
-/** The consented dependency-removal rounds: how many were opened, the last one's status and fixed failure code, and
- * where the test tab landed after it, so a receipt lost on its way can be told from a consent the gateway refused. */
+/** The consented dependency-removal rounds: how many were opened, the last one's status and fixed failure code,
+ * where the test tab landed after it, so a receipt lost on its way can be told from a consent the gateway refused,
+ * and whether the runner carried the receipt by API after the edge refused the browser's hop. */
 export function dependencyRemovalSummary(events) {
   const rounds = events.filter((event) => event.stage === 'dependency_removal' && event.status === 'recorded').length;
   const last = events.findLast((event) => event.stage === 'dependency_removal' && ['recovery_required', 'failed', 'succeeded'].includes(event.status));
   if (rounds === 0 && last === undefined) return null;
   const landing = last?.landing ?? null;
   return { rounds, lastStatus: last?.status ?? null, lastFailureCode: label(last?.failureCode),
-    lastLanding: landing === null ? null : { site: label(landing.site), page: label(landing.page), result: label(landing.result), reason: label(landing.reason) } };
+    lastLanding: landing === null ? null : { site: label(landing.site), page: label(landing.page), result: label(landing.result), reason: label(landing.reason) },
+    lastReceiptImport: label(last?.receiptImport) };
 }
 
 /** The hosted root job's recorded outcome: its status, the steps done, the fixed reason word and the revocation flag; null before any outcome. */

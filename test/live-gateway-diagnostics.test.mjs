@@ -58,11 +58,18 @@ test('the dependency-removal summary counts the rounds and keeps the last landin
     { stage: 'dependency_removal', status: 'recovery_required', actionId, failureCode: 'fresh_authorization_required', landing: { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' } },
   ];
   assert.deepEqual(dependencyRemovalSummary(events), { rounds: 2, lastStatus: 'recovery_required', lastFailureCode: 'fresh_authorization_required',
-    lastLanding: { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' } });
+    lastLanding: { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' }, lastReceiptImport: null });
   assert.equal(dependencyRemovalSummary([{ stage: 'root_removal', status: 'started' }]), null);
   // A round the journal recorded without a landing, and a landing with words outside the vocabulary, summarize to null fields.
   assert.deepEqual(dependencyRemovalSummary([{ stage: 'dependency_removal', status: 'recorded', actionId }, { stage: 'dependency_removal', status: 'failed', actionId, failureCode: null, landing: { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'https://x/?secret' } }]),
-    { rounds: 1, lastStatus: 'failed', lastFailureCode: null, lastLanding: { site: 'gateway', page: 'removal', result: 'recovery_required', reason: null } });
+    { rounds: 1, lastStatus: 'failed', lastFailureCode: null, lastLanding: { site: 'gateway', page: 'removal', result: 'recovery_required', reason: null }, lastReceiptImport: null });
+  // A hop the edge refused, after which the runner carried the receipt by API, reads as such beside the error page
+  // the tab landed on; a label outside the vocabulary is not copied.
+  const refused = { stage: 'dependency_removal', status: 'recovery_required', actionId, failureCode: 'fresh_authorization_required',
+    landing: { site: 'other', page: 'error', result: null, reason: null }, receiptHop: { status: 403, server: 'cloudflare', mitigated: null } };
+  assert.deepEqual(dependencyRemovalSummary([...events, { ...refused, receiptImport: 'runner_after_edge_refusal' }]), { rounds: 2, lastStatus: 'recovery_required', lastFailureCode: 'fresh_authorization_required',
+    lastLanding: { site: 'other', page: 'error', result: null, reason: null }, lastReceiptImport: 'runner_after_edge_refusal' });
+  assert.equal(dependencyRemovalSummary([{ ...refused, receiptImport: 'https://x/?attempt=secret' }]).lastReceiptImport, null);
   const report = await lifecycleFailureReport({ failureCode: 'removal_receipt_unavailable', events });
   assert.equal(report.dependencyRemoval.rounds, 2);
   assert.equal(report.dependencyRemoval.lastLanding.reason, 'removal');

@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, receiptHopOf, refusedAtAccessEdge, TAB_REPLACEMENT_REASONS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
 import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
-import { landingOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
+import { INSTALLER_CONNECTION_TIMEOUT_MS, LiveGatewayBrowserError, landingOf, recordedReceiptOf, removalAttemptOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
+import { removeLiveGateway } from '../tools/live-gateway-lifecycle.mjs';
+
+const installerOrigin = 'https://installer.example.com';
+const managementOrigin = 'https://manage.example.com';
+const basics = { adminEmail: 'admin@example.com' };
 
 test('live browser API requests are confined to exact configured origins and lifecycle routes', () => {
   const origin = 'https://manage.example.com';
@@ -20,6 +25,56 @@ test('live browser API requests are confined to exact configured origins and lif
   for (const value of ['http://manage.example.com', 'https://user:secret@manage.example.com', `${origin}/path`, `${origin}?secret`]) {
     assert.throws(() => validateLiveBrowserOrigin(value), { code: 'origin_invalid' });
   }
+});
+
+test('the one lifecycle path with a query is the removal page\'s own progress read for one well-formed attempt, and nothing near it', () => {
+  const origin = 'https://manage.example.com';
+  const attempt = `attempt_${'A'.repeat(24)}`;
+  const progress = '/__ankka/operation/teardown/progress';
+  assert.doesNotThrow(() => validateLiveBrowserRequest([origin], origin, `${progress}?attempt=${attempt}`, 'GET'));
+  assert.doesNotThrow(() => validateLiveBrowserRequest([origin], origin, `${progress}?attempt=attempt_${'a-Z_09'.repeat(4)}`, 'GET'));
+  for (const [target, path, method] of [
+    // A read only, on a configured origin only.
+    [origin, `${progress}?attempt=${attempt}`, 'POST'], [origin, `${progress}?attempt=${attempt}`, 'PUT'], [origin, `${progress}?attempt=${attempt}`, 'DELETE'],
+    ['https://foreign.example.com', `${progress}?attempt=${attempt}`, 'GET'],
+    // Exactly one attempt of the gateway's own form, and no other query.
+    [origin, progress, 'GET'], [origin, `${progress}?`, 'GET'], [origin, `${progress}?attempt=`, 'GET'],
+    [origin, `${progress}?attempt=attempt_${'A'.repeat(23)}`, 'GET'], [origin, `${progress}?attempt=attempt_${'A'.repeat(25)}`, 'GET'],
+    [origin, `${progress}?attempt=action_${'A'.repeat(24)}`, 'GET'], [origin, `${progress}?attempt=attempt_${'A'.repeat(23)}%`, 'GET'],
+    [origin, `${progress}?attempt=${attempt}&token=secret`, 'GET'], [origin, `${progress}?token=secret&attempt=${attempt}`, 'GET'],
+    [origin, `${progress}?attempt=${attempt}#fragment`, 'GET'], [origin, `${progress}/?attempt=${attempt}`, 'GET'],
+    // Neither the page itself, nor its start route, nor any other route gains a query.
+    [origin, `/__ankka/operation/teardown?attempt=${attempt}`, 'GET'], [origin, '/__ankka/operation/teardown', 'GET'],
+    [origin, '/__ankka/operation/teardown/start', 'POST'], [origin, `/__ankka/operation/progress?attempt=${attempt}`, 'GET'],
+    [origin, `/api/team?attempt=${attempt}`, 'GET'], [origin, `/api/teardown?attempt=${attempt}`, 'GET'],
+    [origin, `/__ankka/install/status?attempt=${attempt}`, 'GET'],
+  ]) {
+    assert.throws(() => validateLiveBrowserRequest([origin], target, path, method), { code: 'request_outside_lifecycle' });
+  }
+});
+
+test('the attempt is read from the removal page\'s own address only, and a recorded receipt only from a settled removal\'s link to the installer\'s receipt page', () => {
+  const attempt = `attempt_${'A'.repeat(24)}`;
+  const page = `${managementOrigin}/__ankka/operation/teardown`;
+  assert.equal(removalAttemptOf(`${page}?attempt=${attempt}`, managementOrigin), attempt);
+  assert.equal(removalAttemptOf(`${page}?attempt=${attempt}&result=removed`, managementOrigin), attempt);
+  for (const value of [page, `${page}?result=recovery_required&reason=removal`, `${page}?attempt=attempt_short`, `${page}?attempt=${attempt}x`,
+    `${page}/progress?attempt=${attempt}`, `${installerOrigin}/__ankka/operation/teardown?attempt=${attempt}`, `${installerOrigin}/teardown`,
+    'chrome-error://chromewebdata/', '']) assert.equal(removalAttemptOf(value, managementOrigin), null);
+  const receipt = JSON.stringify({ schemaVersion: 1, statement: 'synthetic signed receipt — ünïcode' });
+  const fragment = Buffer.from(receipt, 'utf8').toString('base64url');
+  const settled = { schemaVersion: 1, attemptId: attempt, status: 'settled', result: 'removed', reason: null, handoffUrl: `${installerOrigin}/teardown#${fragment}`, steps: [] };
+  assert.equal(recordedReceiptOf(settled, installerOrigin), receipt);
+  for (const progress of [
+    { ...settled, status: 'removing' }, { ...settled, status: 'authorizing' },
+    { ...settled, result: 'recovery_required', reason: 'removal', handoffUrl: null }, { ...settled, result: null },
+    { ...settled, handoffUrl: null }, { ...settled, handoffUrl: `${installerOrigin}/teardown` },
+    { ...settled, handoffUrl: `https://foreign.example.com/teardown#${fragment}` }, { ...settled, handoffUrl: `${managementOrigin}/teardown#${fragment}` },
+    { ...settled, handoffUrl: `${installerOrigin}/manage#${fragment}` }, { ...settled, handoffUrl: `${installerOrigin}/teardown?next=x#${fragment}` },
+    // A fragment that is not text is no receipt.
+    { ...settled, handoffUrl: `${installerOrigin}/teardown#${Buffer.from(Array.from({ length: 48 }, () => 0xff)).toString('base64url')}` },
+    null, undefined, {},
+  ]) assert.equal(recordedReceiptOf(progress, installerOrigin), null);
 });
 
 test('bootstrap navigation requires the generated Worker identity and an exact workers.dev origin', () => {
@@ -161,27 +216,35 @@ test('a navigation failure is classified in fixed labels from the page state and
   assert.deepEqual([...NAVIGATION_FAILURES], ['closed', 'crashed', 'timeout', 'other']);
 });
 
-const installerOrigin = 'https://installer.example.com';
-const managementOrigin = 'https://manage.example.com';
-const basics = { adminEmail: 'admin@example.com' };
+
+/** A document answer as the tab's response listener sees it. */
+const documentAnswer = (url, status) => ({ url: () => url, status: () => status, headers: () => ({ server: 'cloudflare' }), request: () => ({ resourceType: () => 'document' }) });
 
 /** A tab as the runner drives it, recording what the runner attaches. `outcomes` says what each navigation does:
- * `crashed`, `timeout`, `refused`, `discarded` (the target goes away under the navigation) or null for a shown page. */
+ * `crashed`, `timeout`, `refused`, `discarded` (the target goes away under the navigation), `edge_refused` (the edge
+ * answers an empty 403 and Chrome commits its own error page), `denied_page` (a 403 that carries a page) or null for
+ * a shown page. `onAuthorize` plays what follows the removal review's button. */
 function fakeTab(outcomes) {
-  const tab = { listeners: {}, events: [], routes: [], timeouts: [], navigations: [], closed: false, current: 'about:blank' };
+  const tab = { listeners: {}, events: [], routes: [], timeouts: [], navigations: [], waits: [], closed: false, current: 'about:blank', onAuthorize: null };
   tab.on = (event, listener) => { tab.events.push(event); tab.listeners[event] = listener; };
   tab.route = async (matcher, handler) => { tab.routes.push({ matcher, handler }); };
   tab.setDefaultTimeout = (ms) => tab.timeouts.push(ms);
   tab.bringToFront = async () => { if (tab.closed) throw new Error('page.bringToFront: Target page, context or browser has been closed'); };
-  tab.goto = async (href) => {
-    tab.navigations.push(href);
+  tab.goto = async (href, options) => {
+    tab.navigations.push(href); tab.waits.push(options?.waitUntil);
     const outcome = outcomes.shift() ?? null;
     if (outcome === 'discarded') { tab.closed = true; throw new Error('page.goto: Target page, context or browser has been closed'); }
     if (outcome === 'crashed') throw new Error('page.goto: Navigation failed because page crashed!');
     if (outcome === 'timeout') throw Object.assign(new Error('page.goto: Timeout 90000ms exceeded.'), { name: 'TimeoutError' });
     if (outcome === 'refused') throw new Error('page.goto: net::ERR_CONNECTION_REFUSED at https://x/?secret');
+    if (outcome === 'edge_refused') {
+      tab.listeners.response(documentAnswer(href, 403)); tab.current = 'chrome-error://chromewebdata/';
+      throw new Error(`page.goto: net::ERR_HTTP_RESPONSE_CODE_FAILURE at ${href}`);
+    }
+    tab.listeners.response?.(documentAnswer(href, outcome === 'denied_page' ? 403 : 200));
     tab.current = href;
   };
+  tab.getByRole = () => ({ click: async () => { await tab.onAuthorize?.(tab); } });
   tab.url = () => tab.current;
   tab.isClosed = () => tab.closed;
   tab.close = async () => { tab.closed = true; };
@@ -404,5 +467,148 @@ test('the answer to the receipt page navigation is kept in fixed fields only, fo
   assert.equal(runner.receiptHop(), null);
   listener(response(`${installerOrigin}/teardown`, 'document', 403));
   assert.deepEqual(runner.receiptHop(), { status: 403, server: 'cloudflare', mitigated: null });
+  await runner.close();
+});
+
+test('the load that opens the installer\'s own connection never stops the run: a refused or failed load is journaled in fixed fields, and an armed interception stays unspent', async () => {
+  assert.ok(INSTALLER_CONNECTION_TIMEOUT_MS <= 60_000);
+  for (const [outcome, expected] of [
+    [null, { loaded: true, answer: { status: 200, server: 'cloudflare', mitigated: null } }],
+    // The load is itself reused onto the gateway's connection: the edge's empty 403, Chrome's own error page.
+    ['edge_refused', { loaded: false, answer: { status: 403, server: 'cloudflare', mitigated: null } }],
+    // A refusal that carries a page commits like a load; the answer's status still says it was refused.
+    ['denied_page', { loaded: false, answer: { status: 403, server: 'cloudflare', mitigated: null } }],
+    ['refused', { loaded: false, answer: null }], ['timeout', { loaded: false, answer: null }], ['discarded', { loaded: false, answer: null }],
+  ]) {
+    const { tabs, browserType } = fakeBrowserType([[outcome, null]]);
+    const notices = [], events = [];
+    const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection: 'chrome', headless: true,
+      notify: (notice) => notices.push(notice), checkpoint: async (event) => events.push(event), browserType });
+    await runner.loseNextTeardownReceiptHop();
+    await runner.openInstallerConnection();
+    // The origin's root, committed only: never the receipt page, which an armed interception would spend itself on.
+    assert.deepEqual(tabs[0].navigations, [`${installerOrigin}/`]);
+    assert.deepEqual(tabs[0].waits, ['commit']);
+    assert.equal(tabs[0].routes[2].matcher(new URL(tabs[0].navigations[0])), false);
+    assert.equal(runner.interruptionObserved(), false);
+    assert.deepEqual(events, [{ stage: 'browser', status: 'installer_connection', ...expected }]);
+    assert.equal(notices.length, 1);
+    assert.equal(JSON.stringify([events, notices]).includes('secret'), false);
+    // The receipt hop's own record is untouched by that load.
+    assert.equal(runner.receiptHop(), null);
+    await runner.close();
+  }
+});
+
+test('the recorded receipt is read once, for the attempt the removal page followed in this round only, and the attempt never leaves the browser port', async () => {
+  const attempt = `attempt_${'Q'.repeat(24)}`;
+  const receipt = JSON.stringify({ schemaVersion: 1, statement: 'synthetic signed removal receipt' });
+  const progress = { schemaVersion: 1, attemptId: attempt, status: 'settled', result: 'removed', reason: null, handoffUrl: `${installerOrigin}/teardown#${Buffer.from(receipt, 'utf8').toString('base64url')}`, steps: [] };
+  const handoff = `${managementOrigin}/__ankka/operation/teardown#${'H'.repeat(48)}`;
+  const { tabs, context, browserType } = fakeBrowserType([[null, null]]);
+  const notices = [], events = [], sent = [];
+  context.request.fetch = async (url, options) => {
+    sent.push(`${options.method} ${url}`);
+    return { status: () => 200, headers: () => ({ 'content-type': 'application/json; charset=utf-8' }), body: async () => Buffer.from(JSON.stringify(progress)), dispose: async () => {} };
+  };
+  const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection: 'chrome', headless: true,
+    notify: (notice) => notices.push(notice), checkpoint: async (event) => events.push(event), browserType });
+  // No removal page was seen: nothing is asked.
+  assert.equal(await runner.recordedReceipt(), null);
+  assert.deepEqual(sent, []);
+  // The consent lands on the removal page, whose address names the attempt; the page's hop is then refused.
+  tabs[0].onAuthorize = (tab) => {
+    tab.listeners.response(documentAnswer(`${managementOrigin}/__ankka/operation/teardown?attempt=${attempt}`, 200));
+    tab.listeners.response(documentAnswer(`${installerOrigin}/teardown`, 403));
+    tab.current = 'chrome-error://chromewebdata/';
+  };
+  await runner.continueHandoff(handoff, 'teardown');
+  assert.deepEqual(runner.landing(), { site: 'other', page: 'error', result: null, reason: null });
+  assert.deepEqual(runner.receiptHop(), { status: 403, server: 'cloudflare', mitigated: null });
+  assert.equal(await runner.recordedReceipt(), receipt);
+  assert.deepEqual(sent, [`GET ${managementOrigin}/__ankka/operation/teardown/progress?attempt=${attempt}`]);
+  // The next round starts without the previous round's attempt or hop: neither can stand in for its own.
+  tabs[0].onAuthorize = null;
+  await runner.continueHandoff(handoff, 'teardown');
+  assert.equal(runner.receiptHop(), null);
+  assert.equal(await runner.recordedReceipt(), null);
+  assert.equal(sent.length, 1);
+  // An update handoff is no removal round and leaves the round's evidence alone.
+  tabs[0].listeners.response(documentAnswer(`${installerOrigin}/teardown`, 403));
+  await runner.continueHandoff(`${managementOrigin}/__ankka/operation#${'H'.repeat(48)}`, 'update');
+  assert.deepEqual(runner.receiptHop(), { status: 403, server: 'cloudflare', mitigated: null });
+  assert.equal(JSON.stringify([events, notices]).includes('attempt_'), false);
+  assert.equal(JSON.stringify([events, notices]).includes('Q'.repeat(24)), false);
+  await runner.close();
+});
+
+test('refusal observed, recovery by API, receipt saved: the real browser port and the real removal sequence journal fixed labels only, never the attempt', async () => {
+  const attempt = `attempt_${'Q'.repeat(24)}`;
+  const actionId = `action_${'A'.repeat(32)}`;
+  const receipt = JSON.stringify({ schemaVersion: 1, statement: 'synthetic signed removal receipt' });
+  const fragment = Buffer.from(receipt, 'utf8').toString('base64url');
+  const handoffFragment = 'H'.repeat(48);
+  const config = { installerOrigin, managementOrigin, basics: { ...basics, managementHostname: new URL(managementOrigin).hostname } };
+  // The load ahead of the round is refused like the hop it is meant to help; the round still runs.
+  const { tabs, context, browserType } = fakeBrowserType([['edge_refused', null]]);
+  const notices = [], events = [], sent = [], imports = [];
+  let held = null;
+  const answer = (status, body) => ({ status: () => status, headers: () => ({ 'content-type': 'application/json; charset=utf-8' }), body: async () => Buffer.from(JSON.stringify(body)), dispose: async () => {} });
+  context.request.fetch = async (url, options) => {
+    const target = new URL(url);
+    const route = `${options.method} ${target.origin === installerOrigin ? 'installer' : 'gateway'} ${target.pathname}`;
+    sent.push(route + target.search);
+    if (route === 'GET installer /api/teardown') return held === null ? answer(409, { error: 'teardown_unavailable' }) : answer(200, held);
+    if (route === 'POST installer /api/teardown/import') {
+      imports.push({ body: JSON.parse(options.data), journaled: events.length });
+      held = { canAuthorize: true, hostname: config.basics.managementHostname, handoff: JSON.parse(options.data).handoff, revocationUnconfirmed: false, csrfToken: 'synthetic', steps: [] };
+      return answer(200, { imported: true });
+    }
+    if (route === 'POST gateway /api/teardown-actions') return answer(200, { actionId, handoffUrl: `${managementOrigin}/__ankka/operation/teardown#${handoffFragment}` });
+    if (route === `GET gateway /api/teardown-actions/${actionId}`) return answer(200, { status: 'recovery_required', failureCode: 'fresh_authorization_required' });
+    if (route === 'GET gateway /__ankka/operation/teardown/progress' && target.search === `?attempt=${attempt}`) {
+      return answer(200, { schemaVersion: 1, attemptId: attempt, status: 'settled', result: 'removed', reason: null, handoffUrl: `${installerOrigin}/teardown#${fragment}`, steps: [] });
+    }
+    // The test ends at the root consent, which is not its subject.
+    if (route === 'POST installer /api/teardown/authorize') return answer(500, {});
+    return assert.fail(`unexpected ${route}`);
+  };
+  const checkpoint = async (event) => events.push(event);
+  const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection: 'chrome', headless: true,
+    notify: (notice) => notices.push(notice), checkpoint, browserType });
+  tabs[0].onAuthorize = (tab) => {
+    tab.listeners.response(documentAnswer(`${managementOrigin}/__ankka/operation/teardown?attempt=${attempt}`, 200));
+    tab.listeners.response(documentAnswer(`${installerOrigin}/teardown`, 403));
+    tab.current = 'chrome-error://chromewebdata/';
+  };
+  // The runner's own waits, without their pauses: a wait with a deadline gives up after a few reads.
+  const waitFor = async (read, accepts, { seconds } = {}) => {
+    for (let attempts = 0; attempts < (seconds === undefined ? 1 : 3); attempts += 1) { const value = await read(); if (accepts(value)) return value; }
+    throw new LiveGatewayBrowserError('interactive_step_timed_out');
+  };
+  await assert.rejects(removeLiveGateway({ config, browser: { ...runner, waitFor }, provider: {}, inventory: {}, checkpoint, phase: 'root' }), { code: 'gateway_http_rejected', status: 500 });
+  const refusal = { status: 403, server: 'cloudflare', mitigated: null };
+  assert.deepEqual(events, [
+    { stage: 'dependency_removal', status: 'started' },
+    { stage: 'dependency_removal', status: 'recorded', actionId },
+    { stage: 'browser', status: 'installer_connection', loaded: false, answer: refusal },
+    { stage: 'dependency_removal', status: 'recovery_required', actionId, failureCode: 'fresh_authorization_required',
+      landing: { site: 'other', page: 'error', result: null, reason: null }, receiptHop: refusal, receiptImport: 'runner_after_edge_refusal' },
+    { stage: 'root_removal', status: 'receipt_saved', handoff: receipt, revocationUnconfirmed: false },
+    { stage: 'root_removal', status: 'started' },
+  ]);
+  // The gateway's record is read once, after the landing grace, and the round says how the receipt travels before
+  // the import is written; the saved receipt is then imported as the runner always imports it.
+  const progressReads = sent.filter((route) => route.startsWith('GET gateway /__ankka/operation/teardown/progress'));
+  assert.deepEqual(progressReads, [`GET gateway /__ankka/operation/teardown/progress?attempt=${attempt}`]);
+  assert.ok(sent.indexOf(progressReads[0]) > sent.lastIndexOf(`GET gateway /api/teardown-actions/${actionId}`));
+  assert.ok(sent.indexOf(progressReads[0]) < sent.indexOf('POST installer /api/teardown/import'));
+  assert.deepEqual(imports, [{ body: { handoff: receipt }, journaled: 4 }, { body: { handoff: receipt }, journaled: 5 }]);
+  assert.deepEqual(tabs[0].navigations, [`${installerOrigin}/`, `${managementOrigin}/__ankka/operation/teardown#${handoffFragment}`]);
+  // Beside the saved receipt, which the private journal has always kept, nothing of the hop is journaled or printed:
+  // not the attempt, not the link's fragment, not the handoff's.
+  const journal = JSON.stringify([events.map((event) => event.status === 'receipt_saved' ? { ...event, handoff: null } : event), notices]);
+  for (const secret of ['attempt_', 'Q'.repeat(24), fragment, handoffFragment]) assert.equal(journal.includes(secret), false);
+  assert.equal(JSON.stringify(events).includes('attempt_'), false);
   await runner.close();
 });

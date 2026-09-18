@@ -224,9 +224,46 @@ The gateway's removal page names `removed` in its own address just before it
 hops to the installer with the receipt. For the runner that word means the
 receipt is on its way: the round keeps waiting for the installer to hold it, and
 only a recovery result ends the wait early. Each settled round also records what
-answered the browser's navigation to the installer's receipt page, in fixed
-fields (HTTP status, `server` label, Cloudflare's mitigation label), so an edge
-refusal can be told from the application's.
+answered the browser's navigation to the installer's receipt page in that
+round, in fixed fields (HTTP status, `server` label, Cloudflare's mitigation
+label), so an edge refusal can be told from the application's.
+
+In the isolated fixture that hop can be refused by the edge, for a reason the
+product's hop never meets. The gateway's hostname and the installer's hostname
+are in the same zone under one certificate, so a browser that holds a live
+connection to the gateway reuses it for its request to the installer (HTTP/2
+connection reuse across the hostnames a certificate covers), and the edge
+refuses a request whose TLS name differs from its Host: an empty `403` that
+never reaches the installer, for which Chrome commits its own error page, so
+the receipt page never imports the receipt (a run that had only the hop stopped
+as `removal_receipt_unavailable`). A browser that still holds a connection of
+the installer's own uses that one, and the hop succeeds. A customer's gateway never shares a zone with the hosted
+installer, so its hop is not refused this way; an installation on the
+installer's own zone would be. The runner handles the fixture's case in two
+ways, and neither replaces the hop, which every round still exercises:
+
+- Before each removal round's consent it loads the installer in its test tab,
+  which opens a connection of the installer's own unless that load is itself
+  reused onto the gateway's connection and refused. A load that fails never
+  stops the run; the journal records it as `browser: installer_connection`
+  with `loaded` and the answer's fixed fields. It loads the installer's root,
+  never the receipt page, which an armed interception would spend itself on.
+- When a settled round's landing is Chrome's error page, the hop was answered
+  `403`, and the installer holds no receipt after the landing grace, the receipt
+  travels without the browser. The runner reads the gateway's own record of the
+  attempt through the removal page's progress route (the only lifecycle request
+  that carries a query; the attempt comes from the removal page's address, is
+  kept in memory for that one read, and is never journaled or printed), takes
+  the signed receipt from the settled attempt's link to the receipt page, and
+  imports it through the installer's API as that page would have. The round's
+  checkpoint says so before the import is written, with
+  `receiptImport: runner_after_edge_refusal`: the browser's hop was refused by
+  the edge and the receipt travelled by API. When the gateway's record holds no
+  receipt for the attempt, or keeps refusing the read, the checkpoint carries
+  `unavailable_after_edge_refusal` and the next round opens as before. A
+  recovery result, the installer's own page, or a hop that was not refused
+  never takes this path. `--status` and the failure report show the last
+  round's label as `lastReceiptImport`.
 
 A browser can lose an installed Access session cookie while the cached token
 is still valid (observed live: the cookie vanished from an attached Chrome
@@ -298,15 +335,18 @@ replaced earlier would carry the armed interception into recovery), then opens
 a new tab in the same context, attached like any other except for the spent
 interception route, and closes the previous one, only ever its own tab. The
 recovery rounds then run in a tab that never carried the interception, as they
-do in a fresh `--resume-installed` process. Live, the tab that had carried it
-met the installer's receipt page with an empty `403` in every recovery round,
-so Chrome showed its own error page, the page never imported the receipt and
-the run stopped as `removal_receipt_unavailable`, while a fresh process
-recovered the receipt on its first round on the same gateway, with the same
-session and no Access denial: the failure was bound to that tab. The
-replacement is recorded as `browser: tab_replaced` with the fixed reason
-`interruption_spent`; like a reopen it is the runner's event, never the last
-stage, and `tabsReopened` does not count it.
+do in a fresh `--resume-installed` process. The replacement was introduced when
+the empty `403` that the receipt hop met in every recovery round was attributed
+to the tab that had carried the interception. That attribution was wrong: the
+refusal is the edge's answer to the reused connection described above, and a
+fresh process escaped it only because it had loaded the installer moments
+earlier and still held a connection of the installer's own. The replacement is
+harmless and stays, so that a spent interception never rides into the recovery
+rounds; it is not the remedy for that refusal. It is recorded as
+`browser: tab_replaced` with the fixed reason `interruption_spent`; like a
+reopen it is the runner's event, never the last stage, and `tabsReopened` does
+not count it.
+
 The gateway settles each consent attempt by alarm behind its removal page,
 which then records the result word in its own address: `removed` before it hops
 to the installer with the signed receipt, or `recovery_required` with the
