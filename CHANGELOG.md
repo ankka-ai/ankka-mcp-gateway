@@ -4,6 +4,15 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Land on the new release's dashboard after an update or a rollback, without a manual reload. Cloudflare keeps
+  serving the previous version, Worker and management assets alike, at an edge location for a short while after the
+  upload, so the update page handed the browser to the previous release's dashboard. The page now waits, as its own
+  step, until the release that serves its progress polls is the attempt's target on two answers in a row, for at most
+  sixty seconds, after which it hands over anyway and says that a reload may be needed. The serving release is the
+  stateless entrypoint's, which answers where the browser asks; the one management object restarts on the new version
+  at once and would confirm too early. An attempt that was not applied hands over at once, as before. Both releases
+  must carry the step: an update from an earlier release, or a rollback to one, still hands over at once.
+
 - Fix the dashboard refusing to load on gateway-v0.1.64 ("The gateway response could not be verified"). The gateway's
   status gained `serviceIdentity`, and source and Team actions gained `actorKind`, without the dashboard's strict
   response schemas learning them, so every status answer was rejected. The dashboard now accepts all three, and the

@@ -33,6 +33,7 @@ import {
   CUSTOMER_INSTALL_ROOT_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
   CUSTOMER_OPERATION_ROOT_PATH,
+  CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH,
 } from './customer-install-paths';
 import type { ReceiptOwnedCloudflareResourceKind, CustomerCloudflareOperation } from './cloudflare-operation-authority';
 import { canonicalJson } from './canonical-json';
@@ -42,7 +43,7 @@ import { createGatewayTeardownHandoff } from './gateway-teardown-handoff';
 import { DurableCustomerTeardownAttemptPort } from './customer-teardown-attempt';
 import { customerTeardownCommand } from './customer-teardown-command';
 import { CustomerTeardownRemovalDriver } from './customer-teardown-driver';
-import { CustomerRuntimeUpdateDriver, DurableCustomerUpdateOutcomePort } from './customer-update-driver';
+import { CustomerRuntimeUpdateDriver, DurableCustomerUpdateOutcomePort, withCustomerServingRelease } from './customer-update-driver';
 import { DurableCustomerTeardownOutcomePort, type CustomerTeardownCompletion } from './customer-teardown-progress';
 import { createCustomerTeardownRouter, customerTeardownCookiePresent, CUSTOMER_TEARDOWN_PATH } from './customer-teardown-router';
 import {
@@ -866,7 +867,13 @@ export default {
           url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH) ||
           ['/api/bigquery', '/api/bigquery/resume'].includes(url.pathname)) {
         if (url.origin !== `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`) return notFound();
-        return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
+        // The update page waits for the version Cloudflare serves where the browser asks. That is this entrypoint's
+        // release, which shares its version with the dashboard's assets here; the one management object restarts on
+        // the new version right after the upload, wherever the browser is, so its own release would confirm too early.
+        const forwarded = url.pathname === CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH
+          ? withCustomerServingRelease(request, config.ANKKA_GATEWAY_RELEASE)
+          : request;
+        return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(forwarded);
       }
       if (request.method === 'POST' && url.pathname === '/api/teardown-actions') {
         return prepareCurrentGatewayTeardown(request, env);
