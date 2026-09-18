@@ -66,6 +66,8 @@ test('management config is independent of release artifacts, browser and infrast
   assert.deepEqual(validateLiveManagementConfig(config), config);
   assert.throws(() => validateLiveManagementConfig({ ...config, token: 'must-not-be-in-config' }));
   assert.throws(() => validateLiveManagementConfig({ ...config, managementOrigin: 'http://manage.example.com' }));
+  // This mode holds no operator token and writes no secret: the automatic management-token opt-in belongs to the full lifecycle only.
+  assert.throws(() => validateLiveManagementConfig({ ...config, managementToken: { keychain: { service: 'ankka-lifecycle-runner', account: 'management-token' } } }));
   // The service identity enters the config by reference only: client and token ids are public, the secret stays in the store.
   const serviceAccess = { clientId: `${'a'.repeat(32)}.access`, tokenId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
     secret: { keychain: { service: 'ankka-lifecycle-runner', account: 'access-client-secret' } },
@@ -92,6 +94,11 @@ test('API passes and recovery receipts never imply full lifecycle qualification'
   assert.equal(result.serviceIdentity, null);
   assert.equal(result.rootRemoval, null);
   assert.equal(result.dependencyRemoval, null);
+  // The automatic management-token step is summarized by its fixed outcome; a write that only started is not one.
+  assert.equal(result.managementToken, null);
+  assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'management_token', status: 'started' }] }).managementToken, null);
+  assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'management_token', status: 'started' }, { stage: 'management_token', status: 'installed_by_runner' }] }).managementToken, 'installed_by_runner');
+  assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'management_token', status: 'already_configured' }] }).managementToken, 'already_configured');
   // A stop on a failed navigation carries why in the fixed vocabulary, and a replaced test tab is counted but is
   // never the last stage; a tab replaced on purpose after the interruption is the runner's event too, not a reopen.
   const lost = summarizeLiveJournal({ ...state, scope: 'browser_lifecycle', events: [
@@ -106,7 +113,11 @@ test('API passes and recovery receipts never imply full lifecycle qualification'
   assert.equal(lost.tabsReopened, 1);
   // A refused Chrome attach is a fixed code with the operator's remedy in the stop output; other stops carry no hint.
   assert.match(operatorHint('browser_attach_failed'), /chrome:\/\/inspect\/#remote-debugging/u);
-  for (const code of ['navigation_failed', 'unexpected_failure', 'update_not_verified']) assert.equal(operatorHint(code), null);
+  // The automatic management-token step's stops name the operator's remedy too: the store, the permission, the resume.
+  assert.match(operatorHint('credential_unavailable'), /keychain item or the environment variable/u);
+  assert.match(operatorHint('management_token_write_rejected'), /Workers Scripts Write.*--resume-installed/u);
+  assert.match(operatorHint('management_token_write_unknown'), /--resume-installed/u);
+  for (const code of ['navigation_failed', 'unexpected_failure', 'update_not_verified', 'toString', undefined, null]) assert.equal(operatorHint(code), null);
   assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'command', status: 'stopped', failureCode: 'navigation_failed', navigation: 'https://x/?secret' }] }).navigation, null);
   assert.deepEqual(summarizeLiveJournal({ ...state, events: [...state.events,
     { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, revocationUnconfirmed: true }] }).rootRemoval,

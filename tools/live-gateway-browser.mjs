@@ -7,6 +7,10 @@ export { LiveGatewayBrowserError, NAVIGATION_FAILURES, validateLiveBootstrapOrig
 
 const API_PATH = /^\/api\/(?:session(?:\/new)?|selection|plan|cleanup|bootstrap(?:\/handoff)?|status|sources(?:\/discover)?|source-actions(?:\/action_[A-Za-z0-9_-]{32})?|team|team-actions(?:\/action_[A-Za-z0-9_-]{32})?|update|update-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown-actions(?:\/action_[A-Za-z0-9_-]{32})?|teardown(?:\/import|\/authorize)?)$/u;
 const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth\/start)$/u;
+/** The gateway removal page's own progress route, for the one attempt that page follows: a read, and the only
+ * lifecycle path that carries a query. */
+const REMOVAL_PROGRESS_PATH = /^\/__ankka\/operation\/teardown\/progress\?attempt=attempt_[A-Za-z0-9_-]{24}$/u;
+const REMOVAL_ATTEMPT = /^attempt_[A-Za-z0-9_-]{24}$/u;
 const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
 
 /**
@@ -26,6 +30,9 @@ export function rejectedSessionOutcome({ status, installedAt, now = Date.now() }
 }
 /** A hosted attempt lives ten minutes; an owned browser waits no longer than that for a pending callback on a stop. */
 export const CALLBACK_CLOSE_WAIT_MS = 600_000;
+/** How long the load that opens the installer's own connection ahead of a removal round may take; a round's consent
+ * window is ten minutes, and a load that fails is tolerated. */
+export const INSTALLER_CONNECTION_TIMEOUT_MS = 30_000;
 /** The fixed reasons the runner replaces its test tab on purpose, as the journal records them: the interception has
  * spent itself on the lost callback, so what follows runs in a tab that never carried it. */
 export const TAB_REPLACEMENT_REASONS = Object.freeze(['interruption_spent']);
@@ -43,7 +50,8 @@ export function heldOriginMatcher(hold) {
 }
 
 export function validateLiveBrowserRequest(origins, origin, path, method) {
-  if (!origins.includes(origin) || !(API_PATH.test(path) || BOOTSTRAP_PATH.test(path)) || !METHODS.has(method)) {
+  const lifecyclePath = API_PATH.test(path) || BOOTSTRAP_PATH.test(path) || (method === 'GET' && REMOVAL_PROGRESS_PATH.test(path));
+  if (!origins.includes(origin) || !lifecyclePath || !METHODS.has(method)) {
     throw new LiveGatewayBrowserError('request_outside_lifecycle');
   }
 }
@@ -132,6 +140,28 @@ export function landingOf(value, { installerOrigin, managementOrigin }) {
   return { site, page, result: word('result'), reason: word('reason') };
 }
 
+/** The attempt the gateway's removal page follows, from that page's own address; null for every other address. The
+ * runner keeps it in memory for the one progress read that may need it: it is never journaled, printed or handed to
+ * the lifecycle. */
+export function removalAttemptOf(value, managementOrigin) {
+  let url;
+  try { url = new URL(value); } catch { return null; }
+  if (url.origin !== managementOrigin || url.pathname !== '/__ankka/operation/teardown') return null;
+  const attempt = url.searchParams.get('attempt');
+  return attempt !== null && REMOVAL_ATTEMPT.test(attempt) ? attempt : null;
+}
+
+/** The signed receipt a settled attempt's progress hands to the removal page, decoded as the installer's receipt page
+ * decodes it from the hop's fragment; null unless the attempt ended in `removed` with a link to exactly that page.
+ * Only the receipt leaves: never the link, and never the attempt the progress names. */
+export function recordedReceiptOf(progress, installerOrigin) {
+  if (progress?.status !== 'settled' || progress.result !== 'removed') return null;
+  try {
+    const link = new URL(validateLiveHandoff(progress.handoffUrl, installerOrigin, '/teardown'));
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.from(link.hash.slice(1), 'base64url'));
+  } catch { return null; }
+}
+
 /** An explicitly authorized Chrome connection borrows its context and owns only
  * a new tab. Never close that context or export browser storage, traces or HAR. */
 export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify, checkpoint = async () => {}, browserType = chromium, accessFactory = createLiveGatewayAccess }) {
@@ -180,6 +210,10 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   let interrupted = false;
   let interruptionArmed = false;
   let lastReceiptHop = null;
+  // What answered the last load of the installer ahead of a removal round, in the receipt hop's fixed fields.
+  let lastInstallerLoad = null;
+  // The attempt the gateway's removal page follows in the current round, from that page's own address. In memory only.
+  let removalAttempt = null;
   let cancelled = false;
   // Once the gateway has removed the dependencies behind its removal page, that page hops to the installer's receipt
   // page with the signed receipt in its fragment. While armed, the hop is dropped at the browser, once: the receipt
@@ -205,9 +239,12 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     tab.on('response', (response) => {
       let url;
       try { url = new URL(response.url()); } catch { return; }
-      if (url.origin === installerOrigin && url.pathname === '/teardown' && response.request().resourceType() === 'document') {
-        lastReceiptHop = receiptHopOf(response.status(), response.headers());
-      }
+      if (response.request().resourceType() !== 'document') return;
+      if (url.origin === installerOrigin && url.pathname === '/teardown') lastReceiptHop = receiptHopOf(response.status(), response.headers());
+      if (url.origin === installerOrigin && url.pathname === '/') lastInstallerLoad = receiptHopOf(response.status(), response.headers());
+      // The consent lands on the gateway's removal page, whose address names the attempt it follows. Only the attempt
+      // is kept, in memory: the address itself is never saved.
+      removalAttempt = removalAttemptOf(url.href, managementOrigin) ?? removalAttempt;
     });
     await tab.route(heldOriginMatcher(hold), answerHeldOrigin);
     await tab.route(isHandoffPoll, answerHandoffPoll);
@@ -349,8 +386,40 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
   return {
     request, navigate, waitFor,
     cancel() { cancelled = true; accessCancellation.abort(); },
-    /** The last answer to a navigation to the installer's receipt page, in fixed fields; null before any. */
+    /** The answer to the current removal round's navigation to the installer's receipt page, in fixed fields; null
+     * before any. */
     receiptHop: () => lastReceiptHop,
+    /**
+     * Opens a connection of the installer's own ahead of a removal round, by loading the installer in the test tab.
+     * In the isolated fixture the gateway's hostname and the installer's are in the same zone under one certificate,
+     * so a browser that holds a live connection to the gateway reuses it for its request to the installer, and the
+     * edge refuses a request whose TLS name differs from its Host with an empty 403 that never reaches the installer.
+     * A browser that already holds a connection of the installer's own uses that one. This load can itself be reused
+     * onto the gateway's connection and refused, so it never stops the run: the journal records whether the page
+     * loaded and what answered, and a refused receipt hop is then recovered by API. The origin's root, never the
+     * receipt page: a load of that page would spend an armed interception.
+     */
+    async openInstallerConnection() {
+      lastInstallerLoad = null;
+      let loaded = true;
+      try { await page.goto(`${installerOrigin}/`, { waitUntil: 'commit', timeout: INSTALLER_CONNECTION_TIMEOUT_MS }); }
+      catch { loaded = false; }
+      const answer = lastInstallerLoad;
+      // A refusal that carries a body commits like a page; only the answer's status tells it from a load.
+      if ((answer?.status ?? 0) >= 400) loaded = false;
+      await checkpoint({ stage: 'browser', status: 'installer_connection', loaded, answer });
+      notify(loaded ? 'Active test tab: isolated installer, loaded ahead of the removal round.'
+        : 'The isolated installer did not load ahead of the removal round. The run continues.');
+    },
+    /**
+     * The signed receipt the gateway recorded for the attempt its removal page followed in this round, read from that
+     * page's own progress route without the browser hop; null when the tab showed no attempt or the attempt did not
+     * end in `removed`. The attempt stays in this module: it rides in this one request and nowhere else.
+     */
+    async recordedReceipt() {
+      if (removalAttempt === null) return null;
+      return recordedReceiptOf(await request(managementOrigin, `/__ankka/operation/teardown/progress?attempt=${removalAttempt}`), installerOrigin);
+    },
     /** The tab's current landing in fixed labels; a closed tab lands nowhere. */
     landing() {
       let url;
@@ -367,6 +436,8 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     },
     async continueHandoff(value, kind) {
       const path = kind === 'teardown' ? '/__ankka/operation/teardown' : '/__ankka/operation';
+      // A removal round's evidence is its own: the hop's answer and the attempt of an earlier round never count for it.
+      if (kind === 'teardown') { lastReceiptHop = null; removalAttempt = null; }
       await navigate(validateLiveHandoff(value, managementOrigin, path));
       if (kind === 'teardown') {
         try { await page.getByRole('button', { name: 'Authorize removal in Cloudflare', exact: true }).click(); }
@@ -413,10 +484,12 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     },
     interruptionObserved: () => interrupted,
     /**
-     * Replaces the test tab on purpose, for one of the fixed reasons, and journals it. Live, the tab that had
-     * carried the interception met the installer's receipt page with an empty 403 in every recovery round, while a
-     * fresh process recovered the receipt at once on the same gateway: the rounds after the interruption therefore
-     * run in a tab that never carried the route, as they would in a fresh process.
+     * Replaces the test tab on purpose, for one of the fixed reasons, and journals it: the rounds after the
+     * interruption run in a tab that never carried the route, as they would in a fresh process. The replacement is
+     * harmless, and it is not what the empty 403 on the receipt hop in recovery rounds needed: that refusal was first
+     * attributed to the tab that had carried the interception, but its cause is the connection reuse described at
+     * `openInstallerConnection`, which a fresh process escaped only because it had just loaded the installer and
+     * still held a connection of the installer's own.
      */
     async replaceTab(reason) {
       if (!TAB_REPLACEMENT_REASONS.includes(reason)) throw new LiveGatewayBrowserError('tab_replacement_reason_invalid');
