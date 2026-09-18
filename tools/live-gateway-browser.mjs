@@ -56,6 +56,12 @@ export function validateLiveHandoff(value, origin, path) {
   return url.href;
 }
 
+/** Whether an answer is the Access edge's redirect to its login: the request never reached the application. */
+export function refusedAtAccessEdge(status, location, origin) {
+  if (![302, 303].includes(status) || !v.is(v.string(), location)) return false;
+  try { return new URL(location, origin).hostname.endsWith('.cloudflareaccess.com'); } catch { return false; }
+}
+
 const LANDING_WORD = /^[a-z_]{1,32}$/u;
 const HOSTED_CALLBACK_PATH = /^\/(?:oauth\/callback|__ankka\/install\/oauth\/callback)$/u;
 
@@ -119,10 +125,10 @@ export function landingOf(value, { installerOrigin, managementOrigin }) {
 
 /** An explicitly authorized Chrome connection borrows its context and owns only
  * a new tab. Never close that context or export browser storage, traces or HAR. */
-export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify, checkpoint = async () => {}, browserType = chromium }) {
+export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify, checkpoint = async () => {}, browserType = chromium, accessFactory = createLiveGatewayAccess }) {
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
   const accessCancellation = new AbortController();
-  const installAccess = createLiveGatewayAccess({ origins, email: basics.adminEmail, notify, signal: accessCancellation.signal });
+  const installAccess = accessFactory({ origins, email: basics.adminEmail, notify, signal: accessCancellation.signal });
   // Origins whose Access session the runner installed, with the time of that install.
   const authenticated = new Map();
   if (browserConnection !== undefined && (browserConnection !== 'chrome' || browserProfile)) {
@@ -270,14 +276,16 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
       if (csrfToken !== undefined) options.headers['x-csrf-token'] = csrfToken;
       response = await context.request.fetch(origin + path, options);
       const status = response.status();
-      // Only a rejected read can bootstrap Access for a newly installed gateway.
-      // Never repeat a write, and never forward a token across a redirect.
+      // Only a rejected read can bootstrap Access for a newly installed gateway, and a token is never forwarded across
+      // a redirect. The Access edge's redirect to its login means the application never saw the request, so the same
+      // request is sent once more after the session cookie is put back from the cached token: a browser can lose that
+      // cookie while the token is still valid, for a read and a write alike.
       const location = response.headers().location;
-      if (authenticate && method === 'GET' && origin === managementOrigin &&
-          [302, 303].includes(status) && location &&
-          new URL(location, origin).hostname.endsWith('.cloudflareaccess.com')) {
-        await installAccess(context, origin, { allowLogin: true });
-        if (!authenticated.has(origin)) authenticated.set(origin, Date.now());
+      const known = authenticated.has(origin);
+      if (authenticate && refusedAtAccessEdge(status, location, origin) && (known || (method === 'GET' && origin === managementOrigin))) {
+        await installAccess(context, origin, { allowLogin: !known, force: known });
+        if (known) notify(`Access session put back for the ${origin === installerOrigin ? 'isolated installer' : 'test gateway'}.`);
+        else authenticated.set(origin, Date.now());
         await response.dispose(); response = null;
         return await request(origin, path, { method, body, csrfToken }, false);
       }

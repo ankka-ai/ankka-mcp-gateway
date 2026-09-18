@@ -87,3 +87,20 @@ test('cancellation interrupts normal-browser login without installing a token', 
     } });
   await assert.rejects(install({ addCookies: assert.fail }, origin, { allowLogin: true }), { code: 'access_login_cancelled' });
 });
+
+test('a forced install rereads the cached token and puts the cookie back although this process installed it before', async () => {
+  const calls = [], cookies = [];
+  const value = token();
+  const install = createLiveGatewayAccess({ origins: [origin], email, run: async (...args) => { calls.push(args); return { stdout: value + '\n' }; } });
+  const context = { addCookies: async (items) => cookies.push(...items) };
+  await install(context, origin);
+  await install(context, origin);
+  assert.equal(cookies.length, 1);
+  await install(context, origin, { force: true });
+  assert.equal(calls.length, 2);
+  assert.equal(cookies.length, 2);
+  assert.equal(cookies[1].value, value);
+  // A forced install never starts a login by itself: an expired cache still stops as before.
+  const expired = createLiveGatewayAccess({ origins: [origin], email, run: async () => { throw new Error('no token'); } });
+  await assert.rejects(expired({ addCookies: assert.fail }, origin, { force: true }), { code: 'access_login_required' });
+});

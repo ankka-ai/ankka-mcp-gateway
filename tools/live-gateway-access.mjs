@@ -48,10 +48,12 @@ export function createLiveGatewayAccess({ origins, email, run = execute, notify 
     } catch { throw new LiveGatewayAccessError('access_login_required'); }
     return accessCookie(stdout.trim(), origin, email);
   }
-  return async function install(context, origin, { allowLogin = false } = {}) {
+  // `force` puts the cookie back although this process installed it before: a browser can lose the cookie while the
+  // cached token is still valid, and the edge then refuses a session the runner believes is in place.
+  return async function install(context, origin, { allowLogin = false, force = false } = {}) {
     if (signal?.aborted) throw new LiveGatewayAccessError('access_login_cancelled');
     if (!allowed.has(origin)) throw new LiveGatewayAccessError('access_origin_invalid');
-    if ((installed.get(origin) ?? 0) > Date.now() + 60_000) return;
+    if (!force && (installed.get(origin) ?? 0) > Date.now() + 60_000) return;
     let cookie;
     try {
       cookie = await cached(origin);

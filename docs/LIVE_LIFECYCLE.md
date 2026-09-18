@@ -220,6 +220,15 @@ config and `--recover-removal`. Recovery does not turn an incomplete lifecycle r
 into a passing lifecycle result. Before a receipt exists, use the product's existing
 setup/removal recovery flow and the recorded action references.
 
+A browser can lose an installed Access session cookie while the cached token
+is still valid (observed live: the cookie vanished from an attached Chrome
+minutes after the runner had installed it). The Access edge then redirects the
+runner's request to its login, which means the application never saw it; the
+runner puts the cookie back from the cached token and sends the same request
+once more, for a read and a write alike, and says so in its output. A second
+refusal is handled as before. It never starts a login for the installer's
+session.
+
 Right after an installation the gateway's management Access application is
 minutes old, and some edges still refuse a freshly installed session while its
 policy propagates. For ten minutes after the runner installs that session, such
