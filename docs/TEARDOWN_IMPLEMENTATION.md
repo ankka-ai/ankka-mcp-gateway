@@ -76,6 +76,48 @@ has expired. A fresh signed handoff for the same certificate, locators, and
 completed dependency graph can reopen that same job; it cannot change authority
 or erase progress. No new job accepts an expired handoff.
 
+### The way back into an interrupted removal
+
+The receipt crosses from the gateway to the hosted page in one browser hop. A
+closed tab, a network failure, or a hop that arrives after the ten-minute
+window loses it, and only a fresh consent on the gateway signs another. The
+gateway's records keep answering once the dependencies are gone: `/api/status`,
+`/api/sources`, `/api/source-actions` and `/api/update` read Durable Object
+storage only. `/api/team` answers `503 team_unavailable` when a management
+token is configured, because it reads the deleted policies; the dashboard
+already treats that as a page-level failure.
+
+The dashboard learns the state from routes that exist for other reasons. The
+`/api/source-actions` snapshot points at the recorded removal action
+(`blockingAction.kind` is `teardown`), and `GET /api/teardown-actions/<id>`
+gives its status. `applying` inside its authorization window is a removal that
+is still running. `applying` past that window, `gateway_removed` and
+`recovery_required` are a removal that has begun, or may have, and needs a
+fresh consent; the settlement records `failed` only when the installation
+object proves that deletion never started. For these the dashboard
+shows **Removal in progress** on every page with one action, **Continue
+removing this gateway**, which posts `/api/teardown-actions` and opens the
+removal page exactly as Settings does. The same notice replaces the load
+failure screen when the dashboard cannot load, and the action needs no status
+read. The fresh consent rechecks the recorded graph, finds the removed
+resources absent, and signs a new receipt handoff.
+
+The notice follows the recorded action, not the installation object. A newer
+review that is never authorized replaces an expired record when it is prepared;
+the notice is then absent, and **Review teardown plan** in Settings continues
+the same removal. While an earlier authorization is still open the gateway
+refuses another with `teardown_action_conflict`.
+
+The hosted page answers a refusal that no reload can change with its own word
+and message instead of the reload guidance: `teardown_receipt_expired` for a
+receipt that verifies except for its closed window, with the management
+hostname that receipt certifies; `teardown_receipt_rejected` for a receipt that
+does not verify or contradicts the accepted job, naming no hostname; and
+`teardown_session_missing` when the browser holds no removal. Each says to
+authorize the removal again on the gateway's management page or to choose a
+saved recovery receipt. Every other failure keeps `teardown_unavailable` and
+the reload wording, as does a request that never reached the installer.
+
 The distinct `gateway-root-finalize` operation requests `workers-scripts.write`
 and `zone-access.write`. The old Workers-only `uninstall-finalize` and bootstrap
 cleanup authorities retain their original scopes. The finalizer verifies the
@@ -111,7 +153,11 @@ fresh consent, and lost responses at every dependency deletion. Gateway callback
 tests cover receipt-derived scopes, rejected grants, callback concurrency,
 expiry, revocation, and signing only after verified completion. Hosted tests use
 real SQLite, recreated Durable Objects, complete fixed-root removal, failed
-revocation, rejected authority, and each uncertain provider mutation.
+revocation, rejected authority, and each uncertain provider mutation. They
+also cover each refusal word and its message. The dashboard's real client runs
+against the gateway Worker through a complete removal, reading every status
+the journal records, and its tests cover the notice, the load-failure screen
+and the continued authorization.
 
 ## Qualification still required
 

@@ -27,10 +27,13 @@ import {
   type TeamAction,
   type TeamActionResult,
   type TeamMember,
+  type TeardownAction,
   validHandoffUrl,
 } from './api'
 
 type Notice = { tone: 'neutral' | 'success' | 'warning' | 'error'; message: string } | null
+/** A recorded removal that may have deleted resources: still `running` under its authorization, or `interrupted` until a fresh one. */
+export type RemovalProgress = 'running' | 'interrupted'
 
 interface GatewayContextValue {
   api: GatewayAdminApi
@@ -40,6 +43,7 @@ interface GatewayContextValue {
   sourceActionsError: string | null
   isCheckingSourceActions: boolean
   sourceActionsPollingPaused: boolean
+  removal: RemovalProgress | null
   update: RuntimeUpdate | null
   isLoading: boolean
   isBusy: boolean
@@ -93,6 +97,12 @@ function unavailableUpdate(): RuntimeUpdate {
   }
 }
 
+/** Null until the gateway has begun deleting: a reviewed plan, or an attempt that ended before its first deletion, removes nothing. */
+function removalProgress(action: TeardownAction, now: number): RemovalProgress | null {
+  if (action.status === 'applying' && Date.parse(action.expiresAt) > now) return 'running'
+  return ['applying', 'gateway_removed', 'recovery_required'].includes(action.status) ? 'interrupted' : null
+}
+
 function removeResultParameter(name: string) {
   const url = new URL(window.location.href)
   url.searchParams.delete(name)
@@ -107,6 +117,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   const [sourceActionsError, setSourceActionsError] = useState<string | null>(null)
   const [isCheckingSourceActions, setIsCheckingSourceActions] = useState(false)
   const [sourceActionsPollingPaused, setSourceActionsPollingPaused] = useState(false)
+  const [removal, setRemoval] = useState<RemovalProgress | null>(null)
   const [update, setUpdate] = useState<RuntimeUpdate | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [busyCount, setBusyCount] = useState(0)
@@ -148,6 +159,15 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       const next = await apiRef.current.getSourceActions()
       if (!mounted.current || read !== sourceActionRead.current) return next
       setSourceActions(next)
+      const blocker = next.blockingAction
+      if (blocker?.kind !== 'teardown') setRemoval(null)
+      else {
+        // The pointer says a removal is recorded; only its status says whether deletion may have begun.
+        try {
+          const recorded = await apiRef.current.getTeardownAction(blocker.actionId)
+          if (mounted.current && read === sourceActionRead.current) setRemoval(removalProgress(recorded, Date.now()))
+        } catch { /* An unreadable action keeps the last known answer. */ }
+      }
       const completed = next.actions.filter((action) => action.state === 'succeeded' && !reconciledSourceActions.current.has(action.actionId))
       if (completed.length > 0) {
         await refreshSources()
@@ -347,6 +367,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     sourceActionsError,
     isCheckingSourceActions,
     sourceActionsPollingPaused,
+    removal,
     update,
     isLoading,
     isBusy: busyCount > 0,
@@ -420,9 +441,8 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       if (!handoffUrl) throw new Error('The authorization link could not be verified.')
       return { ...prepared, handoffUrl }
     }),
+    // No status read: the handoff is checked against this page's origin, and an interrupted removal must stay reachable when status is not.
     prepareTeardownAction: () => runBusy(async () => {
-      const trustedStatus = status ?? await apiRef.current.getStatus()
-      if (status === null) setStatus(trustedStatus)
       const prepared = await apiRef.current.prepareTeardownAction()
       const handoffUrl = validHandoffUrl(prepared.handoffUrl, window.location.origin)
       if (!handoffUrl) throw new Error('The teardown handoff could not be verified.')
@@ -448,7 +468,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     sourceNotice, sources, status, update, updateNotice, getTeam, getTeamAction,
     externalChangeVersion, refreshAfterExternalChange,
     sourceActions, sourceActionsError, isCheckingSourceActions, sourceActionsPollingPaused,
-    refreshSourceActions, cancelSourceApply,
+    refreshSourceActions, cancelSourceApply, removal,
   ])
 
   return <GatewayContext.Provider value={value}>{children}</GatewayContext.Provider>

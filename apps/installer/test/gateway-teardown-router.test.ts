@@ -6,7 +6,7 @@ import { gatewayTeardownJobId } from '../src/gateway-teardown-handoff';
 import { GATEWAY_ROOT_REMOVAL_STEPS } from '../src/gateway-teardown-job';
 import { GATEWAY_TEARDOWN_CALL_BUDGET } from '../src/gateway-teardown-provider';
 import { GatewayTeardownStoreClient } from '../src/gateway-teardown-store-client';
-import { createGatewayTeardownRouter, GATEWAY_TEARDOWN_COOKIE } from '../src/gateway-teardown-router';
+import { createGatewayTeardownRouter, gatewayTeardownRefusalMessage, GATEWAY_TEARDOWN_COOKIE, GATEWAY_TEARDOWN_RELOAD_GUIDANCE } from '../src/gateway-teardown-router';
 import type { ExactReleaseBundleIdentity } from '../src/exact-release-bundle';
 import { TwoStageDeploySession, type TwoStageDeploySessionNamespace, type TwoStageDeploySessionTeardownDependencies } from '../src/two-stage-deploy-session';
 import { ROOT_TEST } from './gateway-teardown-fixture';
@@ -29,7 +29,7 @@ async function fixture() {
   const trace: string[] = [];
   /** The subrequests each finalizer pass spent, one entry per alarm. */
   const passes: number[] = [];
-  let revokeFails = false, wrongAccount = false, extraScope = false, returnsRefresh = false;
+  let revokeFails = false, wrongAccount = false, extraScope = false, returnsRefresh = false, bundleFails = false;
   const instances = new Map<string, { sql: ReturnType<typeof teardownSqliteFixture>; stub: TwoStageDeploySession }>();
   const jobId = await gatewayTeardownJobId(provider.handoff);
   // The provider fixture reads the job before answering each call; that look is the test's, not the invocation's.
@@ -56,7 +56,11 @@ async function fixture() {
     }
     return provider.transport(request);
   };
-  const loadBundle = async (identity: ExactReleaseBundleIdentity) => { expect(identity).toEqual(provider.job.release); return provider.bundle; };
+  const loadBundle = async (identity: ExactReleaseBundleIdentity) => {
+    expect(identity).toEqual(provider.job.release);
+    if (bundleFails) throw new Error('release_unavailable');
+    return provider.bundle;
+  };
   // The job object's finalizer: the same OAuth client and trust the router carries, and the test transport.
   const teardown: TwoStageDeploySessionTeardownDependencies = {
     oauth: { clientId: CLIENT_ID, clientSecret: CLIENT_SECRET }, trust: provider.trust, transport, loadBundle, wait: async () => undefined,
@@ -132,6 +136,10 @@ async function fixture() {
     cookie: () => cookie, router: () => router,
     import: () => send('/api/teardown/import', { handoff: provider.handoff }),
     advance: () => { time += 86_400_001; },
+    /** Past a receipt's ten-minute import window, inside the browser session's day. */
+    closeImportWindow: () => { time += 600_001; },
+    now: () => time,
+    failBundle: (fails: boolean) => { bundleFails = fails; },
     /** A new object instance over the same storage: memory, and with it any held grant, is gone. */
     reopen: () => {
       for (const value of instances.values()) value.stub = object(value.sql);
@@ -342,5 +350,54 @@ describe('hosted removal browser callback and durable recovery', () => {
     const fresh = await fixture();
     try { fresh.advance(); expect((await fresh.import()).status).toBe(409); }
     finally { fresh.close(); }
+  });
+
+  it('says where a fresh receipt comes from when no reload can help, and keeps the reload wording for the rest', async () => {
+    const refusalSchema = v.strictObject({ error: v.string(), message: v.optional(v.string()) });
+    const refused = async (response: Response) => { expect(response.status).toBe(409); return v.parse(refusalSchema, await response.json()); };
+    const test = await fixture();
+    try {
+      // No receipt and no session: nothing to reload into.
+      expect(await refused(await test.send('/api/teardown'))).toEqual({ error: 'teardown_session_missing',
+        message: gatewayTeardownRefusalMessage('teardown_session_missing') });
+      // A failure of ours leaves the receipt usable: the page keeps its reload wording.
+      test.failBundle(true);
+      expect(await refused(await test.import())).toEqual({ error: 'teardown_unavailable' });
+      test.failBundle(false);
+      expect((await test.import()).status).toBe(200);
+      // A second consent on the gateway re-signs the same removal; its receipt opens the job only inside its own window.
+      const issuedAt = test.now();
+      const second = await test.sign({ ...test.statement, actionId: `action_${'z'.repeat(32)}`, nonce: 'B'.repeat(43), issuedAt, expiresAt: issuedAt + 600_000 });
+      expect((await test.send('/api/teardown/import', { handoff: second })).status).toBe(200);
+      test.closeImportWindow();
+      const expired = await refused(await test.send('/api/teardown/import', { handoff: second }));
+      expect(expired).toEqual({ error: 'teardown_receipt_expired', message: gatewayTeardownRefusalMessage('teardown_receipt_expired', ROOT_TEST.hostname) });
+      expect(expired.message).toContain(`management page at ${ROOT_TEST.hostname} and authorize the removal again`);
+      expect(expired.message).not.toContain('Reload');
+      // The accepted receipt is the saved recovery receipt: it still opens its job.
+      expect((await test.import()).status).toBe(200);
+      // An expired receipt that names another gateway than its certificate verifies at no time, so its hostname is never repeated.
+      const misdirected = await test.sign({ ...test.statement, issuedAt, expiresAt: issuedAt + 600_000,
+        management: { ...test.statement.management, hostname: 'other.example.com' } });
+      const rejected = await refused(await test.send('/api/teardown/import', { handoff: misdirected }));
+      expect(rejected).toEqual({ error: 'teardown_receipt_rejected', message: gatewayTeardownRefusalMessage('teardown_receipt_rejected') });
+      expect(rejected.message).not.toContain('example.com');
+      expect(await refused(await test.send('/api/teardown/import', { handoff: 'not a receipt' }))).toEqual(rejected);
+      const drifted = await test.sign({ ...test.statement, issuedAt: test.now(), expiresAt: test.now() + 600_000,
+        management: { ...test.statement.management, policyId: 'foreign-policy' } });
+      expect(await refused(await test.send('/api/teardown/import', { handoff: drifted }))).toEqual(rejected);
+      const html = await (await test.send('/teardown')).text();
+      expect(html).toContain(JSON.stringify(GATEWAY_TEARDOWN_RELOAD_GUIDANCE));
+      expect(html).toContain(JSON.stringify(gatewayTeardownRefusalMessage('teardown_receipt_rejected')));
+      expect(html).toContain('refusal.message');
+    } finally { test.close(); }
+    // The first receipt of a removal, arriving after its window: no job exists, and the gateway it names can sign another.
+    const late = await fixture();
+    try {
+      late.closeImportWindow();
+      expect(await refused(await late.import())).toEqual({ error: 'teardown_receipt_expired',
+        message: gatewayTeardownRefusalMessage('teardown_receipt_expired', ROOT_TEST.hostname) });
+      expect(await late.port.read()).toBeNull();
+    } finally { late.close(); }
   });
 });

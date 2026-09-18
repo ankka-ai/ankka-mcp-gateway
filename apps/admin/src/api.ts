@@ -195,15 +195,24 @@ const runtimeActionSchema = v.strictObject({
   expiresAt: v.string(),
   failureCode: v.nullable(v.string()),
 })
+// The removal journal never records `succeeded`: once the connected resources are gone the action reads `gateway_removed`.
+const teardownActionStatusSchema = v.picklist([
+  'authorization_required',
+  'applying',
+  'gateway_removed',
+  'failed',
+  'recovery_required',
+])
 const teardownActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: v.string(),
-  status: actionStatusSchema,
+  status: teardownActionStatusSchema,
   expiresAt: v.string(),
   failureCode: v.nullable(v.string()),
 })
 const teamActionSchema = v.strictObject({
   ...teardownActionSchema.entries,
+  status: actionStatusSchema,
   action: v.optional(v.literal('access')),
   actorKind: actorKindSchema,
   canCancel: v.optional(v.boolean(), false),

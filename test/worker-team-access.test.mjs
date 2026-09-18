@@ -1796,3 +1796,37 @@ test('the dashboard client accepts a gateway that admits a service identity and 
     assert.equal((await dashboard.getTeamAction(action.actionId)).actorKind, 'service');
   });
 }));
+
+// The way back into an interrupted removal rests on these answers: everything the dashboard loads at startup still
+// answers once the connected resources are gone, the pointer names the recorded removal, and its status says where it
+// stands. Only Team, which reads the deleted policies, answers 503.
+test('the dashboard client follows a removal through every status the gateway records and can prepare the next authorization', async () => fixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.equal((await dashboard.getSourceActions()).blockingAction, null);
+    const removal = await gateway.currentTeardown();
+    assert.equal(removal.prepared.status, 200, await removal.prepared.clone().text());
+    const { actionId } = await removal.prepared.json();
+    const recorded = async () => {
+      assert.deepEqual((await dashboard.getSourceActions()).blockingAction, { kind: 'teardown', actionId });
+      return dashboard.getTeardownAction(actionId);
+    };
+    assert.equal((await recorded()).status, 'authorization_required');
+    assert.equal((await dashboard.getTeam()).schemaVersion, 1);
+
+    assert.equal((await removal.send('prove')).status, 200);
+    const applied = await removal.send('apply');
+    assert.equal(applied.status, 200, await applied.clone().text());
+    assert.equal(gateway.provider.liveResourceCount(), 0);
+    assert.equal((await recorded()).status, 'gateway_removed');
+    assert.equal((await dashboard.getStatus()).status, 'ready');
+    assert.equal((await dashboard.getSources()).schemaVersion, 1);
+    assert.equal((await dashboard.getUpdate()).schemaVersion, 1);
+    await assert.rejects(dashboard.getTeam(), { status: 503 });
+
+    assert.equal((await removal.send('settle')).status, 200);
+    assert.deepEqual([(await recorded()).status, (await recorded()).failureCode], ['recovery_required', 'fresh_authorization_required']);
+    const next = await dashboard.prepareTeardownAction();
+    assert.equal(new URL(next.handoffUrl).pathname, '/__ankka/operation/teardown');
+    assert.equal((await dashboard.getTeardownAction(next.actionId)).status, 'authorization_required');
+  });
+}, await portalOnlyClaim()));

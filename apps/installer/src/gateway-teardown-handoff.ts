@@ -206,3 +206,22 @@ export async function verifyGatewayTeardownHandoff(input: {
   if (!await crypto.subtle.verify('Ed25519', key, new Uint8Array(base64UrlDecode(envelope.signature)), payload(envelope.statement))) invalid();
   return deepFreezePlainData({ certificate, statement, handoffSha256: `sha256:${await sha256Hex(input.handoff)}` });
 }
+
+/**
+ * The management hostname of a handoff whose only defect is its closed import
+ * window, or null. It authorizes nothing: the hosted page names the gateway
+ * that can sign a fresh handoff. Everything else is verified as of its issue.
+ */
+export async function expiredGatewayTeardownHandoffHostname(input: {
+  readonly handoff: string;
+  readonly trust: GatewayTeardownTrust;
+  readonly now: number;
+}): Promise<string | null> {
+  try {
+    if (input.handoff.length > 32 * 1024) return null;
+    const statement = v.parse(statementSchema, JSON.parse(v.parse(envelopeSchema, JSON.parse(input.handoff)).statement));
+    if (statement.expiresAt > input.now) return null;
+    const verified = await verifyGatewayTeardownHandoff({ handoff: input.handoff, trust: input.trust, now: statement.issuedAt });
+    return verified.statement.management.hostname;
+  } catch { return null; }
+}

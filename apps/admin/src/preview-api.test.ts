@@ -153,6 +153,21 @@ describe('Team preview', () => {
     expect(await api.getTeam()).toEqual(saved)
   })
 
+  it('previews an interrupted removal as the gateway records it: a settled action, a lost Team read, and a preparable next authorization', async () => {
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', '/settings?preview=removal-interrupted')
+    const api = previewApi()
+    const pointer = (await api.getSourceActions()).blockingAction
+    expect(pointer).toEqual(expect.objectContaining({ kind: 'teardown' }))
+    if (!pointer) throw new Error('Expected a recorded synthetic removal')
+    expect(await api.getTeardownAction(pointer.actionId)).toEqual(expect.objectContaining({
+      status: 'recovery_required', failureCode: 'fresh_authorization_required',
+    }))
+    await expect(api.getTeam()).rejects.toEqual(expect.objectContaining({ status: 503 }))
+    expect((await api.getStatus()).status).toBe('ready')
+    expect((await api.prepareTeardownAction()).status).toBe('authorization_required')
+  })
+
   it('rejects attempts to write through release-gated and lifecycle-paused preview contracts', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     for (const scenario of ['team-readonly', 'team-lifecycle']) {

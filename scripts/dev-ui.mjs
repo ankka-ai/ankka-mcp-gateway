@@ -36,6 +36,7 @@ Gateway dashboard
   Update      http://127.0.0.1:5730/settings?preview=update
   Empty       http://127.0.0.1:5730/?preview=empty
   Error       http://127.0.0.1:5730/?preview=error
+  Removal     http://127.0.0.1:5730/settings?preview=removal-interrupted
 
 No Cloudflare account, OAuth grant, or server is used. Press Ctrl+C to stop.
 `)
