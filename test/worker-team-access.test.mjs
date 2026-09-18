@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import test from 'node:test';
+import * as v from 'valibot';
 
+import { HttpGatewayAdminApi } from '../apps/admin/src/api.ts';
 import worker, { AdminState, planTeamAccessChange, prepareCurrentGatewayTeardown } from '../payload/worker/index.js';
 import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
 import {
@@ -1736,3 +1738,61 @@ test('service tokens are refused for an unapproved identity, a wrong audience, a
     assert.equal((await gateway.api('/api/status')).status, 401);
   });
 });
+
+// The dashboard ships in the same release as this Worker and checks every answer against strict schemas of its own.
+// Its real client runs here against the real Worker, so a field added on one side only fails in this suite and not in
+// a customer's browser: gateway-v0.1.64 shipped a dashboard that refused `/api/status` for its new `serviceIdentity`.
+async function dashboardClient(gateway, run) {
+  const network = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (!v.is(v.string(), input) || !input.startsWith('/')) return network(input, init);
+    // The compiled gateway answers this one route with the current-policy preparation.
+    const options = { method: init.method ?? 'GET', currentTeardown: init.method === 'POST' && input === '/api/teardown-actions' };
+    if (init.body !== undefined) options.body = JSON.parse(init.body);
+    return gateway.api(input, options);
+  };
+  try { return await run(new HttpGatewayAdminApi()); } finally { globalThis.fetch = network; }
+}
+
+test('the dashboard client accepts every answer the gateway gives an administrator', async () => fixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.equal((await dashboard.getStatus()).serviceIdentity, null);
+    assert.equal((await dashboard.getUpdate()).schemaVersion, 1);
+    assert.deepEqual((await dashboard.getSourceActions()).actions, []);
+
+    const discovered = await dashboard.discoverSource(NEW_SOURCE_URL);
+    assert.ok(discovered.tools.some((tool) => tool.name === 'company_lookup'));
+    const current = await dashboard.getSources();
+    const drafted = await dashboard.saveSourceDraft(current.revision, {
+      label: 'Dashboard source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'],
+    });
+    const draft = drafted.sources.find((source) => source.url === NEW_SOURCE_URL);
+    const applied = await dashboard.prepareSourceAction(drafted.revision, draft.id);
+    assert.equal(applied.status, 'succeeded');
+    assert.equal((await dashboard.getSourceAction(applied.actionId)).actorKind, 'human');
+    assert.equal((await dashboard.getSourceActions()).actions.find((entry) => entry.actionId === applied.actionId).actorKind, 'human');
+
+    const team = await dashboard.getTeam();
+    const granted = await dashboard.prepareTeamAction(team.revision, [...team.members, { email: NEW_PERSON, sourceIds: [draft.id] }]);
+    assert.equal(granted.action.status, 'succeeded');
+    assert.equal(granted.action.actorKind, 'human');
+    assert.equal((await dashboard.getTeamAction(granted.action.actionId)).actorKind, 'human');
+    assert.equal((await dashboard.getTeam()).pendingAction.actorKind, 'human'); // the team view carries the last action too
+
+    const teardown = await dashboard.prepareTeardownAction();
+    assert.equal((await dashboard.getTeardownAction(teardown.actionId)).status, 'authorization_required');
+  });
+}));
+
+test('the dashboard client accepts a gateway that admits a service identity and the actions that identity prepared', async () => fixture(async (gateway) => {
+  gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+  const team = await (await gateway.serviceApi('/api/team')).json();
+  const granted = await gateway.serviceApi('/api/team-actions', { method: 'POST', body: changedRequest(team) });
+  assert.equal(granted.status, 200, await granted.clone().text());
+  const { action } = await granted.json();
+  assert.equal(action.actorKind, 'service');
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.deepEqual((await dashboard.getStatus()).serviceIdentity, { clientId: SERVICE_CLIENT });
+    assert.equal((await dashboard.getTeamAction(action.actionId)).actorKind, 'service');
+  });
+}));
