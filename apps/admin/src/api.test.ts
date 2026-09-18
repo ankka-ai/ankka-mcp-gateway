@@ -431,4 +431,30 @@ describe('HttpGatewayAdminApi', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('accepts the service identity a gateway reports, absent, null or configured, and nothing looser', async () => {
+    const clientId = `${'c'.repeat(32)}.access`
+    for (const [reported, expected] of [
+      [{}, undefined], [{ serviceIdentity: null }, null], [{ serviceIdentity: { clientId } }, { clientId }],
+    ] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...readyStatus, ...reported })))
+      expect((await new HttpGatewayAdminApi().getStatus()).serviceIdentity).toEqual(expected)
+      vi.unstubAllGlobals()
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...readyStatus, serviceIdentity: { clientId, secret: 'synthetic' } })))
+    await expect(new HttpGatewayAdminApi().getStatus()).rejects.toMatchObject({ code: 'response_invalid' })
+  })
+
+  it('accepts who prepared a source or Team action and rejects an unknown kind', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    const action = { schemaVersion: 1, actionId, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null }
+    for (const actorKind of ['human', 'service'] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...action, sourceId: 'source-test', actorKind })))
+      expect((await new HttpGatewayAdminApi().getSourceAction(actionId)).actorKind).toBe(actorKind)
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...action, action: 'access', actorKind, canCancel: false })))
+      expect((await new HttpGatewayAdminApi().getTeamAction(actionId)).actorKind).toBe(actorKind)
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...action, sourceId: 'source-test', actorKind: 'robot' })))
+    await expect(new HttpGatewayAdminApi().getSourceAction(actionId)).rejects.toMatchObject({ code: 'response_invalid' })
+  })
 })
