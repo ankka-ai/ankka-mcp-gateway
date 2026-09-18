@@ -78,10 +78,34 @@ An update starts in the gateway dashboard and runs on the gateway itself:
    new Worker version with the existing secrets and object namespace
    inherited. The upload activates at once and replaces the version that ran
    the update; the page shows the stages as they are reached.
-4. The grant is revoked and the page hands the browser to Settings, which
-   polls the action. The new version's alarm finds itself running the target
-   release and completes the journal with `finalize`; if the old version still
-   runs after five minutes, it marks the action as needing recovery instead.
+4. The grant is revoked. Cloudflare keeps serving the previous version, its
+   Worker and its management assets alike, at an edge location for a short
+   while after the upload, so after an applied upload the page does not hand
+   over yet. Every progress answer names the attempt's target release and the
+   release that served the answer, and the page waits, as its own fifth step,
+   until the two are equal on two answers in a row. It waits at most sixty
+   seconds; past that it hands over anyway and says that the dashboard may
+   need a reload. An attempt that was not applied hands over at once.
+5. The page hands the browser to Settings, which polls the action. The new
+   version's alarm finds itself running the target release and completes the
+   journal with `finalize`; if the old version still runs after five minutes,
+   it marks the action as needing recovery instead.
+
+The serving release is the stateless entrypoint's own `ANKKA_GATEWAY_RELEASE`,
+which it names on the progress request it forwards to the management object.
+That is the version Cloudflare runs where the browser asks, and the same
+version's assets answer the dashboard's navigation there. The management
+object's own release cannot stand in for it: there is one object, it restarts
+on the new version right after the upload wherever the browser is, and it
+would confirm while that location still serves the previous dashboard. The
+object's release proves something else: that the upload was applied, also when
+the version that ran it was replaced before it could record its end.
+
+Both releases must carry this step. The page a browser follows comes from the
+release being replaced, so an update from a release without the step hands
+over at once, as before. A rollback to such a release does too, because the
+object that answers after the upload no longer names either release; the
+update record keeps the fields that release reads, so its page still ends.
 
 Gateway traffic is not gradually split between versions, and no candidate is
 probed before activation: the bytes are the signed release the hosted
@@ -106,7 +130,9 @@ digest through its own operation route, even after the channel advances.
 The hosted release service reads the retained, immutable release from its
 bucket using its reviewed channel, origin, and signing key. The gateway then
 independently verifies the signature and every payload digest with its installed
-trust key before uploading the old code and assets.
+trust key before uploading the old code and assets. It runs behind the same
+page as an update and waits the same way before handing over; its target is
+the release rolled back to.
 
 The retained release must still be available under that trust key. Missing,
 altered, mismatched, or untrusted release bytes stop the action before any

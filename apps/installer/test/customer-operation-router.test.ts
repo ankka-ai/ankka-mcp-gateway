@@ -15,7 +15,9 @@ import {
   CUSTOMER_OPERATION_UPDATE_PATH,
   CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH,
 } from '../src/customer-install-paths';
-import { CustomerRuntimeUpdateDriver, customerUpdateProgressSchema, type CustomerUpdateOutcome } from '../src/customer-update-driver';
+import {
+  CUSTOMER_SERVING_RELEASE_HEADER, CustomerRuntimeUpdateDriver, customerUpdateProgressSchema, type CustomerUpdateOutcome,
+} from '../src/customer-update-driver';
 import {
   CUSTOMER_OPERATION_COOKIE,
   createCustomerOperationRouter,
@@ -192,7 +194,7 @@ function dependencies(input: {
     startRuntimeUpdate: (start) => driver.start(start),
     updateView: (attemptId) => driver.view(attemptId),
     issueRelayTicket: async (operation) => {
-      if (operation !== 'source-add' && operation !== 'bigquery-add' && operation !== 'upgrade') throw new Error('unexpected operation');
+      if (!['source-add', 'bigquery-add', 'upgrade', 'rollback'].includes(operation)) throw new Error('unexpected operation');
       return { relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 };
     },
     beginRelay: async ({ operation, gatewayState, pkceChallenge, gatewayCallback }) =>
@@ -221,7 +223,8 @@ function dependencies(input: {
   };
 }
 
-function router(deps: CustomerOperationRouterDependencies) {
+/** `release` is the one the management object itself runs: the installed release until an upload restarts it on the target. */
+function router(deps: CustomerOperationRouterDependencies, release = RELEASE) {
   return createCustomerOperationRouter({
     accountId: ACCOUNT_ID,
     installId: INSTALL_ID,
@@ -229,7 +232,7 @@ function router(deps: CustomerOperationRouterDependencies) {
     managementOrigin: ORIGIN,
     workerName: 'ankka-gateway',
     workersSubdomain: 'customer',
-    release: RELEASE,
+    release,
     artifactSha256: ARTIFACT_SHA256,
   }, deps);
 }
@@ -269,15 +272,21 @@ const runtimeClaim = {
   expiresAt: ACTION_EXPIRES_AT,
 };
 
-function runtimeStartRequest(): Request {
+function runtimeStartRequest(claim = runtimeClaim): Request {
   return new Request(`${ORIGIN}${CUSTOMER_OPERATION_OAUTH_START_PATH}`, {
     method: 'POST',
     headers: { origin: ORIGIN, 'content-type': 'application/json' },
     body: JSON.stringify({
       schemaVersion: 1,
-      handoff: base64UrlEncode(new TextEncoder().encode(JSON.stringify(runtimeClaim))),
+      handoff: base64UrlEncode(new TextEncoder().encode(JSON.stringify(claim))),
     }),
   });
+}
+
+/** One poll of the update page, as the management object receives it from an entrypoint of the named release. */
+function progressRequest(attemptId: string, servingRelease?: string): Request {
+  return new Request(`${ORIGIN}${CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH}?attempt=${attemptId}`,
+    servingRelease === undefined ? {} : { headers: { [CUSTOMER_SERVING_RELEASE_HEADER]: servingRelease } });
 }
 
 /** Starts an attempt and walks the code relay the way the live relay does; returns the callback URL and cookie. */
@@ -457,12 +466,17 @@ describe('gateway-local operation router', () => {
     const html = await page.text();
     expect(html).toContain(CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH);
     for (const secret of [ACCESS_TOKEN, ACTION_KEY]) expect(html).not.toContain(secret);
-    const progress = async () => {
-      const response = await upgradeTarget.fetch(new Request(`${ORIGIN}${CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH}?attempt=${attemptId}`));
+    const progress = async (servingRelease?: string) => {
+      const response = await upgradeTarget.fetch(progressRequest(attemptId, servingRelease));
       expect(response.status).toBe(200);
       return v.parse(customerUpdateProgressSchema, await response.json());
     };
-    expect(await progress()).toEqual({ schemaVersion: 1, attemptId, status: 'running', stage: 'authorized', result: null, reason: null, redirectUrl: null });
+    // The target comes from the attempt; the serving release is whatever the forwarding entrypoint named, never this object's own.
+    expect(await progress(RELEASE)).toEqual({ schemaVersion: 1, attemptId, status: 'running', stage: 'authorized', result: null, reason: null, redirectUrl: null,
+      applied: false, targetRelease: 'gateway-v0.1.35', servingRelease: RELEASE });
+    // An entrypoint from before the header names nothing, and a value that is no release is not repeated.
+    expect((await progress()).servingRelease).toBeNull();
+    expect((await progress('gateway-v0.1.35<script>')).servingRelease).toBeNull();
     expect(alarm.due).toBe(true);
     if (driver === null) throw new Error('driver missing');
     const running: CustomerRuntimeUpdateDriver = driver;
@@ -482,12 +496,14 @@ describe('gateway-local operation router', () => {
     // be able to clear this version's record, so it is gone before the update.
     expect(attemptsDuringUpdate).toEqual([null]);
     expect(upgradeTransport.revoked()).toBe(true);
-    const settled = await progress();
+    // Applied, and the previous version still answers at the browser's location: the page waits on these two.
+    const settled = await progress(RELEASE);
     expect(settled.status).toBe('settled'); expect(settled.result).toBe('applied'); expect(settled.stage).toBeNull();
-    const redirect = new URL(settled.redirectUrl ?? '');
-    expect(redirect.origin + redirect.pathname).toBe(`${ORIGIN}/settings`);
-    expect(redirect.searchParams.get('runtimeAction')).toBe(ACTION_ID);
-    expect(redirect.searchParams.get('runtimeActionResult')).toBe('applied');
+    expect(settled.applied).toBe(true); expect(settled.targetRelease).toBe('gateway-v0.1.35'); expect(settled.servingRelease).toBe(RELEASE);
+    // Where the page hands over is what it always was, whichever release serves the answer.
+    expect(settled.redirectUrl).toBe(`${ORIGIN}/settings?runtimeAction=${ACTION_ID}&runtimeActionResult=applied`);
+    const served = await progress('gateway-v0.1.35');
+    expect(served).toEqual({ ...settled, servingRelease: 'gateway-v0.1.35' });
     expect(await running.continue()).toBe('idle');
     expect((await upgradeTarget.fetch(new Request(`${ORIGIN}${CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH}?attempt=attempt_${'z'.repeat(24)}`))).status).toBe(404);
     expect((await upgradeTarget.fetch(new Request(`${ORIGIN}${CUSTOMER_OPERATION_UPDATE_PATH}?attempt=${attemptId}&code=secret`))).status).toBe(404);
@@ -511,14 +527,69 @@ describe('gateway-local operation router', () => {
     // The object restarts on the new version before the upload's pass records its end: the running record stays.
     const restarted = new CustomerRuntimeUpdateDriver({
       outcomes: { read: () => driver === null ? Promise.resolve(null) : driver.view(attemptId).then((view) =>
-        view === null ? null : { schemaVersion: 1, attemptId, actionId: view.actionId, operation: 'update', status: 'running', result: null, reason: null }),
+        view === null ? null : { schemaVersion: 1, attemptId, actionId: view.actionId, operation: 'update', status: 'running', result: null, reason: null,
+          targetRelease: view.targetRelease }),
         write: async () => undefined },
       transport: upgradeTransport.transport, publicClientId: CLIENT_ID, runRuntimeUpdate: async () => 'applied', now: () => NOW + 4,
       schedule: async () => undefined,
     });
     const view = await restarted.view(attemptId);
-    expect(view).toEqual({ status: 'settled', stage: null, actionId: ACTION_ID, result: null, reason: null });
+    expect(view).toEqual({ status: 'settled', stage: null, actionId: ACTION_ID, result: null, reason: null, targetRelease: 'gateway-v0.1.35' });
     expect(await restarted.continue()).toBe('idle');
+    // No result was recorded, yet the object that answers runs the target: that proves the upload, so the page waits
+    // for Cloudflare to serve it. The dashboard is still told no result, and its action poll decides.
+    const answer = async (release: string) => v.parse(customerUpdateProgressSchema, await (await router(
+      { ...deps, updateView: (id) => restarted.view(id) }, release,
+    ).fetch(progressRequest(attemptId, RELEASE))).json());
+    expect(await answer('gateway-v0.1.35')).toEqual({ schemaVersion: 1, attemptId, status: 'settled', stage: null, result: null, reason: null,
+      redirectUrl: `${ORIGIN}/settings?runtimeAction=${ACTION_ID}`, applied: true, targetRelease: 'gateway-v0.1.35', servingRelease: RELEASE });
+    // An object that restarted for another reason still runs the installed release: nothing was applied, nothing to wait for.
+    expect((await answer(RELEASE)).applied).toBe(false);
+  });
+
+  it('names the release a rollback returns to as the target, through the same page and progress route', async () => {
+    const attempts = attemptPort();
+    const rollbackTransport = transport('workers-scripts.write');
+    let driver: CustomerRuntimeUpdateDriver | null = null;
+    const target = router(dependencies({
+      port: attempts.port, harness: rollbackTransport, applied: [], action: null,
+      runtimeAction: { status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT },
+      onUpdateDriver: (value) => { driver = value; },
+    }));
+    const { cookie, callback } = await authorize(target, runtimeStartRequest({ ...runtimeClaim, operation: 'rollback',
+      to: { release: 'gateway-v0.1.33', artifactSha256: `sha256:${'e'.repeat(64)}`, versionId: null },
+    }), 'workers-scripts.write');
+    const attemptId = attempts.current()?.attemptId ?? '';
+    expect(attempts.current()?.operation).toBe('rollback');
+    const landed = await target.fetch(new Request(callback, { headers: { cookie } }));
+    expect(new URL(landed.headers.get('location') ?? '').pathname).toBe(CUSTOMER_OPERATION_UPDATE_PATH);
+    if (driver === null) throw new Error('driver missing');
+    const running: CustomerRuntimeUpdateDriver = driver;
+    expect(await running.continue()).toBe('settled');
+    const progress = v.parse(customerUpdateProgressSchema, await (await target.fetch(progressRequest(attemptId, RELEASE))).json());
+    expect(progress).toEqual({ schemaVersion: 1, attemptId, status: 'settled', stage: null, result: 'applied', reason: null,
+      redirectUrl: `${ORIGIN}/settings?runtimeAction=${ACTION_ID}&runtimeActionResult=applied`,
+      applied: true, targetRelease: 'gateway-v0.1.33', servingRelease: RELEASE });
+  });
+
+  it('reports a failed update as not applied, so the page hands over at once', async () => {
+    const attempts = attemptPort();
+    const upgradeTransport = transport('workers-scripts.write');
+    let driver: CustomerRuntimeUpdateDriver | null = null;
+    const target = router(dependencies({
+      port: attempts.port, harness: upgradeTransport, applied: [], action: null, updateResult: 'failed',
+      runtimeAction: { status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT },
+      onUpdateDriver: (value) => { driver = value; },
+    }));
+    const { cookie, callback } = await authorize(target, runtimeStartRequest(), 'workers-scripts.write');
+    const attemptId = attempts.current()?.attemptId ?? '';
+    expect((await target.fetch(new Request(callback, { headers: { cookie } }))).status).toBe(303);
+    if (driver === null) throw new Error('driver missing');
+    const running: CustomerRuntimeUpdateDriver = driver;
+    expect(await running.continue()).toBe('settled');
+    const progress = v.parse(customerUpdateProgressSchema, await (await target.fetch(progressRequest(attemptId, RELEASE))).json());
+    expect(progress.applied).toBe(false);
+    expect(progress.redirectUrl).toBe(`${ORIGIN}/settings?runtimeAction=${ACTION_ID}&runtimeActionResult=failed&runtimeActionReason=update_failed`);
   });
 
   it('fails without applying when the grant does not reach the installed account', async () => {

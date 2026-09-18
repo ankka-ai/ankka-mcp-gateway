@@ -99,12 +99,13 @@ gateway's dependency removal and its update do the same on the management
 object behind `/__ankka/operation/teardown` and `/__ankka/operation/update`,
 each page polling a progress route that reports fixed labels and words only.
 Once the dependencies are gone the removal page hops to the installer with the
-signed receipt; once an update has uploaded, its page hands the browser to
-Settings, which follows the action through the existing handover alarm. An
-object restart between passes loses the grant and stops the attempt as
-recovery-required with an unconfirmed revocation; a fresh consent resumes from
-the durable step receipts. Workflows are not used for these paths: persisted
-step state would persist the grant.
+signed receipt; once an update has uploaded and Cloudflare serves the new
+version where the browser asks (see [updates](UPDATES.md)), its page hands the
+browser to Settings, which follows the action through the existing handover
+alarm. An object restart between passes loses the grant and stops the attempt
+as recovery-required with an unconfirmed revocation; a fresh consent resumes
+from the durable step receipts. Workflows are not used for these paths:
+persisted step state would persist the grant.
 
 In-flight fully configured plans remain readable for recovery. Newly started
 deployments use the configuration-free bootstrap path. Hosted session evidence
