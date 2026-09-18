@@ -13,6 +13,14 @@ test('failed stage and safe recovery evidence survive unavailable metrics', asyn
   assert.equal(result.metricsStatus, 'unavailable');
   assert.equal(JSON.stringify(result).includes('private-'), false);
 });
+test('a refused management secret write is reported at its own stage with the provider\'s status', async () => {
+  const result = await lifecycleFailureReport({ failureCode: 'management_token_write_rejected', httpStatus: 403, events: [
+    { stage: 'installation', status: 'passed' }, { stage: 'management_token', status: 'started' },
+  ] });
+  assert.equal(result.failedStage, 'management_token');
+  assert.equal(result.lastMutationStage, 'management_token');
+  assert.equal(result.httpStatus, 403);
+});
 test('metrics admit numeric aggregates only, never provider dimensions or errors', async () => {
   const result = await lifecycleFailureReport({ failureCode: 'bootstrap_not_completed', events: [
     { stage: 'installation', status: 'shell_installed', provision: {} },

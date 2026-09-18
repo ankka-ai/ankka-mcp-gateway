@@ -25,6 +25,24 @@ test('live config refuses production hosts, overlapping targets and identical re
   ]) assert.throws(() => validateLiveLifecycleConfig({ ...config, ...changed }));
 });
 
+test('the management token enters the live config by reference only, in the form the service secret already uses', () => {
+  const keychain = { keychain: { service: 'ankka-lifecycle-runner', account: 'management-token' } };
+  for (const managementToken of [keychain, { env: 'ANKKA_MANAGEMENT_TOKEN_VALUE' }]) {
+    assert.deepEqual(validateLiveLifecycleConfig({ ...config, managementToken }), { ...config, managementToken });
+  }
+  // Without the field the config is what it always was.
+  assert.equal(Object.hasOwn(validateLiveLifecycleConfig(config), 'managementToken'), false);
+  for (const managementToken of [
+    'literal-token-value-is-never-allowed-0123456789', null, {}, [], true,
+    { keychain: { service: 'ankka-lifecycle-runner' } }, { keychain: { account: 'management-token' } },
+    { keychain: { service: 'a name with spaces', account: 'management-token' } }, { keychain: { service: 'ankka', account: '' } },
+    { keychain: { ...keychain.keychain, value: 'literal-token-value-is-never-allowed-0123456789' } },
+    { ...keychain, value: 'literal-token-value-is-never-allowed-0123456789' }, { ...keychain, env: 'ANKKA_MANAGEMENT_TOKEN_VALUE' },
+    // Only the runner's own variables are named, never another tool's credential.
+    { env: 'CLOUDFLARE_API_TOKEN' }, { env: 'ankka_lowercase' }, { env: '' }, { file: '/private/token' },
+  ]) assert.throws(() => validateLiveLifecycleConfig({ ...config, managementToken }), { code: 'live_config_invalid' });
+});
+
 test('an uncertain bootstrap mutation is checkpointed once and never retried', async () => {
   const checkpoints = [], writes = [];
   const browser = {
@@ -283,9 +301,82 @@ test('the continuation waits for the team and sources views before the managemen
       throw new Error('stop_here');
     },
   };
-  await assert.rejects(continueLiveGatewayLifecycle({ config, browser, provider: {}, provision, publishB: async () => {}, checkpoint: async () => {}, notify: () => {} }), /stop_here/u);
+  const notices = [], events = [];
+  await assert.rejects(continueLiveGatewayLifecycle({ config, browser, provider: {}, provision, publishB: async () => {}, checkpoint: async (event) => events.push(event), notify: (notice) => notices.push(notice) }), /stop_here/u);
   assert.deepEqual(reads.slice(0, 4), ['/api/team', '/api/team', '/api/sources', '/api/sources']);
   assert.equal(reads.at(-1), '/api/sources/discover');
+  // Without the opt-in the operator is told to install the token in Cloudflare, exactly as before, and nothing is journaled for it.
+  assert.deepEqual(notices, ['Install the approved management token directly as the gateway secret in Cloudflare. This command never receives that token.']);
+  assert.equal(events.some((event) => event.stage === 'management_token'), false);
+});
+
+test('with the opt-in the runner writes the management secret once, behind a checkpoint, and still waits for the gateway to report it; the value reaches no event, notice or error', async () => {
+  const { continueLiveGatewayLifecycle } = await import('../tools/live-gateway-lifecycle.mjs');
+  const { managementTokenStep } = await import('../tools/live-gateway-command.mjs');
+  const { createLiveGatewayProvider } = await import('../tools/live-gateway-provider.mjs');
+  const installId = `acg-${'5'.repeat(24)}`;
+  const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.synthetic.workers.dev` };
+  const value = 'synthetic-management-token-value-0123456789';
+  const reference = { keychain: { service: 'ankka-lifecycle-runner', account: 'management-token' } };
+  const optedIn = { ...config, managementToken: reference };
+  // No opt-in, no step: the command hands the lifecycle nothing, and neither the store nor the provider is touched.
+  assert.equal(managementTokenStep({ config, provider: { installManagementSecret: async () => assert.fail('no write without the opt-in') }, credential: async () => assert.fail('no read without the opt-in') }), null);
+  const written = (status) => status === 'written' ? Response.json({ success: true }) : status === 'refused' ? new Response(`denied for ${value}`, { status: 403 }) : null;
+  for (const scenario of [
+    { configuredBefore: false, write: 'written', statuses: ['started', 'installed_by_runner'], writes: 1, ends: /stop_here/u },
+    // A gateway that already reports the credential (a resumed run, or a token installed by hand meanwhile) is left alone.
+    { configuredBefore: true, write: 'written', statuses: ['already_configured'], writes: 0, ends: /stop_here/u },
+    // A refused or unanswered write stops the run behind its checkpoint and is never sent again.
+    { configuredBefore: false, write: 'refused', statuses: ['started'], writes: 1, ends: { code: 'management_token_write_rejected', status: 403 } },
+    { configuredBefore: false, write: 'lost', statuses: ['started'], writes: 1, ends: { code: 'management_token_write_unknown' } },
+  ]) {
+    const order = [], notices = [], events = [], credentialReads = [], sent = [];
+    let configured = scenario.configuredBefore, teamReads = 0;
+    const provider = createLiveGatewayProvider({ config: optedIn, token: 'synthetic-operator-token', sleep: async () => assert.fail('a write is never retried'),
+      transport: async (url, options) => {
+        sent.push({ url, method: options.method, body: JSON.parse(options.body) }); order.push('secret_write');
+        if (scenario.write === 'lost') throw new Error(`socket hang up while sending ${value}`);
+        return written(scenario.write);
+      } });
+    const installManagementToken = managementTokenStep({ config: optedIn, provider, credential: async (asked) => { credentialReads.push(asked); return value; } });
+    const browser = {
+      waitFor: async (read, accepts) => { for (;;) { const result = await read(); if (accepts(result)) return result; } },
+      request: async (origin, path) => {
+        assert.equal(origin, config.managementOrigin);
+        order.push(path);
+        if (path === '/api/team') {
+          teamReads += 1;
+          // The secret reaches the edge gradually: the gateway reports it two reads after the write.
+          if (sent.length === 1 && scenario.write === 'written' && teamReads >= 3) configured = true;
+          return { schemaVersion: 1, managementCredentialConfigured: configured, editingEnabled: configured, revision: 0, members: [] };
+        }
+        throw new Error('stop_here');
+      },
+    };
+    let failure = null;
+    await assert.rejects(continueLiveGatewayLifecycle({ config: optedIn, browser, provider, provision, publishB: async () => {}, installManagementToken,
+      checkpoint: async (event) => { events.push(event); order.push(`${event.stage}:${event.status}`); }, notify: (notice) => notices.push(notice) }),
+    (error) => { failure = error; return true; });
+    if (scenario.ends instanceof RegExp) assert.match(failure.message, scenario.ends);
+    else for (const [key, expected] of Object.entries(scenario.ends)) assert.equal(failure[key], expected);
+    assert.deepEqual(events.filter((event) => event.stage === 'management_token'), scenario.statuses.map((status) => ({ stage: 'management_token', status })));
+    assert.equal(sent.length, scenario.writes);
+    assert.deepEqual(credentialReads, scenario.writes === 1 ? [reference] : []);
+    if (scenario.writes === 1) {
+      assert.deepEqual(sent[0], { url: `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/workers/scripts/${provision.workerName}/secrets`,
+        method: 'PUT', body: { name: 'ANKKA_MANAGEMENT_TOKEN', text: value, type: 'secret_text' } });
+      // The gateway's view is read first, the checkpoint precedes the write, and nothing else comes between them.
+      assert.deepEqual(order.slice(0, 3), ['/api/team', 'management_token:started', 'secret_write']);
+    }
+    if (scenario.write === 'written') {
+      // The wait for the gateway's own report still follows, and only then the sources view and the exercise.
+      const after = order.slice(order.indexOf(scenario.writes === 1 ? 'management_token:installed_by_runner' : 'management_token:already_configured') + 1);
+      assert.deepEqual(after, scenario.writes === 1 ? ['/api/team', '/api/team', '/api/sources'] : ['/api/team', '/api/sources']);
+    } else assert.equal(order.at(-1), 'secret_write');
+    // The operator is never told to install the token by hand, and the value is nowhere but the request body.
+    assert.equal(notices.some((notice) => notice.startsWith('Install the approved management token')), false);
+    for (const text of [JSON.stringify(events), JSON.stringify(notices), String(failure), failure.stack, JSON.stringify(failure)]) assert.equal(text.includes('synthetic-management'), false);
+  }
 });
 
 test('the finishing half publishes release B before it waits for the gateway to offer it', async () => {

@@ -25,9 +25,10 @@ This check uses HTTP and the cached Access identity; it opens no browser, needs 
 operator token, and creates no journal or cloud resources. It verifies the email
 returned by Cloudflare's same-origin `/cdn-cgi/access/get-identity` endpoint.
 It does not qualify the lifecycle or verify dashboard login. Use `--preflight`
-to additionally validate the signed release pair and read the target provider
-inventory with the operator token. These checks cannot prove that all future
-write permissions or consent steps will succeed.
+to additionally validate the signed release pair, read the target provider
+inventory with the operator token and, when the config opts into the automatic
+management-token step, check that its reference resolves. These checks cannot
+prove that all future write permissions or consent steps will succeed.
 
 After the Stage 1 consent the installer page hops to the new shell as soon as the
 installer's own readiness probe passes, spending the one-time handoff on that
@@ -148,6 +149,12 @@ The private config has these fields:
   `adminEmail`, and an empty `additionalAdminEmails` array.
 - `source`: `url` and `tool` for a synthetic, public HTTPS MCP endpoint with no
   authentication and one read-only tool. The command adds only that tool.
+- Optional `managementToken`: your opt-in to the automatic management-token
+  step described below. It names the token by reference only, in the form
+  `serviceAccess.secret` uses: `{ "keychain": { "service": "…", "account": "…" } }`
+  for a macOS keychain item, or `{ "env": "ANKKA_…" }` for an environment
+  variable. The config never holds the value. Without this field you install
+  the secret in Cloudflare when prompted, as before.
 - Optional `browserProfile`: an absolute, dedicated Chrome profile directory outside
   the checkout, mode `0700`. Its `.ankka-lifecycle-profile` marker contains
   `Dedicated Ankka lifecycle test browser` followed by a newline. Never select your
@@ -180,10 +187,33 @@ The private config has these fields:
   before the run starts; a session still provisioning stops the run.
 
 Provide the already-authorized operator token through `CLOUDFLARE_API_TOKEN`.
-It is used for isolated installer deployment and direct Cloudflare read-back.
-The command never sends it to the installer or gateway. The distinct management
-token is entered directly as the installed gateway's encrypted
-`ANKKA_MANAGEMENT_TOKEN` secret in Cloudflare. The command never receives it.
+It is used for isolated installer deployment and direct Cloudflare read-back,
+and with the opt-in below for one secret write. The command never sends it to
+the installer or gateway.
+
+Without `managementToken` in the config, the distinct management token is
+entered directly as the installed gateway's encrypted `ANKKA_MANAGEMENT_TOKEN`
+secret in Cloudflare, and the command never receives that token. With
+`managementToken`, the command installs the secret itself: once the
+installation has passed it reads the token from your credential store into
+memory and writes it as that secret of the installed Worker through
+Cloudflare's API (`PUT /accounts/{account}/workers/scripts/{worker}/secrets`)
+with the operator token, which needs Workers Scripts Write (Edit in the
+dashboard) on the account for it. The value goes to Cloudflare's API and
+nowhere else: never to the installer, the gateway's routes or the browser, and
+never into command arguments, output, error messages or the journal. The
+journal records `management_token: started` before the write and
+`management_token: installed_by_runner` after it; `--status` shows the outcome
+as `managementToken`. The gateway's own view is read first, and a gateway that
+already reports the credential (a resumed run, or a token you installed by hand
+meanwhile) is recorded as `already_configured` and not written again. A write
+Cloudflare refuses stops the run as `management_token_write_rejected`, and one
+whose answer never arrives as `management_token_write_unknown`; neither is
+retried, and `--resume-installed` continues from the gateway's view. A
+reference that does not resolve stops a fresh run, and `--preflight`, as
+`credential_unavailable` before anything is deployed. Either way the run then
+waits until the gateway itself reports the credential and token-managed mode.
+Removing the gateway does not revoke the token.
 
 The command opens its own Chrome window, temporary unless a dedicated profile is
 configured. Review the real Cloudflare consent pages there. Access login through
@@ -195,7 +225,8 @@ disable browser security or count that check as a successful live lifecycle.
 By default, the command uses a separate test browser. Only the explicit
 `browserConnection` option attaches to your existing Chrome session. Neither
 mode exports cookies or saves browser traces. A configured profile retains login
-sessions locally; protect it and remove it when qualification is finished. When prompted, install and
+sessions locally; protect it and remove it when qualification is finished. When prompted (the
+command prompts only without the `managementToken` opt-in), install and
 activate the management secret directly in Cloudflare. No consent is expected
 for the synthetic source installation or the grant and removal of
 `qualification@example.com`. An OAuth handoff for those operations fails validation.

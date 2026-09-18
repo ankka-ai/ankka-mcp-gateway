@@ -115,6 +115,54 @@ test('the management domain is ready only when it is a custom domain of the inst
   assert.equal(await provider([{ hostname: 'manage.example.com', service: provision.workerName }]).managementDomainReady(provision), true);
 });
 
+test('the opt-in management secret is written once to the exact recorded Worker, and its value never leaves the request body', async () => {
+  const installId = `acg-${'f'.repeat(24)}`;
+  const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.tenant.workers.dev/` };
+  const value = 'synthetic-management-token-value-0123456789';
+  for (const status of [200, 201]) {
+    const calls = [];
+    const provider = createLiveGatewayProvider({ config, token: 'synthetic-test-token', sleep: async () => assert.fail('a write is never retried'),
+      transport: async (url, options) => { calls.push({ url, options }); return Response.json({ success: true, result: { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' } }, { status }); } });
+    assert.equal(await provider.installManagementSecret(provision, value), undefined);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, `https://api.cloudflare.com/client/v4/accounts/${accountId}/workers/scripts/${provision.workerName}/secrets`);
+    assert.equal(calls[0].options.method, 'PUT');
+    assert.equal(calls[0].options.redirect, 'error');
+    assert.deepEqual(calls[0].options.headers, { authorization: 'Bearer synthetic-test-token', accept: 'application/json', 'content-type': 'application/json' });
+    assert.deepEqual(JSON.parse(calls[0].options.body), { name: 'ANKKA_MANAGEMENT_TOKEN', text: value, type: 'secret_text' });
+    assert.equal(calls[0].url.includes(value), false);
+    assert.equal(JSON.stringify(calls[0].options.headers).includes(value), false);
+  }
+  // A refusal, even one that echoes the value, and an answer that never arrives stop with a fixed code and without
+  // the value, the provider's body or the transport's error; neither is sent again, although a read would be.
+  for (const [answer, expected] of [
+    [async () => new Response(`denied for ${value}`, { status: 403 }), { code: 'management_token_write_rejected', status: 403 }],
+    [async () => new Response(null, { status: 404 }), { code: 'management_token_write_rejected', status: 404 }],
+    [async () => { throw new Error(`socket hang up while sending ${value}`); }, { code: 'management_token_write_unknown', status: null }],
+  ]) {
+    let sent = 0;
+    const provider = createLiveGatewayProvider({ config, token: 'synthetic-test-token', sleep: async () => assert.fail('a write is never retried'),
+      transport: async (url, options) => { sent += 1; return answer(url, options); } });
+    await assert.rejects(provider.installManagementSecret(provision, value), (error) => {
+      assert.equal(error.code, expected.code);
+      assert.equal(error.status, expected.status);
+      assert.equal(error.cause, undefined);
+      for (const text of [String(error), error.stack, JSON.stringify(error), error.message]) assert.equal(text.includes('synthetic-management'), false);
+      return true;
+    });
+    assert.equal(sent, 1);
+  }
+  // Nothing is sent for a Worker that is not the recorded installation's, or without a usable value.
+  let requests = 0;
+  const idle = createLiveGatewayProvider({ config, token: 'synthetic-test-token', transport: async () => { requests += 1; return Response.json({}); } });
+  await assert.rejects(idle.installManagementSecret({ ...provision, workerName: 'foreign-worker' }, value), { code: 'bootstrap_identity_invalid' });
+  await assert.rejects(idle.installManagementSecret({ ...provision, workerName: `${provision.workerName}/../other` }, value), { code: 'bootstrap_identity_invalid' });
+  for (const unusable of [undefined, null, '', 'short', 'x'.repeat(1025), { keychain: { service: 'a', account: 'b' } }]) {
+    await assert.rejects(idle.installManagementSecret(provision, unusable), { code: 'management_token_unavailable' });
+  }
+  assert.equal(requests, 0);
+});
+
 test('a transient transport failure on a read is retried a bounded number of times; a rejection by status is not', async () => {
   const { createLiveGatewayProvider } = await import('../tools/live-gateway-provider.mjs');
   const answer = (url) => new URL(url).pathname === `/client/v4/zones/${zoneId}` ? response({ name: 'example.com', account: { id: accountId } }) : response([]);

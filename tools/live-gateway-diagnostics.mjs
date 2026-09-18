@@ -2,9 +2,9 @@ import * as v from 'valibot';
 import { NAVIGATION_FAILURES } from './live-gateway-origin.mjs';
 // Only fixed labels and numeric aggregates leave this boundary. Never emit raw
 // provider errors, request URLs, headers, cookies, bodies, or resource IDs.
-const stages = new Set(['preflight', 'access', 'installer_deployment', 'installation', 'source_draft', 'source_apply',
+const stages = new Set(['preflight', 'access', 'installer_deployment', 'installation', 'management_token', 'source_draft', 'source_apply',
   'team_grant', 'team_remove', 'inventory', 'update', 'interrupted_removal', 'dependency_removal', 'root_removal', 'recovery']);
-const mutations = new Set(['installer_deployment', 'installation', 'source_draft', 'source_apply', 'team_grant', 'team_remove', 'update', 'dependency_removal', 'root_removal']);
+const mutations = new Set(['installer_deployment', 'installation', 'management_token', 'source_draft', 'source_apply', 'team_grant', 'team_remove', 'update', 'dependency_removal', 'root_removal']);
 const numeric = (value) => v.is(v.pipe(v.number(), v.finite(), v.minValue(0)), value) ? value : null;
 export function sanitizeRuntimeMetrics(rows) {
   if (!Array.isArray(rows) || rows.length > 100) return null;

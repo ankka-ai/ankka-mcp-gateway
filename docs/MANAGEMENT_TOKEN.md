@@ -16,9 +16,11 @@ gateway never returns it to the dashboard or records it in Durable Object state.
 For disposable development gateways, the [lifecycle runner](AGENT_LIFECYCLE.md)
 is a third operator-controlled provisioning path: it reads the operator's
 token from the operator's credential store and writes it as the Worker
-secret with the operator's own deployment authority. The value still never
-passes through Ankka-hosted services, and removing the gateway does not
-revoke it.
+secret with the operator's own deployment authority. The attended
+[browser runner](LIVE_LIFECYCLE.md) does the same only when its private config
+opts in with `managementToken`; without that field its operator installs the
+secret in Cloudflare. The value still never passes through Ankka-hosted
+services, and removing the gateway does not revoke it.
 
 The token needs the Access application/policy and MCP Portal permissions used
 by the fixed operations below. It must not include Worker deployment, DNS,
