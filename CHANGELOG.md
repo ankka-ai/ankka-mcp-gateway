@@ -4,6 +4,77 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Pick the tools of a sign-in source from its real list instead of typing exact names. A source whose endpoint
+  answers discovery with a sign-in challenge cannot list its tools before it is connected, so the form asked for
+  typed names, and a typo surfaced only after installation and connection. The form now says why the list is empty
+  and what happens next, and saves the draft with no tools; the free-text box is gone, for catalog presets too. The
+  gateway installs such a source with nothing enabled: no tool override on its server, a deny-Everyone policy, no
+  Portal mapping. After the operator has connected it in Cloudflare, the paused installation lists the tools
+  Cloudflare synced from it as the checkbox list public sources get (catalog recommendations that exist preselected,
+  nothing preselected from a hint), and the choice is saved as a revision-bound step of its own that re-binds the
+  paused installation atomically; resuming then attaches exactly the chosen tools. Cloudflare does not document
+  what a synced tool record carries beyond its name, so a description or a hint is shown only when the record has
+  one, and the page says when a list has none. With nothing chosen the installation stays paused with a fixed
+  reason and is never attached. An installation already paused with typed names resumes as before, and a typed name
+  can be corrected from the real list. An installation that waits for its operator is no longer shown as "The
+  gateway request failed". Older releases cannot read a source saved without tools, so saving one makes rollback
+  below this release unavailable, as installing any source does, and **Save draft** carries the rollback sentence
+  while that is a real decision; every other draft still restricts nothing. Public sources are unchanged.
+- Set up the gateway's management token inside setup. A freshly installed gateway could not add a source or manage
+  team access until an administrator had created an account API token by hand and added it as a Worker secret in
+  Cloudflare, and nothing in the installer said so. The setup page your own Worker serves before the second approval
+  now has a **Management token** step: a link that opens Cloudflare's token page with **Access: Apps and Policies
+  Edit**, **MCP Portals Edit** and a name containing your management hostname filled in (verified against the
+  dashboard on 2026-09-19), one paste field, and an explicit control to continue without a token. The page says why
+  the token is needed, that creating it takes a Super Administrator or Administrator, and that it can edit every
+  Access policy in the account. The token never passes through anything Ankka hosts: it goes from your browser to
+  your own Worker, which accepts only Cloudflare's two account-token forms, keeps it only in the owning Durable
+  Object's memory beside the install approval, and saves it as the `ANKKA_MANAGEMENT_TOKEN` secret binding with the
+  final runtime upload the install already makes, so no Cloudflare API call is added to any pass. It is never written
+  to Durable Object storage, the journal, a receipt, a log line, an error, a URL or a response. If Cloudflare
+  restarts the object first, the value is lost and the install still completes without it; the install status route
+  and the page that follows the install say so with one fixed word (`held`, `installed`, `skipped` or `dropped`).
+  The exact read-back of the final version accepts the secret binding exactly when the install supplied it. Adding
+  or rotating the token on an installed gateway is unchanged for now: directly in Cloudflare.
+
+- Show the rollback warning on Sources only when it is a real decision, in plain words. The permanent banner
+  ("once source provisioning starts, rollback below this runtime release is unavailable…") is gone. Only when the
+  gateway was updated, its earlier release can still be restored, and starting a source installation would end that,
+  the control that starts or resumes the installation says "After this you can no longer roll back to `<release>`."
+  The gateway reports that release as `installEndsRollbackTo` in the `/api/sources` answer; the dashboard never
+  computes it. `/api/update` no longer offers a rollback that preparation then refuses: once the recorded minimum
+  runtime excludes the retained release it answers
+  `rollback: { available: false, reason: "minimum_runtime_release", release }`, and Settings says why that release
+  can no longer be restored and shows no rollback button. A removal refused for unfinished work now asks to finish
+  or cancel that work, or to wait for an open removal authorization to expire, instead of naming a receipt. The
+  minimum-runtime rule itself is unchanged.
+
+- Land on the new release's dashboard after an update or a rollback, without a manual reload. Cloudflare keeps
+  serving the previous version, Worker and management assets alike, at an edge location for a short while after the
+  upload, so the update page handed the browser to the previous release's dashboard. The page now waits, as its own
+  step, until the release that serves its progress polls is the attempt's target on two answers in a row, for at most
+  sixty seconds, after which it hands over anyway and says that a reload may be needed. The serving release is the
+  stateless entrypoint's, which answers where the browser asks; the one management object restarts on the new version
+  at once and would confirm too early. An attempt that was not applied hands over at once, as before. Both releases
+  must carry the step: an update from an earlier release, or a rollback to one, still hands over at once.
+
+- Give an interrupted removal a way back. Once a removal has begun deleting the
+  gateway's connected resources, the dashboard shows **Removal in progress** on
+  every page, and in place of the load failure screen, with one action that
+  authorizes the removal again; the gateway resumes from its saved progress and
+  signs a fresh receipt. The dashboard reads the state from the recorded
+  removal action and now accepts its `gateway_removed` status. The installer's
+  removal page no longer tells you to reload when no reload can help: an expired
+  receipt names the gateway whose management page signs a new one, and an
+  unverifiable receipt or a browser without an open removal says the same
+  without a hostname. Failures a reload can get past keep the reload wording.
+
+- Fix the dashboard refusing to load on gateway-v0.1.64 ("The gateway response could not be verified"). The gateway's
+  status gained `serviceIdentity`, and source and Team actions gained `actorKind`, without the dashboard's strict
+  response schemas learning them, so every status answer was rejected. The dashboard now accepts all three, and the
+  dashboard's real client runs against the real gateway Worker in the core suite, so a field added on one side only
+  fails there instead of in a customer's browser.
+
 - Update the transitive `sharp` dependency from 0.35.2 to 0.35.4 to resolve
   the libheif advisories GHSA-g89c-p67h-r497 and GHSA-2jg2-4ch7-h545 reported
   as GHSA-rgj7-g3m4-5g8c. Miniflare pins the vulnerable version exactly, so

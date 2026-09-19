@@ -1,9 +1,10 @@
-import { render, screen, waitFor } from '@testing-library/react'
-import { RouterProvider } from '@tanstack/react-router'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { createMemoryHistory, createRouter, RouterProvider } from '@tanstack/react-router'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { GatewayAdminApi, GatewayStatus, ManagedSources, RuntimeUpdate } from '../api'
 import { GatewayProvider } from '../GatewayContext'
-import { router } from '../router'
+import { router, routeTree } from '../router'
+import { SettingsPage } from './SettingsPage'
 
 const status: GatewayStatus = {
   schemaVersion: 1,
@@ -44,7 +45,7 @@ function api(): GatewayAdminApi {
     saveSourceDraft: vi.fn(),
     prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(),
-    cancelSourceAction: vi.fn(),
+    cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(),
     prepareTeardownAction: vi.fn(),
@@ -73,5 +74,50 @@ describe('SettingsPage danger zone', () => {
     await waitFor(() => expect(section).toHaveFocus())
     expect(scrollIntoView).toHaveBeenCalledWith({ behavior: 'smooth', block: 'center' })
     expect(screen.getByText(/Opening the plan does not change your gateway/u)).toBeInTheDocument()
+  })
+})
+
+describe('SettingsPage rollback', () => {
+  beforeEach(cleanup)
+  afterEach(() => { cleanup(); window.history.replaceState(null, '', '/') })
+  const recorded = { release: 'gateway-v0.9.9', artifactSha256: `sha256:${'b'.repeat(64)}` }
+  const restorable: RuntimeUpdate = { ...update, rollback: { available: true, ...recorded, dataRollback: false } }
+  const excluded: RuntimeUpdate = { ...update, rollback: { available: false, reason: 'minimum_runtime_release', release: recorded.release } }
+
+  it('offers the rollback the gateway reports as available', async () => {
+    const client = api()
+    client.getUpdate = vi.fn(async () => restorable)
+    render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
+    expect(await screen.findByRole('button', { name: 'Rollback' })).toBeEnabled()
+    expect(screen.queryByText(/no longer roll back/u)).not.toBeInTheDocument()
+  })
+
+  it('offers no rollback button and says why once the recorded release can no longer be restored', async () => {
+    const client = api()
+    client.getUpdate = vi.fn(async () => excluded)
+    render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
+    expect(await screen.findByText('You can no longer roll back to gateway-v0.9.9. A source was installed or Team access was changed after the update, and the older version cannot work with those changes.')).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Rollback' })).not.toBeInTheDocument()
+    expect(client.prepareRuntimeAction).not.toHaveBeenCalled()
+  })
+
+  it('says nothing about rollback when no earlier release is recorded', async () => {
+    render(<GatewayProvider api={api()}><SettingsPage /></GatewayProvider>)
+    expect(await screen.findByText('Software updates')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Rollback' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/roll back/u)).not.toBeInTheDocument()
+  })
+
+  it('reads the update answer again when opened after another page, so an installation that ended the rollback shows', async () => {
+    const client = api()
+    client.getUpdate = vi.fn<GatewayAdminApi['getUpdate']>().mockResolvedValueOnce(restorable).mockResolvedValue(excluded)
+    const pages = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: ['/sources'] }) })
+    render(<GatewayProvider api={client}><RouterProvider router={pages} /></GatewayProvider>)
+    await screen.findByRole('heading', { name: 'Sources', level: 1 })
+    await waitFor(() => expect(client.getUpdate).toHaveBeenCalledTimes(1))
+    await act(() => pages.navigate({ to: '/settings' }))
+    expect(await screen.findByText(/You can no longer roll back to gateway-v0\.9\.9\./u)).toBeVisible()
+    expect(screen.queryByRole('button', { name: 'Rollback' })).not.toBeInTheDocument()
+    expect(client.getUpdate).toHaveBeenCalledTimes(2)
   })
 })

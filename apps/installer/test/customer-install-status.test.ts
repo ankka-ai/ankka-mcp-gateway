@@ -1,7 +1,7 @@
 import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
 
-import { customerInstallStatusSchema } from '../src/customer-install-status';
+import { customerInstallStatusSchema, customerManagementCredentialWordSchema } from '../src/customer-install-status';
 
 // The exact answer a deployed gateway-v0.1.23 shell gave on 2026-09-04. The
 // hosted readiness check rejected it as `readiness_schema_invalid` because
@@ -39,5 +39,21 @@ describe('customer install status schema', () => {
     ]) {
       expect(v.is(customerInstallStatusSchema, broken)).toBe(false);
     }
+  });
+
+  it('carries at most one fixed word about the management token step, and never anything else under that key', () => {
+    // A freshly deployed shell has no choice to report: its real answer above has no such key and parses unchanged.
+    expect(v.parse(customerInstallStatusSchema, LIVE_ANSWER)).not.toHaveProperty('managementCredential');
+    for (const word of ['held', 'installed', 'skipped', 'dropped'] as const) {
+      const answer = { ...LIVE_ANSWER, status: 'CONVERGING', managementCredential: word };
+      expect(v.parse(customerInstallStatusSchema, answer)).toEqual(answer);
+      expect(v.parse(customerManagementCredentialWordSchema, word)).toBe(word);
+    }
+    for (const broken of [
+      'Held', 'configured', '', `cfat_${'a'.repeat(48)}`, null, true, 1, ['held'], { state: 'held' },
+    ]) {
+      expect(v.is(customerInstallStatusSchema, { ...LIVE_ANSWER, managementCredential: broken })).toBe(false);
+    }
+    expect(v.is(customerInstallStatusSchema, { ...LIVE_ANSWER, managementToken: 'held' })).toBe(false);
   });
 });

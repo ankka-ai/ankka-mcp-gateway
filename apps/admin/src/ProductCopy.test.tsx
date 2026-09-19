@@ -48,6 +48,8 @@ describe('gateway product language', () => {
       expect(screen.getByRole('heading', { name: 'MCP Gateway' })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Copy MCP URL' })).toBeInTheDocument()
       expect(screen.queryByText('Your account stays in control')).not.toBeInTheDocument()
+      // No standing warning in our own terms next to the product's primary action.
+      expect(container.textContent).not.toMatch(/Before installing|source provisioning|runtime release|recover any source action/iu)
     }
     if (path === '/settings') {
       expect(screen.getByText('Preserves your configuration and Durable Object state.')).toBeInTheDocument()

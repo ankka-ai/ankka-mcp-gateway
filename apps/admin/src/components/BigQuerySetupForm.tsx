@@ -1,7 +1,7 @@
 import { type FormEvent, useState } from 'react'
 import { Input } from '@cloudflare/kumo'
 import { ArrowRight } from '@phosphor-icons/react'
-import { type BigQuerySetupInput, validHandoffUrl } from '../api'
+import { type BigQuerySetupInput, rollbackEndsMessage, validHandoffUrl } from '../api'
 import { useGateway } from '../GatewayContext'
 import { Button } from './Button'
 
@@ -81,6 +81,7 @@ export function BigQuerySetupForm({ disabled }: { disabled: boolean }) {
           <p className="mt-3 text-xs leading-5 text-kumo-subtle">After Cloudflare approval, upload the key directly to your gateway. It is stored as a Worker secret in your Cloudflare account. Your team gets three tools: read-only SQL, table details, and table listing. Nobody is assigned access until you grant it.</p>
           {error ? <p role="alert" className="field-error">{error}</p> : null}
           <Button type="submit" variant="primary" className="pressable mt-5" loading={submitting} disabled={!confirmed}>Continue to Cloudflare <ArrowRight size={16} /></Button>
+          {sources?.installEndsRollbackTo ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{rollbackEndsMessage(sources.installEndsRollbackTo)}</p> : null}
         </fieldset>
       </form>
     </section>

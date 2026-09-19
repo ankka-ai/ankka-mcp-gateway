@@ -47,12 +47,21 @@ Revocation is a provider operation and may be unconfirmed. Discarding a local
 copy does not prove provider-side revocation.
 
 Routine source installation and Team policy management use the optional
-`ANKKA_MANAGEMENT_TOKEN` secret in the customer's Worker. The administrator
-creates this account-owned credential and enters it directly in Cloudflare;
-Ankka-hosted infrastructure never receives it. It is used only with fixed
-Cloudflare API operations and is never persisted in Durable Object records or
-returned to the browser. Deployment, updates, DNS, teardown and upstream
-credentials retain separate authority. See [Management token](MANAGEMENT_TOKEN.md).
+`ANKKA_MANAGEMENT_TOKEN` secret in the customer's Worker. An administrator of
+the Cloudflare account creates this account-owned credential, and it never
+passes through anything Ankka hosts. It is entered either into the customer's
+own gateway, on the setup page that Worker serves before the second approval,
+or directly in Cloudflare on an installed gateway. During setup the value is
+held like the install grant: only in the owning Durable Object's memory,
+until the final runtime upload the install already makes writes it as a
+secret binding. It is never written to Durable Object storage, the install
+journal, a receipt, a log line, an error, a URL, or any response; an object
+restart loses it, and the install then completes without it. It is used only
+with fixed Cloudflare API operations and is never returned to the browser.
+Cloudflare cannot scope it to the gateway's own resources: it can edit every
+Access policy in the account, and the setup page says so before asking for
+it. Deployment, updates, DNS, teardown and upstream credentials retain
+separate authority. See [Management token](MANAGEMENT_TOKEN.md).
 
 An operator-controlled external runner executes the same fixed lifecycle
 operations for disposable development gateways with an operator-managed
@@ -123,7 +132,9 @@ foreign and stops removal.
 
 The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
-store Cloudflare OAuth grants or upstream tokens.
+store Cloudflare OAuth grants, the management credential, or upstream tokens.
+Of the management credential step of setup it stores one fixed word: whether
+a token was provided or the step was skipped.
 
 The Team page reads receipt-owned policies live and records an observation time.
 A changed live audience advances the local revision before a new proposal can
@@ -141,6 +152,17 @@ implicitly. Upstream operator authentication and a later Team grant are separate
 steps. Existing receipt audiences remain immutable; only the exact historical
 initial policy and the new empty-audience profile are recognized. Old prepared
 source actions cannot silently become new-profile authorizations.
+
+A source that needs sign-in is created with no tools: no tool override on its
+server, the same deny-Everyone policy, and no Portal mapping. Its administrator
+chooses from the list Cloudflare synced after the operator connection, as a
+revision-bound step that re-binds the paused installation's source hash and
+server receipt atomically and is refused in every state other than the exact
+connection pause. The allowlist is enforced where it is for every source: the
+Portal mapping, deny-by-default, with exactly the chosen names enabled and
+proven by read-back. Nothing is attached while nothing is chosen. The synced
+list is an untrusted review aid like any source-authored text, bounded and
+never a provider body.
 
 Legacy Team authorization and callbacks are refused by the installer before
 OAuth code exchange. The relay and new Worker also reject the old Team grant

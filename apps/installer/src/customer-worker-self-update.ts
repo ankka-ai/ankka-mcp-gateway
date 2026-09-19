@@ -11,6 +11,7 @@ import {
   OPTIONAL_PLAIN_TEXT_BINDINGS,
   type GatewayWorkerPlainTextBindings,
 } from './cloudflare-worker-direct-upload';
+import { CUSTOMER_MANAGEMENT_BINDING, parseCustomerManagementCredential } from './customer-management-credential';
 import { readBoundedText, withDeadline } from './http';
 import { decodeWorkerModuleBase64 } from './worker-module-base64';
 
@@ -101,6 +102,13 @@ export interface CustomerWorkerFinalRuntimeInspectionInput {
   readonly expectedWorkerId: string;
   readonly finalRuntimeSha256: string;
   readonly bindings: GatewayWorkerPlainTextBindings;
+  /**
+   * True exactly when the final version carries the customer's management
+   * secret: the install supplied one, or the recovering runtime is itself
+   * bound to one. The read-back then requires `ANKKA_MANAGEMENT_TOKEN` as a
+   * `secret_text` binding without a readable value, and refuses it otherwise.
+   */
+  readonly managementCredentialBound?: boolean | undefined;
   readonly transport: CustomerCloudflareTransport;
   readonly wait?: (milliseconds: number) => Promise<void>;
 }
@@ -108,6 +116,12 @@ export interface CustomerWorkerFinalRuntimeInspectionInput {
 export interface CustomerWorkerSelfUpdateInput
   extends CustomerWorkerFinalRuntimeInspectionInput {
   readonly finalRuntimeSource: string;
+  /**
+   * The customer's management credential from the caller's memory. The upload
+   * writes it once as the `ANKKA_MANAGEMENT_TOKEN` secret binding; it reaches
+   * no error, no return value and no other request.
+   */
+  readonly managementCredential?: string | undefined;
 }
 
 export interface CustomerWorkerActiveRelease {
@@ -150,6 +164,12 @@ function validateInspection(input: CustomerWorkerFinalRuntimeInspectionInput): v
 
 async function validateUpdate(input: CustomerWorkerSelfUpdateInput): Promise<void> {
   validateInspection(input);
+  // The upload and the read-back that follows must agree on the secret binding.
+  const credential = input.managementCredential;
+  if ((credential !== undefined) !== (input.managementCredentialBound === true) ||
+      (credential !== undefined && parseCustomerManagementCredential(credential) === null)) {
+    fail('invalid', 'validate', 'not_sent');
+  }
   const sourceBytes = new TextEncoder().encode(input.finalRuntimeSource);
   if (sourceBytes.byteLength < 1 || sourceBytes.byteLength > MAX_SOURCE_BYTES ||
       await sha256BytesHex(sourceBytes) !== input.finalRuntimeSha256) {
@@ -250,6 +270,7 @@ async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
 function exactBindings(
   values: readonly BoundaryValue[],
   expected: GatewayWorkerPlainTextBindings,
+  managementCredentialBound: boolean,
 ): boolean {
   const bindings = new Map<string, BoundaryObject>();
   for (const value of values) {
@@ -259,7 +280,9 @@ function exactBindings(
         bindings.has(named.output.name)) return false;
     bindings.set(named.output.name, object.output);
   }
-  if (bindings.size !== Object.keys(expected).length + INHERITED_BINDINGS.length) return false;
+  const exactCount = Object.keys(expected).length + INHERITED_BINDINGS.length +
+    (managementCredentialBound ? 1 : 0);
+  if (bindings.size !== exactCount) return false;
   const admin = bindings.get('ADMIN_STATE');
   const assets = bindings.get('ASSETS');
   const ownershipKey = bindings.get('ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY');
@@ -267,6 +290,14 @@ function exactBindings(
       admin.class_name !== 'AdminState' || assets?.type !== 'assets' || assets.name !== 'ASSETS' ||
       ownershipKey?.type !== 'secret_text' || ownershipKey.name !== 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' ||
       bindings.has('ANKKA_BOOTSTRAP_NONCE')) return false;
+  // The customer's management secret is part of the boundary exactly when the
+  // install supplied one: present as a secret the provider never reads back,
+  // and absent, under any type, in every other install.
+  const management = bindings.get(CUSTOMER_MANAGEMENT_BINDING);
+  if (managementCredentialBound
+    ? management?.type !== 'secret_text' || management.name !== CUSTOMER_MANAGEMENT_BINDING ||
+      Object.hasOwn(management, 'text')
+    : management !== undefined) return false;
   for (const [name, text] of Object.entries(expected)) {
     const binding = bindings.get(name);
     if (binding?.type !== 'plain_text' || binding.name !== name || binding.text !== text) return false;
@@ -286,7 +317,8 @@ async function exactFinalVersion(
   const parsed = v.safeParse(versionSchema, value);
   if (!parsed.success || parsed.output.id !== versionId ||
       (parsed.output.compatibility_flags ?? []).length !== 0 ||
-      parsed.output.modules.length !== 1 || !exactBindings(parsed.output.bindings, input.bindings)) return false;
+      parsed.output.modules.length !== 1 ||
+      !exactBindings(parsed.output.bindings, input.bindings, input.managementCredentialBound === true)) return false;
   const module = parsed.output.modules[0];
   if (!module || module.name !== MAIN_MODULE ||
       module.content_type !== 'application/javascript+module') return false;
@@ -330,12 +362,19 @@ function uploadMetadata(input: CustomerWorkerSelfUpdateInput): BoundaryObject {
     type: 'plain_text' as const,
     text,
   }));
+  // The one place the customer's management credential is written: a secret
+  // binding of the upload the install already makes, so it costs no call.
+  const management = input.managementCredential === undefined ? [] : [Object.freeze({
+    name: CUSTOMER_MANAGEMENT_BINDING,
+    type: 'secret_text' as const,
+    text: input.managementCredential,
+  })];
   return Object.freeze({
     annotations: Object.freeze({
       'workers/message': `Ankka final runtime ${input.finalRuntimeSha256.slice(0, 16)}`,
       'workers/tag': `ankka-final-${input.finalRuntimeSha256.slice(0, 64)}`,
     }),
-    bindings: Object.freeze([...inherited, ...plain].sort((left, right) =>
+    bindings: Object.freeze([...inherited, ...plain, ...management].sort((left, right) =>
       left.name < right.name ? -1 : left.name > right.name ? 1 : 0)),
     compatibility_date: COMPATIBILITY_DATE,
     compatibility_flags: Object.freeze([]),
@@ -444,8 +483,9 @@ export async function uploadCustomerWorkerFinalRuntime(input: CustomerWorkerSelf
 
 /**
  * Publish the final runtime while inheriting only the exact customer-owned DO,
- * assets, and ownership-key secret from one verified active version, and
- * read the activated release back exactly.
+ * assets, and ownership-key secret from one verified active version, add the
+ * customer's management secret when the install supplied one, and read the
+ * activated release back exactly.
  */
 export async function publishCustomerWorkerFinalRuntime(input: CustomerWorkerSelfUpdateInput & {
   readonly previousVersionId: string;

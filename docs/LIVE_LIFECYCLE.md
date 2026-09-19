@@ -25,9 +25,10 @@ This check uses HTTP and the cached Access identity; it opens no browser, needs 
 operator token, and creates no journal or cloud resources. It verifies the email
 returned by Cloudflare's same-origin `/cdn-cgi/access/get-identity` endpoint.
 It does not qualify the lifecycle or verify dashboard login. Use `--preflight`
-to additionally validate the signed release pair and read the target provider
-inventory with the operator token. These checks cannot prove that all future
-write permissions or consent steps will succeed.
+to additionally validate the signed release pair, read the target provider
+inventory with the operator token and, when the config opts into the automatic
+management-token step, check that its reference resolves. These checks cannot
+prove that all future write permissions or consent steps will succeed.
 
 After the Stage 1 consent the installer page hops to the new shell as soon as the
 installer's own readiness probe passes, spending the one-time handoff on that
@@ -148,6 +149,12 @@ The private config has these fields:
   `adminEmail`, and an empty `additionalAdminEmails` array.
 - `source`: `url` and `tool` for a synthetic, public HTTPS MCP endpoint with no
   authentication and one read-only tool. The command adds only that tool.
+- Optional `managementToken`: your opt-in to the automatic management-token
+  step described below. It names the token by reference only, in the form
+  `serviceAccess.secret` uses: `{ "keychain": { "service": "…", "account": "…" } }`
+  for a macOS keychain item, or `{ "env": "ANKKA_…" }` for an environment
+  variable. The config never holds the value. Without this field you install
+  the secret in Cloudflare when prompted, as before.
 - Optional `browserProfile`: an absolute, dedicated Chrome profile directory outside
   the checkout, mode `0700`. Its `.ankka-lifecycle-profile` marker contains
   `Dedicated Ankka lifecycle test browser` followed by a newline. Never select your
@@ -180,10 +187,33 @@ The private config has these fields:
   before the run starts; a session still provisioning stops the run.
 
 Provide the already-authorized operator token through `CLOUDFLARE_API_TOKEN`.
-It is used for isolated installer deployment and direct Cloudflare read-back.
-The command never sends it to the installer or gateway. The distinct management
-token is entered directly as the installed gateway's encrypted
-`ANKKA_MANAGEMENT_TOKEN` secret in Cloudflare. The command never receives it.
+It is used for isolated installer deployment and direct Cloudflare read-back,
+and with the opt-in below for one secret write. The command never sends it to
+the installer or gateway.
+
+Without `managementToken` in the config, the distinct management token is
+entered directly as the installed gateway's encrypted `ANKKA_MANAGEMENT_TOKEN`
+secret in Cloudflare, and the command never receives that token. With
+`managementToken`, the command installs the secret itself: once the
+installation has passed it reads the token from your credential store into
+memory and writes it as that secret of the installed Worker through
+Cloudflare's API (`PUT /accounts/{account}/workers/scripts/{worker}/secrets`)
+with the operator token, which needs Workers Scripts Write (Edit in the
+dashboard) on the account for it. The value goes to Cloudflare's API and
+nowhere else: never to the installer, the gateway's routes or the browser, and
+never into command arguments, output, error messages or the journal. The
+journal records `management_token: started` before the write and
+`management_token: installed_by_runner` after it; `--status` shows the outcome
+as `managementToken`. The gateway's own view is read first, and a gateway that
+already reports the credential (a resumed run, or a token you installed by hand
+meanwhile) is recorded as `already_configured` and not written again. A write
+Cloudflare refuses stops the run as `management_token_write_rejected`, and one
+whose answer never arrives as `management_token_write_unknown`; neither is
+retried, and `--resume-installed` continues from the gateway's view. A
+reference that does not resolve stops a fresh run, and `--preflight`, as
+`credential_unavailable` before anything is deployed. Either way the run then
+waits until the gateway itself reports the credential and token-managed mode.
+Removing the gateway does not revoke the token.
 
 The command opens its own Chrome window, temporary unless a dedicated profile is
 configured. Review the real Cloudflare consent pages there. Access login through
@@ -195,7 +225,8 @@ disable browser security or count that check as a successful live lifecycle.
 By default, the command uses a separate test browser. Only the explicit
 `browserConnection` option attaches to your existing Chrome session. Neither
 mode exports cookies or saves browser traces. A configured profile retains login
-sessions locally; protect it and remove it when qualification is finished. When prompted, install and
+sessions locally; protect it and remove it when qualification is finished. When prompted (the
+command prompts only without the `managementToken` opt-in), install and
 activate the management secret directly in Cloudflare. No consent is expected
 for the synthetic source installation or the grant and removal of
 `qualification@example.com`. An OAuth handoff for those operations fails validation.
@@ -224,9 +255,46 @@ The gateway's removal page names `removed` in its own address just before it
 hops to the installer with the receipt. For the runner that word means the
 receipt is on its way: the round keeps waiting for the installer to hold it, and
 only a recovery result ends the wait early. Each settled round also records what
-answered the browser's navigation to the installer's receipt page, in fixed
-fields (HTTP status, `server` label, Cloudflare's mitigation label), so an edge
-refusal can be told from the application's.
+answered the browser's navigation to the installer's receipt page in that
+round, in fixed fields (HTTP status, `server` label, Cloudflare's mitigation
+label), so an edge refusal can be told from the application's.
+
+In the isolated fixture that hop can be refused by the edge, for a reason the
+product's hop never meets. The gateway's hostname and the installer's hostname
+are in the same zone under one certificate, so a browser that holds a live
+connection to the gateway reuses it for its request to the installer (HTTP/2
+connection reuse across the hostnames a certificate covers), and the edge
+refuses a request whose TLS name differs from its Host: an empty `403` that
+never reaches the installer, for which Chrome commits its own error page, so
+the receipt page never imports the receipt (a run that had only the hop stopped
+as `removal_receipt_unavailable`). A browser that still holds a connection of
+the installer's own uses that one, and the hop succeeds. A customer's gateway never shares a zone with the hosted
+installer, so its hop is not refused this way; an installation on the
+installer's own zone would be. The runner handles the fixture's case in two
+ways, and neither replaces the hop, which every round still exercises:
+
+- Before each removal round's consent it loads the installer in its test tab,
+  which opens a connection of the installer's own unless that load is itself
+  reused onto the gateway's connection and refused. A load that fails never
+  stops the run; the journal records it as `browser: installer_connection`
+  with `loaded` and the answer's fixed fields. It loads the installer's root,
+  never the receipt page, which an armed interception would spend itself on.
+- When a settled round's landing is Chrome's error page, the hop was answered
+  `403`, and the installer holds no receipt after the landing grace, the receipt
+  travels without the browser. The runner reads the gateway's own record of the
+  attempt through the removal page's progress route (the only lifecycle request
+  that carries a query; the attempt comes from the removal page's address, is
+  kept in memory for that one read, and is never journaled or printed), takes
+  the signed receipt from the settled attempt's link to the receipt page, and
+  imports it through the installer's API as that page would have. The round's
+  checkpoint says so before the import is written, with
+  `receiptImport: runner_after_edge_refusal`: the browser's hop was refused by
+  the edge and the receipt travelled by API. When the gateway's record holds no
+  receipt for the attempt, or keeps refusing the read, the checkpoint carries
+  `unavailable_after_edge_refusal` and the next round opens as before. A
+  recovery result, the installer's own page, or a hop that was not refused
+  never takes this path. `--status` and the failure report show the last
+  round's label as `lastReceiptImport`.
 
 A browser can lose an installed Access session cookie while the cached token
 is still valid (observed live: the cookie vanished from an attached Chrome
@@ -298,15 +366,18 @@ replaced earlier would carry the armed interception into recovery), then opens
 a new tab in the same context, attached like any other except for the spent
 interception route, and closes the previous one, only ever its own tab. The
 recovery rounds then run in a tab that never carried the interception, as they
-do in a fresh `--resume-installed` process. Live, the tab that had carried it
-met the installer's receipt page with an empty `403` in every recovery round,
-so Chrome showed its own error page, the page never imported the receipt and
-the run stopped as `removal_receipt_unavailable`, while a fresh process
-recovered the receipt on its first round on the same gateway, with the same
-session and no Access denial: the failure was bound to that tab. The
-replacement is recorded as `browser: tab_replaced` with the fixed reason
-`interruption_spent`; like a reopen it is the runner's event, never the last
-stage, and `tabsReopened` does not count it.
+do in a fresh `--resume-installed` process. The replacement was introduced when
+the empty `403` that the receipt hop met in every recovery round was attributed
+to the tab that had carried the interception. That attribution was wrong: the
+refusal is the edge's answer to the reused connection described above, and a
+fresh process escaped it only because it had loaded the installer moments
+earlier and still held a connection of the installer's own. The replacement is
+harmless and stays, so that a spent interception never rides into the recovery
+rounds; it is not the remedy for that refusal. It is recorded as
+`browser: tab_replaced` with the fixed reason `interruption_spent`; like a
+reopen it is the runner's event, never the last stage, and `tabsReopened` does
+not count it.
+
 The gateway settles each consent attempt by alarm behind its removal page,
 which then records the result word in its own address: `removed` before it hops
 to the installer with the signed receipt, or `recovery_required` with the

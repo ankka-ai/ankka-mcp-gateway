@@ -6,7 +6,7 @@ import { parseCookies } from './cookies';
 import { constantTimeEqual, deriveCsrfToken, openGatewayTeardownCookie, pkceChallenge,
   randomBase64Url, sealGatewayTeardownCookie, sha256, type GatewayTeardownCookie } from './crypto';
 import type { ExactReleaseBundleIdentity } from './exact-release-bundle';
-import { gatewayTeardownJobId, verifyGatewayTeardownHandoff, type GatewayTeardownTrust } from './gateway-teardown-handoff';
+import { expiredGatewayTeardownHandoffHostname, gatewayTeardownJobId, verifyGatewayTeardownHandoff, type GatewayTeardownTrust } from './gateway-teardown-handoff';
 import { authorizeGatewayTeardownJob, consumeGatewayTeardownCallback, createGatewayTeardownJob,
   settleGatewayTeardownAttempt, retainGatewayTeardownRevocationWarning, verifyGatewayTeardownJobAuthority, type GatewayTeardownJob } from './gateway-teardown-job';
 import { GatewayTeardownStoreClient } from './gateway-teardown-store-client';
@@ -37,6 +37,28 @@ function sameOrigin(request: Request): boolean {
     request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() === 'application/json';
 }
 
+/** What the page says about a failure a reload may get past; every other failure has its own refusal word. */
+export const GATEWAY_TEARDOWN_RELOAD_GUIDANCE = 'Removal could not continue. Reload this page or use your saved recovery receipt.';
+export type GatewayTeardownRefusalCode = 'teardown_receipt_expired' | 'teardown_receipt_rejected' | 'teardown_session_missing';
+
+/**
+ * A refusal no reload can change: the same receipt, or the same missing
+ * session, meets the same answer. The hostname is known only for a receipt
+ * that verifies except for its closed window.
+ */
+class GatewayTeardownRefusal extends Error {
+  constructor(readonly code: GatewayTeardownRefusalCode, readonly hostname: string | null = null) { super(code); }
+}
+
+/** One message per refusal word: where a receipt this page can use comes from. */
+export function gatewayTeardownRefusalMessage(code: GatewayTeardownRefusalCode, hostname: string | null = null): string {
+  if (code === 'teardown_session_missing') {
+    return "This browser has no removal open. Choose a recovery receipt you saved from this page, or open your gateway's management page and authorize the removal again.";
+  }
+  return `${code === 'teardown_receipt_expired' ? 'This removal receipt has expired.' : 'This removal receipt could not be verified.'} Open your gateway's management page${
+    hostname === null ? '' : ` at ${hostname}`} and authorize the removal again to get a fresh one, or choose a recovery receipt you saved from this page.`;
+}
+
 function page(): Response {
   const nonce = randomBase64Url(18);
   return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Remove your gateway · Ankka</title>
@@ -47,7 +69,8 @@ function page(): Response {
 <button id="authorize" hidden>Authorize final removal</button><p><button id="download">Download recovery receipt</button></p><small>Keep this receipt to resume if you lose this browser session. It contains resource references and signed removal evidence, but no credentials.</small></section>
 <section><label for="receipt">Resume from a saved recovery receipt</label><p><input id="receipt" type="file" accept="application/json,.json"></p></section></main>
 <script nonce="${nonce}">(()=>{const message=document.querySelector('#message'),review=document.querySelector('#review'),authorize=document.querySelector('#authorize');let current,poll;
-const api=async(path,body)=>{const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'content-type':'application/json',...(current?{'x-csrf-token':current.csrfToken}:{})},body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error('Removal could not continue. Reload this page or use your saved recovery receipt.');return response.json()};
+const reload=${JSON.stringify(GATEWAY_TEARDOWN_RELOAD_GUIDANCE)},rejected=${JSON.stringify(gatewayTeardownRefusalMessage('teardown_receipt_rejected'))};
+const api=async(path,body)=>{let response;try{response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'content-type':'application/json',...(current?{'x-csrf-token':current.csrfToken}:{})},body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',cache:'no-store'})}catch{throw new Error(reload)}if(!response.ok){const refusal=await response.json().catch(()=>null);throw new Error(refusal&&typeof refusal.message==='string'?refusal.message:reload)}return response.json()};
 const show=value=>{current=value;review.hidden=false;document.querySelector('#target').textContent='Gateway: '+value.hostname;message.textContent=value.message;const failure=document.querySelector('#failure');failure.hidden=!value.failureReason;failure.textContent=value.failureReason?'Removal reference: '+value.failureReason:'';document.querySelector('#warning').hidden=!value.revocationUnconfirmed;authorize.hidden=!value.canAuthorize;authorize.disabled=false;authorize.textContent=value.started?'Authorize and resume removal':'Authorize final removal';const steps=document.querySelector('#steps');steps.replaceChildren(...value.steps.map(step=>{const item=document.createElement('li');item.textContent=step.label+(step.done?' — Removed':step.current?' — Removing…':'');return item}));clearTimeout(poll);if(value.removing)poll=setTimeout(()=>load().catch(error=>{message.textContent=error.message}),3000)};
 const load=async()=>show(await api('/api/teardown'));
 addEventListener('pagehide',()=>clearTimeout(poll));
@@ -55,7 +78,7 @@ const accept=async(handoff)=>{await api('/api/teardown/import',{handoff});histor
 authorize.onclick=async()=>{authorize.disabled=true;try{const value=await api('/api/teardown/authorize',{});location.assign(value.authorizationUrl)}catch(error){message.textContent=error.message;authorize.disabled=false}};
 document.querySelector('#download').onclick=()=>{if(!current)return;const url=URL.createObjectURL(new Blob([current.handoff],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ankka-removal-receipt.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 document.querySelector('#receipt').onchange=async(event)=>{try{const file=event.target.files[0];if(!file||file.size>32768)throw new Error('Choose an Ankka removal receipt smaller than 32 KB.');await accept(await file.text())}catch(error){message.textContent=error.message}};
-(async()=>{try{const fragment=location.hash.slice(1);if(fragment){if(!/^[A-Za-z0-9_-]{40,45000}$/.test(fragment))throw new Error('This removal link is invalid.');const bytes=Uint8Array.from(atob(fragment.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));await accept(new TextDecoder('utf-8',{fatal:true}).decode(bytes))}else await load()}catch(error){message.textContent=error.message}})()})();</script></html>`, {
+(async()=>{try{const fragment=location.hash.slice(1);if(fragment){let handoff;try{if(!/^[A-Za-z0-9_-]{40,45000}$/.test(fragment))throw new Error();handoff=new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(atob(fragment.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0)))}catch{throw new Error(rejected)}await accept(handoff)}else await load()}catch(error){message.textContent=error.message}})()})();</script></html>`, {
     headers: { ...headers, 'content-type': 'text/html; charset=utf-8',
       'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'` },
   });
@@ -73,8 +96,18 @@ export function createGatewayTeardownRouter(config: {
   const cookieFor = async (value: GatewayTeardownCookie) => `${GATEWAY_TEARDOWN_COOKIE}=${await sealGatewayTeardownCookie(config.encryptionKey, value)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=86400`;
   const readCookie = async (request: Request) => {
     const sealed = parseCookies(request.headers.get('cookie')).get(GATEWAY_TEARDOWN_COOKIE);
-    if (sealed === undefined) throw new Error('teardown_session_missing');
-    return openGatewayTeardownCookie(config.encryptionKey, sealed, dependencies.now());
+    if (sealed === undefined) throw new GatewayTeardownRefusal('teardown_session_missing');
+    // A cookie past its day, or sealed under another key, is no session either.
+    try { return await openGatewayTeardownCookie(config.encryptionKey, sealed, dependencies.now()); }
+    catch { throw new GatewayTeardownRefusal('teardown_session_missing'); }
+  };
+  /** The offered receipt as of now. A refusal says whether only its window has closed, and then names its gateway. */
+  const verifyOffered = async (handoff: string) => {
+    try { return await verifyGatewayTeardownHandoff({ handoff, trust: config.trust, now: dependencies.now() }); }
+    catch {
+      const hostname = await expiredGatewayTeardownHandoffHostname({ handoff, trust: config.trust, now: dependencies.now() });
+      throw new GatewayTeardownRefusal(hostname === null ? 'teardown_receipt_rejected' : 'teardown_receipt_expired', hostname);
+    }
   };
   const commit = async (port: GatewayTeardownStoreClient, previous: GatewayTeardownJob, job: GatewayTeardownJob) => {
     if (!await port.compareAndSet(previous.revision, job)) throw new Error('teardown_state_conflict');
@@ -107,13 +140,13 @@ export function createGatewayTeardownRouter(config: {
     await dependencies.rateLimit(request, null);
     const body = v.parse(v.strictObject({ handoff: v.pipe(v.string(), v.minLength(1), v.maxLength(32768)) }),
       JSON.parse(await readBoundedText(new Response(request.body), 'bad_request', 48 * 1024)));
-    const jobId = await gatewayTeardownJobId(body.handoff);
+    const jobId = await gatewayTeardownJobId(body.handoff).catch(() => { throw new GatewayTeardownRefusal('teardown_receipt_rejected'); });
     const port = portFor(jobId);
     let job = await port.read();
     if (job === null) {
-      const offered = await verifyGatewayTeardownHandoff({ handoff: body.handoff, trust: config.trust, now: dependencies.now() });
+      const offered = await verifyOffered(body.handoff);
       // A runner-signed handoff belongs to the operator's own record; the hosted finalizer never adopts it.
-      if (offered.statement.customerGrantRevocation !== 'confirmed') throw new Error('teardown_handoff_conflict');
+      if (offered.statement.customerGrantRevocation !== 'confirmed') throw new GatewayTeardownRefusal('teardown_receipt_rejected');
       const bundle = await dependencies.loadBundle(config.release);
       const retirement = bundle.manifest.components.workerRetirement.files[0];
       if (retirement?.path !== 'payload/worker-retirement/index.js') throw new Error('retirement_missing');
@@ -127,11 +160,11 @@ export function createGatewayTeardownRouter(config: {
     if (job.handoff !== body.handoff) {
       // A new gateway consent can re-sign the same completed dependency graph.
       // It cannot replace the original job's locators, release, or progress.
-      const fresh = await verifyGatewayTeardownHandoff({ handoff: body.handoff, trust: config.trust, now: dependencies.now() });
+      const fresh = await verifyOffered(body.handoff);
       if (fresh.certificate.certificateSha256 !== accepted.certificate.certificateSha256 ||
           canonicalJson(fresh.statement.management) !== canonicalJson(accepted.statement.management) ||
           fresh.statement.readyReceiptChecksum !== accepted.statement.readyReceiptChecksum ||
-          fresh.statement.dependencyResourcesHash !== accepted.statement.dependencyResourcesHash) throw new Error('teardown_handoff_conflict');
+          fresh.statement.dependencyResourcesHash !== accepted.statement.dependencyResourcesHash) throw new GatewayTeardownRefusal('teardown_receipt_rejected');
       if (fresh.statement.priorGrantRevocationUnconfirmed && job.revocation !== 'unconfirmed') {
         const warned = retainGatewayTeardownRevocationWarning(job, dependencies.now());
         await commit(port, job, warned); job = warned;
@@ -207,7 +240,11 @@ export function createGatewayTeardownRouter(config: {
           return json(await present(job, cookie.jobId));
         }
         return json({ error: 'not_found' }, 404);
-      } catch { return json({ error: 'teardown_unavailable' }, 409); }
+      } catch (cause) {
+        const refusal = v.safeParse(v.instance(GatewayTeardownRefusal), cause);
+        if (!refusal.success) return json({ error: 'teardown_unavailable' }, 409);
+        return json({ error: refusal.output.code, message: gatewayTeardownRefusalMessage(refusal.output.code, refusal.output.hostname) }, 409);
+      }
     },
   };
 }

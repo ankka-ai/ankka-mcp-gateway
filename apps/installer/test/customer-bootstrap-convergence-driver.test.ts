@@ -136,10 +136,14 @@ describe('customer bootstrap convergence driver', () => {
       now: () => NOW + 10,
       schedule: async () => { scheduled += 1; },
     });
+    // A host that wakes itself for another reason asks this before running a pass.
+    expect(driver.holdsGrant).toBe(false);
     await driver.start({ attemptId: converging.attemptId, grant: grant() });
+    expect(driver.holdsGrant).toBe(true);
     expect(vi.getTimerCount()).toBe(1);
     expect(scheduled).toBe(1);
     expect(await driver.continue()).toBe('scheduled');
+    expect(driver.holdsGrant).toBe(true);
     // A delayed alarm must not leave the object eligible for idle hibernation
     // after ten seconds when no browser is polling the progress page.
     await vi.advanceTimersByTimeAsync(15_000);
@@ -153,6 +157,7 @@ describe('customer bootstrap convergence driver', () => {
     expect(state.stored).toMatchObject({ status: 'READY', oauth: null, session: null });
     expect(revocations.count).toBe(1);
     expect(vi.getTimerCount()).toBe(0);
+    expect(driver.holdsGrant).toBe(false);
     // Nothing is left to run once the attempt has settled.
     expect(await driver.continue()).toBe('idle');
     expect(scheduled).toBe(3);

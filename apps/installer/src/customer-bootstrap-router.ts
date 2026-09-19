@@ -37,6 +37,13 @@ import {
   CUSTOMER_INSTALL_OAUTH_START_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
+import {
+  CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH,
+  customerManagementCredentialName,
+  customerManagementCredentialSchema,
+  customerManagementCredentialTemplateLink,
+  type CustomerManagementCredentialStep,
+} from './customer-management-credential';
 import { parseOauthCallbackQuery, type OauthCallbackQuery } from './oauth-callback-query';
 
 const SESSION_COOKIE = '__Host-ankka_bootstrap_session';
@@ -46,6 +53,13 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const AUTHORIZATION_CODE = /^[A-Za-z0-9._~-]{8,4096}$/u;
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_HANDOFF_BYTES = 60 * 1024;
+/** An account token is at most 69 characters here; nothing larger is read on the management step. */
+const MAX_MANAGEMENT_STEP_BYTES = 512;
+/** Either the pasted value or the explicit choice to continue without one; never both, never anything else. */
+const managementStepSchema = v.union([
+  v.strictObject({ managementToken: customerManagementCredentialSchema }),
+  v.strictObject({ skip: v.literal(true) }),
+]);
 
 export interface CustomerBootstrapStatePort {
   read(): Promise<CustomerBootstrapState | null | undefined>;
@@ -112,6 +126,13 @@ export interface CustomerBootstrapRouterDependencies {
     outcome: CustomerBootstrapCallbackOutcome,
     cookies: readonly string[],
   ) => Response;
+  /**
+   * The management credential step of setup. The router validates the pasted
+   * value's form and hands it over exactly once; it keeps no copy, and no
+   * response or error of this router carries it. Absent: the step is not
+   * offered and its route does not exist.
+   */
+  readonly managementCredential?: CustomerManagementCredentialStep;
 }
 
 export interface CustomerBootstrapCallbackOutcome {
@@ -263,6 +284,28 @@ async function smallJson<Schema extends v.GenericSchema>(
   return v.parse(schema, JSON.parse(serialized));
 }
 
+/**
+ * Reads the management step's small body without ever throwing what it read:
+ * a refused body yields null, so no exception, message, or response can carry
+ * a pasted value.
+ */
+async function managementStepInput(
+  request: Request,
+): Promise<v.InferOutput<typeof managementStepSchema> | null> {
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_MANAGEMENT_STEP_BYTES) return null;
+  let decoded: unknown;
+  try {
+    const serialized = await request.text();
+    if (serialized.length > MAX_MANAGEMENT_STEP_BYTES) return null;
+    decoded = JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+  const parsed = v.safeParse(managementStepSchema, decoded);
+  return parsed.success ? parsed.output : null;
+}
+
 export function validCustomerBootstrapRelayAuthorization(
   value: CustomerBootstrapRelayStart,
   publicClientId: string,
@@ -349,6 +392,24 @@ export function createCustomerBootstrapRouter(
       throw new CustomerBootstrapStateError('conflict');
     }
     return current;
+  };
+
+  /**
+   * What the setup page needs to show the management credential step: the
+   * fixed word so far, and, once a plan names the management hostname, the
+   * token name and Cloudflare's template link built from it. Never a value.
+   */
+  const withManagementStep = async (setup: CustomerWorkerSetupPublicState) => {
+    if (dependencies.managementCredential === undefined) return setup;
+    const hostname = setup.plan?.gatewayConfiguration.managementHostname;
+    return {
+      ...setup,
+      managementCredential: {
+        state: await dependencies.managementCredential.word() ?? null,
+        name: hostname === undefined ? null : customerManagementCredentialName(hostname),
+        createUrl: hostname === undefined ? null : customerManagementCredentialTemplateLink(hostname),
+      },
+    };
   };
 
   return Object.freeze({
@@ -444,14 +505,40 @@ export function createCustomerBootstrapRouter(
           if (request.method === 'GET' && current.status === 'INCOMPLETE' &&
               current.oauth?.phase === 'authorizing' && current.oauth.expiresAt <= now() &&
               dependencies.readSetup !== undefined) {
-            return json({ ...await dependencies.readSetup(), approvalExpired: true });
+            return json({ ...await withManagementStep(await dependencies.readSetup()), approvalExpired: true });
           }
           if (current.oauth !== null || current.status !== 'INCOMPLETE') return json({ error: 'setup_locked' }, 409);
-          if (request.method === 'GET' && dependencies.readSetup !== undefined) return json(await dependencies.readSetup());
+          if (request.method === 'GET' && dependencies.readSetup !== undefined) {
+            return json(await withManagementStep(await dependencies.readSetup()));
+          }
           if (request.method === 'POST' && dependencies.configureSetup !== undefined) {
-            return json(await dependencies.configureSetup(parseDeploySelection(await smallJson(request, boundaryObjectSchema))));
+            return json(await withManagementStep(
+              await dependencies.configureSetup(parseDeploySelection(await smallJson(request, boundaryObjectSchema))),
+            ));
           }
           return notFound();
+        }
+
+        // The management credential step. The pasted value arrives once, by
+        // same-origin POST under the setup session, and leaves this function
+        // only into the host's memory; the answer is a fixed word.
+        if (request.method === 'POST' && url.pathname === CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH &&
+            url.search === '' && dependencies.managementCredential !== undefined) {
+          if (!sameOriginMutation(request)) return json({ schemaVersion: 1, error: 'forbidden' }, 403);
+          const secret = readSessionCookie(request);
+          if (secret === null) return json({ schemaVersion: 1, error: 'bootstrap_session_required' }, 403);
+          await authenticatedSession(current, secret, now());
+          // Open exactly while the review is: before an approval starts, and
+          // again once an approval expired unexchanged. A running approval or
+          // install never changes what it will upload.
+          const reviewOpen = current.status === 'INCOMPLETE' && (current.oauth === null ||
+            (current.oauth.phase === 'authorizing' && current.oauth.expiresAt <= now()));
+          if (!reviewOpen) return json({ schemaVersion: 1, error: 'setup_locked' }, 409);
+          const input = await managementStepInput(request);
+          if (input === null) return json({ schemaVersion: 1, error: 'management_token_invalid' }, 400);
+          if ('skip' in input) await dependencies.managementCredential.skip();
+          else await dependencies.managementCredential.accept(input.managementToken);
+          return json({ schemaVersion: 1, managementCredential: await dependencies.managementCredential.word() ?? null });
         }
 
         if (request.method === 'POST' && url.pathname === CUSTOMER_INSTALL_OAUTH_START_PATH) {

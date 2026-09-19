@@ -19,6 +19,7 @@ export function SettingsPage() {
     isBusy,
     prepareRuntimeAction,
     prepareTeardownAction,
+    refreshUpdate,
     update,
     updateNotice,
   } = useGateway()
@@ -35,6 +36,9 @@ export function SettingsPage() {
     }
   }, [getTeam])
   useEffect(() => { void checkManagement() }, [checkManagement])
+  // Installing a source can end a rollback, so an answer loaded before this page opened is read again.
+  const updateLoadedEarlier = useRef(update !== null)
+  useEffect(() => { if (updateLoadedEarlier.current) void refreshUpdate() }, [refreshUpdate])
   const dangerZone = useRef<HTMLElement>(null)
   const teardownRequested = new URLSearchParams(window.location.search).get('teardown') === 'review'
 
@@ -64,6 +68,8 @@ export function SettingsPage() {
     : update.status === 'unavailable' ? 'Channel unavailable' : 'Up to date'
   const channelLabel = update.channel === 'stable' ? 'Stable' : 'Canary'
   const availableRelease = update.status === 'available' ? update.available?.release : null
+  // A recorded release the gateway can no longer restore: say why instead of offering it.
+  const rollbackEnded = !update.rollback.available && 'release' in update.rollback ? update.rollback.release : null
 
   return (
     <div>
@@ -144,6 +150,8 @@ export function SettingsPage() {
                 <Button variant="secondary" className="pressable" disabled={isBusy} onClick={() => void authorize('rollback')}>
                   <ClockCounterClockwise size={16} /> Rollback
                 </Button>
+              ) : rollbackEnded ? (
+                <p className="basis-full text-sm leading-6 text-kumo-subtle">You can no longer roll back to {rollbackEnded}. A source was installed or Team access was changed after the update, and the older version cannot work with those changes.</p>
               ) : null}
             </div>
           </div>

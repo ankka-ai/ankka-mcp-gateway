@@ -5,10 +5,14 @@ import { LiveLifecycleError } from './live-gateway-lifecycle.mjs';
 function requireCondition(value, code) { if (!value) throw new LiveLifecycleError(code); }
 const id = (value) => v.is(v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/u)), value);
 
-/** Read-only provider evidence. No arbitrary URL, grant forwarding, or deletion. */
+/** Provider evidence is read-only: no arbitrary URL, grant forwarding, or deletion. The one write is the operator's
+ * opt-in, the management token as the encrypted secret of the exact recorded Worker. */
 // A read mutates nothing, so a transient transport failure (a timeout or a dropped connection) is retried this many
 // times before it is judged; a rejection by status is never retried.
 const READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
+/** The Worker secret the gateway reads its management token from. */
+const MANAGEMENT_SECRET_NAME = 'ANKKA_MANAGEMENT_TOKEN';
+const managementTokenValue = v.pipe(v.string(), v.minLength(20), v.maxLength(1024));
 
 export function createLiveGatewayProvider({ config, token, transport = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
   requireCondition(/^[a-f0-9]{32}$/u.test(config.accountId) && /^[a-f0-9]{32}$/u.test(config.zoneId) && token, 'provider_config_invalid');
@@ -170,5 +174,26 @@ export function createLiveGatewayProvider({ config, token, transport = fetch, sl
     },
     assertDependenciesAbsent: (inventory) => absent(inventory, true),
     assertAllAbsent: (inventory) => absent(inventory, false),
+    /**
+     * The one provider write, and only on the operator's opt-in: the management token as the encrypted secret of the
+     * exact recorded Worker, with the operator token this port already holds. It is sent once and never retried; an
+     * answer that never arrives leaves the write unknown and stops the run. The value rides in the request body and
+     * nowhere else: no URL, error, notice or journal event carries it, and the answer's body is never read.
+     */
+    async installManagementSecret(provision, value) {
+      validateLiveBootstrapOrigin(provision);
+      requireCondition(v.is(managementTokenValue, value), 'management_token_unavailable');
+      let response;
+      try {
+        response = await transport(`https://api.cloudflare.com/client/v4${account}/workers/scripts/${provision.workerName}/secrets`, {
+          method: 'PUT', redirect: 'error', signal: AbortSignal.timeout(30_000),
+          headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ name: MANAGEMENT_SECRET_NAME, text: value, type: 'secret_text' }),
+        });
+      } catch { throw new LiveLifecycleError('management_token_write_unknown'); }
+      await response.body?.cancel();
+      // The secrets endpoint answers 201 for a new secret and 200 for a replaced one.
+      if (response.status !== 200 && response.status !== 201) throw new LiveLifecycleError('management_token_write_rejected', response.status);
+    },
   };
 }

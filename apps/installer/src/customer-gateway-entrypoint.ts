@@ -9,6 +9,7 @@ import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceipt
 import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover';
 import { customerInstallProgressPage } from './customer-install-progress-page';
+import { CUSTOMER_MANAGEMENT_BINDING } from './customer-management-credential';
 import {
   customerInstallationObjectName,
   handleCustomerInstallationObjectRequest,
@@ -33,6 +34,7 @@ import {
   CUSTOMER_INSTALL_ROOT_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
   CUSTOMER_OPERATION_ROOT_PATH,
+  CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH,
 } from './customer-install-paths';
 import type { ReceiptOwnedCloudflareResourceKind, CustomerCloudflareOperation } from './cloudflare-operation-authority';
 import { canonicalJson } from './canonical-json';
@@ -42,7 +44,7 @@ import { createGatewayTeardownHandoff } from './gateway-teardown-handoff';
 import { DurableCustomerTeardownAttemptPort } from './customer-teardown-attempt';
 import { customerTeardownCommand } from './customer-teardown-command';
 import { CustomerTeardownRemovalDriver } from './customer-teardown-driver';
-import { CustomerRuntimeUpdateDriver, DurableCustomerUpdateOutcomePort } from './customer-update-driver';
+import { CustomerRuntimeUpdateDriver, DurableCustomerUpdateOutcomePort, withCustomerServingRelease } from './customer-update-driver';
 import { DurableCustomerTeardownOutcomePort, type CustomerTeardownCompletion } from './customer-teardown-progress';
 import { createCustomerTeardownRouter, customerTeardownCookiePresent, CUSTOMER_TEARDOWN_PATH } from './customer-teardown-router';
 import {
@@ -314,6 +316,10 @@ export class AdminState extends RuntimeAdminState {
       handover,
       storage: this.finalState.storage,
       journal: new CustomerStage2DurableStatePort(this.finalState.storage),
+      // This runtime is the version the read-back inspects: it carries the
+      // customer's management secret exactly when the install supplied one.
+      // Only the binding's presence is read here, never its value.
+      managementCredentialBound: v.is(v.string(), this.finalEnv[CUSTOMER_MANAGEMENT_BINDING]),
       runtime: {
         controlPlaneOrigin: PUBLIC_ORIGIN,
         updateChannel: config.ANKKA_UPDATE_CHANNEL,
@@ -866,7 +872,13 @@ export default {
           url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH) ||
           ['/api/bigquery', '/api/bigquery/resume'].includes(url.pathname)) {
         if (url.origin !== `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`) return notFound();
-        return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
+        // The update page waits for the version Cloudflare serves where the browser asks. That is this entrypoint's
+        // release, which shares its version with the dashboard's assets here; the one management object restarts on
+        // the new version right after the upload, wherever the browser is, so its own release would confirm too early.
+        const forwarded = url.pathname === CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH
+          ? withCustomerServingRelease(request, config.ANKKA_GATEWAY_RELEASE)
+          : request;
+        return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(forwarded);
       }
       if (request.method === 'POST' && url.pathname === '/api/teardown-actions') {
         return prepareCurrentGatewayTeardown(request, env);

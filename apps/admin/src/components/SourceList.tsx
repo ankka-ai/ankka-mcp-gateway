@@ -15,10 +15,12 @@ interface SourceListProps {
   authorizeDisabled?: boolean
   isBusy: boolean
   draftLabel?(sourceId: string): string
+  /** One sentence to read before installing, shown directly beside each install control; nothing when null. */
+  installNote?: string | null
   onAuthorize(sourceId: string): void
 }
 
-export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, onAuthorize }: SourceListProps) {
+export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, installNote = null, onAuthorize }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -108,10 +110,14 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                           className="pressable h-auto min-h-9 max-w-full whitespace-normal py-1.5"
                           disabled={!installationEnabled || authorizeDisabled}
                           loading={isBusy}
+                          aria-describedby={installationEnabled && installNote ? `${sourceDetailsId}-install-note` : undefined}
                           onClick={() => onAuthorize(source.id)}
                         >
                           {installationEnabled ? 'Install source' : 'Installation unavailable'}
                         </Button>
+                        {installationEnabled && installNote ? (
+                          <p id={`${sourceDetailsId}-install-note`} className="basis-full text-xs leading-5 text-kumo-subtle">{installNote}</p>
+                        ) : null}
                       </div>
                     )}
                   </td>
@@ -121,7 +127,10 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                     <td colSpan={3} className="px-5 py-5 sm:pl-14">
                       <p className="text-xs text-kumo-subtle">{connection}</p>
                       <code className="mt-2 block select-all break-all text-xs text-kumo-default">{source.url}</code>
-                      <p className="mt-4 text-xs font-medium text-kumo-subtle">{source.enabledTools.length} exact tool{source.enabledTools.length === 1 ? '' : 's'}</p>
+                      <p className="mt-4 text-xs font-medium text-kumo-subtle">{source.enabledTools.length === 0
+                        // Only a sign-in source can be saved without tools: its real list exists once it is connected.
+                        ? 'No tools chosen yet. Nothing is enabled; you choose from the source’s real list after connecting it.'
+                        : `${source.enabledTools.length} exact tool${source.enabledTools.length === 1 ? '' : 's'}`}</p>
                       <div className="mt-2 flex max-h-52 flex-wrap gap-2 overflow-y-auto pr-1" role="region" aria-label={`${source.label} allowed tools`} tabIndex={0}>
                         {source.enabledTools.map((tool) => <code key={tool} className="tool-chip break-all">{tool}</code>)}
                       </div>
