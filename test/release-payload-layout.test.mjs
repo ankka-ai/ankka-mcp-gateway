@@ -21,7 +21,7 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'd4a97b9f7cf1fb46f960d0927fac1f318cb62614ae3ae5249bdbd54c2810643a',
+  installer: 'b39db3124e177cdb11f0c431336542d3751c15ca6816d4a4c2531f68b92ba0d0',
   worker: '6dd36dde762828a2d76c1fdd4056181aab2d2bf2c5d46bf8e1dfb6b3d0ea899d',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -254,7 +254,11 @@ test('installer assets cover the exact hosted two-stage session, plan, approval,
   assert.match(html, /Approval 1/u);
   assert.match(html, /Approval 2/u);
   assert.match(html, /Installer grants are revoked/u);
-  assert.match(html, /add an account-owned token directly to your gateway in Cloudflare/u);
+  // The installer says before it starts that setup needs one account API token, who can create it, and where it goes.
+  assert.match(html, /an account administrator who can create one API token during setup/u);
+  assert.match(html, /Setup has three parts/u);
+  assert.match(html, /You paste it into your own gateway; it never passes through Ankka\./u);
+  assert.doesNotMatch(html, /add an account-owned token directly to your gateway in Cloudflare/u);
   assert.match(html, /stores no Cloudflare token and sends no analytics/u);
   assert.doesNotMatch(html, /target="_blank"/u);
   assert.doesNotMatch(script, /window\.open/u);

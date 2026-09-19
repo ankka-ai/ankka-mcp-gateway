@@ -42,12 +42,13 @@
           <div class="setup-controls">
           <form id="gateway-form" novalidate>
             <div class="button-row"><button id="save-gateway" class="primary-button" type="submit">Deploy to Cloudflare</button></div>
-            <p class="caption requirements">Requires an active domain and Cloudflare Zero Trust.</p>
+            <p class="caption requirements">Requires an active domain, Cloudflare Zero Trust, and an account administrator who can create one API token during setup.</p>
           </form>
           <details class="disclosure">
             <summary>How permissions work</summary>
             <p><strong>Approval 1:</strong> Ankka installs the initial gateway, reads your domains, and registers a Workers subdomain if needed. It then revokes the temporary permission.</p>
-            <p><strong>Approval 2:</strong> Your gateway asks permission to finish the configuration you review. Installer grants are revoked. For ongoing source and Team management, add an account-owned token directly to your gateway in Cloudflare.</p>
+            <p><strong>Approval 2:</strong> Your gateway asks permission to finish the configuration you review. Installer grants are revoked.</p>
+            <p><strong>Management token:</strong> Adding sources and managing Team access write to your Cloudflare account long after these approvals are gone, so your gateway needs one account API token of its own. Setup asks for it and links to Cloudflare with both permissions filled in. You paste it into your own gateway; it never passes through Ankka.</p>
           </details>
           </div>
         </section>
@@ -59,6 +60,7 @@
           <p id="plan-expiry" class="caption tabular"></p>
           <div id="review-missing" class="callout" role="note" hidden><strong>Deploy your gateway first</strong><p>The initial deployment uses a generated Worker name. Choose your gateway details after it is deployed.</p><div class="button-row"><button class="secondary-button" type="button" data-go="/">Deploy your gateway</button></div></div>
           <div class="callout"><strong>Temporary access</strong><p>Choose one account. Allow Workers editing and domain reading to install your gateway. Access is revoked before setup continues.</p></div>
+          <div class="callout"><strong>Setup has three parts</strong><p>Connect Cloudflare here, configure and approve on your own gateway, then create one account API token when setup asks for it. The token needs a Super Administrator or Administrator of the account; setup gives you a link that fills in its two permissions.</p></div>
           <div class="button-row split"><button class="secondary-button" type="button" data-go="/">Back</button><button id="connect-cloudflare" class="primary-button" type="button">Connect Cloudflare</button></div>
         </section>
 

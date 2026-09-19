@@ -15,7 +15,7 @@ import { teardownSqliteFixture } from './gateway-teardown-sqlite-fixture';
 import { ENCRYPTION_KEY, CLIENT_ID, CLIENT_SECRET } from './fixtures';
 
 const viewSchema = v.object({ csrfToken: v.string(), canAuthorize: v.boolean(), complete: v.boolean(), revocationUnconfirmed: v.boolean(),
-  removing: v.boolean(), message: v.string(), failureReason: v.nullable(v.string()),
+  removing: v.boolean(), message: v.string(), failureReason: v.nullable(v.string()), managementTokenName: v.nullable(v.string()),
   steps: v.array(v.object({ done: v.boolean(), current: v.boolean() })), handoff: v.string() });
 
 async function fixture() {
@@ -211,12 +211,16 @@ describe('hosted removal browser callback and durable recovery', () => {
       const removing = await test.view();
       expect(removing.removing).toBe(true); expect(removing.canAuthorize).toBe(false); expect(removing.complete).toBe(false);
       expect(removing.message).toBe('Removing your gateway. This page updates itself.');
+      // The token reminder belongs to the end: until the gateway is gone there is nothing to clean up after.
+      expect(removing.managementTokenName).toBeNull();
       expect(removing.steps.map((step) => step.current)).toEqual([true, false, false, false, false]);
       await test.settle();
       const view = await test.view();
       expect(view.steps.every((step) => step.done)).toBe(true);
       expect(view.removing).toBe(false); expect(view.steps.some((step) => step.current)).toBe(false);
       expect(view.canAuthorize).toBe(false); expect(view.revocationUnconfirmed).toBe(false); expect(view.complete).toBe(true);
+      // Removal cannot revoke the management token, so the finished page names the one setup pre-filled for this gateway.
+      expect(view.managementTokenName).toBe(`Ankka gateway ${test.statement.management.hostname}`);
       expect(test.grants()).toBe(1); expect(test.revoked()).toBe(1);
       for (const spent of test.passes) expect(spent).toBeLessThanOrEqual(GATEWAY_TEARDOWN_CALL_BUDGET);
       expect((await test.send(callback.href, undefined, { cookie: callbackCookie })).status).toBe(409);
