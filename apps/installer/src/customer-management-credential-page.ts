@@ -18,7 +18,10 @@ function scriptLiteral<Value>(value: Value): string {
  * `name` (so no form submission could ever carry it) and is emptied as soon
  * as it is read. The value goes once, in the body of a same-origin POST to
  * this same callback, and is never placed in a URL, a fragment, a cookie,
- * browser storage, or the page again. Nothing is persisted by this page.
+ * browser storage, or the page again. The POST follows no redirect: an answer
+ * that is one, such as a sign-in page for a session that ran out, is read as
+ * unconfirmed and the value goes nowhere else. Nothing is persisted by this
+ * page.
  */
 export function customerManagementCredentialPage(input: {
   readonly code: string;
@@ -41,7 +44,7 @@ let sent=false;
 let timer;
 const close=(text)=>{sent=true;clearTimeout(timer);field.value='';field.disabled=true;save.disabled=true;cancel.disabled=true;message.textContent=text;$('back').hidden=false};
 timer=setTimeout(()=>{if(!sent)close(expired)},remaining);
-const post=async(body)=>{const response=await fetch(location.pathname,{method:'POST',credentials:'same-origin',cache:'no-store',redirect:'error',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return response.json()};
+const post=async(body)=>{const response=await fetch(location.pathname,{method:'POST',credentials:'same-origin',cache:'no-store',redirect:'manual',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});return response.json()};
 const leave=(result)=>{const next=new URL(String(result.redirectUrl));if(next.origin!==location.origin||next.pathname!=='/settings')throw new Error();clearTimeout(timer);location.replace(next.href)};
 form.addEventListener('submit',async(event)=>{event.preventDefault();if(sent)return;let value=field.value.trim();field.value='';
 if(!/^(?:cfat_[A-Za-z0-9]{40,64}|[A-Za-z0-9_-]{40})$/.test(value)){value='';message.textContent='That is not a Cloudflare account API token. Account tokens start with cfat_. Copy the token exactly as Cloudflare showed it.';return}

@@ -58,7 +58,7 @@ describe('management token paste page', () => {
     expect(script.indexOf("history.replaceState(null,'',location.pathname)")).toBeLessThan(script.indexOf('addEventListener'));
     // The field is emptied before anything is awaited or checked.
     expect(script).toContain("let value=field.value.trim();field.value='';");
-    expect(script).toContain("fetch(location.pathname,{method:'POST',credentials:'same-origin',cache:'no-store',redirect:'error'");
+    expect(script).toContain("fetch(location.pathname,{method:'POST',credentials:'same-origin',cache:'no-store',redirect:'manual'");
     expect(script).toContain('post({code,state,managementToken:value});value=\'\';');
     // Nothing on the page stores anything, builds a URL from the value, or sends it anywhere but its own origin.
     expect(script).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|sendBeacon|XMLHttpRequest|WebSocket|EventSource/u);
