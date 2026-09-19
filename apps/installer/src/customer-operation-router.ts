@@ -32,6 +32,10 @@ import {
   CUSTOMER_OPERATION_UPDATE_PATH,
   CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH,
 } from './customer-install-paths';
+import { customerManagementCredentialSchema } from './customer-management-credential';
+import type { CustomerManagementCredentialControl } from './customer-management-credential-control';
+import { customerManagementCredentialPage } from './customer-management-credential-page';
+import { writeCustomerManagementCredentialSecret } from './customer-management-credential-secret';
 import { operationSignature } from './customer-operation-secrets';
 import type { CustomerRuntimeUpdateTarget } from './customer-runtime-update';
 import {
@@ -53,7 +57,10 @@ import {
  * the ownership trust certified for the install, then runs the operation with
  * the request-local grant and revokes it. An update instead hands the grant
  * and the key to the management object's memory and answers with the page
- * that follows the upload. Nothing about the grant, the PKCE verifier, or the
+ * that follows the upload. A management token change lands on a page of this
+ * gateway that takes the pasted token once: the value lives only inside the
+ * request that writes it as the Worker's own secret, and the answer is a
+ * fixed word. Nothing about the grant, the PKCE verifier, or the
  * action key is written to durable storage: the verifier and the key ride in
  * one HttpOnly cookie, the attempt record keeps only hashes, identifiers, and
  * expiries.
@@ -133,6 +140,34 @@ const bigQueryCallbackSchema = v.strictObject({
   serviceAccountJson: v.pipe(v.string(), v.minLength(1), v.maxLength(16_384)),
 });
 
+/** A management token change, exactly as the gateway's prepare route builds it: bound to the running release. */
+const managementCredentialActionClaimSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  actionType: v.literal('management_credential'),
+  ...commonClaimEntries,
+  release: v.pipe(v.string(), v.regex(RELEASE)),
+  artifactSha256: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
+});
+/** What the gateway's own paste page posts, once: the pasted token, or the decision to stop. */
+const managementCredentialCallbackSchema = v.union([
+  v.strictObject({
+    code: v.pipe(v.string(), v.regex(AUTHORIZATION_CODE)),
+    state: v.pipe(v.string(), v.regex(TOKEN)),
+    managementToken: customerManagementCredentialSchema,
+  }),
+  v.strictObject({
+    code: v.pipe(v.string(), v.regex(AUTHORIZATION_CODE)),
+    state: v.pipe(v.string(), v.regex(TOKEN)),
+    cancel: v.literal(true),
+  }),
+]);
+/** The same body with any string in the token's place: a wrong paste is told apart from a malformed request. */
+const managementCredentialEnvelopeSchema = v.strictObject({
+  code: v.pipe(v.string(), v.regex(AUTHORIZATION_CODE)),
+  state: v.pipe(v.string(), v.regex(TOKEN)),
+  managementToken: v.pipe(v.string(), v.maxLength(MAX_BODY_BYTES)),
+});
+
 const runtimeVersionSchema = v.strictObject({
   release: v.pipe(v.string(), v.regex(RELEASE)),
   artifactSha256: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
@@ -171,8 +206,8 @@ const targetSchema = v.strictObject({
 export const customerOperationAttemptSchema = v.strictObject({
   schemaVersion: v.literal(1),
   attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
-  kind: v.picklist(['source', 'bigquery', 'runtime']),
-  operation: v.picklist(['source-add', 'bigquery-add', 'upgrade', 'rollback']),
+  kind: v.picklist(['source', 'bigquery', 'runtime', 'management_credential']),
+  operation: v.picklist(['source-add', 'bigquery-add', 'upgrade', 'rollback', 'management-credential']),
   actionId: v.pipe(v.string(), v.regex(ACTION_ID)),
   actorEmail: v.pipe(v.string(), v.maxLength(256), v.regex(EMAIL)),
   actionExpiresAt: v.pipe(v.number(), v.safeInteger()),
@@ -191,7 +226,13 @@ type RuntimeActionClaim = v.InferOutput<typeof runtimeActionClaimSchema>;
 type DecodedClaim =
   | { readonly kind: 'source'; readonly claim: SourceActionClaim }
   | { readonly kind: 'bigquery'; readonly claim: v.InferOutput<typeof bigQueryActionClaimSchema> }
-  | { readonly kind: 'runtime'; readonly claim: RuntimeActionClaim };
+  | { readonly kind: 'runtime'; readonly claim: RuntimeActionClaim }
+  | { readonly kind: 'management_credential'; readonly claim: v.InferOutput<typeof managementCredentialActionClaimSchema> };
+type CallbackUpload =
+  | { readonly kind: 'bigquery'; readonly body: v.InferOutput<typeof bigQueryCallbackSchema> }
+  | { readonly kind: 'management_credential'; readonly body: v.InferOutput<typeof managementCredentialCallbackSchema> }
+  /** A pasted value that is not an account token: only what identifies the attempt survives the parse. */
+  | { readonly kind: 'management_credential_refused'; readonly body: { readonly code: string; readonly state: string } };
 
 /** One attempt per gateway, durable so the callback can refuse replays. */
 export interface CustomerOperationAttemptPort {
@@ -206,7 +247,9 @@ export interface CustomerOperationActionView {
   readonly expiresAt: number;
 }
 
-export type CustomerOperationResult = 'applied' | 'failed' | 'denied' | 'revocation_unconfirmed';
+export type CustomerOperationResult = 'applied' | 'failed' | 'denied' | 'revocation_unconfirmed' | 'cancelled';
+
+export type { CustomerManagementCredentialControl };
 
 export interface CustomerOperationRuntimeUpdateInput {
   readonly accessToken: string;
@@ -240,6 +283,12 @@ export interface CustomerOperationRouterDependencies {
   readonly readSourceAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
   readonly readBigQueryAction?: (actionId: string) => Promise<CustomerOperationActionView | null>;
   readonly runBigQuerySetup?: (input: BigQueryOperationInput) => Promise<Response>;
+  /** A prepared management token change; absent where the runtime does not offer one. */
+  readonly readManagementCredentialAction?: (actionId: string) => Promise<CustomerOperationActionView | null>;
+  /** True when the gateway's record accepted the command. Never receives the token. */
+  readonly controlManagementCredentialAction?: (input: CustomerManagementCredentialControl) => Promise<boolean>;
+  /** The administrator a request is verified for, or null. The paste is accepted only from the one who prepared it. */
+  readonly verifyAdministrator?: (request: Request) => Promise<string | null>;
   readonly readRuntimeAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
   readonly issueRelayTicket: (operation: CustomerCloudflareOperation) => Promise<{
     readonly relayTicket: string;
@@ -367,6 +416,8 @@ function decodeClaim(handoff: string): DecodedClaim | null {
   if (bigquery.success) return { kind: 'bigquery', claim: bigquery.output };
   const runtime = v.safeParse(runtimeActionClaimSchema, decoded);
   if (runtime.success) return { kind: 'runtime', claim: runtime.output };
+  const management = v.safeParse(managementCredentialActionClaimSchema, decoded);
+  if (management.success) return { kind: 'management_credential', claim: management.output };
   return null;
 }
 
@@ -376,20 +427,24 @@ function claimMatches(
   now: number,
 ): boolean {
   const { claim } = decoded;
-  const identity = decoded.kind !== 'runtime'
-    ? decoded.claim.releaseIdentity.release === config.release &&
-      decoded.claim.releaseIdentity.artifactSha256 === config.artifactSha256
-    : decoded.claim.from.release === config.release &&
-      decoded.claim.from.artifactSha256 === `sha256:${config.artifactSha256}` &&
-      decoded.claim.to.release !== decoded.claim.from.release;
+  const identity = decoded.kind === 'management_credential'
+    ? decoded.claim.release === config.release &&
+      decoded.claim.artifactSha256 === `sha256:${config.artifactSha256}`
+    : decoded.kind !== 'runtime'
+      ? decoded.claim.releaseIdentity.release === config.release &&
+        decoded.claim.releaseIdentity.artifactSha256 === config.artifactSha256
+      : decoded.claim.from.release === config.release &&
+        decoded.claim.from.artifactSha256 === `sha256:${config.artifactSha256}` &&
+        decoded.claim.to.release !== decoded.claim.from.release;
   return identity && claim.accountId === config.accountId && claim.managementOrigin === config.managementOrigin &&
     claim.workerName === config.workerName && claim.workersSubdomain === config.workersSubdomain &&
     claim.expiresAt > now && claim.expiresAt <= now + MAX_ACTION_LIFETIME_MS + CLOCK_SKEW_MS;
 }
 
-function relayOperation(decoded: DecodedClaim): 'source-add' | 'bigquery-add' | 'upgrade' | 'rollback' {
+function relayOperation(decoded: DecodedClaim): CustomerOperationAttempt['operation'] {
   if (decoded.kind === 'source') return 'source-add';
   if (decoded.kind === 'bigquery') return 'bigquery-add';
+  if (decoded.kind === 'management_credential') return 'management-credential';
   return decoded.claim.operation === 'rollback' ? 'rollback' : 'upgrade';
 }
 
@@ -449,6 +504,38 @@ function failureReason<Thrown>(error: Thrown): CustomerOperationReason {
   return 'unexpected';
 }
 
+/**
+ * Why a token change stopped, as one fixed word. Cloudflare answers an
+ * exchange of a code it no longer honours with HTTP 400; on this flow, where
+ * a person creates a token between the approval and the exchange, that is the
+ * approval running out.
+ */
+function managementCredentialFailureReason<Thrown>(error: Thrown): CustomerOperationReason {
+  if (error instanceof CustomerCloudflareGrantError && error.code === 'token_exchange_failed' &&
+      error.detail === 'http_400') return 'approval_expired';
+  const reason = failureReason(error).slice(0, 80);
+  return REASON.test(reason) ? reason : 'unexpected';
+}
+
+/** The body of a callback POST: a BigQuery key, a pasted management token, a wrong paste, or the decision to stop. */
+async function callbackUpload(request: Request): Promise<CallbackUpload | null> {
+  // Nothing thrown here is kept: a parser's message can quote what it read.
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(await readBigQueryText(request.body));
+  } catch {
+    return null;
+  }
+  const bigQuery = v.safeParse(bigQueryCallbackSchema, decoded);
+  if (bigQuery.success) return { kind: 'bigquery', body: bigQuery.output };
+  const management = v.safeParse(managementCredentialCallbackSchema, decoded);
+  if (management.success) return { kind: 'management_credential', body: management.output };
+  const wrongPaste = v.safeParse(managementCredentialEnvelopeSchema, decoded);
+  return wrongPaste.success
+    ? { kind: 'management_credential_refused', body: { code: wrongPaste.output.code, state: wrongPaste.output.state } }
+    : null;
+}
+
 export function operationPage(): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
   const pageHeaders = headers('text/html; charset=utf-8');
@@ -466,10 +553,11 @@ function dashboardLocation(
   actionId: string,
   outcome: { readonly result: CustomerOperationResult | null; readonly reason: CustomerOperationReason | null },
 ): URL {
-  const location = kind !== 'runtime'
-    ? new URL('/sources', managementOrigin)
-    : new URL('/settings', managementOrigin);
-  const parameter = kind !== 'runtime' ? 'sourceAction' : 'runtimeAction';
+  const location = kind === 'runtime' || kind === 'management_credential'
+    ? new URL('/settings', managementOrigin)
+    : new URL('/sources', managementOrigin);
+  const parameter = kind === 'runtime' ? 'runtimeAction'
+    : kind === 'management_credential' ? 'managementCredentialAction' : 'sourceAction';
   location.searchParams.set(parameter, actionId);
   if (outcome.result !== null) location.searchParams.set(`${parameter}Result`, outcome.result);
   if (outcome.reason !== null && REASON.test(outcome.reason)) {
@@ -552,6 +640,20 @@ export function createCustomerOperationRouter(
   const now = dependencies.now ?? Date.now;
   const gatewayCallback = `${config.managementOrigin}${CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH}`;
 
+  /** Ends a token change in the gateway's own record; a refused or failed command leaves the record to its expiry. */
+  const endManagementCredentialAction = async (
+    identity: Pick<CustomerManagementCredentialControl, 'actionId' | 'actionKey' | 'actionExpiresAt'>,
+    failureCode: string | null,
+  ): Promise<void> => {
+    try {
+      await dependencies.controlManagementCredentialAction?.(failureCode === null
+        ? { ...identity, command: 'complete' }
+        : { ...identity, command: 'fail', failureCode });
+    } catch {
+      // The record expires on its own.
+    }
+  };
+
   const start = async (request: Request): Promise<Response> => {
     if (!sameOriginJsonMutation(request, config.managementOrigin)) {
       return json({ schemaVersion: 1, error: 'forbidden' }, 403);
@@ -567,7 +669,9 @@ export function createCustomerOperationRouter(
       ? await dependencies.readSourceAction(claim.actionId)
       : decoded.kind === 'bigquery'
         ? await dependencies.readBigQueryAction?.(claim.actionId) ?? null
-        : await dependencies.readRuntimeAction(claim.actionId);
+        : decoded.kind === 'management_credential'
+          ? await dependencies.readManagementCredentialAction?.(claim.actionId) ?? null
+          : await dependencies.readRuntimeAction(claim.actionId);
     if (action === null || action.status !== 'authorization_required' || action.expiresAt !== claim.expiresAt) {
       return json({ schemaVersion: 1, error: 'operation_conflict' }, 409);
     }
@@ -578,9 +682,13 @@ export function createCustomerOperationRouter(
     if (existing !== null && existing.expiresAt > startedAt && existing.actionId !== claim.actionId) {
       const previousAction = existing.kind === 'runtime'
         ? await dependencies.readRuntimeAction(existing.actionId)
-        : await dependencies.readSourceAction(existing.actionId);
-      // A cancelled action invalidates its handoff and may be replaced immediately.
-      if (previousAction?.status !== 'failed') {
+        : existing.kind === 'management_credential'
+          ? await dependencies.readManagementCredentialAction?.(existing.actionId) ?? null
+          : await dependencies.readSourceAction(existing.actionId);
+      // A cancelled action invalidates its handoff and may be replaced immediately. So may a token change its own
+      // administrator started again: the gateway keeps one such record, and the earlier one is gone from it.
+      const replaced = existing.kind === 'management_credential' && previousAction === null;
+      if (!replaced && previousAction?.status !== 'failed') {
         return json({ schemaVersion: 1, error: 'operation_pending' }, 409);
       }
     }
@@ -627,6 +735,13 @@ export function createCustomerOperationRouter(
       ]);
     } catch {
       await dependencies.attempts.clear();
+      // A token change that cannot reach its consent ends here, so its lock
+      // on updates, removals, sources and Team changes does not outlive it.
+      if (decoded.kind === 'management_credential') {
+        await endManagementCredentialAction({
+          actionId: claim.actionId, actionKey: claim.actionKey, actionExpiresAt: claim.expiresAt,
+        }, 'authorization_unavailable');
+      }
       return json({ schemaVersion: 1, error: 'authorization_unavailable' }, 503, [clearCookie()]);
     }
   };
@@ -655,34 +770,68 @@ export function createCustomerOperationRouter(
   };
 
   const callback = async (request: Request, url: URL): Promise<Response> => {
-    let uploaded: v.InferOutput<typeof bigQueryCallbackSchema> | null = null;
+    let uploaded: CallbackUpload | null = null;
     if (request.method === 'POST') {
       if (!sameOriginJsonMutation(request, config.managementOrigin) || url.search !== '') return json({ error: 'oauth_callback_rejected' }, 400);
-      try { uploaded = v.parse(bigQueryCallbackSchema, JSON.parse(await readBigQueryText(request.body))); }
-      catch { return json({ error: 'oauth_callback_rejected' }, 400); }
+      uploaded = await callbackUpload(request);
+      if (uploaded === null) return json({ error: 'oauth_callback_rejected' }, 400);
     }
     const callbackAt = now();
     const cookies = [clearCookie()];
     const cookie = readOperationCookie(request, callbackAt);
     const attempt = await dependencies.attempts.read();
-    const oauthState = uploaded?.state ?? url.searchParams.get('state') ?? '';
     if (cookie === null || attempt === null || attempt.attemptId !== cookie.attemptId ||
         attempt.expiresAt !== cookie.expiresAt || attempt.expiresAt <= callbackAt ||
-        attempt.phase !== 'authorizing' || !TOKEN.test(oauthState) ||
-        !constantTimeEqual(await sha256(oauthState), attempt.stateHash)) {
+        attempt.phase !== 'authorizing') {
       return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
     }
-    if (uploaded !== null && attempt.kind !== 'bigquery') return json({ error: 'oauth_callback_rejected' }, 400, cookies);
-    const code = uploaded?.code ?? url.searchParams.get('code') ?? '';
+    const managementIdentity = {
+      actionId: attempt.actionId, actionKey: cookie.actionKey, actionExpiresAt: attempt.actionExpiresAt,
+    };
+    // The paste page keeps the code in script memory only, so a reload of it arrives here with nothing.
+    // The approval cannot be used any more: end the change now, so its lock ends with it.
+    if (attempt.kind === 'management_credential' && request.method === 'GET' && url.search === '') {
+      await dependencies.attempts.clear();
+      await endManagementCredentialAction(managementIdentity, 'paste_page_closed');
+      return redirectToDashboard(config.managementOrigin, attempt, { result: 'failed', reason: 'paste_page_closed' }, cookies);
+    }
+    const oauthState = uploaded?.body.state ?? url.searchParams.get('state') ?? '';
+    if (!TOKEN.test(oauthState) || !constantTimeEqual(await sha256(oauthState), attempt.stateHash)) {
+      return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
+    }
+    const uploadKind = uploaded === null ? null : uploaded.kind === 'bigquery' ? 'bigquery' : 'management_credential';
+    if (uploadKind !== null && attempt.kind !== uploadKind) return json({ error: 'oauth_callback_rejected' }, 400, cookies);
+    // A token change belongs to the administrator who prepared it, at the paste page and at the paste.
+    if (attempt.kind === 'management_credential' &&
+        (await dependencies.verifyAdministrator?.(request) ?? null) !== attempt.actorEmail) {
+      return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
+    }
+    const code = uploaded?.body.code ?? url.searchParams.get('code') ?? '';
     const oauthError = url.searchParams.get('error');
     if (oauthError === 'authorization_rejected' && code === '' && url.searchParams.size === 2) {
       await dependencies.attempts.clear();
+      if (attempt.kind === 'management_credential') await endManagementCredentialAction(managementIdentity, 'authorization_denied');
       return redirectToDashboard(config.managementOrigin, attempt, { result: 'denied', reason: null }, cookies);
     }
     if (oauthError !== null || !AUTHORIZATION_CODE.test(code) || (uploaded === null && url.searchParams.size !== 2)) {
       return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
     }
     if (attempt.kind === 'bigquery' && uploaded === null) return bigQueryCredentialPage(code, oauthState);
+    if (attempt.kind === 'management_credential' && uploaded === null) {
+      return customerManagementCredentialPage({
+        code, state: oauthState, managementHostname: management.hostname, expiresAt: attempt.expiresAt, now: callbackAt,
+      });
+    }
+    // A wrong paste spends nothing: the attempt, the cookie and the approval stay as they are for the next paste.
+    if (uploaded?.kind === 'management_credential_refused') {
+      return json({ schemaVersion: 1, error: 'management_token_invalid' }, 400);
+    }
+    if (uploaded?.kind === 'management_credential' && 'cancel' in uploaded.body) {
+      await dependencies.attempts.clear();
+      await endManagementCredentialAction(managementIdentity, 'cancelled');
+      const cancelled = dashboardLocation(config.managementOrigin, attempt.kind, attempt.actionId, { result: 'cancelled', reason: null });
+      return json({ schemaVersion: 1, result: 'cancelled', reason: null, redirectUrl: cancelled.toString() }, 200, cookies);
+    }
     // The attempt is spent before the exchange: a replayed callback cannot exchange twice.
     await dependencies.attempts.write({ ...attempt, phase: 'exchanging' });
     let grant: EphemeralCustomerCloudflareGrant | null = null;
@@ -709,10 +858,30 @@ export function createCustomerOperationRouter(
         });
         if (attempt.kind === 'source') return applySource(attempt, cookie.actionKey, accessToken, callbackAt);
         if (attempt.kind === 'bigquery') {
-          if (uploaded === null || dependencies.runBigQuerySetup === undefined) return { result: 'failed', reason: 'bigquery_setup_unavailable' };
+          if (uploaded?.kind !== 'bigquery' || dependencies.runBigQuerySetup === undefined) return { result: 'failed', reason: 'bigquery_setup_unavailable' };
           return appliedOutcome(await dependencies.runBigQuerySetup({ actionId: attempt.actionId, actionKey: cookie.actionKey,
-            actorEmail: attempt.actorEmail, accessToken, actionExpiresAt: attempt.actionExpiresAt, serviceAccountJson: uploaded.serviceAccountJson,
+            actorEmail: attempt.actorEmail, accessToken, actionExpiresAt: attempt.actionExpiresAt, serviceAccountJson: uploaded.body.serviceAccountJson,
           }), attempt.actionId);
+        }
+        if (attempt.kind === 'management_credential') {
+          if (uploaded?.kind !== 'management_credential' || !('managementToken' in uploaded.body)) {
+            return { result: 'failed', reason: 'attempt_invalid' };
+          }
+          // The gateway's own record moves to its write first: it refuses an
+          // expired or replaced action, and it keeps the lifecycle lock while
+          // the write is in flight.
+          const began = await dependencies.controlManagementCredentialAction?.({ ...managementIdentity, command: 'begin' }) ?? false;
+          if (!began) return { result: 'failed', reason: 'action_unavailable' };
+          // The write gives this Worker a new version, and the version that
+          // runs afterwards may refuse this one's storage writes. The attempt
+          // is spent already, so it is cleared before the write.
+          await dependencies.attempts.clear();
+          // The pasted value leaves this request here and nowhere else.
+          const written = await writeCustomerManagementCredentialSecret({
+            accessToken, accountId: config.accountId, workerName: config.workerName,
+            value: uploaded.body.managementToken, transport: dependencies.transport,
+          });
+          return written.written ? { result: 'applied', reason: null } : { result: 'failed', reason: written.reason };
         }
         if (attempt.target === null || attempt.operation === 'source-add') {
           return { result: 'failed', reason: 'attempt_invalid' };
@@ -730,7 +899,7 @@ export function createCustomerOperationRouter(
         return handed ? { result: 'applied', reason: null } : { result: 'failed', reason: 'update_start_failed' };
       });
     } catch (error) {
-      outcome = { result: 'failed', reason: failureReason(error) };
+      outcome = { result: 'failed', reason: attempt.kind === 'management_credential' ? managementCredentialFailureReason(error) : failureReason(error) };
     }
     if (grant !== null && !handed) {
       try {
@@ -739,6 +908,9 @@ export function createCustomerOperationRouter(
         if (outcome.result === 'applied') outcome = { result: 'revocation_unconfirmed', reason: null };
       }
       grant.discard();
+    }
+    if (attempt.kind === 'management_credential') {
+      await endManagementCredentialAction(managementIdentity, outcome.result === 'failed' ? outcome.reason ?? 'unexpected' : null);
     }
     try {
       await dependencies.attempts.clear();
@@ -751,7 +923,11 @@ export function createCustomerOperationRouter(
       return redirectTo(progress, cookies);
     }
     const redirect = redirectToDashboard(config.managementOrigin, attempt, outcome, cookies);
-    return uploaded === null ? redirect : json({ redirectUrl: redirect.headers.get('location') }, 200, cookies);
+    if (uploaded === null) return redirect;
+    // The paste page is told the end as fixed words; the BigQuery page keeps its answer as it was.
+    return attempt.kind === 'management_credential'
+      ? json({ schemaVersion: 1, result: outcome.result, reason: outcome.reason, redirectUrl: redirect.headers.get('location') }, 200, cookies)
+      : json({ redirectUrl: redirect.headers.get('location') }, 200, cookies);
   };
 
   /**

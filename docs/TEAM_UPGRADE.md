@@ -23,8 +23,10 @@ older contract is unavailable. Existing lifecycle floors remain enforced.
 
 ## Replacing and removing credentials
 
-Create the replacement account token directly in Cloudflare, replace the Worker
-secret, verify management access in Settings, then revoke the old token.
+Replace the token from **Settings → Replace management token**: one approval
+in Cloudflare, then the new token created from the page's link and pasted into
+your own gateway (see [Management token](MANAGEMENT_TOKEN.md#what-the-settings-flow-does-with-the-value)).
+Verify management access in Settings, then delete the old token in Cloudflare.
 Deleting a secret or Worker does not revoke its API token. Historical Worker
 versions may retain old bindings, so revoke at the provider to remove authority.
 The gateway has no token-creation or token-revocation permission.

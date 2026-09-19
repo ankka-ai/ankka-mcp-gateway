@@ -1,6 +1,10 @@
 import {
   CLOUDFLARE_OAUTH_SCOPE,
+  CLOUDFLARE_OPERATION_MUTATIONS,
+  CLOUDFLARE_OPERATION_POSTCONDITIONS,
+  CUSTOMER_CLOUDFLARE_OPERATIONS,
   FIXED_CLOUDFLARE_OPERATIONS,
+  LATER_CUSTOMER_CLOUDFLARE_OPERATIONS,
   exactOperationScopes,
   fixedCloudflareOperationAuthority,
   isCustomerCloudflareOperation,
@@ -41,7 +45,7 @@ describe('fixed Cloudflare OAuth operation authority', () => {
   it('has the exhaustive fixed operation catalogue and no generic authority', () => {
     expect(FIXED_CLOUDFLARE_OPERATIONS).toEqual([
       'bootstrap', 'install', 'upgrade', 'rollback', 'source-add', 'bigquery-add', 'source-update',
-      'source-remove', 'uninstall', 'uninstall-finalize', 'gateway-root-finalize',
+      'source-remove', 'management-credential', 'uninstall', 'uninstall-finalize', 'gateway-root-finalize',
     ]);
     expect(isFixedCloudflareOperation('install')).toBe(true);
     expect(isFixedCloudflareOperation('source-remove')).toBe(true);
@@ -154,6 +158,51 @@ describe('fixed Cloudflare OAuth operation authority', () => {
       mutations: ['publish-inert-worker-release', 'delete-receipt-resource', 'delete-root-worker', 'delete-admin-state-namespace'],
     });
     expect(isCustomerCloudflareOperation('gateway-root-finalize')).toBe(false);
+  });
+
+  it('lets a gateway write its own management secret with the scripts scope and nothing else', () => {
+    // The whole entry, not a subset: a second scope, family, mutation or an upload path would widen the consent.
+    expect(fixedCloudflareOperationAuthority('management-credential')).toEqual({
+      operation: 'management-credential',
+      executor: 'customer-gateway',
+      enabled: true,
+      scopes: [CLOUDFLARE_OAUTH_SCOPE.workersScriptsWrite],
+      workerRelease: { mutationPath: 'none', activation: 'none', versionEndpoint: 'none', deploymentEndpoint: 'none' },
+      endpointFamilies: ['workers-scripts'],
+      ownershipStates: ['receipt-owned'],
+      mutations: ['write-worker-secret'],
+      postconditions: ['management-secret-write-accepted'],
+      credentialLifecycle: {
+        storage: 'request-memory-only', refreshTokens: false, revoke: 'attempt-after-success-or-failure',
+        discard: 'always', retry: 'fresh-authorization',
+      },
+    });
+    expect(exactOperationScopes('management-credential')).toEqual(['workers-scripts.write']);
+    expect(isCustomerCloudflareOperation('management-credential')).toBe(true);
+    expect(CUSTOMER_CLOUDFLARE_OPERATIONS).toContain('management-credential');
+    expect(LATER_CUSTOMER_CLOUDFLARE_OPERATIONS).toContain('management-credential');
+    expect(CLOUDFLARE_OPERATION_MUTATIONS).toContain('write-worker-secret');
+    expect(CLOUDFLARE_OPERATION_POSTCONDITIONS).toContain('management-secret-write-accepted');
+  });
+
+  it('gives no other customer operation the secret write, and changes none of their consents', () => {
+    // The scope sets every consent is derived from, as they were before this operation existed.
+    const before = {
+      install: ['access-acct.read', 'zone-access.write', 'dns.write', 'mcp-portals.write', 'workers-routes.read', 'workers-scripts.write', 'zone.read'],
+      upgrade: ['workers-scripts.write'],
+      rollback: ['workers-scripts.write'],
+      'source-add': ['zone-access.write', 'mcp-portals.write'],
+      'bigquery-add': ['zone-access.write', 'mcp-portals.write', 'workers-scripts.write', 'workers-routes.read'],
+      'source-update': ['zone-access.write', 'mcp-portals.write'],
+      'source-remove': ['zone-access.write', 'mcp-portals.write'],
+    };
+    for (const operation of CUSTOMER_CLOUDFLARE_OPERATIONS) {
+      if (operation === 'management-credential' || operation === 'uninstall') continue;
+      expect(exactOperationScopes(operation), operation).toEqual(before[operation]);
+      expect(fixedCloudflareOperationAuthority(operation).mutations, operation).not.toContain('write-worker-secret');
+    }
+    expect(Object.keys(before).sort()).toEqual(CUSTOMER_CLOUDFLARE_OPERATIONS
+      .filter((operation) => operation !== 'management-credential' && operation !== 'uninstall').sort());
   });
 
   it('freezes every authority boundary', () => {

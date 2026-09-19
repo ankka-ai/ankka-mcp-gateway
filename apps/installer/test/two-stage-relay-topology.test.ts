@@ -447,6 +447,99 @@ describe('production-shaped relay topology: customer account to auth.ankka.ai ov
     })).rejects.toThrow('relay_rejected');
   });
 
+  /**
+   * The route table of the relay as it was deployed before the
+   * `management-credential` operation existed, as literal patterns. A relay
+   * that has not been redeployed answers exactly like this: the same code for
+   * every route it knows, `not_found` for everything else.
+   */
+  const RELAY_ROUTES_BEFORE = [
+    /^\/oauth\/relay-ticket\/(?:challenge|issue)\/(install|upgrade|rollback|source-add|bigquery-add|source-update|source-remove|uninstall)$/u,
+    /^\/oauth\/start\/(install|upgrade|rollback|source-add|bigquery-add|source-update|source-remove|uninstall)$/u,
+  ];
+  const OPERATIONS_BEFORE = ['upgrade', 'rollback', 'source-add', 'bigquery-add', 'source-update', 'source-remove', 'uninstall'] as const;
+
+  async function ticketAndStart(
+    f: Awaited<ReturnType<typeof relayFixture>>,
+    transport: CustomerCloudflareTransport,
+    operation: typeof OPERATIONS_BEFORE[number] | 'management-credential',
+  ) {
+    const kinds = operation === 'uninstall' ? { receiptResourceKinds: ['worker', 'dns_record'] as const } : {};
+    const ticket = await requestCustomerGatewayRelayTicket({
+      certificate: f.certificate, certificateSha256: f.verified.certificateSha256, gatewayCallback: GATEWAY_CALLBACK,
+      operation, ownershipPrivateKey: f.ownership.privateKey, transport, now: () => f.clock.now, ...kinds,
+    });
+    return beginCustomerBootstrapRelay({
+      publicClientId: CLIENT_ID, relayTicket: ticket.relayTicket, gatewayState: randomBase64Url(32),
+      pkceChallenge: randomBase64Url(32), gatewayCallback: GATEWAY_CALLBACK, transport, operation, ...kinds,
+    });
+  }
+
+  it('sends every operation that existed before exactly the requests a relay that was not redeployed accepts', async () => {
+    const f = await relayFixture();
+    const notRedeployed: CustomerCloudflareTransport = async (input, init) => {
+      const request = new Request(input, init);
+      return RELAY_ROUTES_BEFORE.some((route) => route.test(new URL(request.url).pathname))
+        ? f.publicHttps(input, init)
+        : Response.json({ schemaVersion: 1, error: 'not_found' }, { status: 404 });
+    };
+    for (const operation of OPERATIONS_BEFORE) {
+      f.calls.length = 0;
+      const started = await ticketAndStart(f, notRedeployed, operation);
+      const kinds = operation === 'uninstall' ? ['worker', 'dns_record'] as const : undefined;
+      expect(new URL(started.authorizationUrl).searchParams.get('scope'), operation)
+        .toBe(exactOperationScopes(operation, kinds).join(' '));
+      // The whole request surface of one consent: three POSTs, these paths, these headers, these body keys.
+      expect(f.calls.map((call) => `${call.method} ${new URL(call.url).pathname}`), operation).toEqual([
+        `POST /oauth/relay-ticket/challenge/${operation}`,
+        `POST /oauth/relay-ticket/issue/${operation}`,
+        `POST /oauth/start/${operation}`,
+      ]);
+      for (const call of f.calls) {
+        expect(call.headers, operation).toEqual({ accept: 'application/json', 'content-type': 'application/json' });
+      }
+      const bodyKeys = f.calls.map((call) => Object.keys(v.parse(v.record(v.string(), v.string()), JSON.parse(call.body))).sort());
+      expect(bodyKeys, operation).toEqual([
+        ['request'], ['proof'], ['gatewayCallback', 'gatewayState', 'pkceChallenge', 'relayTicket'],
+      ]);
+    }
+
+    // The one thing such a relay cannot do is the new operation: its first request finds no route, nothing else is sent.
+    f.calls.length = 0;
+    await expect(ticketAndStart(f, notRedeployed, 'management-credential')).rejects.toMatchObject({ code: 'relay_rejected' });
+    expect(f.calls).toEqual([]);
+  });
+
+  it('gives the redeployed relay one new operation: a scripts-only consent that returns to the certified management callback', async () => {
+    const f = await relayFixture();
+    const started = await ticketAndStart(f, f.publicHttps, 'management-credential');
+    expect(f.shardNames).toEqual(['v1:management-credential', 'v1:management-credential']);
+    expect(f.calls.map((call) => `${call.method} ${new URL(call.url).pathname}`)).toEqual([
+      'POST /oauth/relay-ticket/challenge/management-credential',
+      'POST /oauth/relay-ticket/issue/management-credential',
+      'POST /oauth/start/management-credential',
+    ]);
+    const authorization = new URL(started.authorizationUrl);
+    expect(authorization.searchParams.get('scope')).toBe('workers-scripts.write');
+    expect(authorization.searchParams.get('redirect_uri')).toBe(CLOUDFLARE_CODE_RELAY_CALLBACK);
+    const relayState = v.parse(relayStateSchema, authorization.searchParams.get('state'));
+    // The relay sees an authorization code and nothing else; a management token never reaches it on any route.
+    const callback = await f.relay.fetch(new Request(
+      `${CLOUDFLARE_CODE_RELAY_CALLBACK}?code=${AUTHORIZATION_CODE}&scope=workers-scripts.write&state=${relayState}`,
+      { redirect: 'manual' },
+    ), f.env);
+    expect(callback.status).toBe(302);
+    const forwarded = new URL(callback.headers.get('location') ?? '');
+    expect(`${forwarded.origin}${forwarded.pathname}`).toBe(GATEWAY_CALLBACK);
+    expect([...forwarded.searchParams.keys()].sort()).toEqual(['code', 'state']);
+    // A wider echoed scope than the operation's own is refused: the sealed state names the operation.
+    const widened = await f.relay.fetch(new Request(
+      `${CLOUDFLARE_CODE_RELAY_CALLBACK}?code=${AUTHORIZATION_CODE}&scope=${encodeURIComponent('workers-scripts.write zone-access.write')}&state=${relayState}`,
+      { redirect: 'manual' },
+    ), f.env);
+    expect(widened.status).not.toBe(302);
+  });
+
   it('serves only the fixed public origin and its deployable config declares exactly that route and no token or secret binding', async () => {
     const f = await relayFixture();
     for (const origin of ['https://ankka-cloudflare-auth.tenant.workers.dev', 'http://auth.ankka.ai', 'https://auth.ankka.ai:8443']) {

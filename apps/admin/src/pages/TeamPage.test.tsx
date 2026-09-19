@@ -35,6 +35,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     getTeam: vi.fn(async () => structuredClone(team)), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     ...overrides,
   }
 }
@@ -289,15 +290,35 @@ describe('TeamPage', () => {
     expect(window.location.search).toBe('')
   })
 
-  it('keeps writes disabled without a management token and links to setup', async () => {
+  it.each([
+    ['skipped', 'You continued without a token during setup, so your gateway has never had one.'],
+    ['provided', 'You pasted a token during setup, but your gateway lost it before it could be saved. It kept nothing of it, so the token has to be added again.'],
+    [null, 'This gateway was set up before setup asked for the token, so it was never given one.'],
+    [undefined, 'This gateway was set up before setup asked for the token, so it was never given one.'],
+  ] as const)('keeps writes disabled without a management token and leads to the one way of adding it (setup: %s)', async (choice, sentence) => {
     const user = userEvent.setup()
-    const client = renderTeam(api({ getTeam: vi.fn(async () => ({
-      ...team, editingEnabled: false, editingDisabledReason: 'management_credential_missing' as const,
-      managementCredentialConfigured: false,
-    })) }))
+    // jsdom follows a fragment, not a navigation: stand on the operation page so the handoff is observable.
+    window.history.replaceState(null, '', '/__ankka/operation')
+    const prepared = { schemaVersion: 1 as const, actionId, status: 'authorization_required' as const, expiresAt, handoffUrl: `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}` }
+    const withoutToken: Team = { ...team, editingEnabled: false, editingDisabledReason: 'management_credential_missing', managementCredentialConfigured: false }
+    // A gateway from before this field existed leaves it out altogether.
+    if (choice !== undefined) withoutToken.managementCredentialChoice = choice
+    const client = renderTeam(api({
+      getTeam: vi.fn(async () => withoutToken),
+      prepareManagementCredentialAction: vi.fn(async () => prepared),
+    }))
     const person = await screen.findByRole('group', { name: 'analyst@example.com' })
     expect(within(person).getByRole('checkbox')).toBeDisabled()
-    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
+    // One card says what the token is for, what it can reach, why it is missing here, and starts the way to add it.
+    const card = screen.getByRole('heading', { name: 'Add your management token' }).closest('section')
+    expect(card).toHaveTextContent('Your gateway needs one Cloudflare API token of its own to add sources and change team access, because every approval you give it is temporary.')
+    expect(card).toHaveTextContent('Cloudflare cannot limit this token to your gateway: it can edit every Access policy in your account, and it never passes through anything Ankka hosts.')
+    expect(card).toHaveTextContent(sentence)
+    expect(screen.queryByRole('link', { name: 'Settings' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add management token' }))
+    expect(client.prepareManagementCredentialAction).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(window.location.hash).toBe(`#${'a'.repeat(40)}`))
+    window.history.replaceState(null, '', '/')
     const save = screen.getByRole('button', { name: 'Save' })
     expect(save).toBeDisabled()
     await user.click(save)
@@ -333,7 +354,9 @@ describe('TeamPage', () => {
       proposedMembers,
     }))
     const client = renderTeam(api({ getTeam }))
-    expect(await screen.findByText(/Nothing was automatically restored/)).toHaveTextContent('Check its permissions or replace it in Cloudflare')
+    expect(await screen.findByText(/Nothing was automatically restored/)).toHaveTextContent('Verify management access in Settings to see what is missing, or replace the token there.')
+    // A release that manages membership in Cloudflare never offers the token card.
+    expect(screen.queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Resume recorded change' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Cancel recorded change' })).not.toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'analyst@example.com' })).getByRole('checkbox')).toBeChecked()
@@ -495,7 +518,8 @@ describe('TeamPage', () => {
 
   it('pauses editing for a pending lifecycle action without hiding saved access and tools', async () => {
     const client = renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, editingEnabled: false, editingDisabledReason: 'lifecycle_action_pending' as const })) }))
-    expect(await screen.findByText(/Another source, update, or teardown action is in progress/)).toBeInTheDocument()
+    expect(await screen.findByText(/Another source, update, teardown, or management token action is in progress/)).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
     expect(savedAccessList()).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     expect(client.prepareTeamAction).not.toHaveBeenCalled()

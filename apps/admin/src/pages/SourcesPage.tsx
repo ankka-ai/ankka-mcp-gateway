@@ -2,10 +2,11 @@ import { Input } from '@cloudflare/kumo'
 import { Button } from '../components/Button'
 import { ArrowRight, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { GatewayApiError, GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceActionSummary, type SourceActionTools, type SourceDiscovery, type BigQuerySetups, rollbackEndsMessage, validHandoffUrl } from '../api'
+import { GatewayApiError, GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type ManagementCredentialChoice, type SourceActionSummary, type SourceActionTools, type SourceDiscovery, type BigQuerySetups, rollbackEndsMessage, validHandoffUrl } from '../api'
 import { SOURCE_CATALOG, type SourceCatalog, type SourceCatalogSource } from '../catalog'
 import { useGateway } from '../GatewayContext'
 import { GatewayEndpoint } from '../components/GatewayEndpoint'
+import { ManagementTokenCard } from '../components/ManagementTokenCard'
 import { PageHeader } from '../components/PageHeader'
 import { NativeConnectorGuides } from '../components/NativeConnectorGuides'
 import { StatusPill } from '../components/StatusPill'
@@ -132,10 +133,12 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     clearSourceNotice,
     cancelSourceApply,
     discoverSource,
+    getTeam,
     isBusy,
     isCheckingSourceActions,
     prepareSourceApply,
     refreshSourceActions,
+    refreshSources,
     saveSourceDraft,
     sourceActions,
     sourceActionsError,
@@ -153,6 +156,22 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     void api.getBigQuerySetups().then((value) => { if (active) setBigQuery(value) }).catch(() => { if (active) setBigQuery(null) })
     return () => { active = false }
   }, [api, externalChangeVersion, sourceActions])
+  // Installation is off either because this release pauses it or because the gateway has no management token. Only
+  // the gateway knows which, and while the token is missing its answer costs no Cloudflare call.
+  const tokenInQuestion = sources !== null && sources.installationEnabled !== true && sources.applyMode === 'account_token'
+  const [missingToken, setMissingToken] = useState<{ choice: ManagementCredentialChoice | null } | 'configured' | 'unreadable' | null>(null)
+  useEffect(() => {
+    if (!tokenInQuestion) { setMissingToken(null); return }
+    let active = true
+    void getTeam().then(async (team) => {
+      if (!active) return
+      if (team.managementCredentialConfigured === false) { setMissingToken({ choice: team.managementCredentialChoice ?? null }); return }
+      // The token arrived after this dashboard loaded its sources: read them again before saying anything is paused.
+      await refreshSources().catch(() => {})
+      if (active) setMissingToken('configured')
+    }).catch(() => { if (active) setMissingToken('unreadable') })
+    return () => { active = false }
+  }, [getTeam, refreshSources, tokenInQuestion])
   const [sourceMode, setSourceMode] = useState<'catalog' | 'custom'>(catalog.sources.length > 0 ? 'catalog' : 'custom')
   const [catalogSourceId, setCatalogSourceId] = useState<string | null>(null)
   const [label, setLabel] = useState('')
@@ -201,6 +220,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   // The gateway decides whether installing ends a rollback; this page only says so beside the control that commits to it.
   const rollbackNote = installationEnabled && sources.installEndsRollbackTo ? rollbackEndsMessage(sources.installEndsRollbackTo) : null
   const applyBlocked = isBusy || isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || sourceActions.blockingAction !== null
+  // The gateway itself said it has no management token: the page leads to the one way of adding it.
+  const tokenIsMissing = !installationEnabled && missingToken !== null && missingToken !== 'configured' && missingToken !== 'unreadable'
   const latestActions = new Map<string, SourceActionSummary>()
   for (const action of sourceActions?.actions ?? []) {
     const previous = latestActions.get(action.sourceId)
@@ -319,7 +340,13 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
       {showBigQuery && installationEnabled ? <BigQuerySetupForm disabled={applyBlocked || resumingBigQuery} /> : null}
 
-      {!installationEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{sources.applyMode === 'account_token' ? <>Configure your Cloudflare management credential in <a href="/settings" className="underline">Settings</a> to enable source installation.</> : SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
+      {tokenIsMissing ? (
+        <>
+          <ManagementTokenCard choice={missingToken.choice} />
+          <p role="status" className="mt-4 text-sm leading-6 text-kumo-subtle">Saved drafts are retained. They can be installed once your gateway has the token.</p>
+        </>
+      ) : null}
+      {!installationEnabled && (sources.applyMode !== 'account_token' || missingToken === 'configured' || missingToken === 'unreadable') ? <p role="status" className="notice-banner notice-warning mt-6">{missingToken === 'unreadable' ? <>Source installation needs a working management token. Check it in <a href="/settings" className="underline">Settings</a>.</> : SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
 
       {sourceNotice ? (
         <div role="status" className={`notice-banner mt-6 notice-${sourceNotice.tone}`}>
@@ -341,7 +368,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           {sourceActionsPollingPaused ? <p role="status" className="mt-3 text-sm text-kumo-subtle">Automatic checks have paused. Use Check status for the latest result; this does not cancel the action.</p> : null}
           {blocker && blocker.kind !== 'source' ? (
             <p role="status" className="mt-3 text-sm leading-6 text-kumo-subtle">
-              A gateway {blocker.kind === 'runtime' ? 'update or rollback' : blocker.kind === 'teardown' ? 'removal' : 'Team access'} action is blocking source installation. Review that action before applying a source.
+              A gateway {blocker.kind === 'runtime' ? 'update or rollback' : blocker.kind === 'teardown' ? 'removal' : blocker.kind === 'management_credential' ? 'management token' : 'Team access'} action is blocking source installation. Review that action before applying a source.
               <span className="mt-1 block break-all font-mono text-xs">Action: {blocker.actionId}</span>
             </p>
           ) : null}
@@ -597,7 +624,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <div className="empty-card">
             <div className="flex size-12 items-center justify-center rounded-2xl bg-kumo-tint text-kumo-subtle"><Database size={23} /></div>
             <h2 className="mt-4 text-base font-semibold text-kumo-strong">No sources yet</h2>
-            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : 'Configure your Cloudflare management credential in Settings to enable source installation.'}</p>
+            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : tokenIsMissing ? 'Your gateway needs its management token before it can install a source.' : 'Source installation is unavailable right now.'}</p>
             <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={() => setShowForm(true)}><Plus size={16} weight="bold" /> Add your first source</Button>
           </div>
         ) : (

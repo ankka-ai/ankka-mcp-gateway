@@ -16,6 +16,7 @@ import {
   HttpGatewayAdminApi,
   SOURCE_ADDITION_PAUSED_MESSAGE,
   type ManagedSources,
+  type ManagementVerification,
   type PreparedAction,
   type SourceApplyResult,
   type RuntimeOperation,
@@ -66,6 +67,8 @@ interface GatewayContextValue {
   prepareSourceApply(sourceId: string, renewActionId?: string): Promise<SourceApplyResult>
   prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction>
   prepareTeardownAction(): Promise<PreparedAction>
+  prepareManagementCredentialAction(): Promise<PreparedAction>
+  verifyManagementAccess(): Promise<ManagementVerification>
   getTeam(): Promise<Team>
   prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
@@ -197,6 +200,8 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   }), [refreshSourceActions, runBusy])
 
   const getTeam = useCallback(() => apiRef.current.getTeam(), [])
+  // Not a busy action: the page that asks shows its own progress, and a failed check is an answer, not a page error.
+  const verifyManagementAccess = useCallback(() => apiRef.current.verifyManagementAccess(), [])
   const getTeamAction = useCallback((actionId: string) => apiRef.current.getTeamAction(actionId), [])
 
   const refreshUpdate = useCallback(async () => {
@@ -451,6 +456,14 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       if (!handoffUrl) throw new Error('The teardown handoff could not be verified.')
       return { ...prepared, handoffUrl }
     }),
+    // The handoff is this gateway's own operation page; the token itself is pasted there, never here.
+    prepareManagementCredentialAction: () => runBusy(async () => {
+      const prepared = await apiRef.current.prepareManagementCredentialAction()
+      const handoffUrl = validHandoffUrl(prepared.handoffUrl, window.location.origin)
+      if (!handoffUrl) throw new Error('The authorization link could not be verified.')
+      return { ...prepared, handoffUrl }
+    }),
+    verifyManagementAccess,
     getTeam,
     getTeamAction,
     prepareTeamAction: (expectedRevision, members) => runBusy(async () => {
@@ -468,7 +481,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     }),
   }), [
     busyCount, error, hasLoaded, isLoading, refreshSources, refreshUpdate, reload, runBusy,
-    sourceNotice, sources, status, update, updateNotice, getTeam, getTeamAction,
+    sourceNotice, sources, status, update, updateNotice, getTeam, getTeamAction, verifyManagementAccess,
     externalChangeVersion, refreshAfterExternalChange,
     sourceActions, sourceActionsError, isCheckingSourceActions, sourceActionsPollingPaused,
     refreshSourceActions, cancelSourceApply, removal,

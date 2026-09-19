@@ -40,6 +40,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => removalRecorded), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     prepareTeardownAction: vi.fn(async () => ({ schemaVersion: 1 as const, actionId: `action_${'b'.repeat(32)}`, status: 'authorization_required' as const,
       expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `${window.location.origin}${REMOVAL_PAGE}#${'h'.repeat(40)}` })),
     getTeardownAction: vi.fn(async () => recorded({ status: 'recovery_required', failureCode: 'fresh_authorization_required' })),
@@ -62,7 +63,7 @@ describe('AppShell during a removal', () => {
     open(client)
 
     expect(await screen.findByRole('heading', { name: 'Settings', level: 1 })).toBeInTheDocument()
-    expect(await screen.findByText(/Could not verify management access/u)).toBeInTheDocument()
+    expect(await screen.findByText(/could not read your Team policies\. Verify management access/u)).toBeInTheDocument()
     const notice = (await screen.findByText('Removal in progress')).closest('[role="status"]')
     expect(notice).toHaveTextContent('some of its connected resources may already be gone')
     expect(notice).toHaveTextContent('it resumes from the saved progress')

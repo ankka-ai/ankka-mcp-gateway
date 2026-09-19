@@ -301,6 +301,8 @@ const INTERNAL_SOURCES_PATH = '/sources';
 const INTERNAL_ROLLBACK_OUTLOOK_PATH = '/rollback-outlook';
 const INTERNAL_TEAM_PATH = '/team';
 const INTERNAL_TEAM_ACTIONS_PATH = '/team-actions';
+const INTERNAL_MANAGEMENT_CHANGES_PATH = '/management-credential-actions';
+const INTERNAL_MANAGEMENT_VERIFY_PATH = '/management-credential/verify';
 const STORAGE_KEY = 'ankka-mcp-gateway/uninstall-state/v1';
 const STATUS_KEY = 'ankka-mcp-gateway/public-status/v1';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
@@ -309,6 +311,10 @@ const ACTIONS_KEY = 'ankka-mcp-gateway/source-actions/v1';
 const UPDATES_KEY = 'ankka-mcp-gateway/runtime-updates/v1';
 const TEARDOWNS_KEY = 'ankka-mcp-gateway/teardown-actions/v1';
 const TEAM_KEY = 'ankka-mcp-gateway/team-access/v1';
+// The one management token change an administrator has open, without its value: see safeCredentialAction.
+const MANAGEMENT_CHANGE_KEY = 'ankka-mcp-gateway/management-credential-action/v1';
+// Setup records the administrator's choice at its token step under this key, as a fixed word and never the value.
+const MANAGEMENT_CHOICE_KEY = 'ankka-mcp-gateway/management-credential-choice/v1';
 // New source policies start with no audience. Only a separate Team save grants
 // access; historical receipts and their original audiences remain immutable.
 const SOURCE_ADDITION_PAUSED = false;
@@ -2985,6 +2991,8 @@ async function sourceActionSnapshot(storage, actorEmail, now) {
       }
     }
   }
+  const credentialChange = await openCredentialAction(storage, now);
+  if (!blockingAction && credentialChange) blockingAction = sourceActionPointer(credentialChange, 'management_credential');
   const control = current.actions.some(sourceActionConnectionPaused)
     ? safeManagementControl(await storage.get(CONTROL_KEY)) : null;
   return { schemaVersion: 1, actions: current.actions.map((action) => {
@@ -3847,6 +3855,8 @@ async function saveRuntimeUpdates(storage, state) {
 
 async function prepareRuntimeAction(storage, environment, input) {
   if (await currentTeardownLocksRuntime(storage, Date.now())) return null;
+  // A token change gives this Worker a new version; an update must not read its bindings around that write.
+  if (await credentialActionBlocksLifecycle(storage, Date.now())) return null;
   if (await teamActionBlocksLifecycle(storage) || !await teamRuntimeReleaseAllowed(storage, input?.to?.release)) return null;
   if (!exactKeys(input, [
     'actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'issuedAt', 'operation', 'to',
@@ -4811,6 +4821,7 @@ async function rootTeardownAuthority(storage, environment, installationId, env, 
 }
 
 async function prepareTeardownAction(storage, environment, input, env, currentPolicies = false, managed = null) {
+  if (await credentialActionBlocksLifecycle(storage, Date.now())) return null;
   const currentState = currentPolicies ? await currentTeardownState(storage, env, managed) : null;
   if (currentPolicies ? currentState === null : await teamTeardownBlocked(storage)) return null;
   if (!exactKeys(input, [
@@ -5266,6 +5277,29 @@ export class AdminState {
           : null;
         return action ? fixedJson(200, publicRuntimeAction(action)) :
           fixedJson(404, { schemaVersion: 1, error: 'runtime_action_not_found' });
+      }
+      if (url.pathname === INTERNAL_MANAGEMENT_CHANGES_PATH && request.method === 'POST') {
+        const input = await request.json().catch(() => null);
+        const action = await prepareCredentialAction(this.state.storage, this.env, input);
+        return action ? fixedJson(200, publicCredentialAction(action)) :
+          fixedJson(409, { schemaVersion: 1, error: 'management_credential_action_conflict' });
+      }
+      if (url.pathname === `${INTERNAL_MANAGEMENT_CHANGES_PATH}/control` && request.method === 'POST') {
+        return processCredentialActionControl(request, this.env, this.state.storage);
+      }
+      if (url.pathname.startsWith(`${INTERNAL_MANAGEMENT_CHANGES_PATH}/`) && request.method === 'GET') {
+        const actionId = url.pathname.slice(`${INTERNAL_MANAGEMENT_CHANGES_PATH}/`.length);
+        const action = safeCredentialAction(await this.state.storage.get(MANAGEMENT_CHANGE_KEY));
+        return action && ACTION_ID.test(actionId) && action.actionId === actionId
+          ? fixedJson(200, publicCredentialAction(action))
+          : fixedJson(404, { schemaVersion: 1, error: 'management_credential_action_not_found' });
+      }
+      if (url.pathname === INTERNAL_MANAGEMENT_VERIFY_PATH && request.method === 'POST') {
+        // Inside this queue, so no source or Team write of this gateway interleaves with the two writes.
+        try { return fixedJson(200, await verifyManagementAccess(this.state.storage, this.env)); } catch {
+          return fixedJson(200, { schemaVersion: 1, status: 'unconfirmed', token: 'not_checked',
+            portals: 'not_checked', accessPolicies: 'not_checked' });
+        }
       }
       if (url.pathname === INTERNAL_TEAM_PATH && request.method === 'GET') {
         const snapshot = await teamSnapshot(this.state.storage, this.env);
@@ -5930,6 +5964,12 @@ async function armSourceCompatibility(storage, env) {
 }
 
 async function otherLifecycleBlocksSource(storage, now, currentActionId) {
+  if (await credentialActionBlocksLifecycle(storage, now)) return true;
+  return recordedLifecycleBlocks(storage, now, currentActionId);
+}
+
+/** An unfinished source installation, update or removal, as their own journals record it. */
+async function recordedLifecycleBlocks(storage, now, currentActionId) {
   for (const key of [ACTIONS_KEY, UPDATES_KEY, TEARDOWNS_KEY]) {
     const raw = await storage.get(key);
     if (raw === undefined) continue;
@@ -6056,6 +6096,233 @@ async function verifyManagementCredential(env) {
   return verified.status === 'ok' && verified.result?.status === 'active';
 }
 
+/**
+ * One management token change, as the gateway records it: who prepared it,
+ * until when, and how it ended. The pasted token is never part of this record,
+ * of any command that moves it, or of anything else this object stores.
+ *
+ * `authorization_required` holds the lifecycle lock until it expires. `applying`
+ * holds it while the one Worker-secret write is in flight: that write gives this
+ * Worker a new version, and the version that runs afterwards may never record
+ * the end, so the lock is bounded by the write's own deadline instead of by a
+ * recovery state. Whether the token arrived is never read from here: the
+ * runtime receives the binding or it does not.
+ */
+const CREDENTIAL_WRITE_WINDOW_MS = 2 * 60 * 1000;
+const CREDENTIAL_FAILURE = /^[a-z][a-z0-9_]{0,79}$/u;
+
+function safeCredentialAction(value) {
+  if (!exactKeys(value, [
+    'actionId', 'actionKeyHash', 'actorEmail', 'beganAt', 'expiresAt', 'failureCode', 'issuedAt', 'schemaVersion', 'status',
+  ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
+      !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
+      normalizedEmail(value.actorEmail) !== value.actorEmail || !Number.isSafeInteger(value.issuedAt) ||
+      !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
+      value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
+      !['authorization_required', 'applying', 'succeeded', 'failed'].includes(value.status) ||
+      !(value.beganAt === null || Number.isSafeInteger(value.beganAt)) ||
+      (value.status === 'applying' && value.beganAt === null) ||
+      (value.status === 'authorization_required' && value.beganAt !== null) ||
+      !(value.failureCode === null || (isText(value.failureCode) && CREDENTIAL_FAILURE.test(value.failureCode))) ||
+      (value.status === 'failed') !== (value.failureCode !== null)) return null;
+  return Object.freeze({ ...value });
+}
+
+/**
+ * The recorded change while it still holds the lock, else null. A record that
+ * does not validate holds nothing: unlike a source or update journal it is
+ * evidence of no provider write, so it must never lock a gateway for good.
+ */
+async function openCredentialAction(storage, now) {
+  const action = safeCredentialAction(await storage.get(MANAGEMENT_CHANGE_KEY));
+  if (!action) return null;
+  if (action.status === 'authorization_required') return action.expiresAt > now ? action : null;
+  return action.status === 'applying' && now < action.beganAt + CREDENTIAL_WRITE_WINDOW_MS ? action : null;
+}
+
+async function credentialActionBlocksLifecycle(storage, now) {
+  return await openCredentialAction(storage, now) !== null;
+}
+
+function publicCredentialAction(action) {
+  return Object.freeze({
+    schemaVersion: 1, actionId: action.actionId, status: action.status,
+    expiresAt: new Date(action.expiresAt).toISOString(), failureCode: action.failureCode,
+  });
+}
+
+/**
+ * Records a new change when nothing else is unfinished: no source installation,
+ * update, removal or Team change, and no other token change. The same helpers
+ * refuse those while this one is open.
+ */
+async function prepareCredentialAction(storage, env, input) {
+  if (!exactKeys(input, ['actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'issuedAt']) ||
+      !Number.isSafeInteger(input.issuedAt) || !accessConfiguration(env)?.emails.includes(input.actorEmail)) return null;
+  // An administrator may start their own unfinished approval again; it replaces the earlier one, whose handoff
+  // then names an action that no longer exists. Anything already writing, or prepared by someone else, stays.
+  const open = await openCredentialAction(storage, input.issuedAt);
+  if (open && (open.status !== 'authorization_required' || open.actorEmail !== input.actorEmail)) return null;
+  if (await recordedLifecycleBlocks(storage, input.issuedAt, null) || await teamActionBlocksLifecycle(storage)) return null;
+  const action = safeCredentialAction({
+    schemaVersion: 1, actionId: input.actionId, actionKeyHash: input.actionKeyHash, actorEmail: input.actorEmail,
+    issuedAt: input.issuedAt, expiresAt: input.expiresAt, status: 'authorization_required', beganAt: null, failureCode: null,
+  });
+  if (!action || action.expiresAt - action.issuedAt !== 10 * 60 * 1000) return null;
+  await storage.put(MANAGEMENT_CHANGE_KEY, action);
+  return action;
+}
+
+/**
+ * Moves the recorded change, by a command signed with its one-time key:
+ * `begin` right before the write, then `complete` or `fail`. A change that
+ * never reached its write may also `fail`, which is how a declined or
+ * abandoned approval gives the lock back at once. No command carries the token.
+ */
+async function processCredentialActionControl(request, env, storage, nowMs = Date.now()) {
+  const rejected = () => fixedJson(400, { schemaVersion: 1, error: 'management_credential_action_rejected' });
+  const rawBody = await readBoundedText(request, 4 * 1024);
+  if (!parseManagementEnvironment(env) || request.method !== 'POST' || !rawBody || request.headers.has('authorization') ||
+      request.headers.has('cookie') || request.headers.has('origin') || request.headers.has('referer') ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return rejected();
+  let value;
+  try { value = JSON.parse(rawBody); } catch { value = null; }
+  const failing = value?.command === 'fail';
+  if (!isPlainData(value) || canonicalJson(value) !== rawBody || !exactKeys(value, failing
+    ? ['actionId', 'actionKey', 'command', 'expiresAt', 'failureCode', 'issuedAt', 'schemaVersion']
+    : ['actionId', 'actionKey', 'command', 'expiresAt', 'issuedAt', 'schemaVersion']) ||
+      value.schemaVersion !== 1 || !['begin', 'complete', 'fail'].includes(value.command) ||
+      (failing && (!isText(value.failureCode) || !CREDENTIAL_FAILURE.test(value.failureCode)))) return rejected();
+  const action = safeCredentialAction(await storage.get(MANAGEMENT_CHANGE_KEY));
+  if (!action || action.actionId !== value.actionId || !isText(value.actionKey) || !NONCE.test(value.actionKey) ||
+      await sha256(value.actionKey) !== action.actionKeyHash ||
+      !await verifyHmac(rawBody, value.actionKey, request.headers.get('x-ankka-management-credential-signature')) ||
+      !Number.isSafeInteger(value.issuedAt) || value.issuedAt < action.issuedAt ||
+      value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 || value.expiresAt !== action.expiresAt) return rejected();
+  let next = null;
+  if (value.command === 'begin' && action.status === 'authorization_required' && action.expiresAt > nowMs) {
+    next = { ...action, status: 'applying', beganAt: nowMs };
+  } else if (value.command === 'complete' && action.status === 'applying') {
+    next = { ...action, status: 'succeeded' };
+  } else if (failing && ['authorization_required', 'applying'].includes(action.status)) {
+    next = { ...action, status: 'failed', failureCode: value.failureCode };
+  }
+  const updated = next && safeCredentialAction(next);
+  if (!updated) return fixedJson(409, { schemaVersion: 1, error: 'management_credential_action_conflict' });
+  await storage.put(MANAGEMENT_CHANGE_KEY, updated);
+  return fixedJson(200, publicCredentialAction(updated));
+}
+
+/** What setup recorded at its token step: `provided`, `skipped`, or null for a gateway that was never asked. */
+async function managementCredentialChoice(storage) {
+  const recorded = await storage.get(MANAGEMENT_CHOICE_KEY);
+  return exactKeys(recorded, ['choice', 'schemaVersion']) && recorded.schemaVersion === 1 &&
+    ['provided', 'skipped'].includes(recorded.choice) ? recorded.choice : null;
+}
+
+/**
+ * Proves that the installed token can do both things the gateway needs it for,
+ * without changing anything: it writes the gateway's own Portal and the
+ * Portal's own Access policy back exactly as they are.
+ *
+ * Each resource is read first and must match what the receipts say, judged as
+ * every other check here judges it: identifiers, names, markers, the exact
+ * server mappings and the exact audience, never a timestamp. So a write of the
+ * same content cannot look like drift afterwards. On any difference nothing is
+ * written for that resource and the answer says drift. The Portal is sent the
+ * body this gateway sends when it attaches a source; the policy is sent the
+ * five fields a Team change sends, with the values as read. A refusal of the
+ * credential names the missing permission; every other failure is unconfirmed.
+ *
+ * At most seven provider calls: one token check, read, write and read-back of
+ * the Portal, read and write of the policy with its application.
+ */
+async function verifyManagementAccess(storage, env) {
+  const answer = (status, token, portals, accessPolicies) =>
+    ({ schemaVersion: 1, status, token, portals, accessPolicies });
+  const token = managementCredential(env);
+  if (!token) return answer('missing', 'missing', 'not_checked', 'not_checked');
+  const now = Date.now();
+  if (await otherLifecycleBlocksTeam(storage, now) || await teamActionBlocksLifecycle(storage)) {
+    return answer('busy', 'not_checked', 'not_checked', 'not_checked');
+  }
+  const signal = AbortSignal.timeout(45_000);
+  const environment = parseManagementEnvironment(env);
+  if (!environment) return answer('unconfirmed', 'not_checked', 'not_checked', 'not_checked');
+  const account = encodeURIComponent(environment.accountId);
+  const verified = await providerCall(`/accounts/${account}/tokens/verify`, token, { signal });
+  if (verified.status === 'auth' || (verified.status === 'ok' && verified.result?.status !== 'active')) {
+    return answer('rejected', 'rejected', 'not_checked', 'not_checked');
+  }
+  if (verified.status !== 'ok') return answer('unconfirmed', 'unconfirmed', 'not_checked', 'not_checked');
+  const context = await teamRuntimeContext(storage, env);
+  // The saved policy is the one a Team change would call its `before`, from the same planner, decided before any call.
+  let target = null;
+  try {
+    target = context && planTeamAccessChange({ schemaVersion: 1, expectedRevision: context.team.revision,
+      members: context.team.members }, context.planner).policies.find((policy) => policy.kind === 'portal');
+  } catch { target = null; }
+  if (!context || !target) return answer('unconfirmed', 'active', 'not_checked', 'not_checked');
+  const word = (response) => response.status === 'auth' ? 'permission_missing' : 'unconfirmed';
+
+  // MCP Portals Edit: the gateway's own Portal, read, written back unchanged, read again.
+  const portalPath = `/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`;
+  const mappings = context.authority.portalMappings;
+  let portals;
+  const portal = await providerCall(portalPath, token, { signal });
+  if (portal.status !== 'ok') portals = portal.status === 'absent' ? 'drift' : word(portal);
+  else if (!portalExact(portal.result, context.control, mappings)) portals = 'drift';
+  else {
+    const body = {
+      name: context.control.portal.name, hostname: context.control.portal.hostname, code_mode: 'default_on',
+      secure_web_gateway: false, description: context.control.portal.marker,
+    };
+    // As when a source is attached: the guide names `id`, the schema `server_id`. A Portal without sources keeps the
+    // body it was created with, which carries no server list.
+    if (mappings.length > 0) body.servers = mappings.map((mapping) => ({ ...mapping, id: mapping.server_id }));
+    const written = await providerCall(portalPath, token, { method: 'PUT', body: canonicalJson(body), signal });
+    if (written.status !== 'ok') portals = word(written);
+    else {
+      const after = await providerCall(portalPath, token, { signal });
+      portals = after.status === 'ok' && portalExact(after.result, context.control, mappings) ? 'verified' : 'unconfirmed';
+    }
+  }
+
+  // Access: Apps and Policies Edit: the Portal's own policy, below its own application, written back as read.
+  const applicationPath = `/accounts/${account}/access/apps/${encodeURIComponent(target.applicationId)}`;
+  const resourceValue = context.authority.resources.find((value) =>
+    value.kind === 'portal_access_application' && value.provider.id === target.applicationId);
+  const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
+  const saved = target.before;
+  let accessPolicies;
+  const application = entry ? await providerCall(applicationPath, token, { signal }) : null;
+  if (!application) accessPolicies = 'unconfirmed';
+  else if (application.status !== 'ok') accessPolicies = application.status === 'absent' ? 'drift' : word(application);
+  else if (application.result?.id !== target.applicationId ||
+      (Object.hasOwn(application.result, 'account_id') && application.result.account_id !== environment.accountId) ||
+      !accessApplicationIdentityMatches(application.result, 'portal_access_application', entry.state)) accessPolicies = 'drift';
+  else {
+    const policies = await providerCall(`${applicationPath}/policies?page=1&per_page=${PROVIDER_PAGE_SIZE}`, token, { signal });
+    const live = policies.status === 'ok' && Array.isArray(policies.result) && policies.result.length === 1
+      ? policies.result[0] : null;
+    if (policies.status !== 'ok') accessPolicies = word(policies);
+    else if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== environment.accountId) ||
+        !teamPolicyMatches(live, saved, target.policyId)) accessPolicies = 'drift';
+    else {
+      const asRead = { name: live.name, decision: live.decision, include: live.include, exclude: live.exclude, require: live.require };
+      const written = await providerCall(`${applicationPath}/policies/${encodeURIComponent(target.policyId)}`,
+        token, { method: 'PUT', body: canonicalJson(asRead), signal });
+      if (written.status !== 'ok') accessPolicies = word(written);
+      else accessPolicies = teamPolicyMatches(written.result, saved, target.policyId) ? 'verified' : 'unconfirmed';
+    }
+  }
+
+  const words = [portals, accessPolicies];
+  const status = words.includes('permission_missing') ? 'permission_missing' : words.includes('drift') ? 'drift'
+    : words.every((value) => value === 'verified') ? 'verified' : 'unconfirmed';
+  return answer(status, 'active', portals, accessPolicies);
+}
+
 async function teamSnapshot(storage, env) {
   let state = await readTeamState(storage, env);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
@@ -6101,6 +6368,7 @@ async function teamSnapshot(storage, env) {
     proposedMembers: state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
       ? state.pendingAction.request.members : null,
     managementCredentialConfigured: configured,
+    managementCredentialChoice: await managementCredentialChoice(storage),
     editingEnabled: configured && !blocked,
     editingDisabledReason: blocked ? 'lifecycle_action_pending' : configured ? null : 'management_credential_missing' };
 }
@@ -6312,6 +6580,78 @@ async function handleTeam(request, env) {
   } catch { prepared = null; }
   return prepared instanceof Response
     ? prepared : fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
+}
+
+/**
+ * Settings, for the gateway's own management token. `actions` prepares the one
+ * change an administrator then approves in Cloudflare and finishes on a page of
+ * this gateway; `verify` proves what the installed token can do. Both are
+ * same-origin POSTs of an administrator. The service identity is refused by its
+ * route allowlist, and again here. Neither route ever receives the token.
+ */
+async function handleManagementCredential(request, env) {
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  if (access.actor.kind !== 'human') return fixedJson(403, { schemaVersion: 1, error: 'service_operation_denied' });
+  const { actorEmail } = access;
+  const environment = parseManagementEnvironment(env);
+  let url;
+  try { url = new URL(request.url); } catch { return fixedJson(400, { schemaVersion: 1, error: 'request_invalid' }); }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!environment || url.hostname !== environment.managementHostname || !stub) {
+    return fixedJson(503, { schemaVersion: 1, error: 'management_credential_unavailable' });
+  }
+  const verifying = url.pathname === '/api/management-credential/verify';
+  if (!verifying && url.pathname !== '/api/management-credential/actions') {
+    return fixedJson(404, { schemaVersion: 1, error: 'not_found' });
+  }
+  if (request.method !== 'POST') return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const input = await readJsonInput(request);
+  if (!exactKeys(input, ['schemaVersion']) || input.schemaVersion !== 1) {
+    return fixedJson(400, { schemaVersion: 1, error: 'request_invalid' });
+  }
+  if (verifying) {
+    try {
+      const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_MANAGEMENT_VERIFY_PATH}`, { method: 'POST' }));
+      return response instanceof Response ? response :
+        fixedJson(503, { schemaVersion: 1, error: 'management_credential_unavailable' });
+    } catch { return fixedJson(503, { schemaVersion: 1, error: 'management_credential_unavailable' }); }
+  }
+  const now = Date.now();
+  const expiresAt = now + 10 * 60 * 1000;
+  const actionId = `action_${randomBase64Url(24)}`;
+  const actionKey = randomBase64Url(32);
+  let prepared;
+  try {
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_MANAGEMENT_CHANGES_PATH}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ actionId, actionKeyHash: await sha256(actionKey), actorEmail, expiresAt, issuedAt: now }),
+    }));
+  } catch { prepared = null; }
+  if (!(prepared instanceof Response) || prepared.status !== 200) {
+    return fixedJson(409, { schemaVersion: 1, error: 'management_credential_action_conflict' });
+  }
+  const claim = canonicalJson({
+    schemaVersion: 1,
+    actionType: 'management_credential',
+    actionId,
+    actionKey,
+    actorEmail,
+    accountId: environment.accountId,
+    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
+    workerName: environment.workerName,
+    workersSubdomain: environment.workersSubdomain,
+    managementOrigin: `https://${environment.managementHostname}`,
+    release: environment.release,
+    artifactSha256: environment.releaseSha256,
+    expiresAt,
+  });
+  const fragment = base64UrlEncode(new TextEncoder().encode(claim));
+  return fixedJson(200, {
+    schemaVersion: 1, actionId, status: 'authorization_required', expiresAt: new Date(expiresAt).toISOString(),
+    handoffUrl: `https://${environment.managementHostname}${OPERATION_PATH}#${fragment}`,
+  });
 }
 
 async function handleSourceActions(request, env) {
@@ -6787,6 +7127,7 @@ export default {
     if (url.pathname === '/api/team' || url.pathname === '/api/team-actions' || url.pathname.startsWith('/api/team-actions/')) {
       return handleTeam(request, env);
     }
+    if (url.pathname.startsWith('/api/management-credential/')) return handleManagementCredential(request, env);
     if (url.pathname === '/api/source-actions' || url.pathname.startsWith('/api/source-actions/')) {
       return handleSourceActions(request, env);
     }

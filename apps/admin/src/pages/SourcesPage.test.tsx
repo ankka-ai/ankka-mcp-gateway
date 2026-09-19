@@ -36,6 +36,7 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   }
 }
 
@@ -212,6 +213,7 @@ describe('SourcesPage', () => {
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     expect(await screen.findByText(`${SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.`)).toBeInTheDocument()
@@ -235,6 +237,81 @@ describe('SourcesPage', () => {
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
 
+  it.each([true, false])('leads a gateway without its management token to the one way of adding it (empty=%s)', async (empty) => {
+    const user = userEvent.setup()
+    // jsdom follows a fragment, not a navigation: stand on the operation page so the handoff is observable.
+    window.history.replaceState(null, '', '/__ankka/operation')
+    const current: ManagedSources = { ...sources, applyMode: 'account_token', installationEnabled: false, sources: empty ? [] : [draft] }
+    const prepared = { schemaVersion: 1 as const, actionId: `action_${'m'.repeat(32)}`, status: 'authorization_required' as const, expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}` }
+    const api: GatewayAdminApi = {
+      ...actionApi({ schemaVersion: 1, actions: [], blockingAction: null }),
+      getSources: vi.fn(async () => current),
+      getTeam: vi.fn(async () => ({
+        schemaVersion: 1 as const, revision: 1, editingEnabled: false, editingDisabledReason: 'management_credential_missing' as const,
+        managementCredentialConfigured: false, managementCredentialChoice: 'provided' as const, members: [], adminEmails: ['admin@example.com'],
+        sources: [], pendingAction: null, proposedMembers: null,
+      })),
+      prepareManagementCredentialAction: vi.fn(async () => prepared),
+    }
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const card = (await screen.findByRole('heading', { name: 'Add your management token' })).closest('section')
+    expect(card).toHaveTextContent('Your gateway needs one Cloudflare API token of its own to add sources and change team access, because every approval you give it is temporary.')
+    expect(card).toHaveTextContent('Cloudflare cannot limit this token to your gateway: it can edit every Access policy in your account, and it never passes through anything Ankka hosts.')
+    expect(card).toHaveTextContent('You pasted a token during setup, but your gateway lost it before it could be saved. It kept nothing of it, so the token has to be added again.')
+    expect(screen.getByText('Saved drafts are retained. They can be installed once your gateway has the token.')).toBeVisible()
+    // The card replaces the sentence that sent people to Settings; nothing is installable meanwhile.
+    expect(screen.queryByRole('link', { name: 'Settings' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/Saved drafts are retained but cannot be applied/u)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Add source' })).toBeDisabled()
+    if (empty) expect(screen.getByText('Your gateway needs its management token before it can install a source.')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Add management token' }))
+    expect(api.prepareManagementCredentialAction).toHaveBeenCalledTimes(1)
+    await waitFor(() => expect(window.location.hash).toBe(`#${'a'.repeat(40)}`))
+    window.history.replaceState(null, '', '/')
+  })
+
+  it('keeps the token card for a missing token only: a token it cannot read points to Settings, and a gateway that installs asks nothing', async () => {
+    const current: ManagedSources = { ...sources, applyMode: 'account_token', installationEnabled: false, sources: [draft] }
+    const unreadable: GatewayAdminApi = {
+      ...actionApi({ schemaVersion: 1, actions: [], blockingAction: null }),
+      getSources: vi.fn(async () => current), getTeam: vi.fn(async () => { throw new GatewayApiError(503, 'team_unavailable') }),
+    }
+    render(<GatewayProvider api={unreadable}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByText(/Source installation needs a working management token\. Check it in/u)).toBeVisible()
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
+    expect(screen.queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
+    cleanup()
+
+    const installing = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
+    render(<GatewayProvider api={installing}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByRole('button', { name: 'Add source' })).toBeEnabled()
+    expect(installing.getTeam).not.toHaveBeenCalled()
+  })
+
+  it('reads its sources again when the token arrived after the dashboard loaded, instead of calling installation paused', async () => {
+    const disabled: ManagedSources = { ...sources, applyMode: 'account_token', installationEnabled: false, sources: [draft] }
+    const api: GatewayAdminApi = {
+      ...actionApi({ schemaVersion: 1, actions: [], blockingAction: null }),
+      getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(disabled).mockResolvedValue({ ...disabled, installationEnabled: true }),
+      getTeam: vi.fn(async () => ({
+        schemaVersion: 1 as const, revision: 1, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
+        members: [], adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null,
+      })),
+    }
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add source' })).toBeEnabled())
+    expect(api.getSources).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(/temporarily unavailable/u)).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
+  })
+
+  it('names an open token change as what source installation waits for', async () => {
+    const pointer = { kind: 'management_credential' as const, actionId: `action_${'m'.repeat(32)}` }
+    render(<GatewayProvider api={actionApi({ schemaVersion: 1, actions: [], blockingAction: pointer })}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByText(/A gateway management token action is blocking source installation\./u)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+  })
+
   it('shows the protected BigQuery catalogue but blocks connection and keeps all tools unselected', async () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn()
@@ -252,6 +329,7 @@ describe('SourcesPage', () => {
       })),
       saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText('No sources yet')
@@ -300,6 +378,7 @@ describe('SourcesPage', () => {
       getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage catalog={SYNTHETIC_SOURCE_CATALOG} /></GatewayProvider>)
@@ -359,6 +438,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage catalog={SYNTHETIC_SOURCE_CATALOG} /></GatewayProvider>)
@@ -389,6 +469,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -435,6 +516,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -499,6 +581,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -559,6 +642,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)

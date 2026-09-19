@@ -50,6 +50,7 @@ function pausedApi(action: SourceActionSummary | null, source: ManagedSource = s
     getSourceActionTools: vi.fn<GatewayAdminApi['getSourceActionTools']>(async () => tools),
     chooseSourceActionTools: vi.fn<GatewayAdminApi['chooseSourceActionTools']>(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   } satisfies GatewayAdminApi
 }
 

@@ -15,16 +15,18 @@ reaches your gateway in one of two ways:
   Cloudflare approval. The page links to Cloudflare's token page with both
   permissions and a name filled in, and has one field to paste the token
   into. The value goes from your browser to your own Worker and nowhere else.
-- **On an installed gateway**, directly in Cloudflare: as the
-  `ANKKA_MANAGEMENT_TOKEN` encrypted secret on the gateway Worker, using
-  Cloudflare's dashboard or local Wrangler. A Settings flow that takes the
-  same link and field, behind one Cloudflare approval, is planned
-  ([issue #176](https://github.com/ankka-ai/ankka-mcp-gateway/issues/176));
-  until it exists, these Cloudflare-side instructions are how an installed
-  gateway gets, replaces, or rotates its token.
+- **On an installed gateway**, from **Settings → Add management token** (or
+  **Replace management token**): you approve one change in Cloudflare, and a
+  page your own gateway serves afterwards has the same link and one field to
+  paste the token into. Your gateway writes it as its own
+  `ANKKA_MANAGEMENT_TOKEN` encrypted secret. This is the one way the product
+  offers for a gateway that runs without the token, whether setup skipped it,
+  lost it, or predates the step, and for replacing a token.
 
 Neither `deploy.ankka.ai` nor `auth.ankka.ai` serves a token-entry form or
-receives the value, and the gateway never returns it to a browser.
+receives the value, and the gateway never returns it to a browser. The relay
+at `auth.ankka.ai` sees what it sees for every operation: an authorization
+code on its way to your gateway's certified callback, and nothing else.
 
 ### What the setup page does with the value
 
@@ -68,6 +70,63 @@ Continuing without a token is allowed through an explicit control on the
 setup page. Until the token exists, adding sources and managing team access
 stay disabled; updates, rollback, and removal do not need it.
 
+### What the Settings flow does with the value
+
+A gateway cannot write its own secrets outside the minutes of an operation
+you approved. So the flow is one fixed operation, `management-credential`,
+with exactly one Cloudflare scope, `workers-scripts.write`, and one mutation,
+a Worker-secret write on the gateway's own Worker:
+
+1. The card offers the [template link](#the-template-link) first. Create the
+   token and copy it before you continue: Cloudflare's approval lasts only a
+   few minutes, and a token created afterwards can outlive it. The paste page
+   shows the link again for a token that was not created yet.
+2. **Add management token** prepares the change inside your gateway. Only an
+   administrator can, from the dashboard's own origin; the service identity
+   cannot. It is refused while a source installation, update, removal or Team
+   change is unfinished, and those are refused while it is open.
+3. Your gateway's operation page sends you to Cloudflare for one approval.
+4. Cloudflare returns you to a page **of your gateway**. It keeps the
+   authorization code in script memory only, drops it from the address at
+   once, and shows the [template link](#the-template-link) and one field. The
+   field is not echoed, has no `name`, and is emptied as soon as it is read.
+5. The page sends the value once, in the body of a same-origin POST, under
+   the attempt's HttpOnly cookie, its state and its PKCE verifier, and only
+   from the administrator who prepared the change. The page's policy allows
+   connections to your gateway's own origin and nothing else, and no form
+   submission.
+6. Your gateway accepts only the two [account token forms](#accepted-token-forms).
+   A wrong paste is refused before anything is spent, so the same approval
+   takes the next paste. Then it exchanges the code, checks with one read that
+   the approval covers this account's Worker, and writes the secret with
+   **one** call:
+   `PUT /accounts/{account}/workers/scripts/{worker}/secrets` with
+   `{ "name": "ANKKA_MANAGEMENT_TOKEN", "text": …, "type": "secret_text" }`.
+   HTTP 200 or 201 is success. The call is never retried and its answer is
+   never read. It is the endpoint the [lifecycle runner](AGENT_LIFECYCLE.md)'s
+   manage stage writes the same secret through, with the operator's authority
+   instead of your approval.
+7. It revokes the approval, as every operation does, and answers with fixed
+   words.
+
+The value exists only inside that one request. It is never written to Durable
+Object storage, never kept in object memory between requests (there is no
+holder and no keep-alive here: the paste comes after the approval), and never
+placed in a journal, a log line, an error, a URL, a cookie or a response. The
+gateway's record of the change holds who prepared it, until when, and how it
+ended.
+
+Approvals last a few minutes. If yours runs out before you paste the token,
+the page says so, nothing is saved, and you start again from Settings. After
+a successful write Cloudflare starts your Worker with the new secret within
+about a minute; Settings watches for it by itself and then offers **Verify
+management access**.
+
+Replacing a token takes the same steps. Your gateway cannot delete the old
+token: afterwards, delete it in Cloudflare under **Manage Account → Account
+API Tokens**. Both carry the name `Ankka gateway <management hostname>`; the
+old one has the earlier creation date.
+
 ### The template link
 
 ```text
@@ -109,14 +168,15 @@ the earlier form a 40-character alphanumeric string; tokens issued in that
 form also contain `-` and `_`, so both are accepted there. The checksum itself
 is not recomputed: its algorithm is not published. Should Cloudflare issue an
 account token in another form, the setup page refuses it with its fixed
-message and the install continues without it; the token can then be added as
-described for an installed gateway.
+message and the install continues without it. The Settings page applies the
+same check, so such a token is accepted only once a release widens the
+accepted forms.
 
 Everything else is refused before anything is kept, including a user API
 token (`cfut_`), a Global API Key (`cfk_`), surrounding whitespace, and any
-longer value. Setup does not verify the token against Cloudflare: the form
-check costs no API call, and **Settings → Verify management access** checks
-the installed token afterwards.
+longer value. The Settings flow applies the same check. Neither verifies the
+token against Cloudflare: the form check costs no API call, and **Settings →
+Verify management access** checks the installed token afterwards.
 
 For disposable development gateways, the [lifecycle runner](AGENT_LIFECYCLE.md)
 is a further, operator-controlled provisioning path: it reads the operator's
@@ -142,26 +202,53 @@ provider authority of a stolen token.
 
 ## Setup and verified endpoint permissions
 
-During installation, the setup page in your own Worker does steps 1 to 3 with
-you: open its link, create the token, paste it. For a gateway that is already
-installed:
+During installation, the setup page in your own Worker does these steps with
+you; on an installed gateway, **Settings → Add management token** does:
 
-1. In Cloudflare, open **Manage Account → Account API Tokens → Create Token**,
-   or open the [template link](#the-template-link), which fills in step 2.
-   This requires a Super Administrator or Administrator. Use an account-owned
-   token, not a user OAuth grant or Global API Key. See [Cloudflare's account-token guide](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/).
-2. For the selected account, use **Access: Apps and Policies
+1. Open the [template link](#the-template-link) the page shows. It opens
+   **Manage Account → Account API Tokens → Create Token** with step 2 filled
+   in. This requires a Super Administrator or Administrator. The token is
+   account-owned, not a user OAuth grant or Global API Key. See [Cloudflare's account-token guide](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/).
+2. For the selected account, the token carries **Access: Apps and Policies
    Write** and **MCP Portals Write**. A template link names the same level
-   `edit`, and the setup page says **Edit**. These passed the endpoint check below,
+   `edit`, and the pages say **Edit**. These passed the endpoint check below,
    including both account and zone Access routes. Do not add unrelated permissions
    to make a failing test pass.
-3. Add the value directly as the encrypted Worker secret `ANKKA_MANAGEMENT_TOKEN`.
-   Do not put it in a plaintext variable, command argument, repository or support
-   message. Alternatively use the local interactive `wrangler secret put
-   ANKKA_MANAGEMENT_TOKEN` prompt with your private gateway configuration.
-4. Open **Settings → Verify management access**. This checks account-token
-   validity and reads owned Team policies; it does not prove source-create or
-   policy-write permissions. Complete the disposable-account qualification below.
+3. Paste the value into the page of your own gateway. Do not put it in a
+   plaintext variable, command argument, repository or support message.
+4. Open **Settings → Verify management access** (see below).
+
+### What verification proves
+
+**Verify management access** proves both permissions on exactly the two
+resources the gateway owns, without changing them:
+
+| Check | Calls | Proves |
+| --- | --- | --- |
+| Account token verification | 1 read | The token is active for this account |
+| The gateway's own MCP Portal: read, written back unchanged, read again | 2 reads, 1 write | **MCP Portals Edit** |
+| The Portal's own Access application and its one policy: read, policy written back as read | 2 reads, 1 write | **Access: Apps and Policies Edit** |
+
+That is at most **seven** Cloudflare API calls per verification. Each resource
+is read first and must match what the receipts and the saved Team say, judged
+the way every other check judges it: identifiers, names, markers, the exact
+server mappings and the exact audience, never a timestamp. So a write of the
+same content cannot look like drift afterwards. On any difference nothing is
+written to that resource and the answer says **drift**; the page does not
+reset it. The Portal is sent the body the gateway sends when it attaches a
+source; the policy is sent the five fields a Team change sends, with the
+values as read. Both write shapes passed the real-provider endpoint check
+below. The answer is fixed words: the token is `active`, `missing`,
+`rejected` or `unconfirmed`, and each permission is `verified`,
+`permission_missing` (Cloudflare refused the token for that resource),
+`drift`, `unconfirmed` or `not_checked`. Verification runs inside the
+management object's queue, and is refused as `busy` while a source
+installation, update, removal, Team change or token change is unfinished.
+
+Identical writes of this kind have not been observed against the real
+provider for side effects beyond the resource bodies (Cloudflare may advance
+its own modification time, which nothing here reads). That observation
+belongs to the disposable-account qualification below.
 
 | Fixed operations | Verified permission set |
 | --- | --- |
@@ -198,14 +285,19 @@ qualification or proof that every narrower permission combination fails.
 Validate the credential against the account token verification endpoint and
 validate actual resource access before changing anything. Missing, expired,
 revoked, or rejected credentials disable management with fixed safe errors.
-Replace the secret directly in Cloudflare, verify the replacement, then revoke
-the old token. Deleting a Worker secret or uninstalling the gateway does not
-revoke the token; the administrator revokes it separately in Cloudflare. The
-gateway cannot do it: deleting a token needs token-management authority, which
-no part of Ankka ever holds. The last removal page therefore names the token
-setup pre-filled (`Ankka gateway <management hostname>`) and links to the
-account's API tokens, and the hosted installer says before an install starts
-that setup needs one account API token and who can create it.
+Replace the token from **Settings → Replace management token**, verify the
+replacement, then delete the old token in Cloudflare by its name. Deleting a
+Worker secret or uninstalling the gateway does not revoke the token; the
+administrator revokes it separately in Cloudflare. The gateway cannot do it:
+deleting a token needs token-management authority, which no part of Ankka
+ever holds. The last removal page therefore names the token setup pre-filled
+(`Ankka gateway <management hostname>`) and links to the account's API
+tokens, and the hosted installer says before an install starts that setup
+needs one account API token and who can create it.
+
+A token change and an update exclude each other on purpose: the update reads
+the Worker's bindings to decide whether the new version inherits the secret,
+and the secret write gives the Worker a new version of its own.
 
 The signed release contract declares the optional customer-managed binding.
 Updates preserve it only as a secret binding; unsupported older contracts must

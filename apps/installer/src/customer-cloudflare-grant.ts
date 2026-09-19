@@ -392,8 +392,8 @@ export async function verifyCustomerCloudflareGrantAccount(input: {
 }
 
 /** Operations whose grant the gateway binds to the account it was installed in. */
-export type CustomerCloudflareGatewayOperation = 'source-add' | 'bigquery-add' | 'upgrade' | 'rollback' | 'uninstall' |
-  'uninstall-finalize' | 'gateway-root-finalize';
+export type CustomerCloudflareGatewayOperation = 'source-add' | 'bigquery-add' | 'upgrade' | 'rollback' |
+  'management-credential' | 'uninstall' | 'uninstall-finalize' | 'gateway-root-finalize';
 
 const WORKER_NAME = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 

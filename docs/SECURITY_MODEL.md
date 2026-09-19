@@ -49,9 +49,12 @@ copy does not prove provider-side revocation.
 Routine source installation and Team policy management use the optional
 `ANKKA_MANAGEMENT_TOKEN` secret in the customer's Worker. An administrator of
 the Cloudflare account creates this account-owned credential, and it never
-passes through anything Ankka hosts. It is entered either into the customer's
-own gateway, on the setup page that Worker serves before the second approval,
-or directly in Cloudflare on an installed gateway. During setup the value is
+passes through anything Ankka hosts. It is entered only into the customer's
+own gateway: on the setup page that Worker serves before the second approval,
+or, on an installed gateway, on the page that Worker serves after one approval
+of the fixed `management-credential` operation (`workers-scripts.write`, one
+Worker-secret write). There the value lives only inside the request that
+writes it: no holder, no storage, and an answer of fixed words. During setup the value is
 held like the install grant: only in the owning Durable Object's memory,
 until the final runtime upload the install already makes writes it as a
 secret binding. It is never written to Durable Object storage, the install
@@ -134,7 +137,13 @@ The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
 store Cloudflare OAuth grants, the management credential, or upstream tokens.
 Of the management credential step of setup it stores one fixed word: whether
-a token was provided or the step was skipped.
+a token was provided or the step was skipped. Of a token change from Settings
+it stores who prepared it, until when, and how it ended.
+
+**Verify management access** writes with the management credential, and only
+to the gateway's own Portal and the Portal's own Access policy, each exactly
+as just read and only when the read matches the receipts. It proves both
+permissions in at most seven provider calls and changes nothing.
 
 The Team page reads receipt-owned policies live and records an observation time.
 A changed live audience advances the local revision before a new proposal can

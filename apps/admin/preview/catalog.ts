@@ -41,6 +41,7 @@ export const catalog: PreviewEntry[] = [
   worker('recovery-loading', 'Preparing setup recovery', 'customer-gateway-entrypoint', 'Requesting a fresh setup approval.'),
   worker('recovery-error', 'Setup recovery error', 'customer-gateway-entrypoint', 'The retry state for setup recovery.'),
   worker('bigquery-key', 'BigQuery credential step', 'customer-bigquery-credential-page', 'The current key-upload interface. Use synthetic files only.'),
+  worker('management-token', 'Management token step', 'customer-management-credential-page', 'Where an approved token change lands: the create link and the one paste field. Use synthetic values only.'),
   worker('remove-review', 'Removal review', 'customer-teardown-router', 'Review the two removal phases before approval.'),
   worker('remove-error', 'Removal stopped', 'customer-teardown-router', 'An interrupted removal and the return to Settings.'),
   worker('remove-final', 'Final removal & receipt', 'gateway-teardown-router', 'The hosted final-removal review and recovery-receipt controls.'),

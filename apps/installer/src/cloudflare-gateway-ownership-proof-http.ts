@@ -16,7 +16,7 @@ const KEY_ID = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const MAX_BODY_BYTES = 16 * 1024;
 const CUSTOMER_OPERATION =
-  '(install|upgrade|rollback|source-add|bigquery-add|source-update|source-remove|uninstall)';
+  '(install|upgrade|rollback|source-add|bigquery-add|source-update|source-remove|management-credential|uninstall)';
 const CHALLENGE_PATH = new RegExp(`^/oauth/relay-ticket/challenge/${CUSTOMER_OPERATION}$`, 'u');
 const ISSUE_PATH = new RegExp(`^/oauth/relay-ticket/issue/${CUSTOMER_OPERATION}$`, 'u');
 
@@ -146,7 +146,8 @@ function operationFromPath(
   const operation = pattern.exec(pathname)?.[1];
   return operation === 'install' || operation === 'upgrade' || operation === 'rollback' ||
     operation === 'source-add' || operation === 'bigquery-add' ||
-    operation === 'source-update' || operation === 'source-remove' || operation === 'uninstall'
+    operation === 'source-update' || operation === 'source-remove' ||
+    operation === 'management-credential' || operation === 'uninstall'
     ? operation
     : null;
 }

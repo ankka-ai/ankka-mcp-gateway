@@ -585,8 +585,18 @@ follows the status route behind Access.
 | `upgrade` / `rollback` | customer Gateway | `workers-scripts.write` |
 | `source-add` / `source-update` / `source-remove` | customer Gateway | `zone-access.write`, `mcp-portals.write` |
 | `bigquery-add` | customer Gateway | `zone-access.write`, `mcp-portals.write`, `workers-scripts.write`, `workers-routes.read` |
+| `management-credential` | customer Gateway | `workers-scripts.write` |
 | `uninstall` | customer Gateway | union derived only from checksum-valid receipt resource kinds |
 | `uninstall-finalize` | hosted installer | `workers-scripts.write` |
+
+`management-credential` lets a gateway write its own `ANKKA_MANAGEMENT_TOKEN`
+secret: one Worker-secret write on the receipt-owned Worker, no upload, no
+version or deployment read, and no Access, Portal or DNS authority. The token
+is pasted into a page of the gateway after the approval and lives only inside
+the request that writes it; the relay sees an authorization code and nothing
+else. See [Management token](MANAGEMENT_TOKEN.md#what-the-settings-flow-does-with-the-value).
+A relay deployed before this operation existed answers its routes with
+`not_found`; every other operation's relay requests are unchanged.
 
 There is no generic scope request, arbitrary Cloudflare request proxy, generic
 `repair`, or browser-provided uninstall resource list. An incomplete install is

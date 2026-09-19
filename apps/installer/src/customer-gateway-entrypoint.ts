@@ -13,6 +13,10 @@ import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover
 import { customerInstallProgressPage } from './customer-install-progress-page';
 import { CUSTOMER_MANAGEMENT_BINDING } from './customer-management-credential';
 import {
+  customerManagementCredentialControlRequest,
+  type CustomerManagementCredentialControl,
+} from './customer-management-credential-control';
+import {
   customerInstallationObjectName,
   handleCustomerInstallationObjectRequest,
   verifyReceiptInInstallationObject,
@@ -443,6 +447,27 @@ export class AdminState extends RuntimeAdminState {
     return Number.isSafeInteger(expiresAt) ? { status: parsed.output.status, expiresAt } : null;
   }
 
+  /** Reads one prepared management token change through the payload's own internal route. */
+  private async readManagementCredentialAction(actionId: string) {
+    const response = await super.fetch(new Request(`https://admin-state.invalid/management-credential-actions/${actionId}`));
+    if (response.status !== 200) return null;
+    const parsed = v.safeParse(sourceActionViewSchema, await response.json());
+    if (!parsed.success || parsed.output.actionId !== actionId) return null;
+    const expiresAt = Date.parse(parsed.output.expiresAt);
+    return Number.isSafeInteger(expiresAt) ? { status: parsed.output.status, expiresAt } : null;
+  }
+
+  /**
+   * One HMAC-signed command to the payload's record of a management token
+   * change, in process. The command names the action and its end; the pasted
+   * token is never part of it.
+   */
+  private async signedManagementCredentialControl(input: CustomerManagementCredentialControl): Promise<boolean> {
+    const response = await super.fetch(await customerManagementCredentialControlRequest(input, Date.now()));
+    await response.body?.cancel();
+    return response.status === 200;
+  }
+
   /** One HMAC-signed control command to the payload's update journal, in process. */
   private async signedRuntimeControl(input: {
     readonly actionId: string;
@@ -694,6 +719,12 @@ export class AdminState extends RuntimeAdminState {
       },
       runBigQuerySetup: (input) => this.bigQuerySetup(config).run(input),
       readRuntimeAction: (actionId) => this.readRuntimeAction(actionId),
+      readManagementCredentialAction: (actionId) => this.readManagementCredentialAction(actionId),
+      controlManagementCredentialAction: (input) => this.signedManagementCredentialControl(input),
+      verifyAdministrator: async (request) => {
+        const actor = v.safeParse(v.string(), await verifyAccess(request, this.finalEnv));
+        return actor.success ? actor.output : null;
+      },
       startRuntimeUpdate: async (input) => (await this.runtimeUpdateDriver(config)).start(input),
       updateView: async (attemptId) => (await this.runtimeUpdateDriver(config)).view(attemptId),
       issueRelayTicket: (operation) => this.issueOperationRelayTicket(config, operation),

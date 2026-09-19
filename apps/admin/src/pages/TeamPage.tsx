@@ -3,6 +3,7 @@ import { AddUserDialog } from '../components/AddUserDialog'
 import { Check, Trash, X } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type Team, type TeamAction, type TeamMember } from '../api'
+import { ManagementTokenCard } from '../components/ManagementTokenCard'
 import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
 import { useGateway } from '../GatewayContext'
@@ -167,6 +168,9 @@ export function TeamPage() {
   const message = actionMessage(action)
   const disabled = isBusy || saving || loading || needsRefresh || callbackId !== null || recorded || team?.editingEnabled !== true
   const canCancel = (action?.status === 'authorization_required' || action?.status === 'recovery_required') && action.canCancel === true
+  // The gateway says it has no management token: lead to the one way of adding it instead of a disabled page.
+  const tokenMissing = team?.managementCredentialConfigured === false &&
+    team.editingDisabledReason !== 'managed_in_cloudflare' && team.editingDisabledReason !== 'release_review_required'
 
   const save = async () => {
     if (!team?.editingEnabled || loading || isBusy || needsRefresh || callbackId !== null || actionInFlight.current || action?.status === 'applying' || (!recorded && !changed)) return
@@ -221,7 +225,9 @@ export function TeamPage() {
       {message ? <p role="status" className={`notice-banner mt-6 notice-${action?.status === 'succeeded' ? 'success' : action?.status === 'failed' || action?.status === 'recovery_required' ? 'error' : 'neutral'}`}>{message}</p> : null}
       {!team ? <p className="mt-8 text-sm text-kumo-subtle">{loading ? 'Loading team access…' : 'No team access information is available.'}</p> : (
         <>
-          {!team.editingEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, or teardown action is in progress. Finish or safely cancel that action, then refresh.' : team.editingDisabledReason === 'management_credential_missing' ? <>Add your Cloudflare management credential in <a href="/settings" className="underline">Settings</a> to enable Team changes.</> : team.editingDisabledReason === 'managed_in_cloudflare' ? <>Team membership is managed directly in Cloudflare for this release. This gateway does not accept a permanent Cloudflare management credential. Follow the <a href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md" target="_blank" rel="noreferrer" className="underline underline-offset-4">Team access guide</a> to review the owned Access policies.</> : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
+          {tokenMissing ? <ManagementTokenCard choice={team.managementCredentialChoice} /> : null}
+          {tokenMissing && team.editingDisabledReason === 'management_credential_missing' ? <p role="status" className="mt-4 text-sm leading-6 text-kumo-subtle">Until your gateway has the token, you can still inspect the saved access configuration and shared tools.</p> : null}
+          {!team.editingEnabled && team.editingDisabledReason !== 'management_credential_missing' ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, teardown, or management token action is in progress. Finish or safely cancel that action, then refresh.' : team.editingDisabledReason === 'managed_in_cloudflare' ? <>Team membership is managed directly in Cloudflare for this release. This gateway does not accept a permanent Cloudflare management credential. Follow the <a href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md" target="_blank" rel="noreferrer" className="underline underline-offset-4">Team access guide</a> to review the owned Access policies.</> : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
           {sources && sources.installationEnabled !== true && sources.applyMode !== 'account_token' ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed sources below.' : 'This restriction does not change saved access.'}</p> : null}
           {needsRefresh ? <p role="status" className="notice-banner notice-warning mt-6">Editing is paused until the recorded state can be checked. Trying again reloads the saved configuration and discards unsaved selections; it does not resubmit a change.</p> : null}
           <section className="mt-7" aria-labelledby="edit-access-title">

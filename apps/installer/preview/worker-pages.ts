@@ -2,6 +2,7 @@ import type { Connect } from 'vite'
 import { customerSetupPage } from '../src/customer-setup-page'
 import { customerInstallProgressPage } from '../src/customer-install-progress-page'
 import { bigQueryCredentialPage } from '../src/customer-bigquery-credential-page'
+import { customerManagementCredentialPage } from '../src/customer-management-credential-page'
 import { operationPage } from '../src/customer-operation-router'
 import { recoveryPage } from '../src/customer-gateway-entrypoint'
 import { page as customerTeardownPage } from '../src/customer-teardown-router'
@@ -38,6 +39,7 @@ function render(scenario: string): Response | null {
   if (scenario === 'operation-loading' || scenario === 'operation-error') return operationPage()
   if (scenario === 'recovery-loading' || scenario === 'recovery-error') return recoveryPage()
   if (scenario === 'bigquery-key') return bigQueryCredentialPage('synthetic-preview-code', 'synthetic-preview-state')
+  if (scenario === 'management-token') return customerManagementCredentialPage({ code: 'synthetic-preview-code', state: 'synthetic-preview-state', managementHostname: 'manage.example.com', expiresAt: 600_000, now: 0 })
   if (scenario === 'remove-review' || scenario === 'remove-error') return customerTeardownPage(scenario === 'remove-error')
   if (scenario === 'remove-final') return finalTeardownPage()
   return null
