@@ -125,11 +125,11 @@ describe('customer setup management token step', () => {
     expect(html).toContain('Without the token, adding sources and managing team access stay disabled. You can add it later in Settings.');
     expect(html).toContain('<button id="credential-skip" type="button" class="secondary">Continue without a token</button>');
     // One paste field: not echoed, not remembered, and without a name no form submission could carry.
-    const fields = [...html.matchAll(/<input\b[^>]*>/gu)].map((match) => match[0]).filter((field) => field.includes('credential'));
+    const fields = [...html.matchAll(/<input\b[^>]*>/giu)].map((match) => match[0]).filter((field) => field.includes('credential'));
     expect(fields).toEqual([
       '<input id="credential-value" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="64" required>',
     ]);
-    expect(html).not.toMatch(/<form\b[^>]*\b(?:action|method)=/u);
+    expect(html).not.toMatch(/<form\b[^>]*\b(?:action|method)=/iu);
     // Every id names one element: the script addresses the page by id, and the management address field keeps its own.
     const ids = [...html.matchAll(/\sid="([^"]+)"/gu)].map((match) => match[1]);
     expect(new Set(ids).size).toBe(ids.length);
@@ -146,7 +146,8 @@ describe('customer setup management token step', () => {
     const policy = response.headers.get('content-security-policy') ?? '';
     const nonce = /script-src 'nonce-([a-f0-9]{32})'/u.exec(policy)?.[1];
     expect(policy).toBe(`default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-    expect([...html.matchAll(/<script\b[^>]*>/gu)].map((match) => match[0])).toEqual([`<script nonce="${nonce}">`]);
+    // Any spelling of a script tag counts: the page has exactly the one that carries the nonce.
+    expect([...html.matchAll(/<script\b[^>]*>/giu)].map((match) => match[0])).toEqual([`<script nonce="${nonce}">`]);
     expect(html).not.toMatch(/\son[a-z]+\s*=/iu);
     expect(response.headers.get('referrer-policy')).toBe('no-referrer');
     expect(response.headers.get('cache-control')).toBe('no-store');
