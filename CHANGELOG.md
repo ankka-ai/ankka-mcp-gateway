@@ -49,6 +49,9 @@ Notable public product and repository changes are recorded here.
   `--status` and the failure report name the path that set the token (`pasted_at_setup`, `installed_by_runner`,
   `already_configured`, `operator`) and, as `managementTokenFallback`, why the customer's path did not.
 
+- Document stable-channel availability: the hosted installer serves the stable release, canary releases are
+  published for evaluation, and support is best-effort under the support policy.
+
 - Say before an install starts that setup needs one account API token, who can create it, and that it is pasted into
   your own gateway, on the hosted installer's first screen, in its review step and in "How permissions work" (which
   still described adding the token by hand in Cloudflare). The last removal page now names the management token setup
