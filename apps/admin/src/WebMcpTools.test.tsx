@@ -46,7 +46,7 @@ function fixtureApi(): GatewayAdminApi {
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
-    getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(), prepareRuntimeAction: vi.fn(),
+    getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   }
@@ -124,7 +124,7 @@ describe('WebMcpTools', () => {
       prepareSourceAction: vi.fn(),
       getSourceAction: vi.fn(),
       getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
-      cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
+      cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(),
       getRuntimeAction: vi.fn(),
       prepareTeardownAction,

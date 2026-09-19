@@ -14,6 +14,7 @@ import type {
   SourceActions,
   SourceActionSummary,
   SourceActionTools,
+  SourceAuthorization,
   SourceApplyResult,
   SourceDiscovery,
   SourceDraftInput,
@@ -396,6 +397,10 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const ready = Date.now() - this.#firstToolRead >= 2_000
     return structuredClone({ schemaVersion: 1, actionId, sourceId: action.sourceId,
       state: ready ? 'ready' : 'connection_required', tools: ready ? SIGN_IN_TOOLS : [] })
+  }
+
+  async authorizeSource(): Promise<SourceAuthorization> {
+    throw new GatewayApiError(409, 'source_oauth_unavailable')
   }
 
   async chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {

@@ -735,3 +735,24 @@ describe('the management token', () => {
     }
   })
 })
+
+describe('source provider authorization', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('binds authorization to the current action and draft revision', async () => {
+    const result = { schemaVersion: 1, authorizationUrl: 'https://identity.example.net/authorize?state=synthetic', expiresAt: '2026-09-19T12:05:00Z' }
+    const fetcher = vi.fn(async () => Response.json(result))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(new HttpGatewayAdminApi().authorizeSource('action_' + 'a'.repeat(32), 4, 'source-synthetic')).resolves.toEqual(result)
+    expect(fetcher).toHaveBeenCalledWith('/api/source-actions/action_' + 'a'.repeat(32) + '/authorize', expect.objectContaining({
+      method: 'POST', credentials: 'same-origin', redirect: 'error', body: JSON.stringify({ schemaVersion: 1, revision: 4, sourceId: 'source-synthetic' }),
+    }))
+  })
+  it('refuses navigation to unsafe authorization URLs or a response containing credentials', async () => {
+    for (const authorizationUrl of ['not a URL', 'javascript:alert(1)', 'http://identity.example.net/authorize', 'https://private@identity.example.net/authorize', 'https://identity.example.net/authorize#private']) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, authorizationUrl, expiresAt: '2026-09-19T12:05:00Z' })))
+      await expect(new HttpGatewayAdminApi().authorizeSource('action_' + 'a'.repeat(32), 4, 'source-synthetic')).rejects.toMatchObject({ code: 'response_invalid' })
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, authorizationUrl: 'https://identity.example.net/authorize', expiresAt: '2026-09-19T12:05:00Z', access_token: 'synthetic-unexpected-token' })))
+    await expect(new HttpGatewayAdminApi().authorizeSource('action_' + 'a'.repeat(32), 4, 'source-synthetic')).rejects.toMatchObject({ code: 'response_invalid' })
+  })
+})

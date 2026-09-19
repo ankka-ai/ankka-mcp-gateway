@@ -22,7 +22,8 @@ client-side capability flag alone is not sufficient.
    it grants nobody access, including administrators and existing team members.
    If Cloudflare has not synced its tools, installation pauses before attaching
    the source to the Portal and shows the next connection step.
-5. Connect the upstream once through Cloudflare's operator authentication flow.
+5. Choose **Authorize source** to connect the upstream once. Providers requiring
+   manual OAuth setup keep the Cloudflare connection link.
    Keep Require user auth off. Source credentials stay in your Cloudflare
    account; do not paste them into Ankka or the gateway dashboard.
    For upstreams with a redirect allowlist, configure the exact callback shown

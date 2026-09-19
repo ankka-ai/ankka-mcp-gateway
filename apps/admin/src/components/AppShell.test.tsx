@@ -38,7 +38,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
-    getSourceActions: vi.fn(async () => removalRecorded), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
+    getSourceActions: vi.fn(async () => removalRecorded), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(async () => ({ schemaVersion: 1 as const, managementCredentialConfigured: true, managementCredentialChoice: null })),
     prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),

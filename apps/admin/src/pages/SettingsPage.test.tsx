@@ -46,7 +46,7 @@ function api(): GatewayAdminApi {
     removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(),
     prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(),
-    cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
+    cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(),
     prepareTeardownAction: vi.fn(),

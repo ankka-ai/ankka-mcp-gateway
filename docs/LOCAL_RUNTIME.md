@@ -6,6 +6,8 @@ Use the smallest loop that exercises the changed behavior:
 | --- | --- |
 | `npm run test:runtime` | Production bootstrap state and crypto code in workerd, with real SQLite Durable Object storage |
 | `npm run dev:runtime` | The same synthetic fixture with local traces and an agent-readable inspection API |
+| `node --test apps/installer/test-runtime/mcp-oauth-proof.test.mjs` | Isolated synthetic OAuth callback, PKCE, replay and refresh checks; see the [OAuth experiment](../fixtures/mcp-oauth-proof/README.md) for its separate live provider proof |
+| `node --test apps/installer/test-runtime/source-oauth.test.mjs` | Production source authorization on SQLite, actual paused-source receipts, concurrent callback replay and a Worker restart; synthetic outbound providers |
 | `npm run lifecycle -- run --job /private/job.json` | The unattended disposable lifecycle with an operator-managed credential: install, manage, update, interrupt, resume and remove through the production operations ([runner guide](AGENT_LIFECYCLE.md)) |
 | `npm run validate:lifecycle:live -- --config /private/config.json` | The separately prepared signed, deployed gateway lifecycle with browser consent |
 

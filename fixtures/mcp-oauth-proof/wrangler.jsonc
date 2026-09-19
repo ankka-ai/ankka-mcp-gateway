@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "ankka-mcp-oauth-proof",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-02",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "logpush": false,
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": false, "invocation_logs": false, "persist": false },
+    "traces": { "enabled": false, "persist": false }
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "STATE", "class_name": "OAuthProofState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["OAuthProofState"] }]
+}

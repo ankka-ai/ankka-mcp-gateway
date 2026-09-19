@@ -48,7 +48,7 @@ function pausedApi(action: SourceActionSummary | null, source: ManagedSource = s
     discoverSource: vi.fn<GatewayAdminApi['discoverSource']>(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn<GatewayAdminApi['prepareSourceAction']>(),
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
     getSourceActionTools: vi.fn<GatewayAdminApi['getSourceActionTools']>(async () => tools),
-    chooseSourceActionTools: vi.fn<GatewayAdminApi['chooseSourceActionTools']>(),
+    authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn<GatewayAdminApi['chooseSourceActionTools']>(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   } satisfies GatewayAdminApi
@@ -61,6 +61,21 @@ async function choice() {
 describe('choosing the tools of a connected sign-in source', () => {
   afterEach(cleanup)
 
+  it('starts provider authorization for the current action and retains the manual fallback on failure', async () => {
+    const user = userEvent.setup()
+    const api = pausedApi(pause(), signInDraft, offered('connection_required'))
+    api.authorizeSource.mockRejectedValue(new GatewayApiError(409, 'source_oauth_unavailable'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const button = await screen.findByRole('button', { name: 'Authorize source' })
+    await waitFor(() => expect(button).toBeEnabled())
+    await user.click(button)
+    expect(api.authorizeSource).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, signInDraft.id)
+    expect(await screen.findByRole('alert')).toHaveTextContent('open it in Cloudflare for manual OAuth setup')
+    expect(screen.getByRole('link', { name: 'Open source in Cloudflare' })).toHaveAttribute('href', CONNECTION_URL)
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+    expect(api.chooseSourceActionTools).not.toHaveBeenCalled()
+  })
+
   it('lists nothing until Cloudflare is connected and never offers a resume that could attach nothing', async () => {
     const user = userEvent.setup()
     const api = pausedApi(pause())
@@ -72,7 +87,7 @@ describe('choosing the tools of a connected sign-in source', () => {
     expect(within(card).getByText(/installed with nothing enabled: it is not attached to your Portal and nobody has been assigned access/u)).toBeVisible()
     expect(within(card).getByRole('link', { name: 'Open source in Cloudflare' })).toHaveAttribute('href', CONNECTION_URL)
     const region = await choice()
-    expect(await within(region).findByText(/Cloudflare is not connected to this source yet/u)).toBeVisible()
+    expect(await within(region).findByText(/This source needs authorization before its tools can be listed/u)).toBeVisible()
     expect(within(region).queryByRole('checkbox')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Resume installation' })).not.toBeInTheDocument()
     expect(api.getSourceActionTools).toHaveBeenCalledExactlyOnceWith(ACTION_ID)

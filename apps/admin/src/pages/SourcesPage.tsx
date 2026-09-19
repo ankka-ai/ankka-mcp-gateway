@@ -13,6 +13,7 @@ import { StatusPill } from '../components/StatusPill'
 import { BigQuerySetupForm } from '../components/BigQuerySetupForm'
 import { SourceList } from '../components/SourceList'
 import { SourceToolChoice } from '../components/SourceToolChoice'
+import { SourceAuthorization, SourceAuthorizationResult } from '../components/SourceAuthorization'
 import { ToolChecklist } from '../components/ToolChecklist'
 import { bigQueryPreflightGuidance } from '../bigQueryFailure'
 
@@ -69,7 +70,7 @@ function actionLabel(action: SourceActionSummary): string {
 /** A sign-in source installed with nothing enabled: what it waits for, in the order the operator meets it. */
 function unchosenToolsGuidance(action: SourceActionSummary): string | null {
   if (action.failureCode === 'source_connection_required') {
-    return 'This source is installed with nothing enabled: it is not attached to your Portal and nobody has been assigned access. Open it in Cloudflare and authenticate, keeping Require user auth off. When its status is Ready, come back: this page lists its real tools so you can choose which to allow.'
+    return 'This source is installed with nothing enabled: it is not attached to your Portal and nobody has been assigned access. Authorize the source, then choose which tools to allow from its real list below. If you use Cloudflare for manual setup, keep Require user auth off.'
   }
   if (action.failureCode === 'source_sync_required') {
     return 'This source is installed with nothing enabled. Open it in Cloudflare and sync its capabilities, resolving any connection error. When its status is Ready, come back: this page lists its real tools so you can choose which to allow.'
@@ -108,7 +109,7 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, acc
         : 'This attempt is closed. Review the saved draft before starting another authorization.'
     case 'recovery_required':
       if (action.failureCode === 'source_connection_required') {
-        return 'Authenticate the server in Cloudflare, keeping Require user auth off. Once its status is Ready, return here to resume and finish installation. Nobody has been assigned access.'
+        return 'Authorize the source to connect it, then review its tools and finish installation. If you use Cloudflare for manual setup, keep Require user auth off. Nobody has been assigned access.'
       }
       if (action.failureCode === 'source_sync_required') {
         return 'Open the server in Cloudflare and sync its capabilities. Resolve any connection error, then return when its status is Ready to resume and finish installation.'
@@ -351,6 +352,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       />
 
       <GatewayEndpoint />
+      <SourceAuthorizationResult />
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
       {showBigQuery && installationEnabled ? <BigQuerySetupForm disabled={applyBlocked || resumingBigQuery} /> : null}
 
@@ -413,6 +415,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
                 </p>
                 <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Action: {action.actionId}</p>
+                {signInPause && action.canRenew === true && sources.applyMode === 'account_token' && shown.failureCode === 'source_connection_required' ? (
+                  <SourceAuthorization actionId={action.actionId} sourceId={actionSource.id} revision={sources.revision} disabled={!installationEnabled || isBusy || isCheckingSourceActions} />
+                ) : null}
                 {action.connectionUrl && action.state === 'recovery_required' ? (
                   <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open source in Cloudflare</a>
                 ) : null}
