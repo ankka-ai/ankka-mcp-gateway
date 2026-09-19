@@ -69,6 +69,9 @@ const managedSourcesSchema = v.strictObject({
   revision: v.number(),
   applyMode: v.picklist(['oauth_per_action', 'account_token']),
   installationEnabled: v.optional(v.boolean(), false),
+  // The release a rollback can still restore today and no longer could once a source installation starts;
+  // null or absent whenever installing decides nothing about rollback. The gateway decides, never this page.
+  installEndsRollbackTo: v.optional(v.nullable(v.string())),
   sources: v.array(managedSourceSchema),
 })
 const discoveredToolSchema = v.strictObject({
@@ -176,6 +179,8 @@ const runtimeUpdateSchema = v.strictObject({
   })),
   rollback: v.union([
     v.strictObject({ available: v.literal(false) }),
+    // A previous release is recorded, but the gateway's saved state no longer allows restoring it.
+    v.strictObject({ available: v.literal(false), reason: v.literal('minimum_runtime_release'), release: v.string() }),
     v.strictObject({
       available: v.literal(true),
       release: v.string(),
@@ -320,6 +325,10 @@ export interface GatewayAdminApi {
 }
 
 export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-source installation is temporarily unavailable in this release. Existing sources and team permissions remain available.'
+/** Shown beside a control that starts or resumes a source installation, only while the gateway reports that it ends a rollback. */
+export function rollbackEndsMessage(release: string): string {
+  return `After this you can no longer roll back to ${release}.`
+}
 export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually registered Google OAuth client. Cloudflare currently documents manual OAuth without an admin credential flow, so one operator connection for your team is not supported. No credentials have been requested. Keep Require user auth off; see the BigQuery setup guide.'
 
 const ERROR_MESSAGES = new Map([
@@ -381,7 +390,7 @@ const ERROR_MESSAGES = new Map([
   ['runtime_action_conflict', 'Another runtime action is active or the installed version changed.'],
   ['runtime_action_invalid', 'The runtime action is no longer valid.'],
   ['runtime_update_not_available', 'The installed runtime already matches its release channel.'],
-  ['teardown_action_conflict', 'Another teardown action is active or the installed receipt could not be proven. Wait for the active action to expire before trying again.'],
+  ['teardown_action_conflict', 'Finish or cancel any unfinished source installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.'],
   ['teardown_action_invalid', 'The teardown request was rejected. Reload the management page before trying again.'],
   ['teardown_actions_unavailable', 'Receipt-authorized teardown is not available from this gateway release.'],
   ['update_channel_unavailable', 'The signed release channel is temporarily unavailable.'],

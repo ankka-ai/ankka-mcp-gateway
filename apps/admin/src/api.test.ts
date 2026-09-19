@@ -470,4 +470,49 @@ describe('HttpGatewayAdminApi', () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...action, sourceId: 'source-test', actorKind: 'robot' })))
     await expect(new HttpGatewayAdminApi().getSourceAction(actionId)).rejects.toMatchObject({ code: 'response_invalid' })
   })
+
+  it('accepts the release a source installation would stop being restorable, absent, null or named, and nothing looser', async () => {
+    const base = { schemaVersion: 1, revision: 4, applyMode: 'account_token', installationEnabled: true, sources: [] }
+    for (const [reported, expected] of [
+      [{}, undefined], [{ installEndsRollbackTo: null }, null], [{ installEndsRollbackTo: 'gateway-v0.9.9' }, 'gateway-v0.9.9'],
+    ] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...base, ...reported })))
+      expect((await new HttpGatewayAdminApi().getSources()).installEndsRollbackTo).toBe(expected)
+      expect((await new HttpGatewayAdminApi().saveSourceDraft(4, { label: 'Knowledge', url: 'https://knowledge.example.com/mcp', authMode: 'none', enabledTools: ['search'] })).installEndsRollbackTo).toBe(expected)
+    }
+    for (const unreviewed of [{ installEndsRollbackTo: true }, { installEndsRollbackTo: { release: 'gateway-v0.9.9' } }, { minimumRuntimeRelease: 'gateway-v1.0.0' }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...base, ...unreviewed })))
+      await expect(new HttpGatewayAdminApi().getSources()).rejects.toMatchObject({ code: 'response_invalid' })
+    }
+  })
+
+  it('accepts a rollback that is offered, absent, or recorded but no longer restorable, and nothing looser', async () => {
+    const base = { schemaVersion: 1, channel: 'stable', status: 'up_to_date', current: { release: 'gateway-v1.0.0', artifactSha256: `sha256:${'a'.repeat(64)}` }, available: null }
+    const recorded = { release: 'gateway-v0.9.9', artifactSha256: `sha256:${'b'.repeat(64)}` }
+    for (const rollback of [
+      { available: false },
+      { available: false, reason: 'minimum_runtime_release', release: recorded.release },
+      { available: true, ...recorded, dataRollback: false },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...base, rollback })))
+      expect((await new HttpGatewayAdminApi().getUpdate()).rollback).toEqual(rollback)
+    }
+    for (const rollback of [
+      { available: false, reason: 'unreviewed_reason', release: recorded.release },
+      { available: false, reason: 'minimum_runtime_release' },
+      { available: false, reason: 'minimum_runtime_release', release: recorded.release, minimumRuntimeRelease: 'gateway-v1.0.0' },
+      { available: true, ...recorded, dataRollback: false, reason: 'minimum_runtime_release' },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...base, rollback })))
+      await expect(new HttpGatewayAdminApi().getUpdate()).rejects.toMatchObject({ code: 'response_invalid' })
+    }
+  })
+
+  it('names unfinished work when removal is refused, in place of the receipt wording', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, error: 'teardown_action_conflict' }, { status: 409 })))
+    await expect(new HttpGatewayAdminApi().prepareTeardownAction()).rejects.toMatchObject({
+      code: 'teardown_action_conflict',
+      message: 'Finish or cancel any unfinished source installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.',
+    })
+  })
 })

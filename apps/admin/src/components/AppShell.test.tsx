@@ -120,7 +120,7 @@ describe('AppShell during a removal', () => {
     })
     open(client)
     fireEvent.click(await screen.findByRole('button', { name: 'Continue removing this gateway' }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Another teardown action is active')
+    expect(await screen.findByRole('alert')).toHaveTextContent('wait for an open removal authorization to expire')
     expect(screen.getByRole('heading', { name: 'Removal in progress', level: 1 })).toBeInTheDocument()
   })
 

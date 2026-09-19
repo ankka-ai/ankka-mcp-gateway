@@ -2,7 +2,7 @@ import { Input } from '@cloudflare/kumo'
 import { Button } from '../components/Button'
 import { ArrowRight, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
 import { type FormEvent, useEffect, useMemo, useState } from 'react'
-import { GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceActionSummary, type SourceDiscovery, type BigQuerySetups, validHandoffUrl } from '../api'
+import { GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceActionSummary, type SourceDiscovery, type BigQuerySetups, rollbackEndsMessage, validHandoffUrl } from '../api'
 import { SOURCE_CATALOG, type SourceCatalog, type SourceCatalogSource } from '../catalog'
 import { useGateway } from '../GatewayContext'
 import { GatewayEndpoint } from '../components/GatewayEndpoint'
@@ -182,6 +182,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   }
   if (!sources) return null
   const installationEnabled = sources.installationEnabled === true
+  // The gateway decides whether installing ends a rollback; this page only says so beside the control that commits to it.
+  const rollbackNote = installationEnabled && sources.installEndsRollbackTo ? rollbackEndsMessage(sources.installEndsRollbackTo) : null
   const applyBlocked = isBusy || isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || sourceActions.blockingAction !== null
   const latestActions = new Map<string, SourceActionSummary>()
   for (const action of sourceActions?.actions ?? []) {
@@ -305,7 +307,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       {showBigQuery && installationEnabled ? <BigQuerySetupForm disabled={applyBlocked || resumingBigQuery} /> : null}
 
       {!installationEnabled ? <p role="status" className="notice-banner notice-warning mt-6">{sources.applyMode === 'account_token' ? <>Configure your Cloudflare management credential in <a href="/settings" className="underline">Settings</a> to enable source installation.</> : SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
-      {installationEnabled ? <p className="notice-banner notice-warning mt-6">Before installing: once source provisioning starts, rollback below this runtime release is unavailable. Finish or recover any source action before removing your gateway. Saving a draft does not activate this restriction.</p> : null}
 
       {sourceNotice ? (
         <div role="status" className={`notice-banner mt-6 notice-${sourceNotice.tone}`}>
@@ -348,12 +349,16 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open source in Cloudflare</a>
                 ) : null}
                 {bigQuery?.setups.some((setup) => setup.actionId === action.actionId && !setup.ready && !setup.recoveryRequired) && action.canCancel ? (
-                  <Button variant="secondary" className="pressable mt-3" disabled={isBusy || resumingBigQuery || isCheckingSourceActions} onClick={() => void resumeBigQuery(action.actionId)}>Continue BigQuery setup</Button>
+                  <>
+                    <Button variant="secondary" className="pressable mt-3" disabled={isBusy || resumingBigQuery || isCheckingSourceActions} onClick={() => void resumeBigQuery(action.actionId)}>Continue BigQuery setup</Button>
+                    {rollbackNote ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{rollbackNote}</p> : null}
+                  </>
                 ) : null}
                 <BigQueryFailure setup={bigQuery?.setups.find((setup) => setup.actionId === action.actionId)} />
                 {action.canRenew === true && action.state === 'recovery_required' && !bigQuery?.setups.some((setup) => setup.actionId === action.actionId && setup.recoveryRequired) ? (
                   <div className="mt-3">
                     <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Resume installation</Button>
+                    {rollbackNote ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{rollbackNote}</p> : null}
                   </div>
                 ) : null}
                 {action.canCancel ? (
@@ -605,6 +610,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             authorizeDisabled={applyBlocked}
             isBusy={isBusy}
             draftLabel={(sourceId) => sourceDraftLabel(latestActions.get(sourceId))}
+            installNote={blocker ? null : rollbackNote}
             onAuthorize={(sourceId) => void authorize(sourceId)}
           />
         )}

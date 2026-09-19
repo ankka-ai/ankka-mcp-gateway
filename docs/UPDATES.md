@@ -169,3 +169,23 @@ when present on the current or target version. See [Team access](TEAM_ACCESS.md)
 and [first-source qualification](FIRST_SOURCE_ONBOARDING.md); a normal code
 update does not provision credentials, grant source access, or clear these
 lifecycle restrictions.
+
+The dashboard follows that recorded minimum instead of warning about it
+permanently, and the gateway, never the dashboard, works out both answers:
+
+- `GET /api/update` offers a rollback only while the minimum still allows the
+  retained release. Once it does not, the answer is
+  `rollback: { available: false, reason: "minimum_runtime_release", release }`.
+  Settings then names that release, says that a source was installed or Team
+  access was changed after the update and the older version cannot work with
+  those changes, and offers no rollback button. `{ available: false }` alone
+  still means that no previous release is recorded.
+- `GET` and `PUT /api/sources` carry `installEndsRollbackTo`: the release that
+  can be restored now and no longer could once a source installation starts on
+  the running release, otherwise `null`. It is `null` on a fresh install, when
+  the minimum already equals the running release or already excludes the
+  retained release, when the retained release is not older than the running
+  one, and whenever source installation is unavailable. Only when it names a
+  release does Sources show one sentence, directly beside the control that
+  starts or resumes an installation: "After this you can no longer roll back
+  to `<release>`."
