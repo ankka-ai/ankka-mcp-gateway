@@ -3,6 +3,7 @@ import type {
   GatewayAdminApi,
   GatewayStatus,
   ManagedSources,
+  ManagementCredentialStatus,
   ManagementVerification,
   PreparedAction,
   RuntimeAction,
@@ -433,6 +434,11 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
 
   async prepareTeardownAction(): Promise<PreparedAction> {
     return { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), handoffUrl: HANDOFF }
+  }
+
+  async getManagementCredentialStatus(): Promise<ManagementCredentialStatus> {
+    return { schemaVersion: 1, managementCredentialConfigured: this.#team.managementCredentialConfigured,
+      managementCredentialChoice: this.#team.managementCredentialChoice ?? null }
   }
 
   async prepareManagementCredentialAction(): Promise<PreparedAction> {

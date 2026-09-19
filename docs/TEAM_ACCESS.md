@@ -12,6 +12,17 @@ Refresh before editing after an external change; stale revisions are rejected.
 An interrupted save retains its exact proposal and write journal for explicit
 resume. Do not replace it with a different proposal or delete its state.
 
+Each Team load checks the management token alongside the initial Cloudflare
+reads, and accepts membership only after all checks succeed. Independent roster
+reads run concurrently, with at most four provider requests in flight. A free
+read slot starts the next source immediately; policy writes and their
+verification keep their ordered journal.
+Only the public Access signing keys are cached in Worker memory, for up to five
+minutes per issuer. A new key ID triggers a refresh, and failed refreshes never
+reuse expired keys. Every request still verifies its signature, issuer, audience,
+expiry and configured administrator or service identity. Membership and
+management credentials are not cached.
+
 The manual procedures below remain useful for provider-side inspection and
 session revocation. Historical canary observations are not proof that the new
 account-token flow has been qualified live.

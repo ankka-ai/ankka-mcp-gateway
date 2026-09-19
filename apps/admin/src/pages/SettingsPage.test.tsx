@@ -2,7 +2,7 @@ import { act, cleanup, render, screen, waitFor, within } from '@testing-library/
 import userEvent from '@testing-library/user-event'
 import { createMemoryHistory, createRouter, RouterProvider } from '@tanstack/react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { GatewayApiError, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type ManagementVerification, type RuntimeUpdate, type Team } from '../api'
+import { GatewayApiError, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type ManagementVerification, type RuntimeUpdate, type ManagementCredentialStatus } from '../api'
 import { GatewayProvider } from '../GatewayContext'
 import { router, routeTree } from '../router'
 import { SettingsPage } from './SettingsPage'
@@ -50,7 +50,7 @@ function api(): GatewayAdminApi {
     prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(),
     prepareTeardownAction: vi.fn(),
-    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     getTeardownAction: vi.fn(),
   }
 }
@@ -128,16 +128,10 @@ describe('SettingsPage management token', () => {
   beforeEach(cleanup)
   afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); window.history.replaceState(null, '', '/') })
   const ACTION = `action_${'m'.repeat(32)}`
-  const members = [{ email: 'admin@example.com', sourceIds: [] }]
-  const withoutToken: Team = {
-    schemaVersion: 1, revision: 3, editingEnabled: false, editingDisabledReason: 'management_credential_missing',
-    managementCredentialConfigured: false, managementCredentialChoice: 'skipped', observedAt: null,
-    members, adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null,
+  const withoutToken: ManagementCredentialStatus = {
+    schemaVersion: 1, managementCredentialConfigured: false, managementCredentialChoice: 'skipped',
   }
-  const withToken: Team = {
-    ...withoutToken, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
-    observedAt: '2026-09-19T10:00:00.000Z',
-  }
+  const withToken: ManagementCredentialStatus = { ...withoutToken, managementCredentialConfigured: true }
   const verified: ManagementVerification = { schemaVersion: 1, status: 'verified', token: 'active', portals: 'verified', accessPolicies: 'verified' }
 
   function section() {
@@ -153,7 +147,7 @@ describe('SettingsPage management token', () => {
 
   it('offers one way to add the token, says why it is missing, and no longer sends anyone to Cloudflare’s secret settings', async () => {
     const client = api()
-    client.getTeam = vi.fn(async () => withoutToken)
+    client.getManagementCredentialStatus = vi.fn(async () => withoutToken)
     // jsdom follows a fragment, not a navigation: stand on the operation page so the handoff is observable.
     window.history.replaceState(null, '', '/__ankka/operation')
     const prepared = { schemaVersion: 1 as const, actionId: ACTION, status: 'authorization_required' as const, expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}` }
@@ -177,9 +171,10 @@ describe('SettingsPage management token', () => {
 
   it('offers replacement through the same steps and says who deletes the old token, by its name', async () => {
     const client = api()
-    client.getTeam = vi.fn(async () => withToken)
+    client.getManagementCredentialStatus = vi.fn(async () => withToken)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    expect(await (await opened()).findByText('Your gateway has a management token, and it can read your current Team policies.')).toBeVisible()
+    expect(await (await opened()).findByText('Your gateway has a management token. Verify management access to check its permissions.')).toBeVisible()
+    expect(client.getTeam).not.toHaveBeenCalled()
     expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
     expect(section().getByRole('button', { name: 'Verify management access' })).toBeEnabled()
     const replacing = section().getByText(/Replacing the token takes the same steps/u)
@@ -211,7 +206,7 @@ describe('SettingsPage management token', () => {
   ]
   it.each(verifications)('says what a verification proved: %j', async (answer, lines) => {
     const client = api()
-    client.getTeam = vi.fn(async () => withToken)
+    client.getManagementCredentialStatus = vi.fn(async () => withToken)
     client.verifyManagementAccess = vi.fn(async () => answer)
     const user = userEvent.setup()
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
@@ -220,13 +215,13 @@ describe('SettingsPage management token', () => {
     expect(client.verifyManagementAccess).toHaveBeenCalledTimes(1)
   })
 
-  it('keeps Verify and Replace reachable when Team cannot be read, which is how a token without its permissions looks', async () => {
+  it('keeps Verify and Replace reachable when token status cannot be read', async () => {
     const client = api()
-    client.getTeam = vi.fn(async () => { throw new GatewayApiError(503, 'team_unavailable') })
+    client.getManagementCredentialStatus = vi.fn(async () => { throw new GatewayApiError(503, 'management_credential_unavailable') })
     client.verifyManagementAccess = vi.fn(async () => { throw new GatewayApiError(503, 'management_credential_unavailable') })
     const user = userEvent.setup()
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    expect(await (await opened()).findByText('Your gateway could not read your Team policies. Verify management access to see what is missing.')).toBeVisible()
+    expect(await (await opened()).findByText('Your gateway could not read its management token status. Reload this page or verify management access.')).toBeVisible()
     expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
     await user.click(section().getByRole('button', { name: 'Verify management access' }))
     expect(await (await opened()).findByRole('alert')).toHaveTextContent('The check could not be run. Reload this page and try again.')
@@ -236,7 +231,7 @@ describe('SettingsPage management token', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     window.history.replaceState(null, '', `/settings?managementCredentialAction=${ACTION}&managementCredentialActionResult=applied`)
     const client = api()
-    client.getTeam = vi.fn<GatewayAdminApi['getTeam']>()
+    client.getManagementCredentialStatus = vi.fn<GatewayAdminApi['getManagementCredentialStatus']>()
       .mockResolvedValueOnce(withoutToken).mockResolvedValueOnce(withoutToken).mockResolvedValue(withToken)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
 
@@ -250,14 +245,14 @@ describe('SettingsPage management token', () => {
     await act(() => vi.advanceTimersByTimeAsync(3_000))
     await act(() => vi.advanceTimersByTimeAsync(3_000))
     expect(await (await opened()).findByText('Cloudflare accepted the token. Your gateway now runs with it. Verify management access to prove that it can do its work.')).toBeVisible()
-    expect(client.getTeam).toHaveBeenCalledTimes(3)
+    expect(client.getManagementCredentialStatus).toHaveBeenCalledTimes(3)
     // Sources were loaded while the token was missing: they are read again, so the Sources page is not left disabled.
     expect(client.getSources).toHaveBeenCalledTimes(2)
     expect(section().getByRole('button', { name: 'Verify management access' })).toBeEnabled()
     expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
     // It stops asking once the token is there.
     await act(() => vi.advanceTimersByTimeAsync(30_000))
-    expect(client.getTeam).toHaveBeenCalledTimes(3)
+    expect(client.getManagementCredentialStatus).toHaveBeenCalledTimes(3)
   })
 
   it.each([
@@ -269,19 +264,19 @@ describe('SettingsPage management token', () => {
   ] as const)('says how a change ended without a token: %s %s', async (result, reason, message) => {
     window.history.replaceState(null, '', `/settings?managementCredentialAction=${ACTION}&managementCredentialActionResult=${result}${reason === null ? '' : `&managementCredentialActionReason=${reason}`}`)
     const client = api()
-    client.getTeam = vi.fn(async () => withoutToken)
+    client.getManagementCredentialStatus = vi.fn(async () => withoutToken)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
     expect(await (await opened()).findByText(message)).toBeVisible()
     // Nothing arrived, so nothing is polled: one read, and the way to start again is right there.
     expect(await (await opened()).findByRole('button', { name: 'Add management token' })).toBeEnabled()
-    expect(client.getTeam).toHaveBeenCalledTimes(1)
+    expect(client.getManagementCredentialStatus).toHaveBeenCalledTimes(1)
     expect(window.location.search).toBe('')
   })
 
   it('ignores a result it was not handed by its own gateway’s shape', async () => {
     window.history.replaceState(null, '', '/settings?managementCredentialAction=not-an-action&managementCredentialActionResult=applied&managementCredentialActionReason=%3Cscript%3E')
     const client = api()
-    client.getTeam = vi.fn(async () => withoutToken)
+    client.getManagementCredentialStatus = vi.fn(async () => withoutToken)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
     expect(await (await opened()).findByRole('button', { name: 'Add management token' })).toBeEnabled()
     expect(section().queryByText(/Cloudflare accepted the token/u)).not.toBeInTheDocument()

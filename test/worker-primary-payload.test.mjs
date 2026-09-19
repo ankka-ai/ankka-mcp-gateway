@@ -943,7 +943,7 @@ test('management status requires a verified Access JWT and exposes no provider o
       true,
       ['sign', 'verify'],
     );
-    const kid = 'test-access-key';
+    const kid = `test-access-key-${crypto.randomUUID()}`;
     const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
     const assertion = await accessAssertion(
       'admin@example.com', env.CF_ACCESS_ISSUER, env.CF_ACCESS_AUD, keys.privateKey, kid,
@@ -987,7 +987,7 @@ test('management teardown handoff is actor-bound, same-origin, receipt-backed, a
       true,
       ['sign', 'verify'],
     );
-    const kid = 'test-access-key';
+    const kid = `test-access-key-${crypto.randomUUID()}`;
     const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
     const assertion = await accessAssertion(
       'admin@example.com', env.CF_ACCESS_ISSUER, env.CF_ACCESS_AUD, keys.privateKey, kid,
@@ -1098,7 +1098,7 @@ async function exerciseSignedRuntimeUpdate(bindExpectedTarget) {
       true,
       ['sign', 'verify'],
     );
-    const kid = 'test-update-access-key';
+    const kid = `test-update-access-key-${crypto.randomUUID()}`;
     const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
     const assertion = await accessAssertion(
       'admin@example.com', env.CF_ACCESS_ISSUER, env.CF_ACCESS_AUD, keys.privateKey, kid,
