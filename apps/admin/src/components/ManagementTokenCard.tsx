@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { ManagementCredentialChoice } from '../api'
 import { useGateway } from '../GatewayContext'
+import { managementTokenCreateLink, managementTokenName } from '../managementTokenLink'
 import { Button } from './Button'
 
 /** What a gateway without the token is told, by what setup recorded at its token step. */
@@ -12,7 +13,18 @@ export function managementTokenChoiceSentence(choice: ManagementCredentialChoice
 
 export const MANAGEMENT_ACCESS_PURPOSE = 'Your gateway needs one Cloudflare API token of its own to add sources and change team access, because every approval you give it is temporary.'
 export const MANAGEMENT_ACCESS_REACH = 'Cloudflare cannot limit this token to your gateway: it can edit every Access policy in your account, and it never passes through anything Ankka hosts.'
-export const MANAGEMENT_ACCESS_STEPS = 'You approve one change in Cloudflare, then create the token from a link and paste it into your own gateway. Creating it needs a Super Administrator or Administrator of your Cloudflare account.'
+export const MANAGEMENT_ACCESS_STEPS = 'Create the token first: Cloudflare’s approval in the second step lasts only a few minutes. Creating it needs a Super Administrator or Administrator of your Cloudflare account.'
+
+/** Step one of the flow, before any approval is spent: the link that creates the token with both permissions and its name. */
+export function ManagementTokenCreateLink() {
+  const hostname = window.location.hostname
+  return (
+    <p>
+      <a className="underline underline-offset-4" href={managementTokenCreateLink(hostname)} target="_blank" rel="noopener noreferrer">Create the token in Cloudflare ↗</a>
+      {' '}The link fills in both permissions and the name <strong>{managementTokenName(hostname)}</strong>. Create it and copy it.
+    </p>
+  )
+}
 
 /**
  * Starts the one way a gateway gets or replaces its management token: prepare the change here, approve it in
@@ -48,7 +60,13 @@ export function ManagementTokenCard({ choice, className = 'mt-6' }: {
       <p>{MANAGEMENT_ACCESS_REACH}</p>
       <p className="text-kumo-subtle">{managementTokenChoiceSentence(choice)}</p>
       <p className="text-kumo-subtle">{MANAGEMENT_ACCESS_STEPS}</p>
-      <div><Button variant="primary" loading={starting} onClick={() => void start()}>Add management token</Button></div>
+      <ol className="list-decimal space-y-3 pl-5">
+        <li><ManagementTokenCreateLink /></li>
+        <li>
+          <p>Add it to your gateway: you approve one change in Cloudflare, then paste the token on a page of your own gateway.</p>
+          <div className="mt-2"><Button variant="primary" loading={starting} onClick={() => void start()}>Add management token</Button></div>
+        </li>
+      </ol>
     </section>
   )
 }

@@ -163,7 +163,7 @@ describe('SettingsPage management token', () => {
 
     expect(await (await opened()).findByRole('heading', { name: 'Add your management token' })).toBeInTheDocument()
     expect(section().getByText('You continued without a token during setup, so your gateway has never had one.')).toBeVisible()
-    expect(section().getByText(/You approve one change in Cloudflare, then create the token from a link and paste it into your own gateway\./u)).toBeVisible()
+    expect(section().getByText(/Create the token first: Cloudflare’s approval in the second step lasts only a few minutes\./u)).toBeVisible()
     expect(container.textContent).not.toMatch(/Variables and Secrets|encrypted secret named|Enter the token only in Cloudflare|wrangler/u)
     expect(section().queryByRole('button', { name: 'Verify management access' })).not.toBeInTheDocument()
     expect(section().queryByRole('button', { name: 'Replace management token' })).not.toBeInTheDocument()

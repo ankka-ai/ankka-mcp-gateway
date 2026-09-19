@@ -77,21 +77,25 @@ you approved. So the flow is one fixed operation, `management-credential`,
 with exactly one Cloudflare scope, `workers-scripts.write`, and one mutation,
 a Worker-secret write on the gateway's own Worker:
 
-1. **Settings** prepares the change inside your gateway. Only an administrator
-   can, from the dashboard's own origin; the service identity cannot. It is
-   refused while a source installation, update, removal or Team change is
-   unfinished, and those are refused while it is open.
-2. Your gateway's operation page sends you to Cloudflare for one approval.
-3. Cloudflare returns you to a page **of your gateway**. It keeps the
+1. The card offers the [template link](#the-template-link) first. Create the
+   token and copy it before you continue: Cloudflare's approval lasts only a
+   few minutes, and a token created afterwards can outlive it. The paste page
+   shows the link again for a token that was not created yet.
+2. **Add management token** prepares the change inside your gateway. Only an
+   administrator can, from the dashboard's own origin; the service identity
+   cannot. It is refused while a source installation, update, removal or Team
+   change is unfinished, and those are refused while it is open.
+3. Your gateway's operation page sends you to Cloudflare for one approval.
+4. Cloudflare returns you to a page **of your gateway**. It keeps the
    authorization code in script memory only, drops it from the address at
    once, and shows the [template link](#the-template-link) and one field. The
    field is not echoed, has no `name`, and is emptied as soon as it is read.
-4. The page sends the value once, in the body of a same-origin POST, under
+5. The page sends the value once, in the body of a same-origin POST, under
    the attempt's HttpOnly cookie, its state and its PKCE verifier, and only
    from the administrator who prepared the change. The page's policy allows
    connections to your gateway's own origin and nothing else, and no form
    submission.
-5. Your gateway accepts only the two [account token forms](#accepted-token-forms).
+6. Your gateway accepts only the two [account token forms](#accepted-token-forms).
    A wrong paste is refused before anything is spent, so the same approval
    takes the next paste. Then it exchanges the code, checks with one read that
    the approval covers this account's Worker, and writes the secret with
@@ -102,7 +106,7 @@ a Worker-secret write on the gateway's own Worker:
    never read. It is the endpoint the [lifecycle runner](AGENT_LIFECYCLE.md)'s
    manage stage writes the same secret through, with the operator's authority
    instead of your approval.
-6. It revokes the approval, as every operation does, and answers with fixed
+7. It revokes the approval, as every operation does, and answers with fixed
    words.
 
 The value exists only inside that one request. It is never written to Durable

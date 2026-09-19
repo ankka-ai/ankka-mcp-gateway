@@ -7,8 +7,10 @@ import {
   MANAGEMENT_ACCESS_PURPOSE,
   MANAGEMENT_ACCESS_REACH,
   ManagementTokenCard,
+  ManagementTokenCreateLink,
   useManagementTokenStart,
 } from '../components/ManagementTokenCard'
+import { managementTokenName } from '../managementTokenLink'
 
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u
 const REASON = /^[a-z][a-z0-9_]{0,120}$/u
@@ -166,7 +168,7 @@ export function ManagementTokenSection() {
   }
 
   const missing = teamState === 'read' && team?.managementCredentialConfigured === false && arrival !== 'waiting'
-  const nameInCloudflare = `Ankka gateway ${window.location.hostname}`
+  const nameInCloudflare = managementTokenName(window.location.hostname)
   const status = teamState === 'loading' ? 'Checking your management token…'
     : teamState === 'unreadable'
       ? 'Your gateway could not read your Team policies. Verify management access to see what is missing.'
@@ -189,7 +191,8 @@ export function ManagementTokenSection() {
           <p>{MANAGEMENT_ACCESS_REACH}</p>
           {arrival === 'waiting' || teamState === 'loading' ? null : (
             <>
-              <p className="text-kumo-subtle">Replacing the token takes the same steps: one approval in Cloudflare, then a new token pasted into your own gateway. Your gateway cannot delete the old token. Afterwards, delete it in Cloudflare under Manage Account → Account API Tokens: both are named <strong>{nameInCloudflare}</strong>, and the old one has the earlier creation date. Removing your gateway does not delete the token either.</p>
+              <p className="text-kumo-subtle">Replacing the token takes the same steps: create the new token first, then one approval in Cloudflare and the new token pasted into your own gateway. Your gateway cannot delete the old token. Afterwards, delete it in Cloudflare under Manage Account → Account API Tokens: both are named <strong>{nameInCloudflare}</strong>, and the old one has the earlier creation date. Removing your gateway does not delete the token either.</p>
+              <ManagementTokenCreateLink />
               <div className="flex flex-wrap gap-3">
                 <Button variant="secondary" loading={verifying} onClick={() => void verify()}>Verify management access</Button>
                 <Button variant="secondary" loading={starting} disabled={verifying} onClick={() => void start()}>Replace management token</Button>

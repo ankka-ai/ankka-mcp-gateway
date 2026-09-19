@@ -211,10 +211,25 @@ export async function manageStage(context: LifecycleContext): Promise<BoundaryVa
     }
     await context.record.set('install', 'source', JSON.parse(JSON.stringify(result)));
   }
+  // "Verify management access" proves both of the token's permissions by writing the gateway's own Portal and its
+  // own Access policy back unchanged. Run here against the provider, twice: the second answer shows that the first
+  // left nothing that reads as drift. A payload from before the check has no such route and answers 404.
+  const verification: string[] = [];
+  for (let round = 0; round < 2; round += 1) {
+    const response = await management.fetch(new Request('https://admin-state.invalid/management-credential/verify', { method: 'POST' }));
+    if (response.status === 404) { await response.body?.cancel(); break; }
+    const answer = v.safeParse(v.looseObject({ status: v.string(), token: v.string(), portals: v.string(), accessPolicies: v.string() }), await response.json());
+    requireStage(response.status === 200 && answer.success, 'management_verification_unreadable', String(response.status));
+    await context.record.event('manage', 'management_access_verification', { round: round + 1, status: answer.output.status,
+      token: answer.output.token, portals: answer.output.portals, accessPolicies: answer.output.accessPolicies });
+    requireStage(answer.output.status === 'verified', 'management_access_not_verified',
+      `${answer.output.token}:${answer.output.portals}:${answer.output.accessPolicies}`);
+    verification.push(answer.output.status);
+  }
   const inventory = await context.provider.capture({ installId: provision.installId, workerName, bootstrapOrigin: provision.bootstrapOrigin });
   await context.record.setInventory(JSON.parse(JSON.stringify(inventory)));
   await context.record.event('manage', 'inventory_captured', { resources: inventory.resources.length });
   const settings = await providerJson(context, `/client/v4/accounts/${context.job.target.accountId}/workers/scripts/${workerName}/settings`);
   requireStage(v.is(v.looseObject({ result: v.looseObject({}) }), settings), 'worker_settings_unreadable');
-  return { resources: inventory.resources.length, managementCredentialInstalled: true };
+  return { resources: inventory.resources.length, managementCredentialInstalled: true, managementAccessVerified: verification.length };
 }
