@@ -200,6 +200,12 @@ installation: a stolen Access-policy credential can affect other policies in
 its selected account. Gateway ownership checks constrain our code, not the
 provider authority of a stolen token.
 
+Individual [source removal](SOURCE_REMOVAL.md) uses the same account-owned
+token for a fixed, receipt-checked Portal update and deletion of that source's
+MCP server, Access policy and Access application. Draft deletion requires no
+provider credential. Managed BigQuery bridge deletion is not a routine token
+operation: its Worker and stored Google key require separate authorization.
+
 ## Setup and verified endpoint permissions
 
 During installation, the setup page in your own Worker does these steps with

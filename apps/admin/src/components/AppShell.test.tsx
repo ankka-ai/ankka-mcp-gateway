@@ -31,7 +31,7 @@ function recorded(action: Pick<TeardownAction, 'status'> & Partial<TeardownActio
 /** A gateway whose connected resources are gone: its own records still answer, its Team policies do not. */
 function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
   return {
-    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+    removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status),
     getSources: vi.fn(async () => sources),
     getTeam: vi.fn(async () => { throw new GatewayApiError(503, 'team_unavailable') }),

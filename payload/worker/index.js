@@ -311,6 +311,8 @@ const INTERNAL_MANAGEMENT_VERIFY_PATH = '/management-credential/verify';
 const INTERNAL_MANAGEMENT_STATUS_PATH = '/management-credential/status';
 const STORAGE_KEY = 'ankka-mcp-gateway/uninstall-state/v1';
 const STATUS_KEY = 'ankka-mcp-gateway/public-status/v1';
+const SOURCE_REMOVAL_KEY = 'ankka-mcp-gateway/source-removal/v1';
+const INTERNAL_SOURCE_REMOVAL_PATH = '/source-removal';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
 const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
 const ACTIONS_KEY = 'ankka-mcp-gateway/source-actions/v1';
@@ -2551,6 +2553,7 @@ function publicStatusFromReadyResponse(body) {
 function safeManagementControl(value) {
   if (!exactKeys(value, [
     'schemaVersion', 'installationId', 'accountId', 'zoneId', 'portal', 'audienceEmails', 'sourceOwnership',
+    ...(Object.hasOwn(value ?? {}, 'removedInitialSource') ? ['removedInitialSource'] : []),
   ]) || value.schemaVersion !== 1 || !INSTALLATION_ID.test(value.installationId) ||
       !ACCOUNT_ID.test(value.accountId) || !ZONE_ID.test(value.zoneId) || !exactKeys(value.portal, [
         'id', 'name', 'hostname', 'marker',
@@ -2560,6 +2563,8 @@ function safeManagementControl(value) {
       !RESOURCE_KEY.test(value.portal.marker.slice(`acg:v1:${value.installationId}:`.length))) {
     return null;
   }
+  const removedInitialSource = Object.hasOwn(value, 'removedInitialSource') ? safeManagedSource(value.removedInitialSource) : undefined;
+  if (removedInitialSource === null || (removedInitialSource && removedInitialSource.status !== 'installed')) return null;
   const audienceEmails = exactSortedUniqueStrings(value.audienceEmails, normalizedEmail, undefined, 1);
   if (!audienceEmails || !Array.isArray(value.sourceOwnership) || value.sourceOwnership.length > 32) return null;
   const sourceOwnership = [];
@@ -2580,7 +2585,7 @@ function safeManagementControl(value) {
   }
   if (new Set(sourceOwnership.map((source) => source.sourceId)).size !== sourceOwnership.length ||
       new Set(sourceOwnership.map((source) => source.resources[0].provider.id)).size !== sourceOwnership.length) return null;
-  return Object.freeze({
+  const result = {
     schemaVersion: 1,
     installationId: value.installationId,
     accountId: value.accountId,
@@ -2588,7 +2593,9 @@ function safeManagementControl(value) {
     portal: Object.freeze({ ...value.portal }),
     audienceEmails,
     sourceOwnership: Object.freeze(sourceOwnership),
-  });
+  };
+  if (removedInitialSource) Object.assign(result, { removedInitialSource });
+  return Object.freeze(result);
 }
 
 function readyResource(body, kind) {
@@ -2972,7 +2979,10 @@ async function sourceActionSnapshot(storage, actorEmail, now) {
   if (!current) return null;
   const blocking = current.actions.find((action) => sourceActionBlocks(action) &&
     sourceActionState(action, now) === 'recovery_required') ?? current.actions.find(sourceActionBlocks);
-  let blockingAction = blocking ? sourceActionPointer(blocking) : null;
+  const removal = safeSourceRemoval(await storage.get(SOURCE_REMOVAL_KEY));
+  if (removal === false) return null;
+  let blockingAction = removal ? { kind: 'source_removal', actionId: removal.actionId, sourceId: removal.sourceId }
+    : blocking ? sourceActionPointer(blocking) : null;
   for (const [key, kind, parse] of [
     [UPDATES_KEY, 'runtime', safeRuntimeUpdates], [TEARDOWNS_KEY, 'teardown', safeTeardownActions],
   ]) {
@@ -4223,7 +4233,7 @@ async function saveRuntimeUpdates(storage, state) {
 }
 
 async function prepareRuntimeAction(storage, environment, input) {
-  if (await currentTeardownLocksRuntime(storage, Date.now())) return null;
+  if (await sourceRemovalBlocks(storage) || await currentTeardownLocksRuntime(storage, Date.now())) return null;
   // A token change gives this Worker a new version; an update must not read its bindings around that write.
   if (await credentialActionBlocksLifecycle(storage, Date.now())) return null;
   if (await teamActionBlocksLifecycle(storage) || !await teamRuntimeReleaseAllowed(storage, input?.to?.release)) return null;
@@ -4506,7 +4516,7 @@ function sameTeardownResourceAuthority(left, right) {
   return canonicalJson(left) === canonicalJson(right);
 }
 
-function teardownResources(root, sourceOwnership, currentPolicies = false) {
+function teardownResources(root, sourceOwnership, currentPolicies = false, removedInitialSource = null) {
   if (!Array.isArray(root.receipt?.resources) || !Array.isArray(sourceOwnership)) return null;
   const receiptSources = root.receipt.resources.filter((resource) => (
     SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind)
@@ -4537,7 +4547,8 @@ function teardownResources(root, sourceOwnership, currentPolicies = false) {
     }
     extras.push(...resources);
   }
-  if ((receiptSources.length > 0) !== (receiptSourceOwner !== null)) return null;
+  if (removedInitialSource ? receiptSources.length !== 3 || receiptSourceOwner !== null
+    : (receiptSources.length > 0) !== (receiptSourceOwner !== null)) return null;
   const seenProviderLocators = new Set();
   const ordered = [];
   // The current flow removes the Portal before its servers. Cloudflare can
@@ -4548,6 +4559,9 @@ function teardownResources(root, sourceOwnership, currentPolicies = false) {
       .concat([...extras].reverse(), [...receiptSources].reverse())
     : [...extras].reverse().concat([...root.receipt.resources].reverse());
   for (const resource of removal) {
+    if (removedInitialSource && receiptSources.includes(resource)) continue;
+    if (removedInitialSource && receiptSources.some((retired) =>
+      teardownProviderLocatorKey(retired) === teardownProviderLocatorKey(resource))) return null;
     const locatorKey = teardownProviderLocatorKey(resource);
     if (seenProviderLocators.has(locatorKey)) return null;
     seenProviderLocators.add(locatorKey);
@@ -4603,7 +4617,7 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
   const portalReceipt = root.receipt.resources.find((resource) => resource.kind === 'portal');
   if (!portalReceipt || control.portal.id !== portalReceipt.provider.id ||
       control.portal.marker !== portalReceipt.marker) return null;
-  const layout = teardownResources(root, control.sourceOwnership, currentPolicies);
+  const layout = teardownResources(root, control.sourceOwnership, currentPolicies, control.removedInitialSource);
   if (!layout) return null;
   const installedSources = sources.sources.filter((source) => source.status === 'installed');
   const installedIds = installedSources.map((source) => source.id).sort(compareText);
@@ -4614,9 +4628,9 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
       root.receipt.accessPolicy.identitiesHash !== audienceHash) return null;
 
   const receiptSource = layout.receiptSourceOwner === null
-    ? null
+    ? control.removedInitialSource ?? null
     : installedSources.find((source) => source.id === layout.receiptSourceOwner) ?? null;
-  if ((layout.receiptSourceOwner !== null) !== (receiptSource !== null)) return null;
+  if (!control.removedInitialSource && (layout.receiptSourceOwner !== null) !== (receiptSource !== null)) return null;
   const rootSettings = teardownSettings(control, receiptSource, 'company-context');
   const rootDesired = await buildDesiredResources(rootSettings, root.installationId);
   if (rootDesired.length !== root.receipt.resources.length ||
@@ -4670,7 +4684,7 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
       entries.set(key, Object.freeze({ desired, state }));
     }
   }
-  if (entries.size !== layout.resources.length || !Array.isArray(partialActions) || partialActions.length > 16 ||
+  if (entries.size !== layout.resources.length + (control.removedInitialSource ? 3 : 0) || !Array.isArray(partialActions) || partialActions.length > 16 ||
       (!currentPolicies && partialActions.length > 0)) return null;
   const partialResources = [];
   const pendingResources = new Set();
@@ -4805,8 +4819,8 @@ function teardownOwnershipMatches(resource, result, authority, currentPolicies =
   return accessApplicationIdentityMatches(result, resource.kind, entry.state);
 }
 
-async function teardownResourceRead(root, resource, authority, token, currentPolicies = false) {
-  const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token);
+async function teardownResourceRead(root, resource, authority, token, currentPolicies = false, signal) {
+  const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { signal });
   if (response.status === 'absent' || response.status === 'auth' || response.status === 'unknown') {
     return response.status;
   }
@@ -4814,19 +4828,19 @@ async function teardownResourceRead(root, resource, authority, token, currentPol
   return teardownOwnershipMatches(resource, response.result, authority, currentPolicies) ? 'present' : 'conflict';
 }
 
-async function teardownServersUnshared(root, authority, token) {
+async function teardownServersUnshared(root, authority, token, signal) {
   const serverIds = new Set(authority.resources.filter((resource) => resource.kind === 'mcp_server')
     .map((resource) => resource.provider.id));
   if (serverIds.size === 0) return true;
   const path = `/accounts/${encodeURIComponent(root.receipt.target.accountId)}/access/ai-controls/mcp/portals`;
-  const portals = await providerList(path, token);
+  const portals = await providerList(path, token, {}, signal);
   if (portals.status !== 'ok') return false;
   const seen = new Set();
   for (const portal of portals.result) {
     if (!safeProviderId(portal?.id) || seen.has(portal.id)) return false;
     seen.add(portal.id);
     if (portal.id === authority.control.portal.id) continue;
-    const read = await providerCall(`${path}/${encodeURIComponent(portal.id)}`, token);
+    const read = await providerCall(`${path}/${encodeURIComponent(portal.id)}`, token, { signal });
     if (read.status !== 'ok' || !isRecord(read.result) || read.result.id !== portal.id) return false;
     const mappings = Object.hasOwn(read.result, 'servers') ? read.result.servers : [];
     if (!Array.isArray(mappings) || mappings.some((mapping) => !isRecord(mapping) ||
@@ -4837,10 +4851,10 @@ async function teardownServersUnshared(root, authority, token) {
   return true;
 }
 
-async function teardownApplicationChildrenMatch(root, resource, authority, token) {
+async function teardownApplicationChildrenMatch(root, resource, authority, token, signal) {
   if (!['source_access_application', 'portal_access_application'].includes(resource.kind)) return true;
   const path = `${teardownProviderPath(resource, root.receipt.target)}/policies`;
-  const listed = await providerList(path, token);
+  const listed = await providerList(path, token, {}, signal);
   if (listed.status !== 'ok') return false;
   const owned = authority.resources.filter((entry) =>
     ['source_access_policy', 'portal_access_policy'].includes(entry.kind) &&
@@ -4854,8 +4868,8 @@ async function teardownApplicationChildrenMatch(root, resource, authority, token
   return true;
 }
 
-async function teardownResourceDelete(root, resource, token) {
-  const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE' });
+async function teardownResourceDelete(root, resource, token, signal) {
+  const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE', signal });
   // Access may accept deletion asynchronously. Acceptance is not absence:
   // the caller still verifies the exact resource before recording removal.
   const accessResource = ['source_access_application', 'portal_access_application',
@@ -5248,7 +5262,7 @@ async function processTeardownActionProof(request, env, storage, nowMs = Date.no
   }
   const authority = await rootTeardownAuthority(storage, environment, action.installationId, env, currentState?.partialActions ?? []);
   if (!authority) return null;
-  const layout = currentPolicies ? teardownResources(authority.root, authority.control.sourceOwnership, true) : null;
+  const layout = currentPolicies ? teardownResources(authority.root, authority.control.sourceOwnership, true, authority.control.removedInitialSource) : null;
   if (currentPolicies && !layout) return null;
   const receiptScopeEvidence = currentPolicies ? {
     receiptResourceKinds: [...new Set([...layout.resources.map((resource) => TEARDOWN_RECEIPT_KINDS[resource.kind]),
@@ -5428,6 +5442,185 @@ async function settleCurrentTeardownAction(request, env, storage, nowMs = Date.n
   return publicTeardownAction(updated);
 }
 
+// One serialized removal at a time. Only identities, hashes and progress are
+// durable; the account-owned credential is read from the Worker for this call.
+function safeSourceRemoval(value) {
+  if (value === undefined || value === null) return null;
+  if (!exactKeys(value, ['schemaVersion', 'actionId', 'sourceId', 'sourceHash', 'resourcesHash', 'step', 'pending']) ||
+      value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
+      !HASH.test(value.sourceHash) || !HASH.test(value.resourcesHash) || !Number.isSafeInteger(value.step) ||
+      value.step < 0 || value.step > 4 || !isBoolean(value.pending) || (value.step === 4 && value.pending)) return false;
+  return Object.freeze({ ...value });
+}
+
+async function sourceRemovalBlocks(storage) {
+  return safeSourceRemoval(await storage.get(SOURCE_REMOVAL_KEY)) !== null;
+}
+
+function sourceRemovalRefusal(error, status = 409) {
+  return fixedJson(status, { schemaVersion: 1, error });
+}
+
+async function finishSourceRemoval(storage, env, source, control, sources, initialSource) {
+  const nextSources = safeManagementSources({ ...sources, revision: sources.revision + 1,
+    sources: sources.sources.filter((entry) => entry.id !== source.id) });
+  const changedControl = { ...control, sourceOwnership: control.sourceOwnership.filter((entry) => entry.sourceId !== source.id) };
+  if (initialSource) Object.assign(changedControl, { removedInitialSource: source });
+  const nextControl = safeManagementControl(changedControl);
+  const team = await readTeamState(storage, env);
+  const rawActions = await storage.get(ACTIONS_KEY);
+  const actions = rawActions === undefined ? null : safeSourceActions(rawActions);
+  if (!nextSources || !nextControl || !team || (rawActions !== undefined && !actions)) return null;
+  const nextTeam = safeTeamState({ ...team, revision: team.revision + 1, pendingAction: null,
+    members: team.members.map((member) => ({ ...member, sourceIds: member.sourceIds.filter((id) => id !== source.id) })),
+    sourceBaselines: team.sourceBaselines.filter((id) => id !== source.id),
+  }, nextControl, nextSources, accessConfiguration(env).emails, serviceActorOf(accessConfiguration(env)));
+  if (!nextTeam) return null;
+  const writes = { [CONTROL_KEY]: nextControl, [SOURCES_KEY]: nextSources,
+    [TEAM_KEY]: nextTeam, [SOURCE_REMOVAL_KEY]: null };
+  if (actions) writes[ACTIONS_KEY] = { ...actions, revision: actions.revision + 1,
+    actions: actions.actions.filter((action) => action.sourceId !== source.id) };
+  if (initialSource) {
+    const status = safePublicStatus(await storage.get(STATUS_KEY));
+    if (!status) return null;
+    writes[STATUS_KEY] = { ...status, source: null };
+  }
+  // Commit the list, ownership, Team assignments and journal together. The
+  // initial source's immutable receipt remains derivable for gateway teardown.
+  await storage.put(writes);
+  return nextSources;
+}
+
+async function removeManagedSource(storage, env, input) {
+  if (!exactKeys(input, ['schemaVersion', 'revision', 'sourceId', 'actorEmail']) || input.schemaVersion !== 1 ||
+      !Number.isSafeInteger(input.revision) || input.revision < 1 || !SOURCE_ID.test(input.sourceId) ||
+      !teamActorAllowed(input.actorEmail, accessConfiguration(env))) return sourceRemovalRefusal('source_invalid', 400);
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  let removal = safeSourceRemoval(await storage.get(SOURCE_REMOVAL_KEY));
+  if (!sources || !control || removal === false) return sourceRemovalRefusal('source_removal_unavailable');
+  if (sources.revision !== input.revision) return sourceRemovalRefusal('source_conflict');
+  const source = sources.sources.find((entry) => entry.id === input.sourceId);
+  if (!source) return sourceRemovalRefusal('source_not_found', 404);
+  if (removal && removal.sourceId !== source.id) return sourceRemovalRefusal('source_removal_pending');
+  if (source.status === 'draft') {
+    return removeSourceDraft(storage, { schemaVersion: 1, revision: input.revision, sourceId: source.id }, input.actorEmail, Date.now());
+  }
+  if (await otherLifecycleBlocksSource(storage, Date.now(), removal?.actionId) || await teamActionBlocksLifecycle(storage)) {
+    return sourceRemovalRefusal('source_removal_action_conflict');
+  }
+  // Bridge receipts are independent of the bounded source-action history.
+  // Never discard one because its completed installation action was pruned.
+  if (await storage.get(`ankka-mcp-gateway/bigquery-source/v1/${source.id}`) !== undefined) {
+    return sourceRemovalRefusal('source_removal_managed_bigquery');
+  }
+  const rawActions = await storage.get(ACTIONS_KEY);
+  const actions = rawActions === undefined ? { actions: [] } : safeSourceActions(rawActions);
+  if (!actions) return sourceRemovalRefusal('source_removal_unavailable');
+  if (actions.actions.some((action) => action.sourceId === source.id && action.bigquerySetupStarted)) {
+    return sourceRemovalRefusal('source_removal_managed_bigquery');
+  }
+  const token = managementCredential(env);
+  if (!token) return sourceRemovalRefusal('source_removal_credential_required');
+  const environment = parseManagementEnvironment(env);
+  const evidence = environment && await rootTeardownAuthority(storage, environment, control.installationId, env);
+  if (!evidence) return sourceRemovalRefusal('source_removal_ownership_conflict');
+  const root = { installationId: control.installationId, receipt: evidence.root.receipt };
+  const authority = await teardownAuthorityState(root, control, sources, environment, true);
+  const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
+  if (!authority || !ownership) return sourceRemovalRefusal('source_removal_ownership_conflict');
+  // Detach first, then delete the server while its Access protection remains.
+  const resources = [ownership.resources[0], ownership.resources[2], ownership.resources[1]];
+  const scoped = { ...authority, resources };
+  const sourceHash = await managedSourceHash(source);
+  const resourcesHash = await sha256(ownership.resources);
+  if (removal && (removal.sourceHash !== sourceHash || removal.resourcesHash !== resourcesHash)) {
+    return sourceRemovalRefusal('source_removal_ownership_conflict');
+  }
+  const before = authority.portalMappings;
+  const after = before.filter((mapping) => mapping.server_id !== ownership.resources[0].provider.id);
+  const portalPath = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`;
+  const signal = AbortSignal.timeout(30_000);
+  const readPortal = () => providerCall(portalPath, token, { signal });
+  const expectedPortal = (result) => portalExact(result, control, removal?.step > 0 ? after : before) ||
+    (removal?.step === 0 && removal.pending && portalExact(result, control, after));
+  try {
+    const portal = await readPortal();
+    if (portal.status !== 'ok' || !expectedPortal(portal.result) ||
+        !await teardownServersUnshared(root, scoped, token, signal)) return sourceRemovalRefusal('source_removal_ownership_conflict');
+    // Check all resources and dependencies before changing the Portal. A
+    // completed prefix must stay absent; a replacement is never ours to erase.
+    for (let index = 0; index < resources.length; index++) {
+      const resource = resources[index];
+      const state = await teardownResourceRead(root, resource, scoped, token, true, signal);
+      if (!['present', 'absent'].includes(state) || (removal?.step > index + 1 && state !== 'absent') ||
+          (state === 'present' && !await teardownApplicationChildrenMatch(root, resource, scoped, token, signal))) {
+        return sourceRemovalRefusal('source_removal_ownership_conflict');
+      }
+    }
+    if (!removal) {
+      if (!await armSourceCompatibility(storage, env)) return sourceRemovalRefusal('source_removal_unavailable');
+      removal = { schemaVersion: 1, actionId: `action_${base64UrlEncode(crypto.getRandomValues(new Uint8Array(24)))}`,
+        sourceId: source.id, sourceHash, resourcesHash, step: 0, pending: false };
+      await storage.put(SOURCE_REMOVAL_KEY, removal);
+    }
+    const progress = async (step, pending = false) => {
+      removal = { ...removal, step, pending };
+      await storage.put(SOURCE_REMOVAL_KEY, removal);
+    };
+    if (removal.step === 0) {
+      const current = await readPortal();
+      if (current.status !== 'ok' || !expectedPortal(current.result)) return sourceRemovalRefusal('source_removal_ownership_conflict');
+      if (!portalExact(current.result, control, after)) {
+        await progress(0, true);
+        const written = await providerCall(portalPath, token, { method: 'PUT', signal, body: canonicalJson({
+          name: control.portal.name, hostname: control.portal.hostname, description: control.portal.marker,
+          code_mode: 'default_on', secure_web_gateway: false,
+          servers: after.map((mapping) => ({ ...mapping, id: mapping.server_id })),
+        }) });
+        if (written.status !== 'ok') return sourceRemovalRefusal('source_removal_recovery_required');
+        const verified = await readPortal();
+        if (verified.status !== 'ok' || !portalExact(verified.result, control, after)) {
+          return sourceRemovalRefusal('source_removal_recovery_required');
+        }
+      }
+      await progress(1);
+    }
+    for (let index = removal.step - 1; index < resources.length; index++) {
+      const resource = resources[index];
+      const current = await readPortal();
+      if (current.status !== 'ok' || !portalExact(current.result, control, after)) return sourceRemovalRefusal('source_removal_ownership_conflict');
+      const state = await teardownResourceRead(root, resource, scoped, token, true, signal);
+      if (state !== 'absent') {
+        if (state !== 'present' || !await teardownApplicationChildrenMatch(root, resource, scoped, token, signal) ||
+            (resource.kind === 'mcp_server' && !await teardownServersUnshared(root, scoped, token, signal))) {
+          return sourceRemovalRefusal('source_removal_ownership_conflict');
+        }
+        await progress(index + 1, true);
+        const deleted = await teardownResourceDelete(root, resource, token, signal);
+        if (!['submitted', 'absent'].includes(deleted) ||
+            await teardownResourceRead(root, resource, scoped, token, true, signal) !== 'absent') {
+          return sourceRemovalRefusal('source_removal_recovery_required');
+        }
+      }
+      await progress(index + 2);
+    }
+    // Re-read every absence before forgetting ownership, including on a resume
+    // after the last delete succeeded but the final storage write was lost.
+    for (const resource of resources) {
+      if (await teardownResourceRead(root, resource, scoped, token, true, signal) !== 'absent') {
+        return sourceRemovalRefusal('source_removal_ownership_conflict');
+      }
+    }
+    const finalPortal = await readPortal();
+    if (finalPortal.status !== 'ok' || !portalExact(finalPortal.result, control, after)) return sourceRemovalRefusal('source_removal_recovery_required');
+    const initialSource = root.receipt.resources.some((resource) => resource.kind === 'mcp_server' &&
+      resource.provider.id === ownership.resources[0].provider.id);
+    const result = await finishSourceRemoval(storage, env, source, control, sources, initialSource);
+    return result ? fixedJson(200, result) : sourceRemovalRefusal('source_removal_recovery_required');
+  } catch { return sourceRemovalRefusal('source_removal_recovery_required'); }
+}
+
 export class AdminState {
   constructor(state, env, managedTeardown = null) {
     this.state = state;
@@ -5441,7 +5634,7 @@ export class AdminState {
     // Status must remain available while a serialized mutation awaits the
     // provider. These reads neither authorize work nor change the journal.
     if (request.method === 'GET' && ([INTERNAL_ACTIONS_PATH, INTERNAL_SOURCES_PATH, INTERNAL_STATUS_PATH,
-      INTERNAL_ROLLBACK_OUTLOOK_PATH, INTERNAL_MANAGEMENT_STATUS_PATH].includes(requestUrl.pathname) ||
+      INTERNAL_ROLLBACK_OUTLOOK_PATH, INTERNAL_MANAGEMENT_STATUS_PATH, INTERNAL_SOURCE_REMOVAL_PATH].includes(requestUrl.pathname) ||
         requestUrl.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`))) {
       return this.readSourceManagementState(request, requestUrl);
     }
@@ -5727,7 +5920,11 @@ export class AdminState {
         const input = parseSourceRemoval(await readJsonInput(request, 1_024));
         return removeSourceDraft(this.state.storage, input, request.headers.get('x-ankka-actor-email'), Date.now());
       }
+      if (url.pathname === INTERNAL_SOURCE_REMOVAL_PATH && request.method === 'POST') {
+        return removeManagedSource(this.state.storage, this.env, await readJsonInput(request, 2048));
+      }
       if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'PUT') {
+        if (await sourceRemovalBlocks(this.state.storage)) return sourceRemovalRefusal('source_removal_pending');
         if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
         if (await teamActionBlocksLifecycle(this.state.storage)) return fixedJson(409, {
           schemaVersion: 1, error: 'team_action_conflict',
@@ -5783,6 +5980,11 @@ export class AdminState {
       return fixedJson(200, { schemaVersion: 1,
         managementCredentialConfigured: managementCredential(this.env) !== null,
         managementCredentialChoice: await managementCredentialChoice(this.state.storage) });
+    }
+    if (url.pathname === INTERNAL_SOURCE_REMOVAL_PATH) {
+      const removal = safeSourceRemoval(await this.state.storage.get(SOURCE_REMOVAL_KEY));
+      return removal === false ? sourceRemovalRefusal('source_removal_unavailable')
+        : fixedJson(200, { pendingRemoval: removal ? { sourceId: removal.sourceId } : null });
     }
     if (url.pathname === INTERNAL_STATUS_PATH) {
       const status = safePublicStatus(await this.state.storage.get(STATUS_KEY));
@@ -6234,6 +6436,27 @@ async function handleSourceDiscovery(request, env) {
   }
 }
 
+async function handleSourceRemoval(request, env) {
+  if (request.method !== 'DELETE') return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'DELETE' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const input = await readJsonInput(request, 1024);
+  if (!exactKeys(input, ['schemaVersion', 'revision']) || input.schemaVersion !== 1 ||
+      !Number.isSafeInteger(input.revision) || input.revision < 1) return sourceRemovalRefusal('source_invalid', 400);
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return sourceRemovalRefusal('source_removal_unavailable', 503);
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCE_REMOVAL_PATH}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ ...input, sourceId: new URL(request.url).pathname.split('/').at(-1), actorEmail: access.actorEmail }),
+    }));
+    if (response.status !== 200) return response;
+    const sources = safeManagementSources(await response.json());
+    return sources ? fixedJson(200, await publicSources(sources, stub, env)) : sourceRemovalRefusal('source_removal_unavailable', 503);
+  } catch { return sourceRemovalRefusal('source_removal_recovery_required'); }
+}
+
 async function handleSources(request, env) {
   if (!['GET', 'PUT', 'DELETE'].includes(request.method)) {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, PUT, DELETE' });
@@ -6297,7 +6520,11 @@ async function publicSources(sources, stub, env) {
       }
     } catch { installEndsRollbackTo = null; }
   }
-  return { ...sources, applyMode: 'account_token', installationEnabled, installEndsRollbackTo };
+  const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCE_REMOVAL_PATH}`));
+  if (response.status !== 200) throw new Error('source_removal_unavailable');
+  const { pendingRemoval } = await response.json();
+  return { ...sources, applyMode: 'account_token', installationEnabled, installEndsRollbackTo,
+    removalEnabled: true, removalCredentialConfigured: managementCredential(env) !== null, pendingRemoval };
 }
 
 function teamSources(sources) {
@@ -6405,6 +6632,8 @@ async function otherLifecycleBlocksSource(storage, now, currentActionId) {
 
 /** An unfinished source installation, update or removal, as their own journals record it. */
 async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true) {
+  const removal = safeSourceRemoval(await storage.get(SOURCE_REMOVAL_KEY));
+  if (removal === false || (removal && removal.actionId !== currentActionId)) return true;
   for (const key of [...(includeSources ? [ACTIONS_KEY] : []), UPDATES_KEY, TEARDOWNS_KEY]) {
     const raw = await storage.get(key);
     if (raw === undefined) continue;
@@ -6467,6 +6696,7 @@ async function currentTeardownLocksRuntime(storage, now) {
 }
 
 async function currentTeardownState(storage, env, managed) {
+  if (await sourceRemovalBlocks(storage)) return null;
   if (!await readTeamState(storage, env) || await teamActionBlocksLifecycle(storage)) return null;
   const rawActions = await storage.get(ACTIONS_KEY);
   const sourceActions = rawActions === undefined ? { actions: [] } : safeSourceActions(rawActions);
@@ -6499,6 +6729,7 @@ async function currentTeardownState(storage, env, managed) {
 }
 
 async function teamTeardownBlocked(storage) {
+  if (await sourceRemovalBlocks(storage)) return true;
   const team = await storage.get(TEAM_KEY);
   if (team === undefined) return false;
   // Native audience mutations cannot be interpreted by the immutable legacy
@@ -7614,6 +7845,7 @@ export default {
     if (url.pathname === '/api/status') return handleStatus(request, env);
     if (url.pathname === '/api/update') return handleRuntimeUpdate(request, env);
     if (url.pathname === '/api/sources/discover') return handleSourceDiscovery(request, env);
+    if (/^\/api\/sources\/source-[a-f0-9]{16}$/u.test(url.pathname)) return handleSourceRemoval(request, env);
     if (url.pathname === '/api/sources') return handleSources(request, env);
     if (url.pathname === '/api/team' || url.pathname === '/api/team-actions' || url.pathname.startsWith('/api/team-actions/')) {
       return handleTeam(request, env);

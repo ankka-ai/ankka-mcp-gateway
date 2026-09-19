@@ -64,6 +64,7 @@ interface GatewayContextValue {
   clearSourceNotice(): void
   clearUpdateNotice(): void
   discoverSource(url: string): Promise<SourceDiscovery>
+  removeSource(sourceId: string): Promise<void>
   saveSourceDraft(source: SourceDraftInput): Promise<ManagedSources>
   removeSourceDraft(sourceId: string): Promise<void>
   prepareSourceApply(sourceId: string, renewActionId?: string): Promise<SourceApplyResult>
@@ -158,6 +159,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     return next
   }, [])
 
+  const observedSourceRemoval = useRef<string | null>(null)
   const refreshSourceActions = useCallback(async (): Promise<SourceActions> => {
     const read = ++sourceActionRead.current
     setIsCheckingSourceActions(true)
@@ -166,6 +168,10 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       if (!mounted.current || read !== sourceActionRead.current) return next
       setSourceActions(next)
       const blocker = next.blockingAction
+      const sourceRemovalId = blocker?.kind === 'source_removal' ? blocker.actionId : null
+      if (sourceRemovalId || observedSourceRemoval.current) await refreshSources()
+      if (!mounted.current || read !== sourceActionRead.current) return next
+      observedSourceRemoval.current = sourceRemovalId
       // The installation's own record outlives the journal: a removal that has begun deleting stays offered for
       // continuation after its interrupted attempt was replaced, or expired, in the journal.
       const begun: RemovalProgress | null = next.removalStarted === true ? 'interrupted' : null
@@ -425,6 +431,19 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
         setSourceNotice({ tone: 'success', message: 'Source removed.' })
       } finally {
         await Promise.all([refreshSources().catch(() => {}), refreshSourceActions().catch(() => {})])
+      }
+    }),
+    removeSource: (sourceId) => runBusy(async () => {
+      const current = sources ?? await refreshSources()
+      const source = current.sources.find((entry) => entry.id === sourceId)
+      try {
+        const next = await apiRef.current.removeSource(current.revision, sourceId)
+        setSources((current) => current && current.revision > next.revision ? current : next)
+        setSourceNotice({ tone: 'success', message: source?.status === 'draft' ? 'Draft deleted.' : 'Source removed from your gateway. Its upstream service and data are unchanged.' })
+        setExternalChangeVersion((version) => version + 1)
+      } finally {
+        await refreshSources().catch(() => {})
+        await refreshSourceActions().catch(() => {})
       }
     }),
     prepareSourceApply: (sourceId, renewActionId) => runBusy(async () => {

@@ -154,6 +154,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     refreshSources,
     saveSourceDraft,
     removeSourceDraft,
+    removeSource: removeInstalledSource,
     sourceActions,
     sourceActionsError,
     sourceActionsPollingPaused,
@@ -410,7 +411,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           {sourceActionsPollingPaused ? <p role="status" className="mt-3 text-sm text-kumo-subtle">Automatic checks have paused. Use Check status for the latest result; this does not cancel the action.</p> : null}
           {blocker && blocker.kind !== 'source' ? (
             <p role="status" className="mt-3 text-sm leading-6 text-kumo-subtle">
-              A gateway {blocker.kind === 'runtime' ? 'update or rollback' : blocker.kind === 'teardown' ? 'removal' : blocker.kind === 'management_credential' ? 'management token' : 'Team access'} action is blocking source installation. Review that action before applying a source.
+              A gateway {blocker.kind === 'runtime' ? 'update or rollback' : blocker.kind === 'teardown' ? 'removal' : blocker.kind === 'management_credential' ? 'management token' : blocker.kind === 'source_removal' ? 'source removal' : 'Team access'} action is blocking source installation. Review that action before applying a source.
               <span className="mt-1 block break-all font-mono text-xs">Action: {blocker.actionId}</span>
             </p>
           ) : null}
@@ -687,6 +688,14 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <SourceList
             sources={sources.sources}
             installationEnabled={installationEnabled}
+            removalEnabled={sources.removalEnabled}
+            removalCredentialConfigured={sources.removalCredentialConfigured}
+            pendingRemovalSourceId={sources.pendingRemoval?.sourceId}
+            removalDisabled={isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || Boolean(blocker && blocker.kind !== 'source_removal')}
+            managedBigQuerySourceIds={bigQuery?.setups.map((setup) => setup.sourceId)}
+            removalNote={sources.installEndsRollbackTo ? `Removing this source means you can no longer restore ${sources.installEndsRollbackTo}.` : null}
+            onRemove={removeInstalledSource}
+            onRefresh={async () => { await refreshSources(); await refreshSourceActions() }}
             authorizeDisabled={applyBlocked}
             isBusy={isBusy}
             draftLabel={(sourceId) => sourceDraftLabel(latestActions.get(sourceId))}
@@ -694,7 +703,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             onAuthorize={(sourceId) => void authorize(sourceId)}
             canRemove={canRemoveDraft}
             removeDisabled={isCheckingSourceActions || resumingBigQuery}
-            onRemove={(sourceId) => void removeSource(sourceId).catch(() => {})}
+            onRemoveDraft={(sourceId) => void removeSource(sourceId).catch(() => {})}
           />
         )}
       </section>

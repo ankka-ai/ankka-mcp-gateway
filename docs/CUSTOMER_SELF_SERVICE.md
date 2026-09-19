@@ -160,6 +160,10 @@ separate steps. Gateways still on the published v19 preview cannot add sources.
 - **Sources** is the home page, with a copyable MCP Gateway URL and a searchable
   source list. Expand a source to inspect its selected tools. When the installed
   runtime enables installation, save and install a reviewed draft here.
+  Expand a source to **Remove source**, including an unused draft.
+  Review the confirmation before removing an installed source. Interrupted removals offer
+  **Continue removal** in the same source row. See [Source removal](SOURCE_REMOVAL.md),
+  including the current restriction on managed BigQuery bridges.
   New sources start denied; old prepared installation links cannot silently
   acquire the new default-deny authorization profile.
 - **Team** reads current Cloudflare policy membership, shows when it was

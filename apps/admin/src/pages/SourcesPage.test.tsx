@@ -31,7 +31,7 @@ function actionSnapshot(action: SourceActionSummary): SourceActions {
 
 function actionApi(snapshot: SourceActions): GatewayAdminApi {
   return {
-    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+    removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
@@ -298,7 +298,7 @@ describe('SourcesPage', () => {
       ],
     }
     const api: GatewayAdminApi = {
-      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+      removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
@@ -406,7 +406,7 @@ describe('SourcesPage', () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn()
     const api: GatewayAdminApi = {
-      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+      removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
@@ -450,7 +450,7 @@ describe('SourcesPage', () => {
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const prepareSourceAction = vi.fn()
     const api: GatewayAdminApi = {
-      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+      removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -511,7 +511,7 @@ describe('SourcesPage', () => {
     const preset = SYNTHETIC_SOURCE_CATALOG.sources[0]
     const saveSourceDraft = vi.fn()
     const api: GatewayAdminApi = {
-      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+      removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -546,7 +546,7 @@ describe('SourcesPage', () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const api: GatewayAdminApi = {
-      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+      removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -596,7 +596,7 @@ describe('SourcesPage', () => {
       }
     })
     const api: GatewayAdminApi = {
-      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+      removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -647,7 +647,7 @@ describe('SourcesPage', () => {
       }],
     }))
     const api: GatewayAdminApi = {
-      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+      removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -715,7 +715,7 @@ describe('SourcesPage', () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const api: GatewayAdminApi = {
-      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+      removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       getSources: vi.fn(async () => sources),
@@ -917,5 +917,86 @@ describe('the rollback sentence beside the install control', () => {
     await user.click(await screen.findByRole('button', { name: 'Add BigQuery' }))
     const proceed = screen.getByRole('button', { name: 'Continue to Cloudflare' })
     expect(proceed.parentElement).toContainElement(screen.getByText(sentence))
+  })
+})
+
+describe('individual source removal', () => {
+  afterEach(cleanup)
+
+  function removalApi() {
+    const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
+    let current: ManagedSources = { ...sources, removalEnabled: true, removalCredentialConfigured: true,
+      pendingRemoval: null, sources: [{ ...draft, status: 'installed' }] }
+    api.getSources = vi.fn(async () => current)
+    api.removeSource = vi.fn(async (revision, sourceId) => {
+      expect(revision).toBe(current.revision)
+      current = { ...current, revision: revision + 1, sources: current.sources.filter((source) => source.id !== sourceId) }
+      return current
+    })
+    return { api, setSources(value: Partial<ManagedSources>) { current = { ...current, ...value } } }
+  }
+
+  it('requires confirmation and refreshes the source list after removal', async () => {
+    const user = userEvent.setup()
+    const { api } = removalApi()
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: draft.label }))
+    const label = 'Remove source'
+    await user.click(screen.getByRole('button', { name: label }))
+    expect(api.removeSource).not.toHaveBeenCalled()
+    expect(screen.getByText(`Remove “${draft.label}” from your gateway?`)).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(api.removeSource).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: label }))
+    await user.click(screen.getByRole('button', { name: label }))
+    await screen.findByText('No sources yet')
+    expect(api.removeSource).toHaveBeenCalledExactlyOnceWith(sources.revision, draft.id)
+    expect(screen.getByText('Source removed from your gateway. Its upstream service and data are unchanged.')).toBeVisible()
+  })
+
+  it('opens saved removal progress on a fresh page and resumes it', async () => {
+    const user = userEvent.setup()
+    const { api, setSources } = removalApi()
+    setSources({ pendingRemoval: { sourceId: draft.id } })
+    api.getSourceActions = vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [],
+      blockingAction: { kind: 'source_removal', actionId: `action_${'b'.repeat(32)}`, sourceId: draft.id } }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Continue removal' }))
+    await waitFor(() => expect(api.removeSource).toHaveBeenCalledExactlyOnceWith(sources.revision, draft.id))
+  })
+
+  it('keeps the source visible and shows recovery after an uncertain response', async () => {
+    const user = userEvent.setup()
+    const { api, setSources } = removalApi()
+    api.removeSource = vi.fn(async () => {
+      setSources({ pendingRemoval: { sourceId: draft.id } })
+      throw new GatewayApiError(409, 'source_removal_recovery_required')
+    })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: draft.label }))
+    await user.click(screen.getByRole('button', { name: 'Remove source' }))
+    await user.click(screen.getByRole('button', { name: 'Remove source' }))
+    await screen.findByRole('button', { name: 'Continue removal' })
+    expect(screen.getByRole('alert')).toHaveTextContent('Removal could not be confirmed')
+    expect(screen.getByRole('button', { name: draft.label })).toBeVisible()
+    expect(api.removeSource).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['older-runtime', 'no-token', 'managed-bigquery', 'other-action'])('explains or disables removal when unavailable: %s', async (reason) => {
+    const user = userEvent.setup()
+    const { api, setSources } = removalApi()
+    if (reason === 'older-runtime') setSources({ removalEnabled: false })
+    if (reason === 'no-token') setSources({ removalCredentialConfigured: false })
+    if (reason === 'managed-bigquery') api.getBigQuerySetups = vi.fn<GatewayAdminApi['getBigQuerySetups']>(async () => ({ schemaVersion: 1, available: true,
+      setups: [{ sourceId: draft.id, actionId: `action_${'b'.repeat(32)}`, ready: true, credentialRequired: false, recoveryRequired: false }] }))
+    if (reason === 'other-action') api.getSourceActions = vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [],
+      blockingAction: { kind: 'team', actionId: `action_${'b'.repeat(32)}` } }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: draft.label }))
+    if (reason === 'other-action') expect(screen.getByRole('button', { name: 'Remove source' })).toBeDisabled()
+    else expect(screen.queryByRole('button', { name: 'Remove source' })).not.toBeInTheDocument()
+    if (reason === 'no-token') expect(screen.getByText(/Add a management token in/u)).toBeVisible()
+    if (reason === 'managed-bigquery') expect(screen.getByText(/Individual removal of managed BigQuery bridges/u)).toBeVisible()
+    expect(api.removeSource).not.toHaveBeenCalled()
   })
 })

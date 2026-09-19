@@ -34,7 +34,9 @@ adapter, and base64 decoder. It verifies:
 - Atomic source-draft and empty BigQuery-record removal through the production
   source-management state machine with SQLite storage. Signed bridge cleanup
   also re-enters the same object for bounded passes and commits its final
-  source/action/bridge removal transaction there.
+  source/action/bridge removal transaction there. Installed-source removal
+  persists progress across a workerd restart after a lost provider response,
+  commits source and Team changes together, and preserves the root receipt.
 
 This is a focused runtime integration fixture, not the deployed gateway router.
 It simulates authorization inputs and does not contact Cloudflare, exchange OAuth
