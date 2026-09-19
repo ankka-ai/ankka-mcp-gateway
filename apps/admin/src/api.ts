@@ -136,7 +136,7 @@ const sourceActionStateSchema = v.picklist([
   'authorization_required', 'authorization_expired', 'applying', 'succeeded', 'failed', 'recovery_required',
 ])
 const sourceActionPointerSchema = v.strictObject({
-  kind: v.picklist(['source', 'runtime', 'teardown', 'team']),
+  kind: v.picklist(['source', 'runtime', 'teardown', 'team', 'management_credential']),
   actionId: v.pipe(v.string(), v.regex(/^action_[A-Za-z0-9_-]{32}$/u)),
   sourceId: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u))),
 })
@@ -270,6 +270,8 @@ const teamSchema = v.strictObject({
     'managed_in_cloudflare', 'release_review_required', 'lifecycle_action_pending', 'management_credential_missing',
   ])),
   managementCredentialConfigured: v.boolean(),
+  // What setup recorded at its token step, as a fixed word: null for a gateway that was never asked. Never the token.
+  managementCredentialChoice: v.optional(v.nullable(v.picklist(['provided', 'skipped']))),
   observedAt: v.optional(v.nullable(v.string())),
   members: teamMembersSchema,
   adminEmails: v.pipe(v.array(teamEmailSchema), v.minLength(1)),
@@ -281,6 +283,18 @@ const teamSchema = v.strictObject({
   })), v.maxLength(TEAM_MAX_SOURCES)),
   pendingAction: v.nullable(teamActionSchema),
   proposedMembers: v.nullable(teamMembersSchema),
+})
+const managementPermissionSchema = v.picklist(['verified', 'permission_missing', 'drift', 'unconfirmed', 'not_checked'])
+/**
+ * What the installed management token can do, as fixed words. `portals` stands for MCP Portals Edit and
+ * `accessPolicies` for Access: Apps and Policies Edit; each is proven by writing the gateway's own resource back unchanged.
+ */
+const managementVerificationSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.picklist(['verified', 'missing', 'rejected', 'permission_missing', 'drift', 'busy', 'unconfirmed']),
+  token: v.picklist(['active', 'missing', 'rejected', 'unconfirmed', 'not_checked']),
+  portals: managementPermissionSchema,
+  accessPolicies: managementPermissionSchema,
 })
 const runtimePreparedActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -327,6 +341,8 @@ export type TeamMember = v.InferOutput<typeof teamMemberSchema>
 export type Team = v.InferOutput<typeof teamSchema>
 export type TeamAction = v.InferOutput<typeof teamActionSchema>
 export type TeamActionResult = v.InferOutput<typeof teamActionResultSchema>
+export type ManagementVerification = v.InferOutput<typeof managementVerificationSchema>
+export type ManagementCredentialChoice = NonNullable<Team['managementCredentialChoice']>
 
 export interface GatewayAdminApi {
   getStatus(): Promise<GatewayStatus>
@@ -353,6 +369,10 @@ export interface GatewayAdminApi {
   getRuntimeAction(actionId: string): Promise<RuntimeAction>
   prepareTeardownAction(): Promise<PreparedAction>
   getTeardownAction(actionId: string): Promise<TeardownAction>
+  /** Prepares the one approval that lets the gateway save its own management token; the token is pasted into the gateway afterwards. */
+  prepareManagementCredentialAction(): Promise<PreparedAction>
+  /** Proves both permissions of the installed token by writing the gateway's own Portal and Access policy back unchanged. */
+  verifyManagementAccess(): Promise<ManagementVerification>
 }
 
 export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-source installation is temporarily unavailable in this release. Existing sources and team permissions remain available.'
@@ -376,7 +396,9 @@ const ERROR_MESSAGES = new Map([
   ['webmcp_handoff_invalid', 'The authorization handoff could not be verified. Check the recorded action before retrying.'],
   ['access_required', 'Your Cloudflare Access session is no longer active. Sign in again and refresh.'],
   ['origin_required', 'Reload this management page before making changes.'],
-  ['management_credential_required', 'Configure a valid gateway management token in Cloudflare before installing sources.'],
+  ['management_credential_required', 'Add a valid management token in Settings before installing sources.'],
+  ['management_credential_action_conflict', 'Your gateway has an unfinished source installation, update, removal, Team change or management token change. Finish it, or wait for its approval to expire (ten minutes at most), then try again.'],
+  ['management_credential_unavailable', 'Your gateway could not reach its management state. Try again in a moment.'],
   ['team_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
   ['team_invalid', 'Review the email addresses and installed source selections before trying again.'],
   ['team_action_conflict', 'A team access change is already in progress. Refresh to review or resume it.'],
@@ -391,8 +413,8 @@ const ERROR_MESSAGES = new Map([
   ['team_policy_drift', 'Cloudflare access policies no longer match the saved configuration. Review the Cloudflare policies before trying again. This page will not reset them automatically.'],
   ['team_release_review_required', 'Team access editing is not available in this gateway release.'],
   ['team_editing_managed_in_cloudflare', 'Team access is managed directly in Cloudflare for this release. No gateway management credential is accepted.'],
-  ['team_management_credential_missing', 'Configure your gateway management token in Cloudflare Settings, then retry.'],
-  ['team_management_credential_invalid', 'Cloudflare rejected the gateway management token. Check its permissions or replace it in Cloudflare.'],
+  ['team_management_credential_missing', 'Add your management token in Settings, then retry.'],
+  ['team_management_credential_invalid', 'Cloudflare rejected the management token. Verify management access in Settings to see what is missing, or replace the token there.'],
   ['team_prepare_failed', 'The team access request could not be confirmed. Refresh to check whether a change was recorded before trying again.'],
   ['team_cancel_failed', 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.'],
   ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable after source provisioning or team policy changes begin. A compatible removal release is required; do not discard the ownership or recovery records.'],
@@ -610,6 +632,18 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
 
   getTeardownAction(actionId: string): Promise<TeardownAction> {
     return this.#request(`/api/teardown-actions/${encodeURIComponent(actionId)}`, teardownActionSchema)
+  }
+
+  prepareManagementCredentialAction(): Promise<PreparedAction> {
+    return this.#request('/api/management-credential/actions', preparedActionSchema, {
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1 }),
+    })
+  }
+
+  verifyManagementAccess(): Promise<ManagementVerification> {
+    return this.#request('/api/management-credential/verify', managementVerificationSchema, {
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1 }),
+    })
   }
 
   async #request<TSchema extends v.GenericSchema>(

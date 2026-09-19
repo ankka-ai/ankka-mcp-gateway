@@ -374,8 +374,8 @@ describe('HttpGatewayAdminApi', () => {
       ['team_action_recovery_required', 'Some access policies may already have changed'],
       ['team_policy_drift', 'Cloudflare access policies no longer match'],
       ['team_editing_managed_in_cloudflare', 'managed directly in Cloudflare'],
-      ['team_management_credential_missing', 'Configure your gateway management token'],
-      ['team_management_credential_invalid', 'Check its permissions'],
+      ['team_management_credential_missing', 'Add your management token in Settings'],
+      ['team_management_credential_invalid', 'Verify management access in Settings'],
       ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable'],
     ] as const) {
       vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: code, detail: 'private provider detail' }, { status: 409 })))
@@ -613,5 +613,90 @@ describe('the tool choice of a sign-in source', () => {
     expect(error).toMatchObject({ code, status: 409 })
     expect(error.message).toMatch(wording)
     expect(error.message).not.toContain('synthetic-sensitive')
+  })
+})
+
+// The gateway's own management token: added, replaced and verified from Settings. The token itself never reaches this client.
+describe('the management token', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+  const actionId = `action_${'a'.repeat(32)}`
+  const team = {
+    schemaVersion: 1, revision: 4, editingEnabled: false, editingDisabledReason: 'management_credential_missing', managementCredentialConfigured: false,
+    members: [{ email: 'admin@example.com', sourceIds: [] }], adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null,
+  }
+
+  it('accepts what setup recorded at its token step, absent, null or one of the two fixed words, and nothing looser', async () => {
+    for (const choice of [{}, { managementCredentialChoice: null }, { managementCredentialChoice: 'skipped' }, { managementCredentialChoice: 'provided' }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...team, ...choice })))
+      expect(await new HttpGatewayAdminApi().getTeam()).toEqual({ ...team, ...choice })
+    }
+    for (const managementCredentialChoice of ['held', 'dropped', 'installed', '', 1, true, { choice: 'skipped' }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...team, managementCredentialChoice })))
+      await expect(new HttpGatewayAdminApi().getTeam()).rejects.toMatchObject({ code: 'response_invalid' })
+    }
+  })
+
+  it('prepares the one approval with an empty request and accepts only the prepared-action shape', async () => {
+    const prepared = { schemaVersion: 1, actionId, status: 'authorization_required', expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `https://manage.example.com/__ankka/operation#${'a'.repeat(40)}` }
+    const fetch = vi.fn(async () => Response.json(prepared))
+    vi.stubGlobal('fetch', fetch)
+    expect(await new HttpGatewayAdminApi().prepareManagementCredentialAction()).toEqual(prepared)
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/management-credential/actions', expect.objectContaining({
+      method: 'POST', credentials: 'same-origin', redirect: 'error', body: '{"schemaVersion":1}',
+    }))
+    for (const invalid of [{ status: 'succeeded' }, { managementToken: 'never-returned' }, { handoffUrl: undefined }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...prepared, ...invalid })))
+      await expect(new HttpGatewayAdminApi().prepareManagementCredentialAction()).rejects.toMatchObject({ code: 'response_invalid' })
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, error: 'management_credential_action_conflict' }, { status: 409 })))
+    await expect(new HttpGatewayAdminApi().prepareManagementCredentialAction()).rejects.toMatchObject({
+      status: 409, code: 'management_credential_action_conflict',
+      message: 'Your gateway has an unfinished source installation, update, removal, Team change or management token change. Finish it, or wait for its approval to expire (ten minutes at most), then try again.',
+    })
+  })
+
+  it('reads every fixed word of a verification and nothing else', async () => {
+    const verified = { schemaVersion: 1, status: 'verified', token: 'active', portals: 'verified', accessPolicies: 'verified' }
+    const answers = [
+      verified,
+      { ...verified, status: 'missing', token: 'missing', portals: 'not_checked', accessPolicies: 'not_checked' },
+      { ...verified, status: 'rejected', token: 'rejected', portals: 'not_checked', accessPolicies: 'not_checked' },
+      { ...verified, status: 'busy', token: 'not_checked', portals: 'not_checked', accessPolicies: 'not_checked' },
+      { ...verified, status: 'unconfirmed', token: 'unconfirmed', portals: 'not_checked', accessPolicies: 'not_checked' },
+      { ...verified, status: 'permission_missing', portals: 'permission_missing' },
+      { ...verified, status: 'permission_missing', accessPolicies: 'permission_missing' },
+      { ...verified, status: 'drift', portals: 'drift', accessPolicies: 'unconfirmed' },
+    ]
+    for (const answer of answers) {
+      const fetch = vi.fn(async () => Response.json(answer))
+      vi.stubGlobal('fetch', fetch)
+      expect(await new HttpGatewayAdminApi().verifyManagementAccess()).toEqual(answer)
+      expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/management-credential/verify', expect.objectContaining({
+        method: 'POST', credentials: 'same-origin', redirect: 'error', body: '{"schemaVersion":1}',
+      }))
+    }
+    for (const invalid of [{ status: 'ok' }, { token: 'valid' }, { portals: 'write_verified' }, { accessPolicies: null }, { providerDetail: 'private' }, { portals: undefined }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...verified, ...invalid })))
+      await expect(new HttpGatewayAdminApi().verifyManagementAccess()).rejects.toMatchObject({ code: 'response_invalid' })
+    }
+  })
+
+  it('reads an open token change as the action that blocks the others', async () => {
+    const pointer = { kind: 'management_credential', actionId }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, actions: [], blockingAction: pointer })))
+    expect((await new HttpGatewayAdminApi().getSourceActions()).blockingAction).toEqual(pointer)
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, error: 'source_action_conflict', reason: 'lifecycle_pending', action: pointer }, { status: 409 })))
+    await expect(new HttpGatewayAdminApi().prepareSourceAction(1, 'source-1111111111111111')).rejects.toMatchObject({ reason: 'lifecycle_pending', action: pointer })
+  })
+
+  it('points every refusal about the token at Settings, the one place that adds or replaces it', async () => {
+    for (const [code, wording] of [
+      ['management_credential_required', 'Add a valid management token in Settings before installing sources.'],
+      ['team_management_credential_missing', 'Add your management token in Settings, then retry.'],
+      ['team_management_credential_invalid', 'Cloudflare rejected the management token. Verify management access in Settings to see what is missing, or replace the token there.'],
+    ] as const) {
+      expect(new GatewayApiError(409, code).message).toBe(wording)
+      expect(new GatewayApiError(409, code).message).not.toMatch(/Variables and Secrets|in Cloudflare Settings|wrangler/u)
+    }
   })
 })

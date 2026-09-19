@@ -4,6 +4,26 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add or replace the gateway's management token from Settings. A gateway that runs without the token (setup skipped
+  it, the pasted value was lost before it was saved, the token was revoked, or the gateway predates the setup step)
+  had one documented way to get it: create it by hand and add it as a Worker secret in Cloudflare. **Settings → Add
+  management token** now prepares one change inside your gateway, sends you to Cloudflare for one approval with
+  exactly one scope (`workers-scripts.write`), and returns you to a page your own gateway serves, with the same
+  pre-filled token link as setup and one paste field. Your gateway writes the token as its own
+  `ANKKA_MANAGEMENT_TOKEN` secret with one Cloudflare call and revokes the approval. The token lives only inside that
+  one request: never in storage, object memory, a journal, a log, an error, a URL, a cookie or a response, and it
+  never passes through anything Ankka hosts. If the approval runs out before you paste, the page says so and you
+  start again. **Replace management token** takes the same steps and says that the old token is yours to delete in
+  Cloudflare, by its name. The change excludes, and is excluded by, an unfinished source installation, update,
+  removal and Team change; only an administrator can prepare it. When the token is missing, Sources, Team and
+  Settings show one card (what the token is for, what it can reach, why it is missing on this gateway, and the
+  button) instead of a disabled page with a link, and after the flow Settings notices the token by itself. **Verify
+  management access** now proves both permissions instead of reading only: it writes the gateway's own MCP Portal
+  and the Portal's own Access policy back exactly as read, only when they match the receipts, in at most seven
+  Cloudflare calls, and names a missing permission. This adds the fixed operation `management-credential` to the
+  authority catalogue and to the relay at `auth.ankka.ai`, which must be redeployed for this one operation; every
+  other operation's relay requests are unchanged.
+
 - Keep "Removal in progress" and its way back on the dashboard for as long as a removal is unfinished. The notice
   followed the removal journal, which forgets an interrupted attempt once a later authorization replaces it or
   expires; the gateway now also reports, from the installation's own durable record, that deletion has begun.

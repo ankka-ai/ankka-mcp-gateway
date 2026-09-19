@@ -28,6 +28,7 @@ export const FIXED_CLOUDFLARE_OPERATIONS = Object.freeze([
   'bigquery-add',
   'source-update',
   'source-remove',
+  'management-credential',
   'uninstall',
   'uninstall-finalize',
   'gateway-root-finalize',
@@ -43,6 +44,7 @@ export const CUSTOMER_CLOUDFLARE_OPERATIONS = Object.freeze([
   'bigquery-add',
   'source-update',
   'source-remove',
+  'management-credential',
   'uninstall',
 ] as const);
 export type CustomerCloudflareOperation = (typeof CUSTOMER_CLOUDFLARE_OPERATIONS)[number];
@@ -53,6 +55,7 @@ export const LATER_CUSTOMER_CLOUDFLARE_OPERATIONS = Object.freeze([
   'bigquery-add',
   'source-update',
   'source-remove',
+  'management-credential',
   'uninstall',
 ] as const);
 export type LaterCustomerCloudflareOperation =
@@ -150,6 +153,7 @@ export const CLOUDFLARE_OPERATION_MUTATIONS = Object.freeze([
   'publish-inert-worker-release',
   'delete-root-worker',
   'delete-admin-state-namespace',
+  'write-worker-secret',
 ] as const);
 
 export type CloudflareOperationMutation = (typeof CLOUDFLARE_OPERATION_MUTATIONS)[number];
@@ -169,6 +173,7 @@ export const CLOUDFLARE_OPERATION_POSTCONDITIONS = Object.freeze([
   'inert-worker-release-active',
   'receipt-resources-absent',
   'foreign-resources-unchanged',
+  'management-secret-write-accepted',
 ] as const);
 
 export type CloudflareOperationPostcondition =
@@ -207,6 +212,8 @@ const INSTALL_SCOPES = frozen([
 ]);
 
 const WORKER_RELEASE_SCOPES = frozen([CLOUDFLARE_OAUTH_SCOPE.workersScriptsWrite]);
+// Cloudflare has no narrower scope for one Worker secret than the scripts scope.
+const WORKER_SECRET_SCOPES = frozen([CLOUDFLARE_OAUTH_SCOPE.workersScriptsWrite]);
 const SOURCE_SCOPES = frozen([
   CLOUDFLARE_OAUTH_SCOPE.accessAppsAndPoliciesWrite,
   CLOUDFLARE_OAUTH_SCOPE.mcpPortalsWrite,
@@ -385,6 +392,23 @@ const OPERATION_AUTHORITY: Readonly<Record<FixedCloudflareOperation, FixedCloudf
       ['ownership-receipt-complete', 'portal-converged', 'source-set-converged',
         'foreign-resources-unchanged'],
     ),
+    // The gateway writes its own `ANKKA_MANAGEMENT_TOKEN` secret, pasted by an
+    // administrator into the gateway itself: one Worker-secret write on the
+    // receipt-owned Worker and nothing else. No upload, no version or
+    // deployment read, no Access, Portal or DNS authority. The postcondition
+    // is what one call can prove: Cloudflare accepted the write. The answer
+    // is never read, so the binding is observed afterwards by the runtime
+    // that receives it, not by this operation.
+    'management-credential': authority(
+      'management-credential',
+      'customer-gateway',
+      WORKER_SECRET_SCOPES,
+      NO_WORKER_RELEASE,
+      ['workers-scripts'],
+      ['receipt-owned'],
+      ['write-worker-secret'],
+      ['management-secret-write-accepted'],
+    ),
     uninstall: authority(
       'uninstall',
       'customer-gateway',
@@ -538,7 +562,9 @@ export function externalRunnerOperationAuthority(
  * `ANKKA_MANAGEMENT_TOKEN` secret through the runner's own deployment
  * authority. This is not a Cloudflare OAuth operation. It is never available
  * to the hosted installer or to a gateway, and the token value never passes
- * through Ankka-hosted services.
+ * through Ankka-hosted services. A gateway writes the same secret only through
+ * its own fixed `management-credential` operation, under one approval an
+ * administrator gives for it.
  */
 export const EXTERNAL_RUNNER_MANAGEMENT_CREDENTIAL_PROVISIONING = Object.freeze({
   operation: 'install-management-credential' as const,
