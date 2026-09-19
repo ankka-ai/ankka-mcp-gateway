@@ -102,11 +102,15 @@ failure screen when the dashboard cannot load, and the action needs no status
 read. The fresh consent rechecks the recorded graph, finds the removed
 resources absent, and signs a new receipt handoff.
 
-The notice follows the recorded action, not the installation object. A newer
-review that is never authorized replaces an expired record when it is prepared;
-the notice is then absent, and **Review teardown plan** in Settings continues
-the same removal. While an earlier authorization is still open the gateway
-refuses another with `teardown_action_conflict`.
+The notice has two sources. The recorded action says whether an attempt runs
+right now. The installation object's own durable record says whether deletion
+has begun at all: the source-actions answer carries it as `removalStarted`,
+read from the same `status-current` evidence the settle step uses. The journal
+alone is not enough, because a newer review that is never authorized replaces
+an expired record and then expires itself, after which the journal names no
+removal although the connected resources are gone. While an earlier
+authorization is still open the gateway refuses another with
+`teardown_action_conflict`.
 
 The hosted page answers a refusal that no reload can change with its own word
 and message instead of the reload guidance: `teardown_receipt_expired` for a

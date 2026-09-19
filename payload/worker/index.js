@@ -2927,6 +2927,26 @@ function sourceActionPointer(action, kind = 'source') {
   return Object.freeze(pointer);
 }
 
+// Whether this gateway's removal has begun deleting, from the installation's
+// own durable record and not from the removal journal: that journal drops an
+// interrupted attempt once a later authorization replaces it, and the dashboard
+// must keep offering the way back for as long as the removal is unfinished.
+// Null when the record cannot be read; the answer then says nothing either way.
+async function gatewayRemovalStarted(storage, env) {
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  const stub = control ? adminStateStub(env, `v1:${control.installationId}`) : null;
+  if (!stub) return null;
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/status-current`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ schemaVersion: 1, installationId: control.installationId }),
+    }));
+    const evidence = response instanceof Response && response.status === 200 ? await response.json() : null;
+    return evidence?.schemaVersion === 1 && evidence.installationId === control.installationId && isBoolean(evidence.removalStarted)
+      ? evidence.removalStarted : null;
+  } catch { return null; }
+}
+
 function sourceActionConflict(reason, action) {
   const body = { schemaVersion: 1, error: 'source_action_conflict' };
   if (reason) body.reason = reason;
@@ -5345,8 +5365,9 @@ export class AdminState {
     if (url.pathname === INTERNAL_ACTIONS_PATH) {
       const snapshot = await sourceActionSnapshot(this.state.storage,
         request.headers.get('x-ankka-actor-email'), Date.now());
-      return snapshot ? fixedJson(200, snapshot) :
-        fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+      if (!snapshot) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+      const removalStarted = await gatewayRemovalStarted(this.state.storage, this.env);
+      return fixedJson(200, removalStarted === null ? snapshot : { ...snapshot, removalStarted });
     }
     // The real tool list of one paused sign-in installation: one provider read, no write.
     const toolsRoute = INTERNAL_ACTION_TOOLS_ROUTE.exec(url.pathname);
