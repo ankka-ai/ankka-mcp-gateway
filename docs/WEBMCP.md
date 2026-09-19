@@ -182,7 +182,11 @@ execution so a race cannot cancel work that has begun. After confirmed
 cancellation, review the current saved draft before requesting a new handoff.
 There is no source Resume tool: no stored OAuth grant or action secret is
 recovered or reused. For active or uncertain work, retain the journal and use
-status/recovery guidance instead of a destructive restart.
+status/recovery guidance instead of a destructive restart. There is likewise no
+tool for a sign-in source's tool choice: `save_mcp_source_draft` still requires
+exact names, and choosing from the list Cloudflare syncs after the operator
+connection is a dashboard step. `list_mcp_source_actions` reports its two pause
+reasons, `source_tools_required` and `source_tools_chosen`, like any other.
 See [source action recovery](SOURCE_ACTION_RECOVERY.md) for the dashboard flow
 and the boundaries of safe cancellation.
 

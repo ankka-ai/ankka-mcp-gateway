@@ -372,9 +372,11 @@ The existing source apply action remains the provisioning boundary:
 Registry metadata does not contain the authoritative tool catalogue.
 `recommendedTools` may preselect a reviewed subset in the UI, but the operator
 must see and approve the exact names. Public sources still undergo fresh live
-discovery before save and apply. OAuth-protected sources cannot currently be
-listed before authentication, so catalog recommendations improve setup but do
-not prove that the tools still exist.
+discovery before save and apply. OAuth-protected sources cannot be listed
+before authentication: their draft is saved without tools, and the
+recommendation is applied only after the operator connection, as a preselection
+of the names that exist in Cloudflare's synced list. A recommended name that no
+longer exists is shown as absent and can never be enabled.
 
 Cloudflare can synchronize capabilities from some OAuth servers, and its
 default behavior can expose newly discovered capabilities. The gateway must
@@ -391,10 +393,14 @@ per-user upstream authentication. Cloudflare may support some of those modes,
 but the current Ankka self-service boundary intentionally does not accept their
 credentials.
 
-A later two-stage OAuth experience may connect first, synchronize capabilities,
-then ask the administrator to approve an exact allowlist. It needs a separate
-design and a canary proving Cloudflare's behavior; it is not a reason to weaken
-phase-one policy.
+The two-stage OAuth experience is that flow: install with nothing enabled,
+connect, let Cloudflare synchronize capabilities, then have the administrator
+approve an exact allowlist from the real list (see
+[pending source installations](SOURCE_ACTION_RECOVERY.md#choosing-the-tools-of-a-sign-in-source)).
+It weakens no phase-one policy: nothing is attached until exact names are
+chosen, and the Portal mapping stays deny-by-default. It is covered by local
+tests against a synthetic provider; what Cloudflare's synced tool records
+carry beyond a name is not documented by Cloudflare and still needs a canary.
 
 ## 8. Registry client libraries
 

@@ -164,7 +164,9 @@ Customer-local Team writes and default-deny source creation can establish a
 minimum compatible runtime before their first provider mutation. An older
 runtime cannot be restored below that recorded floor, and automatic teardown
 remains unavailable. A merely prepared source action or saved draft does not
-set the restriction. The optional Team-management secret also blocks rollback
+set the restriction, except the draft of a sign-in source saved without tools:
+older releases cannot read that record, so the floor is set before it is
+written. The optional Team-management secret also blocks rollback
 when present on the current or target version. See [Team access](TEAM_ACCESS.md)
 and [first-source qualification](FIRST_SOURCE_ONBOARDING.md); a normal code
 update does not provision credentials, grant source access, or clear these
@@ -188,4 +190,6 @@ permanently, and the gateway, never the dashboard, works out both answers:
   one, and whenever source installation is unavailable. Only when it names a
   release does Sources show one sentence, directly beside the control that
   starts or resumes an installation: "After this you can no longer roll back
-  to `<release>`."
+  to `<release>`." **Save draft** carries the same sentence for a sign-in source,
+  whose draft without tools is what sets the minimum; that save already answers
+  `installEndsRollbackTo: null`.

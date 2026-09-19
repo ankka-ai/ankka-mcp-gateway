@@ -153,6 +153,17 @@ steps. Existing receipt audiences remain immutable; only the exact historical
 initial policy and the new empty-audience profile are recognized. Old prepared
 source actions cannot silently become new-profile authorizations.
 
+A source that needs sign-in is created with no tools: no tool override on its
+server, the same deny-Everyone policy, and no Portal mapping. Its administrator
+chooses from the list Cloudflare synced after the operator connection, as a
+revision-bound step that re-binds the paused installation's source hash and
+server receipt atomically and is refused in every state other than the exact
+connection pause. The allowlist is enforced where it is for every source: the
+Portal mapping, deny-by-default, with exactly the chosen names enabled and
+proven by read-back. Nothing is attached while nothing is chosen. The synced
+list is an untrusted review aid like any source-authored text, bounded and
+never a provider body.
+
 Legacy Team authorization and callbacks are refused by the installer before
 OAuth code exchange. The relay and new Worker also reject the old Team grant
 submission. Team management does not enable a temporary `workers.dev` route.

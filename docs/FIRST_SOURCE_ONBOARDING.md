@@ -8,8 +8,11 @@ client-side capability flag alone is not sufficient.
 ## Intended workflow
 
 1. Install an empty gateway and sign in as its administrator.
-2. In Sources, discover one supported HTTPS MCP endpoint and review its exact
-   read-only tool selection. Save the secret-free draft.
+2. In Sources, discover one supported HTTPS MCP endpoint. A public endpoint
+   lists its tools: review the exact read-only selection and save the
+   secret-free draft. An endpoint that needs sign-in answers discovery with a
+   challenge instead of a list, so its draft is saved with no tools; they are
+   chosen in step 5, from its real list. No tool name is ever typed.
 3. Review and authorize that draft's source installation. The gateway asks
    Cloudflare directly for a short-lived grant limited to Access applications
    and MCP portals, creates the exact source resources with it, and revokes
@@ -24,8 +27,15 @@ client-side capability flag alone is not sufficient.
    account; do not paste them into Ankka or the gateway dashboard.
    For upstreams with a redirect allowlist, configure the exact callback shown
    by Cloudflare in the upstream's OAuth settings. Once the server is Ready,
-   return to Sources and renew consent. The gateway verifies the retained
-   resources and exact tool catalogue before attaching the source to the Portal.
+   return to Sources. For a source installed without tools, the paused
+   installation now lists the tools Cloudflare synced from it; choose the ones
+   to allow (catalog recommendations that exist are preselected, nothing is
+   preselected from a hint). The choice is saved as its own revision-bound
+   step, and the installation then resumes. The gateway verifies the retained
+   resources and exact tool catalogue before attaching the source to the
+   Portal, with exactly the chosen tools enabled and everything else disabled.
+   With nothing chosen the installation stays paused; a source is never
+   attached with nothing enabled.
 6. In Cloudflare, update the receipt-owned reusable Access policy to grant the
    installed source to the intended people. The gateway Team page is read-only
    in V1; do not create a standing API token to enable it. Also admit them
@@ -45,9 +55,11 @@ until all applicable stages have been verified.
 
 Tool names and annotations are not authorization boundaries. Before granting
 access, independently confirm that the selected operations are read-safe and
-the upstream credential cannot write. Shared-auth discovery may require the
-operator connection before the actual catalogue can be compared with the
-reviewed exact allowlist; an entered name is not proof that an operation is safe.
+the upstream credential cannot write. A source that needs sign-in can only be
+listed after the operator connection, from Cloudflare's synced catalogue.
+Cloudflare does not promise what a synced tool record carries beyond its name:
+the dashboard shows a description or a hint only when the record has one and
+says when a list has none. A listed name is not proof that an operation is safe.
 
 ## Compatibility and lifecycle boundary
 
@@ -65,7 +77,11 @@ Do not erase its journal or replay its authorization URL.
 The proposed conservative lifecycle safeguard disables automatic teardown and
 blocks older-runtime rollback before the first new-source provider write may
 start. Reading, discovering, saving a draft, and reviewing an action must not
-set that restriction. This is a material release limitation requiring explicit
+set that restriction, with one exception: older releases cannot read a source
+saved without tools, so saving the draft of a sign-in source arms the same
+floor before that record is written, and **Save draft** then carries the
+sentence described below. Every draft an older release can read still arms
+nothing. This is a material release limitation requiring explicit
 review before activation, not an assertion that resources were deleted or that
 a failed installation rolled back. A later compatible teardown implementation
 is a separate follow-up.
@@ -90,6 +106,13 @@ unfinished answers with a request to finish or cancel it first. See
 - Missing operator authentication, incomplete synchronization, or a missing
   selected tool pauses before Portal attachment. Fresh consent can resume the
   same receipts without recreating resources or granting access.
+- A sign-in source installed without tools has no tool override on its server,
+  no Portal mapping and one deny-Everyone policy. Its tool choice is refused
+  unless the installation is exactly paused with all three receipts and no
+  outstanding write; it re-binds the draft revision, the action's source hash
+  and the server receipt's desired hash in one write; a lost response or an
+  object restart applies nothing twice; and nothing is ever attached with
+  nothing enabled. Removal still accepts the re-bound receipt.
 - A first Team read cannot grant a new source implicitly. A later explicit
   source grant uses the ordinary complete-roster revision check.
 - Old source actions cannot enter the new execution path; pending and uncertain

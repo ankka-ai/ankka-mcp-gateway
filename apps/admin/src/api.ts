@@ -118,6 +118,8 @@ const sourceActionFailureCodes = new Set([
   'source_action_conflict', 'source_action_drift', 'source_discovery_failed', 'source_action_invalid',
   'source_action_authorization_failed', 'source_resource_collision', 'source_action_legacy_policy',
   'source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'bigquery_setup_required',
+  // A sign-in source waits with nothing enabled: for its tools to be chosen, then for the chosen tools to be attached.
+  'source_tools_required', 'source_tools_chosen',
 ])
 /** Who prepared an action: an administrator, or the gateway's one configured service identity. */
 const actorKindSchema = v.optional(v.picklist(['human', 'service']))
@@ -152,6 +154,26 @@ const sourceActionsSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actions: v.array(sourceActionSummarySchema),
   blockingAction: v.nullable(sourceActionPointerSchema),
+})
+/**
+ * The real tools of a paused sign-in installation, from Cloudflare's synced list. Cloudflare types a synced tool as an
+ * untyped map, so the gateway passes on a title, a description or a hint only when the record carries it; `tools` is
+ * empty unless `state` is `ready`.
+ */
+const sourceActionToolsSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  actionId: sourceActionPointerSchema.entries.actionId,
+  sourceId: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u)),
+  state: v.picklist(['connection_required', 'sync_required', 'unsupported', 'ready']),
+  tools: v.pipe(v.array(discoveredToolSchema), v.maxLength(500)),
+})
+/** A saved tool choice: the draft revision the paused installation is now bound to, and its exact allowlist. */
+const sourceToolChoiceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  actionId: sourceActionPointerSchema.entries.actionId,
+  sourceId: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u)),
+  revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+  enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.minLength(1), v.maxLength(500)),
 })
 const sourceActionConflictReasonSchema = v.picklist([
   'draft_changed', 'source_pending', 'lifecycle_pending', 'recovery_required',
@@ -290,6 +312,8 @@ export type SourceAction = v.InferOutput<typeof sourceActionSchema>
 export type SourceActionState = v.InferOutput<typeof sourceActionStateSchema>
 export type SourceActionSummary = v.InferOutput<typeof sourceActionSummarySchema>
 export type SourceActionPointer = v.InferOutput<typeof sourceActionPointerSchema>
+export type SourceActionTools = v.InferOutput<typeof sourceActionToolsSchema>
+export type SourceToolChoice = v.InferOutput<typeof sourceToolChoiceSchema>
 export type SourceActions = v.InferOutput<typeof sourceActionsSchema>
 export type SourceActionConflictReason = v.InferOutput<typeof sourceActionConflictReasonSchema>
 export type RuntimeVersion = v.InferOutput<typeof runtimeVersionSchema>
@@ -318,6 +342,10 @@ export interface GatewayAdminApi {
   getSourceActions(): Promise<SourceActions>
   getSourceAction(actionId: string): Promise<SourceAction>
   cancelSourceAction(actionId: string): Promise<SourceAction>
+  /** The real tools of a paused sign-in installation, once Cloudflare has synced them. */
+  getSourceActionTools(actionId: string): Promise<SourceActionTools>
+  /** Saves the tool choice as its own revision-bound step; the recorded installation is resumed separately. */
+  chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
   getRuntimeAction(actionId: string): Promise<RuntimeAction>
   prepareTeardownAction(): Promise<PreparedAction>
@@ -385,6 +413,15 @@ const ERROR_MESSAGES = new Map([
   ['source_response_invalid', 'The endpoint returned an invalid or oversized MCP response.'],
   ['source_tool_list_invalid', 'The endpoint returned an invalid or duplicate tool catalogue.'],
   ['source_tools_changed', 'The tool catalogue changed. Inspect it again before saving.'],
+  // An installation that waits for the operator is not a failed request: say what it waits for.
+  ['source_connection_required', 'The source is installed with nothing enabled and nobody assigned. Connect it in Cloudflare, then continue below.'],
+  ['source_sync_required', 'Cloudflare has not finished syncing the tools of this source. Sync its capabilities in Cloudflare, then continue below.'],
+  ['source_tools_required', 'The source is connected and nothing is enabled yet. Choose its tools below to finish installation.'],
+  ['source_tools_mismatch', 'A selected tool is not in the list Cloudflare synced from this source. Review the selection below.'],
+  ['source_tools_unavailable', 'This installation is not waiting for a tool choice. Check its recorded status.'],
+  ['source_tools_invalid', 'Select between 1 and 500 tools from the list, then try again.'],
+  ['source_tools_unsupported', 'Cloudflare’s synced list for this source cannot be offered here. Nothing was enabled.'],
+  ['source_catalogue_unavailable', 'Cloudflare did not return this source’s server record. Try again in a moment.'],
   ['source_unreachable', 'The MCP endpoint could not be reached within the discovery deadline.'],
   ['source_url_invalid', 'Enter a public HTTPS MCP endpoint without credentials, query parameters, or a custom port.'],
   ['runtime_action_conflict', 'Another runtime action is active or the installed version changed.'],
@@ -537,6 +574,18 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   cancelSourceAction(actionId: string): Promise<SourceAction> {
     return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}`, sourceActionSchema, {
       method: 'DELETE', body: '{}',
+    })
+  }
+
+  getSourceActionTools(actionId: string): Promise<SourceActionTools> {
+    return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/tools`, sourceActionToolsSchema)
+  }
+
+  chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {
+    return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/tools`, sourceToolChoiceSchema, {
+      method: 'POST',
+      // The gateway accepts only a sorted list without repeats, the form it hashes.
+      body: JSON.stringify({ schemaVersion: 1, revision, sourceId, enabledTools: [...new Set(enabledTools)].sort() }),
     })
   }
 

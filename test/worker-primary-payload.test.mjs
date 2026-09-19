@@ -2138,3 +2138,27 @@ test('management API preserves bounded discovery, draft capacity and shared oper
     globalThis.fetch = originalFetch;
   }
 });
+
+// A sign-in source is saved before its tools can be listed. That draft, and nothing else, may have no tools.
+test('only the draft of a sign-in source may be saved or stored without tools', async () => {
+  const save = (authMode, enabledTools) => parseSourceSave({ schemaVersion: 1, revision: 1,
+    source: { label: 'Synthetic source', url: 'https://source.example.com/mcp', authMode, enabledTools } });
+  assert.deepEqual(save('oauth', []).source.enabledTools, []);
+  assert.deepEqual(save('oauth', ['read_records']).source.enabledTools, ['read_records']);
+  assert.equal(save('none', []), null);
+  assert.deepEqual(save('none', ['read_records']).source.enabledTools, ['read_records']);
+
+  const stored = (source) => safeManagementSources({ schemaVersion: 1, revision: 2, applyMode: 'oauth_per_action',
+    sources: [{ id: 'source-1111111111111111', label: 'Synthetic source', url: 'https://source.example.com/mcp', ...source }] });
+  const current = { authMode: 'oauth', onBehalfOfUser: false, enabledTools: [] };
+  assert.deepEqual(stored({ ...current, status: 'draft' }).sources[0].enabledTools, []);
+  assert.deepEqual(stored({ authMode: 'oauth', enabledTools: [], status: 'draft' }).sources[0].enabledTools, [], 'the legacy OAuth shape too');
+  assert.equal(stored({ ...current, status: 'installed' }), null, 'an installed source without tools is invalid state');
+  assert.equal(stored({ ...current, authMode: 'none', status: 'draft' }), null);
+  assert.equal(stored({ enabledTools: [], status: 'draft' }), null, 'the legacy public shape names at least one tool');
+
+  const empty = safeManagementSources({ schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources: [] });
+  const drafted = await saveDraftSource(empty, save('oauth', []));
+  assert.deepEqual([drafted.revision, drafted.sources[0].status, drafted.sources[0].enabledTools], [2, 'draft', []]);
+  assert.equal(managementSourcesInstallProjectionFits(drafted), true);
+});

@@ -281,6 +281,9 @@ const INTERNAL_BOOTSTRAP_PATH = '/bootstrap';
 const INTERNAL_PUBLISH_PATH = '/publish-status';
 const INTERNAL_CONTROL_PATH = '/management-control';
 const INTERNAL_ACTIONS_PATH = '/source-actions';
+// The real tool list of a paused sign-in installation (GET), and its choice (POST).
+const INTERNAL_ACTION_TOOLS_ROUTE = /^\/source-actions\/(action_[A-Za-z0-9_-]{32})\/tools$/u;
+const SOURCE_ACTION_TOOLS_ROUTE = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/tools$/u;
 const INTERNAL_UPDATES_PATH = '/runtime-updates';
 const INTERNAL_TEARDOWNS_PATH = '/teardown-actions';
 /** The receipt resource kind of each dependency the root journal tracks: the fixed words the installer and the removal page see. */
@@ -2057,8 +2060,12 @@ async function createResource(state, kind, token) {
       auth_type: oauth ? 'oauth' : 'unauthenticated',
       secure_web_gateway: false,
       description: marker(state.installationId, desired.key),
-      updated_tools: toolProjection(desired.desired.toolPolicy.allowedTools),
     };
+    // A sign-in source is created before its tools can be chosen. It carries
+    // no override then; the Portal mapping alone enables tools, later.
+    if (desired.desired.toolPolicy.allowedTools.length > 0) {
+      body.updated_tools = toolProjection(desired.desired.toolPolicy.allowedTools);
+    }
     if (oauth) body.is_shared_oauth_callback_enabled = true;
   } else if (kind === 'portal') {
     const server = locator(state, 'mcp_server');
@@ -2632,11 +2639,13 @@ function safeManagedSource(value) {
   if (authMode !== 'none' && authMode !== 'oauth') return null;
   const onBehalfOfUser = current ? value.onBehalfOfUser : authMode === 'oauth';
   if (!isBoolean(onBehalfOfUser) || (authMode === 'none' && onBehalfOfUser !== false)) return null;
+  // A sign-in source is saved before its tools can be listed. Only such a
+  // draft may have none; an installed source without tools is invalid state.
   const enabledTools = exactSortedUniqueStrings(
     value.enabledTools,
     toolName,
     MAX_ENABLED_TOOLS_PER_SOURCE,
-    1,
+    authMode === 'oauth' && value.status === 'draft' ? 0 : 1,
   );
   if (!enabledTools) return null;
   return Object.freeze({
@@ -2720,11 +2729,13 @@ export function parseSourceSave(value) {
       !validSourceLabel(value.source.label)) return null;
   const url = publicMcpUrl(value.source.url);
   const authMode = value.source.authMode;
+  // Only a sign-in source may be saved without tools: its real list exists
+  // after the operator connects it. A public source names at least one.
   const enabledTools = exactSortedUniqueStrings(
     value.source.enabledTools,
     toolName,
     MAX_ENABLED_TOOLS_PER_SOURCE,
-    1,
+    authMode === 'oauth' ? 0 : 1,
   );
   if (!url || !enabledTools || (authMode !== 'none' && authMode !== 'oauth')) return null;
   return Object.freeze({
@@ -2892,10 +2903,18 @@ function sourceActionCanRenew(action, actorEmail, now) {
     !(action.pending?.kind === 'source_access_application' && action.pending.provider === null);
 }
 
+// The fixed reasons an installation waits before the Portal with all three
+// receipts and no write outstanding. `source_tools_required`: connected and
+// synced, nothing chosen yet. `source_tools_chosen`: a choice is saved.
+const SOURCE_CONNECTION_PAUSES = Object.freeze([
+  'source_connection_required', 'source_sync_required', 'source_tools_mismatch',
+  'source_tools_required', 'source_tools_chosen',
+]);
+
 function sourceActionConnectionPaused(action) {
   return action.status === 'recovery_required' && action.pending === null && action.portalUpdate === null &&
     action.resources.length === SOURCE_ACTION_RESOURCE_ORDER.length &&
-    ['source_connection_required', 'source_sync_required', 'source_tools_mismatch'].includes(action.failureCode);
+    SOURCE_CONNECTION_PAUSES.includes(action.failureCode);
 }
 
 function sourceActionBlocks(action) {
@@ -3261,8 +3280,37 @@ function sourceConnectionFailure(server, source) {
   if (['required', 'stale'].includes(server.authentication_status)) return 'source_connection_required';
   if (server.status !== 'ready' || !Array.isArray(server.tools) ||
       server.tools.some((tool) => !isRecord(tool) || !toolName(tool.name))) return 'source_sync_required';
+  // Nothing chosen is never a reason to attach: the installation waits here.
+  if (source.enabledTools.length === 0) return 'source_tools_required';
   const names = new Set(server.tools.map((tool) => tool.name));
   return source.enabledTools.every((name) => names.has(name)) ? null : 'source_tools_mismatch';
+}
+
+/**
+ * Cloudflare's synced catalogue of one server record, as a fixed state and the
+ * tools it may be offered as. Cloudflare types a synced tool as an untyped map:
+ * only a valid `name` is required, and a title, a description or a hint is
+ * passed on only when the record really carries it, within the discovery
+ * bounds. Nothing is derived. The first two states mirror the connection check.
+ */
+function syncedSourceCatalogue(server) {
+  const state = (value, tools = []) => Object.freeze({ state: value, tools: Object.freeze(tools) });
+  if (!isRecord(server)) return state('sync_required');
+  if (['required', 'stale'].includes(server.authentication_status)) return state('connection_required');
+  if (server.status !== 'ready' || !Array.isArray(server.tools)) return state('sync_required');
+  if (server.tools.length > MCP_MAX_TOOLS) return state('unsupported');
+  const tools = [];
+  const names = new Set();
+  for (const candidate of server.tools) {
+    const tool = safeToolSummary(candidate);
+    if (!tool || names.has(tool.name)) return state('unsupported');
+    names.add(tool.name);
+    tools.push(Object.freeze({
+      name: tool.name, title: tool.title, description: tool.description, readOnlyHint: tool.readOnlyHint,
+      destructiveHint: tool.destructiveHint, openWorldHint: tool.openWorldHint,
+    }));
+  }
+  return state('ready', tools.sort((left, right) => compareText(left.name, right.name)));
 }
 
 function portalExact(value, control, mappings) {
@@ -3295,7 +3343,8 @@ async function finalizeSourceAction(storage, action) {
     if (!control) return null;
   }
   const source = sources.sources.find((candidate) => candidate.id === action.sourceId);
-  if (!source || await managedSourceHash(source) !== action.sourceHash ||
+  // A source without tools is never recorded as installed.
+  if (!source || source.enabledTools.length === 0 || await managedSourceHash(source) !== action.sourceHash ||
       (source.status !== 'draft' && source.status !== 'installed')) return null;
   if (source.status === 'draft') {
     sources = safeManagementSources({
@@ -3470,6 +3519,9 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     }
     const connectionFailure = sourceConnectionFailure(server.result, desiredState.source);
     if (connectionFailure) return failSourceAction(storage, action, connectionFailure);
+    // The connection check already stops an empty allowlist. No Portal write
+    // is ever armed for one, whatever that check answers.
+    if (desiredState.source.enabledTools.length === 0) return failSourceAction(storage, action, 'source_tools_required');
     if (Date.now() >= action.expiresAt) return failSourceAction(storage, action, 'source_action_recovery_required');
     action = await persistSourceAction(storage, {
       ...action,
@@ -3503,10 +3555,168 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   } else if (action.portalUpdate?.desiredHash !== desiredHash && action.portalUpdate !== null) {
     return failSourceAction(storage, action, 'source_action_drift');
   }
+  // This gateway never maps a server with nothing enabled. A Portal that
+  // already does was changed elsewhere; that is drift, not completion.
+  if (desiredState.source.enabledTools.length === 0) return failSourceAction(storage, action, 'portal_drift');
   const completed = await finalizeSourceAction(storage, action);
   return completed
     ? fixedJson(200, publicSourceAction(completed))
     : actionRecovery('source_action_state_unavailable');
+}
+
+const SOURCE_TOOLS_READ_TIMEOUT_MS = 10_000;
+const SOURCE_CATALOGUE_REFUSALS = Object.freeze({
+  connection_required: 'source_connection_required',
+  sync_required: 'source_sync_required',
+  unsupported: 'source_tools_unsupported',
+});
+
+function sourceToolsRefusal(status, error) {
+  return fixedJson(status, { schemaVersion: 1, error });
+}
+
+/** The recorded action with the state it is read against, or the fixed refusal: not found, or state that does not validate. */
+async function recordedSourceToolAction(storage, actionId) {
+  const context = await storedSourceActionContext(storage, actionId);
+  if (context) return context;
+  const raw = await storage.get(ACTIONS_KEY);
+  const actions = raw === undefined ? Object.freeze({ actions: [] }) : safeSourceActions(raw);
+  return actions && !actions.actions.some((candidate) => candidate.actionId === actionId)
+    ? sourceToolsRefusal(404, 'source_action_not_found')
+    : sourceToolsRefusal(409, 'source_action_state_unavailable');
+}
+
+/**
+ * The one installation a tool choice may read or re-bind: exactly
+ * connection-paused (all three receipts, no resource or Portal write
+ * outstanding), prepared by this administrator under the current default-deny
+ * profile, for a sign-in draft that still hashes to what the action was
+ * approved for. Anything else is a fixed refusal, and no provider read happens
+ * before this passes.
+ */
+async function sourceToolChoiceContext(context, env, actorEmail) {
+  const { action } = context;
+  const source = context.sources.sources.find((candidate) => candidate.id === action.sourceId);
+  if (!sourceActionConnectionPaused(action) || action.actorEmail !== normalizedActor(actorEmail) ||
+      action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION || action.bigquerySetupStarted === true ||
+      !source || source.status !== 'draft' || source.authMode !== 'oauth') {
+    return sourceToolsRefusal(409, 'source_tools_unavailable');
+  }
+  if (await managedSourceHash(source) !== action.sourceHash) return sourceActionConflict('draft_changed');
+  if (parseManagementEnvironment(env)?.accountId !== context.control.accountId) {
+    return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  }
+  return Object.freeze({ ...context, source });
+}
+
+/** One provider read: the receipt's own server record, as its synced catalogue. No provider text leaves here. */
+async function readSyncedSourceCatalogue(env, control, action) {
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const serverId = action.resources[0].provider.id;
+  const server = await providerCall(
+    `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`,
+    token, { signal: AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS) },
+  );
+  if (server.status === 'auth') return sourceToolsRefusal(409, 'management_credential_required');
+  if (server.status !== 'ok' || !isRecord(server.result) || server.result.id !== serverId) {
+    return sourceToolsRefusal(502, 'source_catalogue_unavailable');
+  }
+  return syncedSourceCatalogue(server.result);
+}
+
+async function readSourceActionTools(storage, env, actionId, actorEmail) {
+  const recorded = await recordedSourceToolAction(storage, actionId);
+  if (recorded instanceof Response) return recorded;
+  const context = await sourceToolChoiceContext(recorded, env, actorEmail);
+  if (context instanceof Response) return context;
+  const catalogue = await readSyncedSourceCatalogue(env, context.control, context.action);
+  if (catalogue instanceof Response) return catalogue;
+  return fixedJson(200, {
+    schemaVersion: 1, actionId: context.action.actionId, sourceId: context.action.sourceId,
+    state: catalogue.state, tools: catalogue.tools,
+  });
+}
+
+/**
+ * The tool choice of a connected sign-in source, as its own revision-bound
+ * step. It re-binds the paused installation to a new draft revision: the
+ * draft's allowlist, the action's `sourceRevision` and `sourceHash`, and the
+ * server receipt's `desiredHash` (which covers the allowlist, and which removal
+ * re-derives from the installed source) change together in one write. Status,
+ * key, provider locators and the absence of any outstanding write do not. The
+ * executor applies the allowlist afterwards, through the existing renewal.
+ */
+async function chooseSourceActionTools(storage, env, input) {
+  if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  const enabledTools = exactKeys(input, ['schemaVersion', 'actionId', 'sourceId', 'revision', 'enabledTools', 'actorEmail']) &&
+      input.schemaVersion === 1 && isText(input.actionId) && ACTION_ID.test(input.actionId) &&
+      isText(input.sourceId) && SOURCE_ID.test(input.sourceId) &&
+      Number.isSafeInteger(input.revision) && input.revision >= 1 && normalizedActor(input.actorEmail)
+    ? exactSortedUniqueStrings(input.enabledTools, toolName, MAX_ENABLED_TOOLS_PER_SOURCE, 1)
+    : null;
+  if (!enabledTools) return sourceToolsRefusal(400, 'source_tools_invalid');
+  const recorded = await recordedSourceToolAction(storage, input.actionId);
+  if (recorded instanceof Response) return recorded;
+  if (await otherLifecycleBlocksSource(storage, Date.now(), input.actionId) ||
+      await teamActionBlocksLifecycle(storage)) return sourceActionConflict('lifecycle_pending');
+  const context = await sourceToolChoiceContext(recorded, env, input.actorEmail);
+  if (context instanceof Response) return context;
+  const { action, actions, control, source, sources } = context;
+  if (input.revision !== sources.revision || input.sourceId !== action.sourceId) {
+    return sourceActionConflict('draft_changed');
+  }
+  const catalogue = await readSyncedSourceCatalogue(env, control, action);
+  if (catalogue instanceof Response) return catalogue;
+  if (catalogue.state !== 'ready') return sourceToolsRefusal(409, SOURCE_CATALOGUE_REFUSALS[catalogue.state]);
+  const available = new Set(catalogue.tools.map((tool) => tool.name));
+  if (!enabledTools.every((name) => available.has(name))) return sourceToolsRefusal(409, 'source_tools_mismatch');
+  const chosen = (revision) => fixedJson(200, {
+    schemaVersion: 1, actionId: action.actionId, sourceId: action.sourceId, revision, enabledTools,
+  });
+  // The same choice on an action already bound to this revision changes nothing.
+  if (canonicalJson(enabledTools) === canonicalJson(source.enabledTools) &&
+      action.sourceRevision === sources.revision) return chosen(sources.revision);
+  const nextSources = safeManagementSources({
+    ...sources,
+    revision: sources.revision + 1,
+    sources: sources.sources.map((candidate) => candidate.id === source.id
+      ? { ...candidate, enabledTools: [...enabledTools] }
+      : candidate),
+  });
+  if (!nextSources || !managementSourcesInstallProjectionFits(nextSources)) {
+    return sourceToolsRefusal(413, 'source_capacity_exceeded');
+  }
+  const nextSource = nextSources.sources.find((candidate) => candidate.id === source.id);
+  const rebound = {
+    ...action,
+    sourceRevision: nextSources.revision,
+    sourceHash: await managedSourceHash(nextSource),
+    failureCode: 'source_tools_chosen',
+  };
+  const desiredState = await actionDesiredState(control, nextSources, rebound);
+  const serverDesired = desiredState ? resource(desiredState, 'mcp_server') : null;
+  if (!serverDesired) return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  const receipt = receiptResource(desiredState, serverDesired, action.resources[0].provider);
+  // Only the hash of the desired tool policy may differ from the retained receipt.
+  if (canonicalJson({ ...receipt, desiredHash: null }) !== canonicalJson({ ...action.resources[0], desiredHash: null })) {
+    return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  }
+  const reboundAction = safeSourceAction({ ...rebound, resources: [receipt, action.resources[1], action.resources[2]] });
+  const nextActions = reboundAction && safeSourceActions({
+    ...actions,
+    revision: actions.revision + 1,
+    actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? reboundAction : candidate),
+  });
+  if (!nextActions || !sourceActionConnectionPaused(reboundAction)) {
+    return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  }
+  // The installation's first write already armed the floor; a lost Team record must not reopen it.
+  if (!await armSourceCompatibility(storage, env)) return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  // One atomic multi-key write: a restart cannot leave a draft that names
+  // tools its paused action was never bound to, or the reverse.
+  await storage.put({ [SOURCES_KEY]: nextSources, [ACTIONS_KEY]: nextActions });
+  return chosen(nextSources.revision);
 }
 
 const RUNTIME_ACTION_STAGES = Object.freeze([
@@ -4906,6 +5116,12 @@ export class AdminState {
         const action = await renewSourceAction(this.state.storage, input, this.env);
         return action instanceof Response ? action : fixedJson(200, publicSourceAction(action));
       }
+      const toolChoice = request.method === 'POST' ? INTERNAL_ACTION_TOOLS_ROUTE.exec(url.pathname) : null;
+      if (toolChoice) {
+        const input = await request.json().catch(() => null);
+        if (input?.actionId !== toolChoice[1]) return sourceToolsRefusal(400, 'source_tools_invalid');
+        return chooseSourceActionTools(this.state.storage, this.env, input);
+      }
       if (url.pathname === `${INTERNAL_ACTIONS_PATH}/bigquery` && request.method === 'POST') {
         const parsed = await parseSourceActionRequest(request, this.env, this.state.storage, Date.now());
         if (!parsed || !['start', 'failed'].includes(parsed.claim.bigqueryPhase)) return actionRecovery('source_action_rejected');
@@ -5096,6 +5312,12 @@ export class AdminState {
           error: 'source_capacity_exceeded',
           revision: current.revision,
         });
+        // Older runtimes cannot read a source without tools. Every other draft
+        // still arms nothing: only this record needs the floor before it exists.
+        if (input.source.enabledTools.length === 0 &&
+            !await armSourceCompatibility(this.state.storage, this.env)) {
+          return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+        }
         await this.state.storage.put(SOURCES_KEY, updated);
         return fixedJson(200, updated);
       }
@@ -5125,6 +5347,12 @@ export class AdminState {
         request.headers.get('x-ankka-actor-email'), Date.now());
       return snapshot ? fixedJson(200, snapshot) :
         fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    }
+    // The real tool list of one paused sign-in installation: one provider read, no write.
+    const toolsRoute = INTERNAL_ACTION_TOOLS_ROUTE.exec(url.pathname);
+    if (toolsRoute) {
+      return readSourceActionTools(this.state.storage, this.env, toolsRoute[1],
+        request.headers.get('x-ankka-actor-email'));
     }
     const actionId = url.pathname.slice(`${INTERNAL_ACTIONS_PATH}/`.length);
     const actions = safeSourceActions(await this.state.storage.get(ACTIONS_KEY));
@@ -6078,9 +6306,10 @@ async function handleSourceActions(request, env) {
   const stub = adminStateStub(env, 'v1:management');
   if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
   if (request.method === 'GET') {
-    const actionId = url.pathname.slice('/api/source-actions/'.length);
+    const toolsRoute = SOURCE_ACTION_TOOLS_ROUTE.exec(url.pathname);
+    const actionId = toolsRoute ? `${toolsRoute[1]}/tools` : url.pathname.slice('/api/source-actions/'.length);
     const collection = url.pathname === '/api/source-actions';
-    if (!collection && !ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
+    if (!collection && !toolsRoute && !ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
     try {
       const response = await stub.fetch(new Request(
         `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}${collection ? '' : `/${actionId}`}`,
@@ -6118,11 +6347,32 @@ async function handleSourceActions(request, env) {
   }
   const renewal = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/renew$/u.exec(url.pathname);
   const renewActionId = renewal?.[1] ?? null;
-  if (url.pathname !== '/api/source-actions' && renewActionId === null) {
+  const toolChoice = SOURCE_ACTION_TOOLS_ROUTE.exec(url.pathname);
+  if (url.pathname !== '/api/source-actions' && renewActionId === null && !toolChoice) {
     return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
   }
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  if (toolChoice) {
+    // The tool choice of a connected sign-in source. The management object
+    // checks everything else inside its queue, with its one provider read.
+    const choice = await readJsonInput(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES);
+    if (!exactKeys(choice, ['schemaVersion', 'revision', 'sourceId', 'enabledTools'])) {
+      return sourceToolsRefusal(400, 'source_tools_invalid');
+    }
+    try {
+      const response = await stub.fetch(new Request(
+        `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/${toolChoice[1]}/tools`,
+        { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: canonicalJson({ ...choice, actionId: toolChoice[1], actorEmail }) },
+      ));
+      return response instanceof Response
+        ? response
+        : fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    } catch {
+      return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    }
+  }
   if (!await verifyManagementCredential(env)) return fixedJson(409, { schemaVersion: 1, error: 'management_credential_required' });
   const input = await readJsonInput(request);
   if (!exactKeys(input, ['schemaVersion', 'revision', 'sourceId']) || input.schemaVersion !== 1 ||
