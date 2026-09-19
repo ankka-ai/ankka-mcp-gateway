@@ -25,6 +25,7 @@ export interface LifecycleJob {
     readonly service?: { readonly secret: CredentialReference; readonly clientId: string; readonly tokenId: string };
   };
   readonly operations: readonly LifecycleOperation[];
+  readonly managementCredentialAtInstall?: boolean;
   readonly runDirectory: string;
   readonly approval?: LifecycleApproval;
 }

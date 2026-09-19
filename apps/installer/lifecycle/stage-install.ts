@@ -267,13 +267,18 @@ export async function convergeStage(context: LifecycleContext): Promise<Boundary
   const journal = recordJournalPort(context.record);
   await waitOutAbandonedLease(context, journal);
   const attemptId = `attempt_${base64UrlEncode(crypto.getRandomValues(new Uint8Array(18)))}`;
+  // The operator's opt-in: the management token reaches the gateway as a customer's pasted token does, as the
+  // secret binding of the final runtime upload, which the converger's exact read-back then requires.
+  const atInstall = context.job.managementCredentialAtInstall === true;
+  requireStage(!atInstall || context.credentials.managementToken !== null, 'management_credential_unavailable');
+  const managementCredential = atInstall ? context.credentials.managementToken ?? undefined : undefined;
   const passes: number[] = [];
   let result: Awaited<ReturnType<typeof convergeCustomerStage2>>;
   for (;;) {
     const callsBefore = context.record.state.trace.length;
     try {
       result = await convergeCustomerStage2({
-        accessToken: context.credentials.deploymentToken, attemptId, storage: ownership, journal,
+        accessToken: context.credentials.deploymentToken, attemptId, managementCredential, storage: ownership, journal,
         runtime: { controlPlaneOrigin: release.bundle.manifest.controlPlaneOrigin, updateChannel: release.bundle.channel === 'stable' ? 'stable' : 'canary', updateKeyId: release.bundle.keyId, updatePublicKey: release.bundle.publicKey },
         bootstrap: { nonce: secrets.bootstrapNonce, expectedBindings: expected },
         finalRuntimeSource: release.finalRuntimeSource,
@@ -326,7 +331,7 @@ export async function convergeStage(context: LifecycleContext): Promise<Boundary
     requireStage(passes.length < MAX_CONVERGER_PASSES, 'converge_pass_limit');
   }
   await context.record.set('install', 'converged', true);
-  return { passes, handedOver: !result.verified };
+  return { passes, handedOver: !result.verified, managementCredentialAtInstall: atInstall };
 }
 
 export async function verifyStage(context: LifecycleContext): Promise<BoundaryValue> {
@@ -346,13 +351,15 @@ export async function verifyStage(context: LifecycleContext): Promise<BoundaryVa
   requireStage(names.success, 'worker_settings_unreadable');
   const bound = names.output.result.bindings.map((binding) => binding.name);
   requireStage(bound.includes('CF_ACCESS_AUD') && !bound.includes('ANKKA_BOOTSTRAP_NONCE'), 'final_runtime_bindings_unexpected');
+  // With the opt-in the install itself bound the management secret; without it the manage stage writes it, before or after this check.
+  requireStage(context.job.managementCredentialAtInstall !== true || bound.includes('ANKKA_MANAGEMENT_TOKEN'), 'management_credential_not_bound');
   const environment = payloadEnvironment(payload, context.record, { ...bindings, CLOUDFLARE_ZONE_ID: target.zoneId, CLOUDFLARE_ZONE_NAME: target.zoneName, ZERO_TRUST_READY: 'true' });
   const management = new payload.AdminState({ storage: context.record.storage('object:v1:management') }, environment);
   for (const path of ['/status', '/sources', '/management-control']) {
     const response = await management.fetch(new Request(`https://admin-state.invalid${path}`));
     requireStage(response.status === 200, 'management_object_unavailable', path);
   }
-  return { workerName: provision.deployment.workerName, bindings: bound.length };
+  return { workerName: provision.deployment.workerName, bindings: bound.length, managementCredentialBound: bound.includes('ANKKA_MANAGEMENT_TOKEN') };
 }
 
 /** One authenticated provider read through the guarded transport; the body is parsed, never logged. */

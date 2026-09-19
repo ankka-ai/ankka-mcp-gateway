@@ -76,6 +76,9 @@ export const lifecycleJobSchema = v.strictObject({
     })),
   }),
   operations: v.pipe(v.array(v.picklist(LIFECYCLE_OPERATIONS)), v.minLength(1), v.maxLength(4)),
+  // The operator's opt-in to install the management token the way a customer's setup does: inside the install's
+  // final runtime upload, as its secret binding, instead of by the manage stage's separate secret write.
+  managementCredentialAtInstall: v.optional(v.boolean()),
   runDirectory: text,
   approval: v.optional(approvalSchema),
 });
@@ -155,7 +158,10 @@ export async function approvalStatement(job) {
   if (job.credentials.service !== undefined) {
     credentials.service = { secret: credentialReferenceLabel(job.credentials.service.secret), clientId: job.credentials.service.clientId, tokenId: job.credentials.service.tokenId };
   }
+  // Named only when chosen, so every approval recorded before the option existed keeps its digest.
+  const options = job.managementCredentialAtInstall === true ? { managementCredentialAtInstall: true } : {};
   return Object.freeze({
+    ...options,
     schemaVersion: 1, jobId: job.jobId, scope: job.scope, target: job.target,
     releases: { a: { release: a.release, artifactSha256: a.artifactSha256, keyId: a.keyId, channel: a.channel }, b: { release: b.release, artifactSha256: b.artifactSha256, keyId: b.keyId, channel: b.channel } },
     source: job.source, operations: job.operations, runDirectory: job.runDirectory, credentials,

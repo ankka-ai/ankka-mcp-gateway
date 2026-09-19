@@ -71,6 +71,34 @@ test('approval binds the exact target, release identities and operations; any ch
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
+test('the management token at install is an approved choice, and approvals from before it keep their digest', async () => {
+  const plain = await fixture();
+  const chosen = await fixture({ managementCredentialAtInstall: true });
+  const declined = await fixture({ managementCredentialAtInstall: false });
+  try {
+    const before = await approvalDigest(await readLifecycleJob(plain.path));
+    // The pins live in each fixture's own directory; the statement names release identities, never paths, so only
+    // the run directory differs between fixtures. Compare on one job instead.
+    const job = await readLifecycleJob(chosen.path);
+    assert.equal(job.managementCredentialAtInstall, true);
+    const withChoice = await approvalDigest(job);
+    const { managementCredentialAtInstall: _choice, ...withoutChoice } = job;
+    assert.notEqual(withChoice, await approvalDigest(withoutChoice));
+    // Declining it is the same statement as never naming it.
+    const declinedJob = await readLifecycleJob(declined.path);
+    const { managementCredentialAtInstall: _declined, ...neverNamed } = declinedJob;
+    assert.equal(await approvalDigest(declinedJob), await approvalDigest(neverNamed));
+    assert.match(before, /^sha256:[a-f0-9]{64}$/u);
+    // Approved with the choice, the job no longer runs without it.
+    const approved = await writeLifecycleJobApproval(chosen.path, job, { approvedBy: ADMIN, approvedAt: new Date().toISOString(), targetDigest: withChoice });
+    await assert.rejects(assertLifecycleJobApproved({ ...approved, managementCredentialAtInstall: false }), { code: 'job_target_changed' });
+    await writeFile(chosen.path, JSON.stringify({ ...chosen.job, managementCredentialAtInstall: 'yes' }), { mode: 0o600 });
+    await assert.rejects(readLifecycleJob(chosen.path), { code: 'job_invalid' });
+  } finally {
+    for (const { directory } of [plain, chosen, declined]) await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test('credential references are names only and the schema refuses inline values or unknown fields', async () => {
   const { directory, path, job } = await fixture();
   try {
