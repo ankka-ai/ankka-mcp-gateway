@@ -136,6 +136,19 @@ const workerRouteSchema = v.looseObject({
   pattern: v.string(),
   script: v.optional(v.nullable(v.string())),
 });
+const dnsRecordSchema = v.looseObject({
+  id: providerIdSchema,
+  name: v.string(),
+  type: v.string(),
+  content: v.string(),
+  proxied: v.optional(v.boolean()),
+  comment: v.optional(v.nullable(v.string())),
+  zone_id: v.optional(v.string()),
+});
+// The originless placeholder Cloudflare documents for a proxied hostname
+// without an origin: the same record shape a Worker custom domain publishes.
+const DNS_PLACEHOLDER_TYPE = 'AAAA';
+const DNS_PLACEHOLDER_CONTENT = '100::';
 
 export type CloudflareManagementStage =
   | 'zero_trust_organization_get'
@@ -162,7 +175,15 @@ export type CloudflareManagementStage =
   | 'management_domain_attach'
   | 'management_domain_get'
   | 'management_domain_list_verify'
-  | 'management_domain_recover';
+  | 'management_domain_recover'
+  | 'management_dns_record_collision'
+  | 'management_dns_record_create'
+  | 'management_dns_record_get'
+  | 'management_dns_record_list_verify'
+  | 'management_dns_record_recover'
+  | 'management_dns_record_release'
+  | 'management_dns_record_release_recover'
+  | 'management_dns_record_absence_get';
 
 export type CloudflareManagementOutcome = 'not_sent' | 'rejected' | 'unknown';
 
@@ -398,6 +419,66 @@ export interface ManagementCustomDomainRecoveryRecord {
   readonly locator: ManagementCustomDomainLocator;
 }
 
+export interface ManagementDnsRecordLocator {
+  readonly recordId: string;
+}
+
+export interface ManagementDnsRecordSpec {
+  readonly accountId: string;
+  readonly zoneId: string;
+  readonly plan: StaticDeployPlan;
+}
+
+/** A proxied placeholder at the management hostname, marked with the installation's ownership marker as its comment. */
+export interface ManagementDnsRecordRequestSpec {
+  readonly comment: string;
+  readonly content: '100::';
+  readonly name: string;
+  readonly proxied: true;
+  readonly ttl: 1;
+  readonly type: 'AAAA';
+}
+
+export interface ManagementDnsRecordIntent {
+  readonly schemaVersion: 1;
+  readonly kind: 'management_dns_record';
+  readonly planId: string;
+  readonly planHash: string;
+  readonly ownershipMarker: string;
+  readonly accountId: string;
+  readonly zoneId: string;
+  readonly request: ManagementDnsRecordRequestSpec;
+}
+
+export interface ManagementDnsRecordRecoveryRecord {
+  readonly schemaVersion: 1;
+  readonly kind: 'management_dns_record_recovery';
+  readonly planId: string;
+  readonly planHash: string;
+  readonly ownershipMarker: string;
+  readonly locator: ManagementDnsRecordLocator;
+}
+
+/** The release of the exact placeholder the journal created, sent right before the custom domain takes the hostname. */
+export interface ManagementDnsRecordReleaseIntent {
+  readonly schemaVersion: 1;
+  readonly kind: 'management_dns_record_release';
+  readonly planId: string;
+  readonly planHash: string;
+  readonly ownershipMarker: string;
+  readonly accountId: string;
+  readonly zoneId: string;
+  readonly locator: ManagementDnsRecordLocator;
+  readonly record: ManagementDnsRecordRequestSpec;
+}
+
+/** The placeholder's absence by identifier, whether this consent sent the deletion or an earlier one did. */
+export interface ManagementDnsRecordReleaseRecord {
+  readonly schemaVersion: 1;
+  readonly kind: 'management_dns_record_released';
+  readonly recordId: string;
+}
+
 interface CloudflareEnvelope {
   readonly errors: null | readonly BoundaryValue[];
   readonly messages: null | readonly BoundaryValue[];
@@ -482,6 +563,27 @@ interface ValidatedWorkerSubdomainInput {
 interface ValidatedDomainIntent {
   readonly expected: Omit<ExpectedDomain, 'domainId'>;
   readonly intent: ManagementCustomDomainIntent;
+}
+
+interface ExpectedDnsRecord {
+  readonly accountId: string;
+  readonly zoneId: string;
+  readonly planId: string;
+  readonly planHash: string;
+  readonly hostname: string;
+  readonly marker: string;
+  readonly recordId: string;
+}
+
+interface ValidatedDnsRecordIntent {
+  readonly expected: Omit<ExpectedDnsRecord, 'recordId'>;
+  readonly intent: ManagementDnsRecordIntent;
+}
+
+/** A hostname whose exact DNS listing must be empty before a write takes it. */
+interface FreeHostname {
+  readonly zoneId: string;
+  readonly hostname: string;
 }
 
 function fail(
@@ -1756,18 +1858,21 @@ function requireDomainIntent(
   return { expected, intent: canonical };
 }
 
+function dnsListUrl(zoneId: string, hostname: string, page: number, perPage: number): URL {
+  const url = zoneUrl(zoneId, '/dns_records');
+  url.searchParams.set('name.exact', hostname);
+  url.searchParams.set('page', String(page));
+  url.searchParams.set('per_page', String(perPage));
+  return url;
+}
+
 async function assertNoExactDnsCollision(
   call: ReturnType<typeof commonInput>,
-  expected: Omit<ExpectedDomain, 'domainId'>,
+  expected: FreeHostname,
+  stage: CloudflareManagementStage = 'management_domain_dns_collision',
 ): Promise<void> {
-  const stage = 'management_domain_dns_collision';
-  const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) => {
-    const url = zoneUrl(expected.zoneId, '/dns_records');
-    url.searchParams.set('name.exact', expected.hostname);
-    url.searchParams.set('page', String(page));
-    url.searchParams.set('per_page', String(perPage));
-    return url;
-  });
+  const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) =>
+    dnsListUrl(expected.zoneId, expected.hostname, page, perPage));
   for (const value of values) {
     const record = v.safeParse(v.looseObject({ id: providerIdSchema, name: v.string() }), value);
     if (!record.success || record.output.name !== expected.hostname) {
@@ -1926,4 +2031,292 @@ export async function recoverManagementCustomDomain(
     ownershipMarker: input.intent.ownershipMarker,
     locator,
   });
+}
+
+function validateDnsRecordSpec(
+  input: ManagementDnsRecordSpec,
+  stage: CloudflareManagementStage,
+): Omit<ExpectedDnsRecord, 'recordId'> {
+  if (!ACCOUNT_ID_PATTERN.test(input.accountId) || !ZONE_ID_PATTERN.test(input.zoneId)) {
+    fail('invalid_input', stage, 'not_sent');
+  }
+  const plan = reviewedManagementProjection(input.plan, stage);
+  if (!validZoneRelation(plan.managementHostname, plan.zoneName)) fail('invalid_input', stage, 'not_sent');
+  return {
+    accountId: input.accountId,
+    zoneId: input.zoneId,
+    planId: plan.planId,
+    planHash: plan.planHash,
+    hostname: plan.managementHostname,
+    marker: `${OWNERSHIP_PREFIX}:${plan.ownershipMarker}`,
+  };
+}
+
+function dnsRecordBody(expected: Omit<ExpectedDnsRecord, 'recordId'>): ManagementDnsRecordRequestSpec {
+  return Object.freeze({
+    comment: expected.marker,
+    content: DNS_PLACEHOLDER_CONTENT,
+    name: expected.hostname,
+    proxied: true,
+    ttl: 1,
+    type: DNS_PLACEHOLDER_TYPE,
+  });
+}
+
+function dnsRecordUrl(zoneId: string, recordId: string): URL {
+  return zoneUrl(zoneId, `/dns_records/${encodeURIComponent(recordId)}`);
+}
+
+function exactDnsRecord(value: BoundaryValue, expected: ExpectedDnsRecord): boolean {
+  const result = v.safeParse(dnsRecordSchema, value);
+  if (!result.success) return false;
+  const record = result.output;
+  return record.id === expected.recordId &&
+    record.name === expected.hostname &&
+    record.type === DNS_PLACEHOLDER_TYPE &&
+    record.content === DNS_PLACEHOLDER_CONTENT &&
+    record.proxied === true &&
+    record.comment === expected.marker &&
+    (record.zone_id === undefined || record.zone_id === expected.zoneId);
+}
+
+export function prepareManagementDnsRecordIntent(input: ManagementDnsRecordSpec): ManagementDnsRecordIntent {
+  const expected = validateDnsRecordSpec(input, 'management_dns_record_create');
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'management_dns_record',
+    planId: expected.planId,
+    planHash: expected.planHash,
+    ownershipMarker: managementOwnershipMarker(input.plan),
+    accountId: expected.accountId,
+    zoneId: expected.zoneId,
+    request: dnsRecordBody(expected),
+  });
+}
+
+function requireDnsRecordIntent(
+  input: ManagementDnsRecordSpec & { readonly intent: ManagementDnsRecordIntent },
+  stage: CloudflareManagementStage,
+): ValidatedDnsRecordIntent {
+  const expected = validateDnsRecordSpec(input, stage);
+  const canonical = prepareManagementDnsRecordIntent(input);
+  if (!exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
+  return { expected, intent: canonical };
+}
+
+/**
+ * The first Stage 2 mutation: a proxied placeholder at the management
+ * hostname, so the name is served by the zone's nameservers long before the
+ * custom domain exists. The exact lookup immediately before POST keeps the
+ * hostname's freshness proof current.
+ */
+export async function createManagementDnsRecord(
+  input: CloudflareManagementCall & ManagementDnsRecordSpec & { readonly intent: ManagementDnsRecordIntent },
+): Promise<ManagementDnsRecordLocator> {
+  const stage = 'management_dns_record_create';
+  const call = commonInput(input, stage);
+  const { expected, intent } = requireDnsRecordIntent(input, stage);
+  await assertNoExactDnsCollision(call, expected, 'management_dns_record_collision');
+  const response = await performRequest(call, stage, zoneUrl(input.zoneId, '/dns_records'), {
+    method: 'POST',
+    headers: jsonHeaders(call.accessToken),
+    body: JSON.stringify(intent.request),
+  });
+  const result = v.safeParse(v.looseObject({ id: providerIdSchema }),
+    requireSuccess(response, stage, CREATED_STATUSES).result);
+  if (!result.success) fail('provider_unknown', stage, 'unknown');
+  return Object.freeze({ recordId: result.output.id });
+}
+
+function expectedDnsRecord(
+  input: ManagementDnsRecordSpec & ManagementDnsRecordLocator,
+  stage: CloudflareManagementStage,
+): ExpectedDnsRecord {
+  const expected = validateDnsRecordSpec(input, stage);
+  if (!providerId(input.recordId)) fail('invalid_input', stage, 'not_sent');
+  return { ...expected, recordId: input.recordId };
+}
+
+export async function verifyManagementDnsRecordGet(
+  input: CloudflareManagementCall & ManagementDnsRecordSpec & ManagementDnsRecordLocator,
+): Promise<ManagementDnsRecordLocator> {
+  const stage = 'management_dns_record_get';
+  const call = commonInput(input, stage);
+  const expected = expectedDnsRecord(input, stage);
+  const response = await performRequest(call, stage, dnsRecordUrl(expected.zoneId, expected.recordId), {
+    method: 'GET',
+    headers: authHeaders(call.accessToken),
+  });
+  if (!exactDnsRecord(requireSuccess(response, stage).result, expected)) fail('late_drift', stage, 'rejected');
+  return Object.freeze({ recordId: expected.recordId });
+}
+
+export async function verifyManagementDnsRecordList(
+  input: CloudflareManagementCall & ManagementDnsRecordSpec & ManagementDnsRecordLocator,
+): Promise<ManagementDnsRecordLocator> {
+  const stage = 'management_dns_record_list_verify';
+  const call = commonInput(input, stage);
+  const expected = expectedDnsRecord(input, stage);
+  const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) =>
+    dnsListUrl(expected.zoneId, expected.hostname, page, perPage));
+  if (values.length > 1) fail('provider_ambiguous', stage, 'rejected');
+  if (values.length !== 1 || !exactDnsRecord(values[0], expected)) fail('late_drift', stage, 'rejected');
+  return Object.freeze({ recordId: expected.recordId });
+}
+
+/** After a lost create response: the one exact placeholder at the hostname is the journal's record, nothing else is. */
+export async function recoverManagementDnsRecord(
+  input: CloudflareManagementCall & ManagementDnsRecordSpec & { readonly intent: ManagementDnsRecordIntent },
+): Promise<ManagementDnsRecordRecoveryRecord> {
+  const stage = 'management_dns_record_recover';
+  const call = commonInput(input, stage);
+  const { expected } = requireDnsRecordIntent(input, stage);
+  const values = await collectPaginated(call, stage, LIST_PAGE_SIZE, (page, perPage) =>
+    dnsListUrl(expected.zoneId, expected.hostname, page, perPage));
+  const matches: ManagementDnsRecordLocator[] = [];
+  for (const value of values) {
+    const parsed = v.safeParse(v.looseObject({ id: providerIdSchema }), value);
+    if (!parsed.success) fail('provider_mismatch', stage, 'rejected');
+    if (exactDnsRecord(value, { ...expected, recordId: parsed.output.id })) {
+      matches.push(Object.freeze({ recordId: parsed.output.id }));
+    }
+  }
+  if (matches.length > 1 || (matches.length === 1 && values.length !== 1)) {
+    fail('provider_ambiguous', stage, 'rejected');
+  }
+  if (matches.length === 0) {
+    if (values.length > 0) fail('provider_mismatch', stage, 'rejected');
+    fail('provider_unknown', stage, 'unknown');
+  }
+  const locator = matches.at(0);
+  if (locator === undefined) fail('provider_unknown', stage, 'unknown');
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'management_dns_record_recovery',
+    planId: input.intent.planId,
+    planHash: input.intent.planHash,
+    ownershipMarker: input.intent.ownershipMarker,
+    locator,
+  });
+}
+
+export function prepareManagementDnsRecordReleaseIntent(
+  input: ManagementDnsRecordSpec & ManagementDnsRecordLocator,
+): ManagementDnsRecordReleaseIntent {
+  const expected = expectedDnsRecord(input, 'management_dns_record_release');
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'management_dns_record_release',
+    planId: expected.planId,
+    planHash: expected.planHash,
+    ownershipMarker: managementOwnershipMarker(input.plan),
+    accountId: expected.accountId,
+    zoneId: expected.zoneId,
+    locator: Object.freeze({ recordId: expected.recordId }),
+    record: dnsRecordBody(expected),
+  });
+}
+
+function requireDnsRecordReleaseIntent(
+  input: ManagementDnsRecordSpec & { readonly intent: ManagementDnsRecordReleaseIntent },
+  stage: CloudflareManagementStage,
+): ExpectedDnsRecord {
+  const expected = expectedDnsRecord({ ...input, recordId: input.intent.locator.recordId }, stage);
+  const canonical = prepareManagementDnsRecordReleaseIntent({ ...input, recordId: input.intent.locator.recordId });
+  if (!exactJson(input.intent, canonical)) fail('invalid_input', stage, 'not_sent');
+  return expected;
+}
+
+function releasedRecord(recordId: string): ManagementDnsRecordReleaseRecord {
+  return Object.freeze({ schemaVersion: 1, kind: 'management_dns_record_released', recordId });
+}
+
+/** Whether a response is the provider's rejected envelope for an identifier it does not hold. */
+function absentEnvelope(response: ProviderResponse): boolean {
+  const envelope = parseEnvelope(response.value);
+  return response.status === 404 && envelope?.success === false &&
+    validProviderErrorList(envelope.errors) && envelope.result === null;
+}
+
+/** A read of the record by identifier: the exact placeholder, its proven absence, or a foreign record under that identifier. */
+async function readDnsRecordById(
+  call: ReturnType<typeof commonInput>,
+  stage: CloudflareManagementStage,
+  expected: ExpectedDnsRecord,
+): Promise<'exact' | 'absent'> {
+  const response = await performRequest(call, stage, dnsRecordUrl(expected.zoneId, expected.recordId), {
+    method: 'GET',
+    headers: authHeaders(call.accessToken),
+  });
+  if (response.status === 404) {
+    if (absentEnvelope(response)) return 'absent';
+    fail('provider_unknown', stage, 'unknown');
+  }
+  if (!exactDnsRecord(requireSuccess(response, stage).result, expected)) fail('provider_mismatch', stage, 'rejected');
+  return 'exact';
+}
+
+async function deleteDnsRecord(
+  call: ReturnType<typeof commonInput>,
+  expected: ExpectedDnsRecord,
+): Promise<void> {
+  const stage = 'management_dns_record_release';
+  const response = await performRequest(call, stage, dnsRecordUrl(expected.zoneId, expected.recordId), {
+    method: 'DELETE',
+    headers: authHeaders(call.accessToken),
+  });
+  const result = v.safeParse(v.looseObject({ id: v.optional(v.string()) }),
+    requireSuccess(response, stage, CREATED_STATUSES).result);
+  if (!result.success || (result.output.id !== undefined && result.output.id !== expected.recordId)) {
+    fail('provider_unknown', stage, 'unknown');
+  }
+}
+
+/**
+ * Releases the exact placeholder so the custom domain can take the hostname:
+ * Cloudflare refuses to attach a custom domain over an externally managed
+ * record. The record is re-read by identifier immediately before DELETE and
+ * must still be the exact journaled placeholder.
+ */
+export async function releaseManagementDnsRecord(
+  input: CloudflareManagementCall & ManagementDnsRecordSpec & { readonly intent: ManagementDnsRecordReleaseIntent },
+): Promise<ManagementDnsRecordReleaseRecord> {
+  const stage = 'management_dns_record_release';
+  const call = commonInput(input, stage);
+  const expected = requireDnsRecordReleaseIntent(input, stage);
+  if (await readDnsRecordById(call, stage, expected) === 'absent') fail('late_drift', stage, 'rejected');
+  await deleteDnsRecord(call, expected);
+  return releasedRecord(expected.recordId);
+}
+
+/**
+ * After an interrupted release: an absent record is the earlier deletion's
+ * proof, and a present exact record means that deletion never applied, so
+ * this fresh consent sends it again. Deleting the exact owned identifier is
+ * the one write that is safe to repeat; nothing else is ever resent.
+ */
+export async function recoverManagementDnsRecordRelease(
+  input: CloudflareManagementCall & ManagementDnsRecordSpec & { readonly intent: ManagementDnsRecordReleaseIntent },
+): Promise<ManagementDnsRecordReleaseRecord> {
+  const stage = 'management_dns_record_release_recover';
+  const call = commonInput(input, stage);
+  const expected = requireDnsRecordReleaseIntent(input, stage);
+  if (await readDnsRecordById(call, stage, expected) === 'exact') await deleteDnsRecord(call, expected);
+  return releasedRecord(expected.recordId);
+}
+
+/** The placeholder's absence by identifier: the postcondition that outlives the installation. */
+export async function verifyManagementDnsRecordAbsent(
+  input: CloudflareManagementCall & ManagementDnsRecordSpec & ManagementDnsRecordLocator,
+): Promise<ManagementDnsRecordReleaseRecord> {
+  const stage = 'management_dns_record_absence_get';
+  const call = commonInput(input, stage);
+  const expected = expectedDnsRecord(input, stage);
+  const response = await performRequest(call, stage, dnsRecordUrl(expected.zoneId, expected.recordId), {
+    method: 'GET',
+    headers: authHeaders(call.accessToken),
+  });
+  if (absentEnvelope(response)) return releasedRecord(expected.recordId);
+  requireSuccess(response, stage);
+  fail('late_drift', stage, 'rejected');
 }

@@ -137,6 +137,13 @@ only verified provider absence advances progress. Unknown responses require a
 fresh consent and read-back, including after the gateway no longer runs. There
 is no force-delete option or browser-provided resource list.
 
+The management hostname's placeholder DNS record is not a teardown resource:
+the second stage releases it as its own journaled step before attaching the
+custom domain and re-proves its absence with the terminal resources, so the
+signed handoff, the hosted job and the finalizer carry nothing for it, and
+installations journaled before the record existed are removed exactly as
+before.
+
 OAuth grants stay in callback-local memory and are revoked and discarded on
 success and failure. State, PKCE verifier, and the gateway action key cross the
 redirect only in separate encrypted HttpOnly cookies; durable attempts contain

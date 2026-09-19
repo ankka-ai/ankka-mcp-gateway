@@ -37,9 +37,13 @@ shell never receives its session. The runner therefore answers the page's
 handoff poll with the installer's own not-ready body until the shell answers
 the runner from its vantage point, then lets the page hop.
 
-After the Stage 2 consent the installer sends the browser to the new management
-hostname before its DNS record exists, and resolvers cache that negative answer
-for the zone's negative TTL (30 minutes on Cloudflare zones). The runner therefore
+After the Stage 2 consent the shell creates a proxied placeholder record for
+the new management hostname as its first write and releases it right before
+the custom domain is attached, because Cloudflare refuses a custom domain over
+an existing record; the record Cloudflare then creates for the custom domain
+reaches the zone's authoritative nameservers minutes after the attachment, and
+a resolver asked in that gap caches the negative answer for the zone's
+negative TTL (30 minutes on Cloudflare zones). The runner therefore
 answers that origin locally in the test tab and reads the provider until the
 custom domain is attached before its first request to the hostname. It then
 waits until the zone's authoritative nameservers serve the record, asking only

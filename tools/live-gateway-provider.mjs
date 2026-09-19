@@ -69,6 +69,9 @@ export function createLiveGatewayProvider({ config, token, transport = fetch, sl
   const apps = () => list(`${account}/access/apps`);
   const domains = () => list(`${account}/workers/domains`);
   const dns = () => list(`${zone}/dns_records?name.exact=${encodeURIComponent(config.basics.portalHostname)}`);
+  // The second stage's placeholder record: released before the custom domain is attached, so only an
+  // interrupted second stage leaves one, and a fresh target must carry none.
+  const managementDns = () => list(`${zone}/dns_records?name.exact=${encodeURIComponent(config.basics.managementHostname)}`);
   async function namespaces(workerName) {
     return (await list(`${account}/workers/durable_objects/namespaces`)).filter((item) => item.script === workerName || item.script_name === workerName);
   }
@@ -119,7 +122,8 @@ export function createLiveGatewayProvider({ config, token, transport = fetch, sl
       requireCondition(target?.name === config.basics.zoneName && target.account?.id === config.accountId, 'zone_account_mismatch');
       requireCondition((await portals()).every((item) => item.hostname !== config.basics.portalHostname) &&
         (await apps()).every((item) => ![config.basics.portalHostname, config.basics.managementHostname].includes(item.domain)) &&
-        (await domains()).every((item) => item.hostname !== config.basics.managementHostname) && (await dns()).length === 0,
+        (await domains()).every((item) => item.hostname !== config.basics.managementHostname) && (await dns()).length === 0 &&
+        (await managementDns()).length === 0,
       'fresh_gateway_hostnames_required');
     },
     async assertWorker(provision) {
