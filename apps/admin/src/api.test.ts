@@ -756,3 +756,15 @@ describe('source provider authorization', () => {
     await expect(new HttpGatewayAdminApi().authorizeSource('action_' + 'a'.repeat(32), 4, 'source-synthetic')).rejects.toMatchObject({ code: 'response_invalid' })
   })
 })
+
+describe('individual source removal', () => {
+  it('sends only the reviewed revision to the exact same-origin source endpoint', async () => {
+    const result = { schemaVersion: 1, revision: 8, applyMode: 'account_token', installationEnabled: true,
+      removalEnabled: true, removalCredentialConfigured: true, pendingRemoval: null, sources: [] }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(result)))
+    await expect(new HttpGatewayAdminApi().removeSource(7, 'source-1111111111111111')).resolves.toEqual(result)
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/sources/source-1111111111111111', expect.objectContaining({
+      method: 'DELETE', body: JSON.stringify({ schemaVersion: 1, revision: 7 }), credentials: 'same-origin', redirect: 'error',
+    }))
+  })
+})

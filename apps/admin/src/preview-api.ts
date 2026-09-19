@@ -69,6 +69,8 @@ const installedSources: ManagedSources = {
   revision: 3,
   applyMode: 'oauth_per_action',
   installationEnabled: true,
+  removalEnabled: true,
+  removalCredentialConfigured: true,
   sources: [
     {
       id: 'source-1111111111111111',
@@ -271,6 +273,16 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
   async resumeBigQuery(_actionId: string): Promise<import('./api').BigQueryPrepared> {
     throw new GatewayApiError(409, 'preview_only')
+  }
+
+  async removeSource(revision: number, sourceId: string): Promise<ManagedSources> {
+    if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
+    this.#sources = { ...this.#sources, revision: revision + 1, sources: this.#sources.sources.filter((source) => source.id !== sourceId) }
+    this.#sourceActions = this.#sourceActions.filter((action) => action.sourceId !== sourceId)
+    this.#team = { ...this.#team, revision: this.#team.revision + 1,
+      sources: this.#team.sources.filter((source) => source.id !== sourceId),
+      members: this.#team.members.map((member) => ({ ...member, sourceIds: member.sourceIds.filter((id) => id !== sourceId) })) }
+    return structuredClone(this.#sources)
   }
 
   async saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources> {

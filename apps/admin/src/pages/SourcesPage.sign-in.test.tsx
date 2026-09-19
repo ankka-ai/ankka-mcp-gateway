@@ -42,7 +42,7 @@ function pausedApi(action: SourceActionSummary | null, source: ManagedSource = s
     : { schemaVersion: 1, actions: [action], blockingAction: { kind: 'source', actionId: action.actionId, sourceId: action.sourceId } }
   const current: ManagedSources = { schemaVersion: 1, revision: 4, applyMode: 'account_token', installationEnabled: true, sources: [source] }
   return {
-    getBigQuerySetups: vi.fn<GatewayAdminApi['getBigQuerySetups']>(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+    removeSource: vi.fn(), getBigQuerySetups: vi.fn<GatewayAdminApi['getBigQuerySetups']>(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn<GatewayAdminApi['getSources']>(async () => current), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn<GatewayAdminApi['discoverSource']>(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn<GatewayAdminApi['prepareSourceAction']>(),

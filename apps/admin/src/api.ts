@@ -72,6 +72,9 @@ const managedSourcesSchema = v.strictObject({
   // The release a rollback can still restore today and no longer could once a source installation starts;
   // null or absent whenever installing decides nothing about rollback. The gateway decides, never this page.
   installEndsRollbackTo: v.optional(v.nullable(v.string())),
+  removalEnabled: v.optional(v.boolean()),
+  removalCredentialConfigured: v.optional(v.boolean()),
+  pendingRemoval: v.optional(v.nullable(v.strictObject({ sourceId: v.pipe(v.string(), v.regex(/^source-[a-f0-9]{16}$/u)) }))),
   sources: v.array(managedSourceSchema),
 })
 const discoveredToolSchema = v.strictObject({
@@ -141,7 +144,7 @@ const sourceActionStateSchema = v.picklist([
   'authorization_required', 'authorization_expired', 'applying', 'succeeded', 'failed', 'recovery_required',
 ])
 const sourceActionPointerSchema = v.strictObject({
-  kind: v.picklist(['source', 'runtime', 'teardown', 'team', 'management_credential']),
+  kind: v.picklist(['source', 'runtime', 'teardown', 'team', 'management_credential', 'source_removal']),
   actionId: v.pipe(v.string(), v.regex(/^action_[A-Za-z0-9_-]{32}$/u)),
   sourceId: v.optional(v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u))),
 })
@@ -382,6 +385,7 @@ export interface GatewayAdminApi {
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
   removeSourceDraft(revision: number, sourceId: string): Promise<ManagedSources>
+  removeSource(revision: number, sourceId: string): Promise<ManagedSources>
   prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<SourceApplyResult>
   getSourceActions(): Promise<SourceActions>
   getSourceAction(actionId: string): Promise<SourceAction>
@@ -466,6 +470,14 @@ const ERROR_MESSAGES = new Map([
   ['source_authentication_unsupported', 'The endpoint did not return the standard MCP OAuth discovery challenge.'],
   ['source_google_shared_oauth_unsupported', GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE],
   ['source_capacity_exceeded', 'This source would exceed the gateway source-state capacity. Reduce its tool selection or remove another draft.'],
+  ['source_removal_credential_required', 'Add a valid management token in Settings before removing this source.'],
+  ['source_not_found', 'This source has already been removed. Refresh the source list.'],
+  ['source_removal_unavailable', 'Source removal could not read your gateway’s saved records. Refresh and try again.'],
+  ['source_removal_pending', 'Finish the source removal already in progress before changing another source.'],
+  ['source_removal_action_conflict', 'Finish or cancel the pending installation, Team change, update, gateway removal or management token change before removing this source.'],
+  ['source_removal_ownership_conflict', 'Removal stopped because your gateway could not verify ownership or confirm that only this Portal uses the source. Check its resources in Cloudflare, then try again.'],
+  ['source_removal_recovery_required', 'Removal could not be confirmed. Check status, then continue removal; your gateway will check saved progress before making further changes.'],
+  ['source_removal_managed_bigquery', 'Individual removal of managed BigQuery bridges is not available yet. Their Worker and stored key require separate Cloudflare authorization. You can revoke source access in Team. Full gateway removal cleans up the bridge too.'],
   ['source_conflict', 'The source list changed in another tab. Refresh and try again.'],
   ['source_invalid', 'The source draft was rejected. Review its endpoint and exact tool selection.'],
   ['source_protocol_unsupported', 'The endpoint did not accept a supported MCP discovery protocol.'],
@@ -623,6 +635,12 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   removeSourceDraft(revision: number, sourceId: string): Promise<ManagedSources> {
     return this.#request('/api/sources', managedSourcesSchema, {
       method: 'DELETE', body: JSON.stringify({ schemaVersion: 1, revision, sourceId }),
+    })
+  }
+
+  removeSource(revision: number, sourceId: string): Promise<ManagedSources> {
+    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}`, managedSourcesSchema, {
+      method: 'DELETE', body: JSON.stringify({ schemaVersion: 1, revision }),
     })
   }
 

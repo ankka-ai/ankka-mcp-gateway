@@ -1,4 +1,5 @@
 import { Button } from './Button'
+import { SourceRemoval } from './SourceRemoval'
 import { CaretDown, CaretRight, Check, Clock, MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, useId, useState } from 'react'
 import type { ManagedSource } from '../api'
@@ -17,13 +18,21 @@ interface SourceListProps {
   draftLabel?(sourceId: string): string
   /** One sentence to read before installing, shown directly beside each install control; nothing when null. */
   installNote?: string | null
+  removalEnabled?: boolean | undefined
+  removalDisabled?: boolean
+  removalCredentialConfigured?: boolean | undefined
+  pendingRemovalSourceId?: string | undefined
+  managedBigQuerySourceIds?: string[] | undefined
+  removalNote?: string | null
+  onRemove?(sourceId: string): Promise<void>
+  onRefresh?(): Promise<void>
   onAuthorize(sourceId: string): void
   canRemove?(sourceId: string): boolean
   removeDisabled?: boolean
-  onRemove?(sourceId: string): void
+  onRemoveDraft?(sourceId: string): void
 }
 
-export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, installNote = null, onAuthorize, canRemove, removeDisabled = false, onRemove }: SourceListProps) {
+export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -74,7 +83,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
         </thead>
         <tbody>
           {visibleSources.map((source) => {
-            const isExpanded = expanded === source.id
+            const isExpanded = expanded === source.id || pendingRemovalSourceId === source.id
             const sourceDetailsId = `${detailsId}-${source.id}`
             const connection = source.authMode === 'oauth'
               ? source.onBehalfOfUser ? 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
@@ -102,7 +111,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                     {source.authMode === 'oauth' ? source.onBehalfOfUser ? 'Legacy OAuth' : 'OAuth' : 'Public'}
                   </td>
                   <td className="px-3 py-3">
-                    {source.status === 'installed' ? (
+                    {pendingRemovalSourceId === source.id ? <span className="text-warning-strong">Removal started</span> : source.status === 'installed' ? (
                       <span className="inline-flex items-center gap-2 text-success-strong"><Check aria-hidden="true" size={17} className="shrink-0" />Installed</span>
                     ) : (
                       <div className="flex flex-wrap items-center gap-2">
@@ -137,10 +146,20 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                       <div className="mt-2 flex max-h-52 flex-wrap gap-2 overflow-y-auto pr-1" role="region" aria-label={`${source.label} allowed tools`} tabIndex={0}>
                         {source.enabledTools.map((tool) => <code key={tool} className="tool-chip break-all">{tool}</code>)}
                       </div>
-                      {source.status === 'draft' && canRemove?.(source.id) && onRemove ? (
+                      {source.status === 'draft' && canRemove?.(source.id) && onRemoveDraft ? (
                         <Button variant="secondary-destructive" className="pressable mt-4" disabled={isBusy || removeDisabled}
-                          onClick={() => onRemove(source.id)}>Remove source</Button>
+                          onClick={() => onRemoveDraft(source.id)}>Remove source</Button>
                       ) : null}
+                      {source.status === 'installed' && removalEnabled && onRemove && onRefresh ? <SourceRemoval
+                        source={source}
+                        pending={pendingRemovalSourceId === source.id}
+                        disabled={isBusy || Boolean(removalDisabled) || (pendingRemovalSourceId !== undefined && pendingRemovalSourceId !== source.id)}
+                        credentialConfigured={removalCredentialConfigured === true}
+                        managedBigQuery={managedBigQuerySourceIds.includes(source.id)}
+                        rollbackNote={removalNote}
+                        onRemove={onRemove}
+                        onRefresh={onRefresh}
+                      /> : null}
                     </td>
                   </tr>
                 ) : null}

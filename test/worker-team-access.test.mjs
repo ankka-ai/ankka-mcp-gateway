@@ -3530,3 +3530,259 @@ test('source OAuth never imports after ownership changes during exchange and giv
     });
   }
 });
+
+const SOURCE_REMOVAL_KEY = 'ankka-mcp-gateway/source-removal/v1';
+async function removeSource(gateway, sourceId, options = {}) {
+  const sources = await (await gateway.api('/api/sources')).json();
+  return gateway.api(`/api/sources/${sourceId ?? sources.sources[0].id}`, {
+    method: 'DELETE', body: { schemaVersion: 1, revision: sources.revision }, ...options,
+  });
+}
+
+test('individual source removal deletes only its resources and preserves Team and full gateway teardown', async () => fixture(async (gateway) => {
+  const originalReceipt = canonicalJson(gateway.storage.snapshot());
+  const before = await gateway.view();
+  const source = before.sources[0];
+  const removed = await removeSource(gateway, source.id);
+  assert.equal(removed.status, 200, await removed.clone().text());
+  const sources = await removed.json();
+  assert.deepEqual(sources.sources, []);
+  assert.equal(sources.pendingRemoval, null);
+  assert.deepEqual(gateway.provider.state.portal.servers, []);
+  assert.equal(gateway.provider.state.servers.size, 0);
+  assert.equal(gateway.provider.state.apps.size, 1);
+  assert.deepEqual((await gateway.view()).members.map((member) => member.sourceIds), before.members.map(() => []));
+  assert.equal(canonicalJson(gateway.storage.snapshot()), originalReceipt);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_REMOVAL_KEY), null);
+  assert.equal((await (await gateway.api('/api/status')).json()).source, null);
+  const teardown = await gateway.currentTeardown();
+  assert.equal(teardown.prepared.status, 200, await teardown.prepared.clone().text());
+  const proof = await teardown.send('prove');
+  assert.equal(proof.status, 200, await proof.clone().text());
+  const applied = await teardown.send('apply');
+  assert.equal(applied.status, 200, await applied.clone().text());
+}));
+
+test('individual source removal preserves other source mappings and allows reinstallation without old access', async () => fixture(async (gateway) => {
+  const additional = await prepareNewSource(gateway);
+  assert.equal((await gateway.apply(additional, {}, null)).status, 200);
+  const initial = (await gateway.view()).sources.find((source) => source.id !== additional.source.id);
+  const removed = await removeSource(gateway, initial.id);
+  assert.equal(removed.status, 200, await removed.clone().text());
+  const remaining = await removed.json();
+  assert.deepEqual(remaining.sources.map((source) => source.id), [additional.source.id]);
+  assert.equal(gateway.provider.state.portal.servers.length, 1);
+  assert.equal((await gateway.view()).sources.length, 1);
+  const removedAdditional = await removeSource(gateway, additional.source.id);
+  assert.equal(removedAdditional.status, 200, await removedAdditional.clone().text());
+  assert.equal((await gateway.view()).sources.length, 0);
+  const newInstall = await prepareNewSource(gateway);
+  assert.equal((await gateway.apply(newInstall, {}, null)).status, 200);
+  assert.equal((await gateway.view()).members.every((member) => member.sourceIds.length === 0), true);
+}));
+
+test('individual source removal deletes an unstarted draft without a management token or provider write', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  assert.equal((await gateway.api(`/api/source-actions/${prepared.claim.actionId}`, { method: 'DELETE' })).status, 200);
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  const baseline = gateway.provider.requests.length;
+  const removed = await removeSource(gateway, prepared.source.id);
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.equal((await removed.json()).sources.some((source) => source.id === prepared.source.id), false);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+for (const fault of ['portal', 'server', 'policy', 'application']) {
+  test(`individual source removal resumes after a lost ${fault} response without replaying the successful write`, async () => fixture(async (gateway) => {
+    let intercepted;
+    gateway.provider.hook(({ record, state }) => {
+      if (intercepted) return undefined;
+      if (fault === 'portal' && record.method === 'PUT' && record.pathname.includes('/mcp/portals/')) {
+        state.portal = { ...state.portal, ...structuredClone(record.body) };
+      } else if (fault === 'server' && record.method === 'DELETE' && record.pathname.includes('/mcp/servers/')) {
+        state.servers.delete(record.pathname.split('/').at(-1));
+      } else if (fault === 'policy' && record.method === 'DELETE' && record.pathname.includes('/policies/')) {
+        const appId = record.pathname.split('/').at(-3);
+        state.policies.set(appId, []);
+      } else if (fault === 'application' && record.method === 'DELETE' && /\/apps\/[^/]+$/u.test(record.pathname)) {
+        const appId = record.pathname.split('/').at(-1);
+        state.apps.delete(appId); state.policies.delete(appId);
+      } else return undefined;
+      intercepted = { pathname: record.pathname, method: record.method };
+      throw new Error('synthetic-lost-response');
+    });
+    const first = await removeSource(gateway);
+    assert.equal(first.status, 409, await first.clone().text());
+    assert.ok(intercepted);
+    assert.ok(gateway.managementStorage.snapshot(SOURCE_REMOVAL_KEY));
+    const list = await (await gateway.api('/api/sources')).json();
+    assert.equal(list.pendingRemoval.sourceId, list.sources[0].id);
+    const snapshot = await (await gateway.api('/api/source-actions')).json();
+    assert.equal(snapshot.blockingAction.kind, 'source_removal');
+    const baseline = gateway.provider.requests.length;
+    gateway.reloadManagement();
+    gateway.provider.hook(undefined);
+    const resumed = await removeSource(gateway);
+    assert.equal(resumed.status, 200, await resumed.clone().text());
+    assert.equal(gateway.provider.requests.slice(baseline).some((record) =>
+      record.pathname === intercepted.pathname && record.method === intercepted.method), false);
+    assert.equal((await gateway.view()).sources.length, 0);
+    for (const write of gateway.managementStorage.writes) {
+      assert.equal(JSON.stringify(write).includes(gateway.env.ANKKA_MANAGEMENT_TOKEN), false);
+    }
+  }));
+}
+
+for (const drift of ['server', 'application', 'policy', 'foreign-policy', 'portal', 'foreign-portal']) {
+  test(`individual source removal refuses ${drift} drift before any provider write`, async () => fixture(async (gateway) => {
+    const sourceApp = app(gateway);
+    if (drift === 'server') gateway.provider.state.server.description = 'foreign';
+    if (drift === 'application') sourceApp.name = 'foreign';
+    if (drift === 'policy') policy(gateway).name = 'foreign';
+    if (drift === 'foreign-policy') gateway.provider.state.policies.get(sourceApp.id).push({ ...policy(gateway), id: 'foreign-policy' });
+    if (drift === 'portal') gateway.provider.state.portal.name = 'foreign';
+    if (drift === 'foreign-portal') gateway.provider.hook(({ record }) => {
+      if (record.method !== 'GET') return undefined;
+      if (record.pathname.endsWith('/mcp/portals')) return envelope([{ id: gateway.provider.state.portal.id }, { id: 'foreign' }]);
+      if (record.pathname.endsWith('/mcp/portals/foreign')) return envelope({ id: 'foreign', servers: gateway.provider.state.portal.servers });
+      return undefined;
+    });
+    const baseline = gateway.provider.requests.length;
+    const result = await removeSource(gateway);
+    assert.equal(result.status, 409, await result.clone().text());
+    assert.equal((await result.json()).error, 'source_removal_ownership_conflict');
+    assertNoMutation(gateway.provider, baseline);
+    assert.equal(gateway.managementStorage.snapshot(SOURCE_REMOVAL_KEY), undefined);
+  }));
+}
+
+test('individual source removal rejects stale revisions, non-admins, cross-origin writes and extra authority', async () => fixture(async (gateway) => {
+  const baseline = gateway.provider.requests.length;
+  for (const [options, status] of [
+    [{ body: { schemaVersion: 1, revision: 999 } }, 409],
+    [{ email: MEMBER }, 401],
+    [{ extraHeaders: { origin: 'https://foreign.example.com' } }, 403],
+    [{ body: { schemaVersion: 1, revision: 1, providerId: 'foreign' } }, 400],
+  ]) {
+    const response = await removeSource(gateway, undefined, options);
+    assert.equal(response.status, status, await response.clone().text());
+  }
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('individual source removal retains managed BigQuery receipts even without a retained source action', async () => fixture(async (gateway) => {
+  const baseline = gateway.provider.requests.length;
+  const sources = await (await gateway.api('/api/sources')).json();
+  const sourceId = sources.sources[0].id;
+  await gateway.managementStorage.put(`ankka-mcp-gateway/bigquery-source/v1/${sourceId}`, { synthetic: 'retained receipt' });
+  const bridge = await removeSource(gateway, sourceId);
+  assert.equal((await bridge.json()).error, 'source_removal_managed_bigquery');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('individual source removal requires a token for installed sources', async () => fixture(async (gateway) => {
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  const baseline = gateway.provider.requests.length;
+  const result = await removeSource(gateway);
+  assert.equal((await result.json()).error, 'source_removal_credential_required');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('individual source removal refuses corrupt progress and pending source authorization', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  const baseline = gateway.provider.requests.length;
+  const blocked = await removeSource(gateway);
+  assert.equal((await blocked.json()).error, 'source_removal_action_conflict');
+  await gateway.managementStorage.put(SOURCE_REMOVAL_KEY, { sourceId: prepared.source.id });
+  const invalid = await gateway.api(`/api/sources/${prepared.source.id}`, { method: 'DELETE', body: {
+    schemaVersion: 1, revision: prepared.sources.revision,
+  } });
+  assert.equal((await invalid.json()).error, 'source_removal_unavailable');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('individual source removal locks source, Team, credential and gateway mutations until resumed', async () => fixture(async (gateway) => {
+  const team = await gateway.view();
+  gateway.provider.hook(({ record }) => record.method === 'PUT' && record.pathname.includes('/mcp/portals/')
+    ? envelope(null, 503) : undefined);
+  assert.equal((await removeSource(gateway)).status, 409);
+  gateway.provider.hook(undefined);
+  const sources = await (await gateway.api('/api/sources')).json();
+  const baseline = gateway.provider.requests.length;
+  const sourceSave = await gateway.api('/api/sources', { method: 'PUT', body: { schemaVersion: 1,
+    revision: sources.revision, source: { label: 'Another source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] } } });
+  assert.equal(sourceSave.status, 409);
+  const teamSave = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members: team.members,
+  } });
+  assert.equal(teamSave.status, 409);
+  const teardown = await gateway.currentTeardown();
+  assert.equal(teardown.prepared.status, 409);
+  const credential = await gateway.api('/api/management-credential/actions', { method: 'POST', body: { schemaVersion: 1 } });
+  assert.equal(credential.status, 409);
+  assertNoMutation(gateway.provider, baseline);
+  const resumed = await removeSource(gateway);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+}));
+
+test('individual source removal checks a foreign application policy introduced after preflight', async () => fixture(async (gateway) => {
+  const sourceApp = app(gateway);
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method === 'DELETE' && record.pathname.includes('/mcp/servers/')) {
+      state.policies.get(sourceApp.id).push({ id: 'foreign-policy', decision: 'allow', include: [] });
+    }
+  });
+  const result = await removeSource(gateway);
+  assert.equal(result.status, 409, await result.clone().text());
+  assert.equal(gateway.provider.state.apps.has(sourceApp.id), true);
+  assert.equal(gateway.provider.state.policies.get(sourceApp.id).some((entry) => entry.id === 'foreign-policy'), true);
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.length, 1);
+}));
+
+test('individual source removal leaves an asynchronously accepted delete pending until absence is verified', async () => fixture(async (gateway) => {
+  gateway.provider.hook(({ record }) => record.method === 'DELETE' && record.pathname.includes('/policies/')
+    ? new Response(null, { status: 202 }) : undefined);
+  const first = await removeSource(gateway);
+  assert.equal(first.status, 409, await first.clone().text());
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.length, 1);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_REMOVAL_KEY).step, 2);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_REMOVAL_KEY).pending, true);
+  gateway.provider.hook(undefined);
+  assert.equal((await removeSource(gateway)).status, 200);
+}));
+
+test('individual source removal atomically commits after an interrupted final storage write', async () => fixture(async (gateway) => {
+  const put = gateway.managementStorage.put.bind(gateway.managementStorage);
+  let injected = false;
+  gateway.managementStorage.put = async (key, value) => {
+    if (!injected && key?.[SOURCE_REMOVAL_KEY] === null) {
+      injected = true;
+      throw new Error('synthetic-atomic-storage-failure');
+    }
+    return put(key, value);
+  };
+  const first = await removeSource(gateway);
+  assert.equal(first.status, 409);
+  assert.equal(injected, true);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_REMOVAL_KEY).step, 4);
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.length, 1);
+  gateway.reloadManagement();
+  const baseline = gateway.provider.requests.length;
+  const resumed = await removeSource(gateway);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal((await gateway.view()).sources.length, 0);
+}));
+
+test('individual source removal refuses a resource recreated after a verified deletion', async () => fixture(async (gateway) => {
+  const server = structuredClone(gateway.provider.state.server);
+  gateway.provider.hook(({ record }) => record.method === 'DELETE' && record.pathname.includes('/policies/') ? envelope(null, 503) : undefined);
+  assert.equal((await removeSource(gateway)).status, 409);
+  gateway.provider.hook(undefined);
+  gateway.provider.state.servers.set(server.id, server);
+  const baseline = gateway.provider.requests.length;
+  const resumed = await removeSource(gateway);
+  assert.equal(resumed.status, 409);
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal(gateway.provider.state.servers.has(server.id), true);
+}));
