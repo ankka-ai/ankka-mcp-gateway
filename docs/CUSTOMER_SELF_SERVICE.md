@@ -180,6 +180,19 @@ Cloudflare account, and team members authenticate only to the
 Gateway Portal. The current dashboard does not offer per-user upstream
 authentication. Ankka does not receive the upstream token.
 
+A source that needs sign-in cannot list its tools until it is connected, so you
+never type tool names for it. Save it and install it: the gateway creates it
+with nothing enabled, nobody assigned and no Portal attachment. Connect it in
+Cloudflare, then return to **Sources**: the paused installation lists the tools
+Cloudflare synced from the source, you choose which to allow, and the gateway
+attaches it with exactly those. Descriptions and read-only hints appear only
+when Cloudflare's synced list carries them, and the page says when it carries
+none; check such tools in the source's own documentation. Saving a source
+without tools makes rollback below the installed release unavailable, as
+installing any source does, because older releases cannot read that draft;
+while an earlier release can still be restored, **Save draft** says so. See
+[pending source installations](SOURCE_ACTION_RECOVERY.md#choosing-the-tools-of-a-sign-in-source).
+
 ## Add BigQuery
 
 Compatible releases provide **Sources → Add BigQuery**. Enter your query project

@@ -38,7 +38,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
-    getSourceActions: vi.fn(async () => removalRecorded), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+    getSourceActions: vi.fn(async () => removalRecorded), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
     prepareTeardownAction: vi.fn(async () => ({ schemaVersion: 1 as const, actionId: `action_${'b'.repeat(32)}`, status: 'authorization_required' as const,
       expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `${window.location.origin}${REMOVAL_PAGE}#${'h'.repeat(40)}` })),

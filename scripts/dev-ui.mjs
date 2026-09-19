@@ -32,6 +32,7 @@ Deployment wizard
 Gateway dashboard
   Overview    http://127.0.0.1:5730/?preview=ready
   Sources     http://127.0.0.1:5730/sources?preview=ready
+  Sign-in     http://127.0.0.1:5730/sources?preview=source-sign-in
   Settings    http://127.0.0.1:5730/settings?preview=ready
   Update      http://127.0.0.1:5730/settings?preview=update
   Empty       http://127.0.0.1:5730/?preview=empty

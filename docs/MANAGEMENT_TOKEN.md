@@ -174,7 +174,10 @@ qualification or proof that every narrower permission combination fails.
 
 - Sources: retain the existing draft revision, exact allowlist, default-deny
   audience, ownership receipts, and recovery journal. Execute the prepared
-  source action inside the customer gateway without management OAuth.
+  source action inside the customer gateway without management OAuth. For a
+  sign-in source, read the receipt's own MCP server once to offer its synced
+  tools and once more to validate the choice; both are the existing `GET` of an
+  MCP server, and neither adds a provider write or a permission.
 - Team: read current owned Access policies, expose a verified read time, and
   save only a revision-bound batch. Validate resource ownership before writes;
   retain ambiguous writes for explicit recovery. Policy membership is not a

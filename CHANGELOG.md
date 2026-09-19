@@ -4,6 +4,22 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Pick the tools of a sign-in source from its real list instead of typing exact names. A source whose endpoint
+  answers discovery with a sign-in challenge cannot list its tools before it is connected, so the form asked for
+  typed names, and a typo surfaced only after installation and connection. The form now says why the list is empty
+  and what happens next, and saves the draft with no tools; the free-text box is gone, for catalog presets too. The
+  gateway installs such a source with nothing enabled: no tool override on its server, a deny-Everyone policy, no
+  Portal mapping. After the operator has connected it in Cloudflare, the paused installation lists the tools
+  Cloudflare synced from it as the checkbox list public sources get (catalog recommendations that exist preselected,
+  nothing preselected from a hint), and the choice is saved as a revision-bound step of its own that re-binds the
+  paused installation atomically; resuming then attaches exactly the chosen tools. Cloudflare does not document
+  what a synced tool record carries beyond its name, so a description or a hint is shown only when the record has
+  one, and the page says when a list has none. With nothing chosen the installation stays paused with a fixed
+  reason and is never attached. An installation already paused with typed names resumes as before, and a typed name
+  can be corrected from the real list. An installation that waits for its operator is no longer shown as "The
+  gateway request failed". Older releases cannot read a source saved without tools, so saving one makes rollback
+  below this release unavailable, as installing any source does, and **Save draft** carries the rollback sentence
+  while that is a real decision; every other draft still restricts nothing. Public sources are unchanged.
 - Set up the gateway's management token inside setup. A freshly installed gateway could not add a source or manage
   team access until an administrator had created an account API token by hand and added it as a Worker secret in
   Cloudflare, and nothing in the installer said so. The setup page your own Worker serves before the second approval

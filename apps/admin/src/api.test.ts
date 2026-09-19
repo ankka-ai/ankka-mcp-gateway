@@ -516,3 +516,92 @@ describe('HttpGatewayAdminApi', () => {
     })
   })
 })
+
+// A sign-in source is installed with nothing enabled; its tools are chosen afterwards from Cloudflare's synced list.
+describe('the tool choice of a sign-in source', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  const actionId = `action_${'a'.repeat(32)}`
+  const sourceId = 'source-1111111111111111'
+  const bare = { title: null, description: null, readOnlyHint: null, destructiveHint: null, openWorldHint: null }
+  const offered = { schemaVersion: 1, actionId, sourceId, state: 'ready', tools: [
+    { name: 'records_export', ...bare },
+    { name: 'records_search', ...bare, title: 'Search records', description: 'Search records.', readOnlyHint: true, destructiveHint: false },
+  ] }
+
+  it('reads the real tools of a paused installation through its own endpoint, in every fixed state', async () => {
+    for (const answer of [offered, ...['connection_required', 'sync_required', 'unsupported'].map((state) => ({ ...offered, state, tools: [] }))]) {
+      const fetch = vi.fn(async () => Response.json(answer))
+      vi.stubGlobal('fetch', fetch)
+      await expect(new HttpGatewayAdminApi().getSourceActionTools(actionId)).resolves.toEqual(answer)
+      expect(fetch).toHaveBeenCalledExactlyOnceWith(`/api/source-actions/${actionId}/tools`, expect.not.objectContaining({ method: 'POST' }))
+    }
+  })
+
+  it('fails closed on anything a tool list should not carry', async () => {
+    for (const invalid of [
+      { ...offered, connectionUrl: 'synthetic-sensitive-link' },
+      { ...offered, state: 'partially_ready' },
+      { ...offered, tools: [{ name: 'records_search', ...bare, inputSchema: { type: 'object' } }] },
+      { ...offered, tools: [{ ...bare }] },
+      { ...offered, tools: [{ name: 'records_search', ...bare, readOnlyHint: 'yes' }] },
+      { ...offered, tools: Array.from({ length: 501 }, (_, index) => ({ name: `tool_${index}`, ...bare })) },
+      { ...offered, tools: 'records_search' },
+      { ...offered, actionId: 'action_short' },
+      { ...offered, schemaVersion: 2 },
+    ]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json(invalid)))
+      const error = await new HttpGatewayAdminApi().getSourceActionTools(actionId).catch((cause: unknown) => cause)
+      expect(error).toMatchObject({ code: 'response_invalid', status: 502 })
+      expect(JSON.stringify(error)).not.toContain('synthetic-sensitive')
+    }
+  })
+
+  it('saves a choice as a sorted list without repeats, bound to the draft revision', async () => {
+    const chosen = { schemaVersion: 1, actionId, sourceId, revision: 8, enabledTools: ['records_export', 'records_search'] }
+    const fetch = vi.fn(async () => Response.json(chosen))
+    vi.stubGlobal('fetch', fetch)
+    await expect(new HttpGatewayAdminApi().chooseSourceActionTools(actionId, 7, sourceId, ['records_search', 'records_export', 'records_search']))
+      .resolves.toEqual(chosen)
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(`/api/source-actions/${actionId}/tools`, expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision: 7, sourceId, enabledTools: ['records_export', 'records_search'] }),
+    }))
+    for (const invalid of [{ ...chosen, enabledTools: [] }, { ...chosen, revision: 0 }, { ...chosen, handoffUrl: 'synthetic' },
+      { ...chosen, enabledTools: ['n'.repeat(129)] }, { schemaVersion: 1, actionId, sourceId, revision: 8 }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json(invalid)))
+      await expect(new HttpGatewayAdminApi().chooseSourceActionTools(actionId, 7, sourceId, ['records_search']))
+        .rejects.toMatchObject({ code: 'response_invalid' })
+    }
+  })
+
+  it('keeps the two reasons such an installation waits for, and a source saved without tools', async () => {
+    const action = { schemaVersion: 1, actionId, sourceId, status: 'recovery_required', state: 'recovery_required',
+      issuedAt: '2030-01-01T00:00:00.000Z', expiresAt: '2030-01-01T00:10:00.000Z', canCancel: false, canRenew: true }
+    for (const failureCode of ['source_tools_required', 'source_tools_chosen']) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, actions: [{ ...action, failureCode }], blockingAction: null })))
+      expect((await new HttpGatewayAdminApi().getSourceActions()).actions[0]?.failureCode).toBe(failureCode)
+    }
+    const sources = { schemaVersion: 1, revision: 3, applyMode: 'account_token', installationEnabled: true, sources: [
+      { id: sourceId, label: 'Customer records', url: 'https://records.example.com/mcp', authMode: 'oauth', onBehalfOfUser: false, enabledTools: [], status: 'draft' }] }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(sources)))
+    expect((await new HttpGatewayAdminApi().getSources()).sources[0]?.enabledTools).toEqual([])
+  })
+
+  it.each([
+    ['source_connection_required', /installed with nothing enabled and nobody assigned/u],
+    ['source_sync_required', /has not finished syncing the tools/u],
+    ['source_tools_required', /Choose its tools below to finish installation/u],
+    ['source_tools_mismatch', /not in the list Cloudflare synced from this source/u],
+    ['source_tools_unavailable', /not waiting for a tool choice/u],
+    ['source_tools_invalid', /between 1 and 500 tools/u],
+    ['source_tools_unsupported', /cannot be offered here\. Nothing was enabled/u],
+    ['source_catalogue_unavailable', /did not return this source’s server record/u],
+  ])('names %s instead of a failed request', async (code, wording) => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, error: code, detail: 'synthetic-sensitive-provider-text' }, { status: 409 })))
+    const error = await new HttpGatewayAdminApi().getSourceActionTools(actionId).catch((cause: unknown) => cause)
+    if (!(error instanceof GatewayApiError)) throw new Error('Expected a gateway refusal')
+    expect(error).toMatchObject({ code, status: 409 })
+    expect(error.message).toMatch(wording)
+    expect(error.message).not.toContain('synthetic-sensitive')
+  })
+})

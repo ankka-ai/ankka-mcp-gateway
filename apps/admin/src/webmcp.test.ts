@@ -129,6 +129,8 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
     getSourceAction: vi.fn(async (_actionId: string) => sourceAction),
     cancelSourceAction: vi.fn<GatewayAdminApi['cancelSourceAction']>(async () => ({ ...sourceAction, status: 'failed' })),
+    getSourceActionTools: vi.fn<GatewayAdminApi['getSourceActionTools']>(),
+    chooseSourceActionTools: vi.fn<GatewayAdminApi['chooseSourceActionTools']>(),
     prepareRuntimeAction: vi.fn<GatewayAdminApi['prepareRuntimeAction']>(async (operation) => ({ ...prepared, operation })),
     getRuntimeAction: vi.fn(async (_actionId: string) => runtimeAction),
     prepareTeardownAction: vi.fn(async () => prepared),
