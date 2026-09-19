@@ -1,3 +1,5 @@
+import { customerPageEnd, customerPageStart } from './customer-page-shell';
+import { customerLoadingIndicator } from './customer-page-theme';
 import * as v from 'valibot';
 import { bigQueryCredentialPage } from './customer-bigquery-credential-page';
 import { readBigQueryText } from './customer-bigquery-contract';
@@ -427,11 +429,11 @@ function failureReason<Thrown>(error: Thrown): CustomerOperationReason {
   return 'unexpected';
 }
 
-function operationPage(): Response {
+export function operationPage(): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
   const pageHeaders = headers('text/html; charset=utf-8');
   pageHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Authorize in Cloudflare</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Authorize this change in Cloudflare</h1><p id="message">Preparing a fresh, temporary Cloudflare approval for your gateway…</p><button id="retry" hidden>Try again</button><p><a href="/sources">Back to the dashboard</a></p><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const run=async()=>{retry.hidden=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_OPERATION_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.replace(value.authorizationUrl)}catch{message.textContent='This authorization link could not be started. Go back to the dashboard, check the action status, and authorize again.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script></html>`, {
+  return new Response(`${customerPageStart('Authorize in Cloudflare', 'message')}<h1>Authorize this change in Cloudflare</h1><div id="progress">${customerLoadingIndicator}</div><p id="message" role="status" aria-live="polite">Preparing a fresh, temporary Cloudflare approval for your gateway…</p><button id="retry" hidden>Try again</button><p><a href="/sources">Back to the dashboard</a></p><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');const progress=document.querySelector('#progress');const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const run=async()=>{retry.hidden=true;progress.hidden=false;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_OPERATION_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.replace(value.authorizationUrl)}catch{progress.hidden=true;message.textContent='This authorization link could not be started. Go back to the dashboard, check the action status, and authorize again.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script>${customerPageEnd}`, {
     status: 200,
     headers: pageHeaders,
   });

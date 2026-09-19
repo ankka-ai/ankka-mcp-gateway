@@ -20,7 +20,7 @@ import type {
 } from './api'
 
 const PREVIEW_SCENARIOS = [
-  'empty', 'ready', 'update', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential',
+  'empty', 'ready', 'update', 'update-running', 'update-failed', 'loading', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential',
   'source-pending', 'source-applying', 'source-expired', 'source-recovery', 'source-completed', 'source-late-success', 'source-lifecycle',
 ] as const
 type PreviewScenario = typeof PREVIEW_SCENARIOS[number]
@@ -172,6 +172,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
 
   async getStatus(): Promise<GatewayStatus> {
+    // Keep the development-only loading screen available for visual inspection.
+    if (this.#scenario === 'loading') return new Promise<GatewayStatus>(() => {});
     if (this.#scenario === 'error') throw new Error('Synthetic preview error: the gateway could not be reached.')
     return structuredClone(status)
   }
@@ -211,7 +213,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     this.#team.proposedMembers = null
     return structuredClone(this.#team.pendingAction)
   }
-  async getUpdate(): Promise<RuntimeUpdate> { return update(this.#scenario === 'update') }
+  async getUpdate(): Promise<RuntimeUpdate> { return update(this.#scenario.startsWith('update')) }
 
   async discoverSource(url: string): Promise<SourceDiscovery> {
     return {
@@ -329,12 +331,12 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       schemaVersion: 1,
       actionId: ACTION_ID,
       operation: 'update',
-      status: 'succeeded',
-      stage: 'activated',
+      status: this.#scenario === 'update-running' ? 'applying' : this.#scenario === 'update-failed' ? 'recovery_required' : 'succeeded',
+      stage: this.#scenario === 'update-running' ? 'verifying_release' : 'activated',
       from: { release: 'gateway-v0.1.12', artifactSha256: `sha256:${'1'.repeat(64)}` },
       to: { release: 'gateway-v0.1.13', artifactSha256: `sha256:${'2'.repeat(64)}` },
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
-      failureCode: null,
+      failureCode: this.#scenario === 'update-failed' ? 'update_failed' : null,
     }
   }
 

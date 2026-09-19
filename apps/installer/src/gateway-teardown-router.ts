@@ -1,3 +1,4 @@
+import { customerPageEnd, customerPageStart } from './customer-page-shell';
 import * as v from 'valibot';
 import { canonicalJson } from './canonical-json';
 import { exactOperationScopes } from './cloudflare-operation-authority';
@@ -38,15 +39,13 @@ function sameOrigin(request: Request): boolean {
     request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() === 'application/json';
 }
 
-function page(): Response {
+export function page(): Response {
   const nonce = randomBase64Url(18);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Remove your gateway · Ankka</title>
-<style>body{font:16px/1.55 system-ui,sans-serif;max-width:44rem;margin:4rem auto;padding:0 1.25rem;color:#171713;background:#fafaf7}h1{font-size:2rem;line-height:1.2}button,input{font:inherit}button{padding:.7rem 1rem;cursor:pointer}li{margin:.5rem 0}.warning{padding:1rem;background:#fff3d2}section{margin:2rem 0}small{display:block;margin-top:1rem}#receipt{max-width:100%}</style>
-<main><p>Ankka MCP Gateway</p><h1>Finish removing your gateway</h1><p id="message" role="status">Loading removal progress…</p><small id="failure" hidden></small>
+  return new Response(`${customerPageStart('Remove your gateway · Ankka', 'form')}<p class="eyebrow">Gateway removal</p><h1>Finish removing your gateway</h1><p id="message" role="status">Loading removal progress…</p><small id="failure" hidden></small>
 <section id="review" hidden><p id="target"></p><p>Your sources and Portal have already been removed. A fresh Cloudflare approval lets Ankka finish removing the gateway's storage, management page, and Worker from your account.</p><ol id="steps"></ol>
 <p id="warning" class="warning" hidden>A previous temporary Cloudflare approval could not be confirmed revoked. Review Ankka MCP Gateway in Cloudflare → My Profile → Access Management → Connected Applications and revoke that approval.</p>
-<button id="authorize" hidden>Authorize final removal</button><p><button id="download">Download recovery receipt</button></p><small>Keep this receipt to resume if you lose this browser session. It contains resource references and signed removal evidence, but no credentials.</small></section>
-<section><label for="receipt">Resume from a saved recovery receipt</label><p><input id="receipt" type="file" accept="application/json,.json"></p></section></main>
+<button class="danger" id="authorize" hidden>Authorize final removal</button><p><button class="secondary" id="download">Download recovery receipt</button></p><small>Keep this receipt to resume if you lose this browser session. It contains resource references and signed removal evidence, but no credentials.</small></section>
+<section><label for="receipt">Resume from a saved recovery receipt</label><p><input id="receipt" type="file" accept="application/json,.json"></p></section>
 <script nonce="${nonce}">(()=>{const message=document.querySelector('#message'),review=document.querySelector('#review'),authorize=document.querySelector('#authorize');let current;
 const api=async(path,body)=>{const response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'content-type':'application/json',...(current?{'x-csrf-token':current.csrfToken}:{})},body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',cache:'no-store'});if(!response.ok)throw new Error('Removal could not continue. Reload this page or use your saved recovery receipt.');return response.json()};
 const show=value=>{current=value;review.hidden=false;document.querySelector('#target').textContent='Gateway: '+value.hostname;message.textContent=value.message;const failure=document.querySelector('#failure');failure.hidden=!value.failureReason;failure.textContent=value.failureReason?'Removal reference: '+value.failureReason:'';document.querySelector('#warning').hidden=!value.revocationUnconfirmed;authorize.hidden=!value.canAuthorize;authorize.disabled=false;authorize.textContent=value.started?'Authorize and resume removal':'Authorize final removal';const steps=document.querySelector('#steps');steps.replaceChildren(...value.steps.map(step=>{const item=document.createElement('li');item.textContent=step.label+(step.done?' — Removed':'');return item}))};
@@ -55,7 +54,7 @@ const accept=async(handoff)=>{await api('/api/teardown/import',{handoff});histor
 authorize.onclick=async()=>{authorize.disabled=true;try{const value=await api('/api/teardown/authorize',{});location.assign(value.authorizationUrl)}catch(error){message.textContent=error.message;authorize.disabled=false}};
 document.querySelector('#download').onclick=()=>{if(!current)return;const url=URL.createObjectURL(new Blob([current.handoff],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ankka-removal-receipt.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
 document.querySelector('#receipt').onchange=async(event)=>{try{const file=event.target.files[0];if(!file||file.size>32768)throw new Error('Choose an Ankka removal receipt smaller than 32 KB.');await accept(await file.text())}catch(error){message.textContent=error.message}};
-(async()=>{try{const fragment=location.hash.slice(1);if(fragment){if(!/^[A-Za-z0-9_-]{40,45000}$/.test(fragment))throw new Error('This removal link is invalid.');const bytes=Uint8Array.from(atob(fragment.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));await accept(new TextDecoder('utf-8',{fatal:true}).decode(bytes))}else await load()}catch(error){message.textContent=error.message}})()})();</script></html>`, {
+(async()=>{try{const fragment=location.hash.slice(1);if(fragment){if(!/^[A-Za-z0-9_-]{40,45000}$/.test(fragment))throw new Error('This removal link is invalid.');const bytes=Uint8Array.from(atob(fragment.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0));await accept(new TextDecoder('utf-8',{fatal:true}).decode(bytes))}else await load()}catch(error){message.textContent=error.message}})()})();</script>${customerPageEnd}`, {
     headers: { ...headers, 'content-type': 'text/html; charset=utf-8',
       'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'` },
   });

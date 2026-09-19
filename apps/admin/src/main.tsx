@@ -8,6 +8,7 @@ import { createPreviewGatewayAdminApi } from './preview-api'
 import { router } from './router'
 import { WebMcpTools } from './WebMcpTools'
 import './styles.css'
+import { customerLoadingStyles } from '../../installer/src/customer-page-theme'
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing root element')
@@ -26,6 +27,7 @@ createRoot(root).render(
   <StrictMode>
     <TooltipProvider>
       <Toasty>
+        <style>{customerLoadingStyles}</style>
         <InstallHandoff>{gateway}</InstallHandoff>
       </Toasty>
     </TooltipProvider>
