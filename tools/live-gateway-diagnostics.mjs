@@ -16,7 +16,7 @@ export function sanitizeRuntimeMetrics(rows) {
 }
 export async function lifecycleFailureReport({ events, failureCode, httpStatus, navigation = null, metrics }) {
   const last = events.findLast((event) => stages.has(event.stage));
-  const pending = events.findLast((event) => mutations.has(event.stage) && ['started', 'recorded', 'receipt_saved'].includes(event.status));
+  const pending = events.findLast((event) => mutations.has(event.stage) && ['started', 'approval_started', 'recorded', 'receipt_saved'].includes(event.status));
   const provision = events.findLast((event) => event.provision)?.provision;
   let runtimeMetrics = null;
   if (metrics && provision) {
@@ -27,6 +27,7 @@ export async function lifecycleFailureReport({ events, failureCode, httpStatus, 
     navigation: navigationFailureLabel(navigation),
     lastMutationStage: pending?.stage ?? null,
     removalReceiptAvailable: events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
+    managementToken: managementTokenPath(events), managementTokenFallback: managementTokenFallback(events),
     tabsReopened: tabReopenings(events),
     dependencyRemoval: dependencyRemovalSummary(events),
     rootRemoval: rootRemovalSummary(events),
@@ -39,6 +40,32 @@ const label = (value) => v.is(v.pipe(v.string(), v.regex(/^[a-z_]{1,32}$/u)), va
 
 /** Why a `navigation_failed` stop happened, within the fixed vocabulary; null outside it and for every other stop. */
 export const navigationFailureLabel = (value) => NAVIGATION_FAILURES.includes(value) ? value : null;
+
+/**
+ * Which path set the gateway's management token, as one fixed word from the journal: `pasted_at_setup` (the customer's
+ * path: the runner entered it at the setup step and the install's final upload carried it), `installed_by_runner` (the
+ * provider port's secret write), `operator` (no opt-in: the operator installed it in Cloudflare), or
+ * `already_configured` when a pass found the credential reported and the journal names no earlier path. A pasted
+ * value the shell dropped, or the gateway never reported, set nothing. Null before any outcome.
+ */
+export function managementTokenPath(events) {
+  let path = null;
+  for (const event of events) {
+    if (event.stage !== 'management_token') continue;
+    if (['pasted_at_setup', 'installed_by_runner', 'operator'].includes(event.status)) path = event.status;
+    else if (['dropped_at_setup', 'not_reported'].includes(event.status)) path = null;
+    else if (event.status === 'already_configured') path ??= 'already_configured';
+  }
+  return path;
+}
+
+/** Why the customer's path did not set the token, as the journal's last fixed word for it: the setup page offered no
+ * step, the shell refused the value's form, the shell dropped the value, or the gateway never reported it. Null when
+ * nothing of the kind was recorded. */
+export function managementTokenFallback(events) {
+  return events.findLast((event) => event.stage === 'management_token' &&
+    ['step_not_offered', 'refused_at_setup', 'dropped_at_setup', 'not_reported'].includes(event.status))?.status ?? null;
+}
 
 /** How many times the runner replaced a test tab the browser had discarded or crashed, from the journal. */
 export const tabReopenings = (events) => events.filter((event) => event.stage === 'browser' && event.status === 'tab_reopened').length;

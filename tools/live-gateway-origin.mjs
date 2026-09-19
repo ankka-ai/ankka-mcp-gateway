@@ -17,6 +17,13 @@ export class LiveGatewayBrowserError extends Error {
  * the error text, which can carry the URL, never does. */
 export const NAVIGATION_FAILURES = Object.freeze(['closed', 'crashed', 'timeout', 'other']);
 
+/** The customer shell's fixed words about the management step of setup, as its answer to the step and its public
+ * install status carry them: `held` while it keeps a pasted value in memory for the final upload, `installed` once
+ * that upload carried it, `skipped`, and `dropped` when a provided value is no longer in memory. Only these words
+ * leave the browser port or enter the journal; anything else reads as null. */
+export const MANAGEMENT_STEP_WORDS = Object.freeze(['held', 'installed', 'skipped', 'dropped']);
+export const managementStepWord = (value) => MANAGEMENT_STEP_WORDS.includes(value) ? value : null;
+
 export function validateLiveBrowserOrigin(value) {
   let url;
   try { url = new URL(value); } catch { throw new LiveGatewayBrowserError('origin_invalid'); }

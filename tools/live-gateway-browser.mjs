@@ -1,7 +1,7 @@
 import { chromium } from 'playwright-core';
 import * as v from 'valibot';
 import { createLiveGatewayAccess, LiveGatewayAccessError } from './live-gateway-access.mjs';
-import { LiveGatewayBrowserError, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
+import { LiveGatewayBrowserError, managementStepWord, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
 
 export { LiveGatewayBrowserError, NAVIGATION_FAILURES, validateLiveBootstrapOrigin, validateLiveBrowserOrigin } from './live-gateway-origin.mjs';
 
@@ -11,7 +11,29 @@ const BOOTSTRAP_PATH = /^\/__ankka\/install\/(?:status|setup|configuration|oauth
  * lifecycle path that carries a query. */
 const REMOVAL_PROGRESS_PATH = /^\/__ankka\/operation\/teardown\/progress\?attempt=attempt_[A-Za-z0-9_-]{24}$/u;
 const REMOVAL_ATTEMPT = /^attempt_[A-Za-z0-9_-]{24}$/u;
+/** The management step of the customer's own setup page, the one lifecycle request that can carry the operator's
+ * management token: a POST, and only to a shell on workers.dev, which is the customer's own Worker. Never to the
+ * installer, which is hosted, and never to the installed gateway's management origin. */
+const MANAGEMENT_STEP_PATH = '/__ankka/install/management-token';
 const METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
+
+/** The shell's one word about the management step, from its answer to the step or from its public install status;
+ * null for anything outside the fixed vocabulary, and for the final runtime's status, which carries no word. */
+export function managementStepWordOf(answer) {
+  return managementStepWord(answer?.managementCredential);
+}
+
+/**
+ * Whether Playwright's debug output is switched on in this environment. `DEBUG` enables its `pw:` loggers, and
+ * `pw:channel` prints every message the client sends to its driver, an API request's body included; `PWDEBUG` opens
+ * its inspector over each call. Either would show the request that carries the management token, so the token is
+ * never sent under them. Judged broadly on purpose: any non-empty `DEBUG`, and any `PWDEBUG` Playwright does not
+ * read as off.
+ */
+export function browserDebugOutputEnabled(env = process.env) {
+  const set = (value) => v.is(v.pipe(v.string(), v.minLength(1)), value);
+  return set(env.DEBUG) || (set(env.PWDEBUG) && !['0', 'false'].includes(env.PWDEBUG));
+}
 
 /**
  * A gateway action applies Portal and Access policy changes before it answers, and a Team write has taken more than
@@ -49,8 +71,14 @@ export function heldOriginMatcher(hold) {
   return (url) => hold.origin !== null && url.origin === hold.origin;
 }
 
+/** A customer shell's origin by its form: the installer and the management hostname live in the operator's zone. */
+function onWorkersDev(origin) {
+  try { return new URL(origin).hostname.endsWith('.workers.dev'); } catch { return false; }
+}
+
 export function validateLiveBrowserRequest(origins, origin, path, method) {
-  const lifecyclePath = API_PATH.test(path) || BOOTSTRAP_PATH.test(path) || (method === 'GET' && REMOVAL_PROGRESS_PATH.test(path));
+  const lifecyclePath = API_PATH.test(path) || BOOTSTRAP_PATH.test(path) || (method === 'GET' && REMOVAL_PROGRESS_PATH.test(path)) ||
+    (method === 'POST' && path === MANAGEMENT_STEP_PATH && onWorkersDev(origin));
   if (!origins.includes(origin) || !lifecyclePath || !METHODS.has(method)) {
     throw new LiveGatewayBrowserError('request_outside_lifecycle');
   }
@@ -163,9 +191,19 @@ export function recordedReceiptOf(progress, installerOrigin) {
 }
 
 /** An explicitly authorized Chrome connection borrows its context and owns only
- * a new tab. Never close that context or export browser storage, traces or HAR. */
-export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify, checkpoint = async () => {}, browserType = chromium, accessFactory = createLiveGatewayAccess }) {
+ * a new tab. Never close that context or export browser storage, traces or HAR. The port starts no Playwright
+ * tracing, HAR or video recording and takes no screenshot: the management step's request relies on that. */
+export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserProfile, browserConnection, headless = false, notify, checkpoint = async () => {}, browserType = chromium, accessFactory = createLiveGatewayAccess, env = process.env }) {
   const origins = [installerOrigin, managementOrigin].map(validateLiveBrowserOrigin);
+  // The shells this run adopted, and the shell's last word about the management step: from its answer to the step,
+  // then from its public install status as the customer's own progress page polls it while the install runs. The
+  // runner adds no poll of its own, so it never keeps the shell's object awake where a customer's browser would not.
+  const shells = new Set();
+  let shellWord = null;
+  async function noteManagementStep(response) {
+    // A poll the page's next navigation cut short says nothing, and the final runtime's status carries no word.
+    try { shellWord = managementStepWordOf(await response.json()) ?? shellWord; } catch { /* nothing read */ }
+  }
   const accessCancellation = new AbortController();
   const installAccess = accessFactory({ origins, email: basics.adminEmail, notify, signal: accessCancellation.signal });
   // Origins whose Access session the runner installed, with the time of that install.
@@ -239,6 +277,7 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     tab.on('response', (response) => {
       let url;
       try { url = new URL(response.url()); } catch { return; }
+      if (shells.has(url.origin) && url.pathname === '/__ankka/install/status') { void noteManagementStep(response); return; }
       if (response.request().resourceType() !== 'document') return;
       if (url.origin === installerOrigin && url.pathname === '/teardown') lastReceiptHop = receiptHopOf(response.status(), response.headers());
       if (url.origin === installerOrigin && url.pathname === '/') lastInstallerLoad = receiptHopOf(response.status(), response.headers());
@@ -432,8 +471,33 @@ export async function openLiveGatewayBrowser({ installerOrigin, managementOrigin
     adoptBootstrap(provision) {
       const origin = validateLiveBootstrapOrigin(provision);
       if (!origins.includes(origin)) origins.push(origin);
+      shells.add(origin);
       return origin;
     },
+    /**
+     * Answers the management step of the customer's own setup page as that page does: one same-origin POST to the
+     * shell this run adopted, carrying the token ("Use this token") or, without a value, the choice to go on without
+     * one ("Continue without a token"). The value rides in that request's body and nowhere else. It is never typed
+     * into a page, so no DOM, screenshot or browser network log holds it; this port records no trace, HAR or video;
+     * a refusal leaves as a fixed code with at most the HTTP status, never a body or the browser's error text; and
+     * with Playwright's debug output switched on the token is not sent at all. The request is sent once: a shell's
+     * origin never takes the Access retry, and an answer that never arrives stops the run like any other lost
+     * write. Only the shell's fixed word leaves. Like the page, the port trims the value and sends no empty one; the
+     * shell alone judges its form.
+     */
+    async answerManagementStep(provision, value = null) {
+      const origin = validateLiveBootstrapOrigin(provision);
+      if (!shells.has(origin)) throw new LiveGatewayBrowserError('bootstrap_identity_invalid');
+      if (value !== null && browserDebugOutputEnabled(env)) throw new LiveGatewayBrowserError('browser_debug_output_enabled');
+      if (value !== null && !v.is(v.pipe(v.string(), v.trim(), v.minLength(1)), value)) throw new LiveGatewayBrowserError('management_token_unavailable');
+      const answer = await request(origin, MANAGEMENT_STEP_PATH, { method: 'POST', body: value === null ? { skip: true } : { managementToken: value.trim() } });
+      const word = managementStepWordOf(answer);
+      shellWord = word ?? shellWord;
+      return word;
+    },
+    /** The shell's last word about the management step (`dropped` once it no longer holds a pasted value); null
+     * before any. */
+    managementStepWord: () => shellWord,
     async continueHandoff(value, kind) {
       const path = kind === 'teardown' ? '/__ankka/operation/teardown' : '/__ankka/operation';
       // A removal round's evidence is its own: the hop's answer and the attempt of an earlier round never count for it.

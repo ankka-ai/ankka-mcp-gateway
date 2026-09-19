@@ -8,6 +8,23 @@ Notable public product and repository changes are recorded here.
   (`managementCredentialAtInstall`), the path a customer's pasted token takes, so that path is proven against
   Cloudflare without a person. The manage stage's own secret write stays the default.
 
+- Take the customer's path for the management token in the attended browser lifecycle runner. The setup page your
+  own Worker serves now has a **Management token** step that keeps its Approve button hidden until it is answered.
+  The runner gets through Stage 2 by that page's routes, so it now answers the step before it starts the approval:
+  with the `managementToken` opt-in it reads the token from the operator's credential store and sends the request the
+  page sends for "Use this token" (one `POST /__ankka/install/management-token` to the shell this run installed),
+  and the install's final upload writes the secret; without the opt-in it sends "Continue without a token" and the
+  operator is prompted as before. The value rides in that one request body only: it is never typed into a page, the
+  browser port records no trace, HAR, video or screenshot, refusals leave as fixed codes, and a fresh run with the
+  opt-in stops as `browser_debug_output_enabled` before anything is deployed while `DEBUG` or `PWDEBUG` is set,
+  because Playwright's debug output prints request bodies. Writing the Worker secret through Cloudflare's API is now
+  the fallback, made at most once: when the shell refused the value's form, when the shell's last word was `dropped`
+  (read from the customer's own progress page's status polls, never from a poll of the runner's), when the gateway
+  never reported the credential within the wait, or when there was no step to paste into (an older release, or
+  `--resume-installed`). The operator token therefore no longer needs Workers Scripts Write in the normal case.
+  `--status` and the failure report name the path that set the token (`pasted_at_setup`, `installed_by_runner`,
+  `already_configured`, `operator`) and, as `managementTokenFallback`, why the customer's path did not.
+
 - Say before an install starts that setup needs one account API token, who can create it, and that it is pasted into
   your own gateway, on the hosted installer's first screen, in its review step and in "How permissions work" (which
   still described adding the token by hand in Cloudflare). The last removal page now names the management token setup

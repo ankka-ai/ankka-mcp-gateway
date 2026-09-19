@@ -27,7 +27,8 @@ returned by Cloudflare's same-origin `/cdn-cgi/access/get-identity` endpoint.
 It does not qualify the lifecycle or verify dashboard login. Use `--preflight`
 to additionally validate the signed release pair, read the target provider
 inventory with the operator token and, when the config opts into the automatic
-management-token step, check that its reference resolves. These checks cannot
+management-token step, check that its reference resolves and that the
+environment would not print the step's request (see below). These checks cannot
 prove that all future write permissions or consent steps will succeed.
 
 After the Stage 1 consent the installer page hops to the new shell as soon as the
@@ -36,6 +37,21 @@ hop; an edge that does not serve the fresh Worker yet answers it 404 and the
 shell never receives its session. The runner therefore answers the page's
 handoff poll with the installer's own not-ready body until the shell answers
 the runner from its vantage point, then lets the page hop.
+
+The runner gets through Stage 2 by the setup page's routes, not by its
+controls: it sends the requests that page sends (`/__ankka/install/setup`,
+`/configuration`, `/management-token`, `/oauth/start`) through the test
+browser's context, which holds the setup session, and the operator reviews only
+the Cloudflare consent. The setup page's **Management token** step keeps the
+Approve button hidden until it is answered, and the shell locks the step once
+an approval runs, so the runner answers it before it starts the approval, as
+the page would: with the `managementToken` opt-in it sends the token ("Use this
+token"), without it the choice to go on ("Continue without a token"). Both are
+described [below](#full-browser-lifecycle). A release whose setup page predates
+the step offers none in its setup view and is asked nothing
+(`management_token: step_not_offered`). The approval that follows has its own
+checkpoint, `installation: approval_started`, so a stop while it waits is
+reported as the installation's and not as the step's.
 
 After the Stage 2 consent the shell creates a proxied placeholder record for
 the new management hostname as its first write and releases it right before
@@ -119,7 +135,8 @@ npm run validate:lifecycle:live -- --config /private/path/config.json --status
 ```
 
 The summary includes scope, passed stages, the last stage, a fixed failure code,
-whether a removal receipt is available and, once the service identity was
+whether a removal receipt is available, which path set the management token
+and, once the service identity was
 proven, its admission, the refused operations and the layer that refused the
 foreign identity. It omits configuration, credentials, and the receipt itself.
 `--resume-installed` continues a journal whose installation
@@ -157,8 +174,9 @@ The private config has these fields:
   step described below. It names the token by reference only, in the form
   `serviceAccess.secret` uses: `{ "keychain": { "service": "…", "account": "…" } }`
   for a macOS keychain item, or `{ "env": "ANKKA_…" }` for an environment
-  variable. The config never holds the value. Without this field you install
-  the secret in Cloudflare when prompted, as before.
+  variable. The config never holds the value. Without this field the runner
+  continues setup without a token and you install the secret in Cloudflare
+  when prompted, as before.
 - Optional `browserProfile`: an absolute, dedicated Chrome profile directory outside
   the checkout, mode `0700`. Its `.ankka-lifecycle-profile` marker contains
   `Dedicated Ankka lifecycle test browser` followed by a newline. Never select your
@@ -192,32 +210,88 @@ The private config has these fields:
 
 Provide the already-authorized operator token through `CLOUDFLARE_API_TOKEN`.
 It is used for isolated installer deployment and direct Cloudflare read-back,
-and with the opt-in below for one secret write. The command never sends it to
-the installer or gateway.
+and, only as the fallback of the opt-in below, for one secret write. The
+command never sends it to the installer or gateway.
 
-Without `managementToken` in the config, the distinct management token is
+Without `managementToken` in the config, the runner answers the setup page's
+management step with "Continue without a token"
+(`management_token: skipped_at_setup`). The distinct management token is then
 entered directly as the installed gateway's encrypted `ANKKA_MANAGEMENT_TOKEN`
-secret in Cloudflare, and the command never receives that token. With
-`managementToken`, the command installs the secret itself: once the
-installation has passed it reads the token from your credential store into
-memory and writes it as that secret of the installed Worker through
-Cloudflare's API (`PUT /accounts/{account}/workers/scripts/{worker}/secrets`)
-with the operator token, which needs Workers Scripts Write (Edit in the
-dashboard) on the account for it. The value goes to Cloudflare's API and
-nowhere else: never to the installer, the gateway's routes or the browser, and
-never into command arguments, output, error messages or the journal. The
-journal records `management_token: started` before the write and
-`management_token: installed_by_runner` after it; `--status` shows the outcome
-as `managementToken`. The gateway's own view is read first, and a gateway that
-already reports the credential (a resumed run, or a token you installed by hand
-meanwhile) is recorded as `already_configured` and not written again. A write
-Cloudflare refuses stops the run as `management_token_write_rejected`, and one
-whose answer never arrives as `management_token_write_unknown`; neither is
-retried, and `--resume-installed` continues from the gateway's view. A
-reference that does not resolve stops a fresh run, and `--preflight`, as
-`credential_unavailable` before anything is deployed. Either way the run then
-waits until the gateway itself reports the credential and token-managed mode.
-Removing the gateway does not revoke the token.
+secret in Cloudflare when the command prompts, and the command never receives
+that token; once the gateway reports it the journal records
+`management_token: operator`.
+
+With `managementToken`, the command takes the customer's path. Before it starts
+the Stage 2 approval it reads the token from your credential store into memory
+and enters it at the management step of the new gateway's own setup page, with
+the request that page sends for "Use this token": one same-origin
+`POST /__ankka/install/management-token` to the shell Worker this run
+installed, under the setup session the test browser holds. The shell keeps the
+value in its Durable Object's memory and the install's final runtime upload
+writes it as the secret (see
+[what the setup page does with the value](MANAGEMENT_TOKEN.md#what-the-setup-page-does-with-the-value)),
+so in the normal case the operator token needs no Workers Scripts permission
+for it. The journal records `management_token: started` before the request and
+`management_token: pasted_at_setup`, with the shell's fixed word `held`, after
+it. After the installation the run waits, as before, until the gateway itself
+reports the credential and token-managed mode.
+
+The value rides in that one request's body and nowhere else. It is never typed
+into a page: the request is made by the test browser's API client with the
+context's cookies, so no DOM, screenshot or browser network log holds it. It is
+in no URL, header, command argument, output, notice, error message or journal
+event; a refusal leaves as a fixed code and an HTTP status, and of the shell's
+answer only its fixed word is kept. The browser port records no Playwright
+trace, HAR or video and takes no screenshot. Playwright's debug output is the
+one hook that would print it: with `DEBUG` enabling its `pw:channel` logger
+Playwright prints every message it sends to its driver, request bodies
+included, and `PWDEBUG` opens its inspector over each call. A fresh run with
+the opt-in, and `--preflight`, therefore stop as `browser_debug_output_enabled`
+before anything is deployed while `DEBUG` or `PWDEBUG` is set, and the browser
+port refuses the paste once more; unset both for the run.
+
+Writing the secret through Cloudflare's API
+(`PUT /accounts/{account}/workers/scripts/{worker}/secrets`, with the operator
+token, which needs Workers Scripts Write, Edit in the dashboard, on the account
+for it) is the fallback, made at most once per run. It follows when:
+
+- the shell refused the value's form (`management_token: refused_at_setup`).
+  The setup page accepts only Cloudflare's two account-token forms and keeps
+  nothing of a refused value; the runner then continues without a token, as a
+  customer would;
+- the shell's last word about the step was `dropped`
+  (`management_token: dropped_at_setup`): its object restarted, or the hold ran
+  out, and the install finished without the value. The runner reads that word
+  from the status polls of the customer's own progress page in its test tab and
+  adds no poll of its own, so it never keeps the shell's object awake where a
+  customer's browser would not. The write then follows without the wait;
+- the gateway did not report the credential within the wait
+  (`management_token: not_reported`);
+- the setup page offered no step, or the run is a `--resume-installed` one,
+  which has no setup page to paste into: a gateway installed before this step
+  existed is handled exactly as before.
+
+The journal records `management_token: started` before the write and
+`management_token: installed_by_runner` after it. The gateway's own view is
+read first, and a gateway that already reports the credential (a resumed run,
+or a token you installed by hand meanwhile) is recorded as `already_configured`
+and not written again. A write Cloudflare refuses stops the run as
+`management_token_write_rejected`, and one whose answer never arrives as
+`management_token_write_unknown`; neither is retried, and `--resume-installed`
+continues from the gateway's view. A paste whose answer never arrives, or that
+the shell refuses for another reason than the value's form, stops the run like
+the setup writes around it and is never sent again. A reference that does not
+resolve stops a fresh run, and `--preflight`, as `credential_unavailable`
+before anything is deployed. Removing the gateway does not revoke the token.
+
+`--status` and the failure report show which path set the token as
+`managementToken`, in fixed words: `pasted_at_setup`, `installed_by_runner`,
+`operator`, or `already_configured` when a pass found the credential reported
+and the journal names no earlier path. `managementTokenFallback` says why the
+customer's path did not set it (`step_not_offered`, `refused_at_setup`,
+`dropped_at_setup` or `not_reported`) and is null otherwise. On a release whose
+setup page offers the step, `installed_by_runner` means the customer's path did
+not set the token, and that word says why.
 
 The command opens its own Chrome window, temporary unless a dedicated profile is
 configured. Review the real Cloudflare consent pages there. Access login through
@@ -409,7 +483,9 @@ relay, releases, and temporary setup tokens for separately authorized fixture cl
 
 A stopped run saves a `diagnostics` object beside its final journal event and
 prints the same compact report. It names the failed stage, the last recorded
-mutation stage, the fixed failure code, and whether a removal receipt exists.
+mutation stage, the fixed failure code, whether a removal receipt exists, and
+the path that set the management token (`managementToken` and
+`managementTokenFallback`, as in `--status`).
 Once the hosted root job has answered, the report and `--status` also carry
 its outcome under `rootRemoval`: the steps done out of five, the job's fixed
 reason word when a step failed, and its revocation flag. The stop codes are
