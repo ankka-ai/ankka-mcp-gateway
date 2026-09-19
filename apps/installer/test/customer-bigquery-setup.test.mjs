@@ -63,8 +63,9 @@ describe('removing an unstarted BigQuery source', () => {
     if (state === 'expired') {
       const key = 'ankka-mcp-gateway/source-actions/v1';
       const actions = await test.storage.get(key);
+      const now = Date.now();
       await test.storage.put(key, { ...actions, actions: actions.actions.map((action) => ({ ...action,
-        issuedAt: Date.now() - 700_000, expiresAt: Date.now() - 100_000 })) });
+        issuedAt: now - 700_000, expiresAt: now - 100_000 })) });
     }
     const removed = await removeDraft(test, prepared.sourceId);
     expect(removed.status).toBe(200);
