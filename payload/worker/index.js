@@ -3206,12 +3206,17 @@ async function failSourceAction(storage, action, code, terminal = false, detail 
   return updated ? actionRecovery(code, detail) : actionRecovery('source_action_state_unavailable');
 }
 
+const BIGQUERY_PREFLIGHT_FAILURE = /^bigquery_(?:google_key_invalid|google_auth_(?:unavailable|response_invalid|http_[1-5][0-9]{2})|google_query_(?:unavailable|rejected|http_[1-5][0-9]{2})|google_response_invalid|runtime_unavailable|setup_failed)$/u;
+
 function sourceActionClaim(value, environment, action, nowMs) {
   if (!exactKeys(value, [
     'schemaVersion', 'actionId', 'actionKey', 'actorEmail', 'accountId',
     'issuedAt', 'expiresAt', 'cloudflareAccessToken',
     ...(Object.hasOwn(value ?? {}, 'bigqueryPhase') ? ['bigqueryPhase'] : []),
-  ]) || (Object.hasOwn(value ?? {}, 'bigqueryPhase') && !['start', 'failed'].includes(value.bigqueryPhase)) || value.schemaVersion !== 1 || value.actionId !== action.actionId ||
+    ...(value?.bigqueryPhase === 'preflight_failed' ? ['bigqueryFailureCode'] : []),
+  ]) || (Object.hasOwn(value ?? {}, 'bigqueryPhase') && !['start', 'failed', 'preflight_failed'].includes(value.bigqueryPhase)) ||
+      (value.bigqueryPhase === 'preflight_failed' && (!isText(value.bigqueryFailureCode) || !BIGQUERY_PREFLIGHT_FAILURE.test(value.bigqueryFailureCode))) ||
+      value.schemaVersion !== 1 || value.actionId !== action.actionId ||
       !isText(value.actionKey) || !NONCE.test(value.actionKey) ||
       normalizedActor(value.actorEmail) !== action.actorEmail || value.accountId !== environment.accountId ||
       !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
@@ -5155,8 +5160,14 @@ export class AdminState {
       }
       if (url.pathname === `${INTERNAL_ACTIONS_PATH}/bigquery` && request.method === 'POST') {
         const parsed = await parseSourceActionRequest(request, this.env, this.state.storage, Date.now());
-        if (!parsed || !['start', 'failed'].includes(parsed.claim.bigqueryPhase)) return actionRecovery('source_action_rejected');
+        if (!parsed || !['start', 'failed', 'preflight_failed'].includes(parsed.claim.bigqueryPhase)) return actionRecovery('source_action_rejected');
         if (await otherLifecycleBlocksSource(this.state.storage, Date.now(), parsed.action.actionId)) return sourceActionConflict();
+        if (parsed.claim.bigqueryPhase === 'preflight_failed') {
+          if (sourceActionHasWriteEvidence(parsed.action)) return actionRecovery('source_action_rejected');
+          const failed = await persistSourceAction(this.state.storage, { ...parsed.action,
+            status: 'failed', failureCode: parsed.claim.bigqueryFailureCode });
+          return failed ? fixedJson(200, publicSourceAction(failed)) : actionRecovery('source_action_state_unavailable');
+        }
         if (parsed.claim.bigqueryPhase === 'start' && !await armSourceCompatibility(this.state.storage, this.env)) {
           return actionRecovery('source_action_state_unavailable');
         }

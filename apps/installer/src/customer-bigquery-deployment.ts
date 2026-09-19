@@ -1,8 +1,8 @@
 import * as v from 'valibot';
-import { createGoogleAuthorization } from '../../read-only-connectors/src/google-auth';
 import { boundaryValueSchema, type BoundaryValue } from './boundary';
 import { canonicalJson } from './canonical-json';
 import { bigQueryHex, readBigQueryText, type BigQueryRecord } from './customer-bigquery-contract';
+import { BigQueryPreflightError, checkBigQueryConnection } from './customer-bigquery-preflight';
 
 declare const __ANKKA_BIGQUERY_RUNTIME_SOURCE__: string;
 export function bigQuerySetupAvailable(): boolean {
@@ -29,9 +29,6 @@ const deploymentSchema = v.looseObject({ deployments: v.array(v.looseObject({
   versions: v.array(v.strictObject({ version_id: identifier, percentage: v.number() })),
 })) });
 const envelopeSchema = v.looseObject({ success: v.literal(true), result: boundaryValueSchema });
-const googleResult = v.object({ result: v.object({ isError: v.optional(v.boolean()),
-  content: v.array(v.object({ type: v.literal('text'), text: v.string() })),
-}) });
 export interface BigQueryDeploymentContext {
   readonly accountId: string;
   readonly zoneId: string;
@@ -75,7 +72,7 @@ export async function deployBigQueryBridge(
   const source = port.runtimeSource ?? (bigQuerySetupAvailable() ? __ANKKA_BIGQUERY_RUNTIME_SOURCE__ : '');
   if (source.length < 1 || new TextEncoder().encode(source).byteLength > 4 * 1024 * 1024 ||
       !/^[a-f0-9]{32}$/u.test(context.accountId) || !/^[a-f0-9]{32}$/u.test(context.zoneId) ||
-      !/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/u.test(context.accessIssuer)) failure();
+      !/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/u.test(context.accessIssuer)) throw new BigQueryPreflightError('bigquery_runtime_unavailable');
   const tags = ['ankka-mcp-gateway', context.installationId, record.sourceId, `bigquery:${await bigQueryHex(source)}`];
   async function api(path: string, method = 'GET', body?: string | FormData, allowAbsent = false): Promise<BoundaryValue> {
     await port.assertActive();
@@ -108,19 +105,7 @@ export async function deployBigQueryBridge(
   if (record.pending !== null) throw new Error('bigquery_resource_uncertain');
   await port.assertActive();
   if (record.workerVersion === null) {
-    const authorize = createGoogleAuthorization(serviceAccountJson, 'bigquery');
-    const googleHeaders = await authorize(port.fetch);
-    const response = await port.fetch('https://bigquery.googleapis.com/mcp', {
-      method: 'POST', redirect: 'manual', signal: AbortSignal.timeout(8_000),
-      headers: { ...googleHeaders, 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-06-18' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: {
-        name: 'execute_sql_readonly', arguments: { projectId: record.configuration.queryProjectId, query: 'SELECT 1 AS bridge_ok' },
-      } }),
-    });
-    if (!response.ok) { await response.body?.cancel(); throw new Error('bigquery_google_connection_failed'); }
-    const result = v.parse(googleResult, JSON.parse(await readBigQueryText(response.body, 512 * 1024))).result;
-    const completed = v.safeParse(v.object({ jobComplete: v.literal(true), errors: v.optional(v.pipe(v.array(boundaryValueSchema), v.maxLength(0))) }), JSON.parse(result.content.map((part) => part.text).join('\n')));
-    if (result.isError || !completed.success) throw new Error('bigquery_google_connection_failed');
+    await checkBigQueryConnection(serviceAccountJson, record.configuration.queryProjectId, port.fetch);
   }
   await port.begin();
   const desiredApplication = { name: applicationName, type: 'self_hosted', domain: record.hostname,

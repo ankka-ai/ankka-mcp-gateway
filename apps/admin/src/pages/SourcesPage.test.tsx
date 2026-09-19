@@ -680,6 +680,38 @@ describe('SourcesPage', () => {
 
 describe('Add BigQuery setup', () => {
   afterEach(cleanup)
+  it('shows the retained Google error after a fresh page load and resumes through BigQuery, even with a management token', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction({ state: 'failed', status: 'failed', canCancel: false,
+      failureCode: 'bigquery_google_query_http_403' })
+    const api = actionApi(actionSnapshot(action))
+    api.getSources = vi.fn(async () => ({ ...sources, applyMode: 'account_token' as const, sources: [draft] }))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true, setups: [{ sourceId: draft.id,
+      actionId: action.actionId, ready: false, credentialRequired: true, recoveryRequired: false }] }))
+    api.resumeBigQuery = vi.fn().mockRejectedValue(new GatewayApiError(409, 'bigquery_setup_conflict'))
+    const page = render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByText(/connection check failed \(HTTP 403\)/)).toHaveTextContent('BigQuery Job User and MCP User')
+    expect(screen.getByText('Error code: bigquery_google_query_http_403')).toBeVisible()
+    expect(screen.queryByText('Waiting for Cloudflare')).not.toBeInTheDocument()
+    expect(screen.queryByText(/No new Cloudflare consent/)).not.toBeInTheDocument()
+    page.unmount()
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
+    expect(within(card).getByText('BigQuery setup failed')).toBeVisible()
+    await user.click(await screen.findByRole('button', { name: 'Continue BigQuery setup' }))
+    await waitFor(() => expect(api.resumeBigQuery).toHaveBeenCalledExactlyOnceWith(action.actionId))
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+  it('explains BigQuery consent separately from ordinary account-token installation', async () => {
+    const action = pendingAction()
+    const api = actionApi(actionSnapshot(action))
+    api.getSources = vi.fn(async () => ({ ...sources, applyMode: 'account_token' as const, sources: [draft] }))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true, setups: [{ sourceId: draft.id,
+      actionId: action.actionId, ready: false, credentialRequired: true, recoveryRequired: false }] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByText(/BigQuery bridge setup needs its own Cloudflare approval/)).toBeVisible()
+    expect(screen.queryByText(/No new Cloudflare consent/)).not.toBeInTheDocument()
+  })
   it('shows bounded Access failure details and keeps an uncertain creation blocked', async () => {
     const action = { ...pendingAction(), state: 'recovery_required' as const, canCancel: false, canRenew: true,
       failureCode: 'bigquery_setup_required' }

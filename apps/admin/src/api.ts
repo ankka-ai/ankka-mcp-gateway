@@ -113,6 +113,11 @@ export interface BigQuerySetupInput {
   readOnlyConfirmed: true
 }
 
+const BIGQUERY_PREFLIGHT_FAILURE = /^bigquery_(?:google_key_invalid|google_auth_(?:unavailable|response_invalid|http_[1-5][0-9]{2})|google_query_(?:unavailable|rejected|http_[1-5][0-9]{2})|google_response_invalid|runtime_unavailable|setup_failed)$/u
+export function isBigQueryPreflightFailure(code: string | null): code is string {
+  return code !== null && BIGQUERY_PREFLIGHT_FAILURE.test(code)
+}
+
 const sourceActionFailureCodes = new Set([
   'source_action_denied', 'source_action_recovery_required', 'source_action_state_unavailable',
   'source_action_conflict', 'source_action_drift', 'source_discovery_failed', 'source_action_invalid',
@@ -130,7 +135,7 @@ const sourceActionSchema = v.strictObject({
   actorKind: actorKindSchema,
   status: actionStatusSchema,
   expiresAt: v.string(),
-  failureCode: v.nullable(v.pipe(v.string(), v.transform((code) => sourceActionFailureCodes.has(code) ? code : 'source_action_failed'))),
+  failureCode: v.nullable(v.pipe(v.string(), v.transform((code) => sourceActionFailureCodes.has(code) || isBigQueryPreflightFailure(code) ? code : 'source_action_failed'))),
 })
 const sourceActionStateSchema = v.picklist([
   'authorization_required', 'authorization_expired', 'applying', 'succeeded', 'failed', 'recovery_required',

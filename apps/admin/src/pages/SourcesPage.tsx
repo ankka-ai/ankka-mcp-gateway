@@ -2,7 +2,7 @@ import { Input } from '@cloudflare/kumo'
 import { Button } from '../components/Button'
 import { ArrowRight, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
 import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
-import { GatewayApiError, GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type ManagementCredentialChoice, type SourceActionSummary, type SourceActionTools, type SourceDiscovery, type BigQuerySetups, rollbackEndsMessage, validHandoffUrl } from '../api'
+import { GatewayApiError, GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type ManagementCredentialChoice, type SourceActionSummary, type SourceActionTools, type SourceDiscovery, type BigQuerySetups, isBigQueryPreflightFailure, rollbackEndsMessage, validHandoffUrl } from '../api'
 import { SOURCE_CATALOG, type SourceCatalog, type SourceCatalogSource } from '../catalog'
 import { useGateway } from '../GatewayContext'
 import { GatewayEndpoint } from '../components/GatewayEndpoint'
@@ -14,6 +14,7 @@ import { BigQuerySetupForm } from '../components/BigQuerySetupForm'
 import { SourceList } from '../components/SourceList'
 import { SourceToolChoice } from '../components/SourceToolChoice'
 import { ToolChecklist } from '../components/ToolChecklist'
+import { bigQueryPreflightGuidance } from '../bigQueryFailure'
 
 const bigQueryResourceNames = { application: 'Access application', worker: 'BigQuery Worker', domain: 'custom domain' }
 
@@ -49,10 +50,11 @@ const actionLabels = {
 } satisfies Record<SourceActionSummary['state'], string>
 
 function sourceDraftLabel(action: SourceActionSummary | undefined): string {
-  return action && action.state !== 'failed' ? actionLabel(action) : 'Saved draft'
+  return action && (action.state !== 'failed' || isBigQueryPreflightFailure(action.failureCode)) ? actionLabel(action) : 'Saved draft'
 }
 
 function actionLabel(action: SourceActionSummary): string {
+  if (action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)) return 'BigQuery setup failed'
   if (action.state === 'recovery_required') {
     if (action.failureCode === 'source_connection_required') return 'Connect your source'
     if (action.failureCode === 'bigquery_setup_required') return 'Resume BigQuery setup'
@@ -78,7 +80,13 @@ function unchosenToolsGuidance(action: SourceActionSummary): string | null {
   return null
 }
 
-function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, accountToken: boolean, toolsChosen = true): string {
+function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, accountToken: boolean, toolsChosen = true, bridgeSetup = false): string {
+  if (action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)) {
+    return `${bigQueryPreflightGuidance(action.failureCode)} The bridge was not deployed. Continue BigQuery setup after correcting the issue; it needs fresh Cloudflare approval and another key upload.`
+  }
+  if (bridgeSetup && action.state === 'authorization_required') return 'BigQuery bridge setup needs its own Cloudflare approval and Google key upload. Complete those steps, or use Continue BigQuery setup if you returned before they finished.'
+  if (bridgeSetup && action.state === 'authorization_expired') return 'This BigQuery attempt expired before deployment began. Continue BigQuery setup for fresh Cloudflare approval and another key upload.'
+  if (bridgeSetup && action.state === 'recovery_required' && action.canRenew === true) return 'Resume BigQuery setup with fresh Cloudflare approval. Your gateway checks the saved resources before continuing; it asks for the Google key again only if the bridge Worker was not deployed.'
   const unchosen = !toolsChosen && action.state === 'recovery_required' ? unchosenToolsGuidance(action) : null
   if (unchosen !== null) return unchosen
   if (accountToken && action.state === 'authorization_required') return 'This installation is prepared in your gateway. Check its status before taking another action. No new Cloudflare consent is needed.'
@@ -376,11 +384,13 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <div aria-live="polite">
             {[...latestActions.values()].map((action) => {
               const actionSource = sources.sources.find((source) => source.id === action.sourceId)
+              const setup = bigQuery?.setups.find((item) => item.actionId === action.actionId)
+              const preflightFailed = action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)
               // A sign-in source paused before the Portal: its tools are chosen here, from its real list. A BigQuery
               // bridge has a fixed allowlist and its own setup flow.
               const signInPause = actionSource !== undefined && actionSource.status === 'draft' && actionSource.authMode === 'oauth' &&
                 action.state === 'recovery_required' && action.failureCode !== null && CONNECTION_PAUSES.has(action.failureCode) &&
-                bigQuery?.setups.some((setup) => setup.actionId === action.actionId) !== true
+                setup === undefined
               const toolsChosen = !signInPause || actionSource.enabledTools.length > 0
               // While nothing is chosen, the card says what the source waits for now, not what it waited for last.
               const live = toolLists[action.actionId]
@@ -389,9 +399,10 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               <article key={action.actionId} className="mt-4 border-t border-kumo-line pt-4" aria-label={`Installation of ${actionSource?.label ?? action.sourceId}`}>
                 <div className="flex flex-wrap items-center gap-2.5">
                   <h3 className="text-sm font-semibold text-kumo-strong">{actionSource?.label ?? action.sourceId}</h3>
-                  <StatusPill tone={action.state === 'succeeded' ? 'ready' : action.state === 'recovery_required' || action.state === 'authorization_expired' ? 'attention' : 'waiting'}>{actionLabel(shown)}</StatusPill>
+                  <StatusPill tone={action.state === 'succeeded' ? 'ready' : preflightFailed || action.state === 'recovery_required' || action.state === 'authorization_expired' ? 'attention' : 'waiting'}>{actionLabel(shown)}</StatusPill>
                 </div>
-                <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(shown, sourceActionsPollingPaused, sources.applyMode === 'account_token', toolsChosen)}</p>
+                <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(shown, sourceActionsPollingPaused, sources.applyMode === 'account_token' && bigQuery !== null, toolsChosen, setup !== undefined && !setup.ready)}</p>
+                {preflightFailed ? <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Error code: {action.failureCode}</p> : null}
                 <p className="mt-2 text-xs leading-5 text-kumo-subtle">
                   Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
                 </p>
@@ -399,13 +410,13 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                 {action.connectionUrl && action.state === 'recovery_required' ? (
                   <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open source in Cloudflare</a>
                 ) : null}
-                {bigQuery?.setups.some((setup) => setup.actionId === action.actionId && !setup.ready && !setup.recoveryRequired) && action.canCancel ? (
+                {setup && !setup.ready && !setup.recoveryRequired && (action.canCancel || preflightFailed) ? (
                   <>
                     <Button variant="secondary" className="pressable mt-3" disabled={isBusy || resumingBigQuery || isCheckingSourceActions} onClick={() => void resumeBigQuery(action.actionId)}>Continue BigQuery setup</Button>
                     {rollbackNote ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{rollbackNote}</p> : null}
                   </>
                 ) : null}
-                <BigQueryFailure setup={bigQuery?.setups.find((setup) => setup.actionId === action.actionId)} />
+                <BigQueryFailure setup={setup} />
                 {signInPause && action.canRenew === true ? (
                   <SourceToolChoice
                     action={action}

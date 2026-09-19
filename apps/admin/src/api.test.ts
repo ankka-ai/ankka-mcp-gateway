@@ -21,6 +21,16 @@ describe('HttpGatewayAdminApi', () => {
     updatedAt: '2026-08-29T00:00:00.000Z',
   } as const
 
+  it.each(['bigquery_google_key_invalid', 'bigquery_google_auth_http_400', 'bigquery_google_query_http_403',
+    'bigquery_google_response_invalid', 'bigquery_setup_failed', 'bigquery_google_auth_http_private-detail'])
+  ('keeps only bounded BigQuery failure codes from the source status: %s', async (code) => {
+    const actionId = `action_${'a'.repeat(32)}`
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, actionId, sourceId: 'source-test',
+      status: 'failed', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: code })))
+    const action = await new HttpGatewayAdminApi().getSourceAction(actionId)
+    expect(action.failureCode).toBe(code.endsWith('private-detail') ? 'source_action_failed' : code)
+  })
+
   it('accepts direct source completion without a consent URL', async () => {
     const completed = { schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z' }
     vi.stubGlobal('fetch', vi.fn(async () => Response.json(completed)))
