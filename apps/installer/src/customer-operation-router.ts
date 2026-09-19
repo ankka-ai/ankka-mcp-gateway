@@ -1,3 +1,5 @@
+import { customerPageEnd, customerPageStart } from './customer-page-shell';
+import { customerLoadingIndicator } from './customer-page-theme';
 import * as v from 'valibot';
 import { bigQueryCredentialPage } from './customer-bigquery-credential-page';
 import { readBigQueryText } from './customer-bigquery-contract';
@@ -447,11 +449,11 @@ function failureReason<Thrown>(error: Thrown): CustomerOperationReason {
   return 'unexpected';
 }
 
-function operationPage(): Response {
+export function operationPage(): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
   const pageHeaders = headers('text/html; charset=utf-8');
   pageHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Authorize in Cloudflare</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Authorize this change in Cloudflare</h1><p id="message">Preparing a fresh, temporary Cloudflare approval for your gateway…</p><button id="retry" hidden>Try again</button><p><a href="/sources">Back to the dashboard</a></p><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const run=async()=>{retry.hidden=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_OPERATION_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.replace(value.authorizationUrl)}catch{message.textContent='This authorization link could not be started. Go back to the dashboard, check the action status, and authorize again.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script></html>`, {
+  return new Response(`${customerPageStart('Authorize in Cloudflare', 'message')}<h1>Authorize this change in Cloudflare</h1><div id="progress">${customerLoadingIndicator}</div><p id="message" role="status" aria-live="polite">Preparing a fresh, temporary Cloudflare approval for your gateway…</p><button id="retry" hidden>Try again</button><p><a href="/sources">Back to the dashboard</a></p><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');const progress=document.querySelector('#progress');const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const run=async()=>{retry.hidden=true;progress.hidden=false;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_OPERATION_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.replace(value.authorizationUrl)}catch{progress.hidden=true;message.textContent='This authorization link could not be started. Go back to the dashboard, check the action status, and authorize again.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script>${customerPageEnd}`, {
     status: 200,
     headers: pageHeaders,
   });
@@ -521,7 +523,7 @@ function updateProgressPage(attemptId: string): Response {
   const pageHeaders = headers('text/html; charset=utf-8');
   pageHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
   const literal = <Value>(value: Value): string => JSON.stringify(value).replaceAll('<', '\\u003c');
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Updating your Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}a{color:inherit}li{margin:.35rem 0}#loader{display:inline-block;width:.9em;height:.9em;border:2px solid #171713;border-right-color:transparent;border-radius:50%;animation:spin 1s linear infinite;vertical-align:-.1em;margin-right:.5rem}@keyframes spin{to{transform:rotate(360deg)}}</style><h1>Updating your Ankka Gateway</h1><p id="message" role="status" aria-live="polite"><span id="loader"></span>Cloudflare approved the update. Your gateway is verifying and uploading the signed release; this page updates itself.</p><ol id="steps"></ol><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{
+  return new Response(`${customerPageStart('Updating your Ankka Gateway', 'message')}<h1>Updating your Ankka Gateway</h1><p id="message" role="status" aria-live="polite"><span id="loader" class="page-loader">${customerLoadingIndicator}</span>Cloudflare approved the update. Your gateway is verifying and uploading the signed release; this page updates itself.</p><ol id="steps"></ol><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{
 const attempt=${literal(attemptId)},labels=${literal(UPDATE_STEP_LABELS)},serving=${literal(UPDATE_SERVING_STEP_LABEL)},stages=${literal(CUSTOMER_UPDATE_STAGES)},steps=document.querySelector('#steps'),message=document.querySelector('#message'),loader=document.querySelector('#loader'),served=document.createElement('li');
 let active=true,timer,bound,controller,confirmed=0;const stop=()=>{active=false;clearTimeout(timer);clearTimeout(bound);if(controller)controller.abort()};addEventListener('pagehide',stop);
 const reached=(stage)=>{const index=stages.indexOf(stage);return index<0?0:index>=stages.length-1?labels.length-1:Math.min(index,labels.length-1)};
@@ -532,7 +534,7 @@ if(!settled)return false;const url=state.redirectUrl||'';if(!url.startsWith(loca
 if(awaited&&!arrived){if(!bound){message.replaceChildren(loader,'The upload is complete. Waiting for Cloudflare to serve the new version…');bound=setTimeout(()=>giveUp(url),${UPDATE_SERVING_WAIT_MS})}return false}
 stop();message.textContent='Handing over to your dashboard, which follows the update to its end.';location.replace(url);return true};
 const poll=async()=>{controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),5000);try{const response=await fetch(${literal(CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH)}+'?attempt='+encodeURIComponent(attempt),{credentials:'same-origin',cache:'no-store',redirect:'manual',signal:controller.signal});if(!response.ok)throw new Error();const state=await response.json();if(!active)return;if(show(state))return}catch{if(!active)return;confirmed=0}finally{clearTimeout(timeout)}if(active)timer=setTimeout(poll,2000)};
-poll()})();</script></html>`, { status: 200, headers: pageHeaders });
+poll()})();</script>${customerPageEnd}`, { status: 200, headers: pageHeaders });
 }
 
 export function createCustomerOperationRouter(

@@ -1,0 +1,12 @@
+.component-catalog { width: min(100%, 1000px); margin-inline: auto; padding: 24px; }
+.component-sample { padding-block: 8px 32px; margin-bottom: 24px; border-bottom: 1px solid #333; }
+.component-label { margin-bottom: 24px; color: #aaa; font: 12px/1.5 "SFMono-Regular", Consolas, monospace; letter-spacing: .04em; }
+.component-row { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+.component-fields { display: grid; gap: 20px; max-width: 680px; }
+.component-fields > label { display: grid; gap: 8px; font-size: 14px; }
+.component-fields p { margin: 0; }
+.component-installer.ankka-setup { min-height: 0; padding: 24px; }
+.component-wordmark { max-width: 280px; margin: 30px auto; }
+.component-wordmark svg { width: 100%; }
+.component-help { color: #aaa; max-width: 65ch; margin-bottom: 20px; }
+@media (max-width: 600px) { .component-catalog { padding: 20px 16px; } .component-installer.ankka-setup { padding: 16px; } }

@@ -28,6 +28,8 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "test-runtime/**/*.ts",
-    "lifecycle/**/*.ts"
+    "lifecycle/**/*.ts",
+    "preview/**/*.ts",
+    "vite.preview.config.ts"
   ]
 }
