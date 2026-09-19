@@ -399,6 +399,19 @@ describe('HttpGatewayAdminApi', () => {
     )
   })
 
+  it('reads every status the removal journal records, and keeps `gateway_removed` out of Team actions', async () => {
+    const actionId = `action_${'a'.repeat(32)}`
+    const action = { schemaVersion: 1, actionId, expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null }
+    for (const status of ['authorization_required', 'applying', 'gateway_removed', 'failed', 'recovery_required'] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...action, status })))
+      expect((await new HttpGatewayAdminApi().getTeardownAction(actionId)).status).toBe(status)
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...action, status: 'succeeded' })))
+    await expect(new HttpGatewayAdminApi().getTeardownAction(actionId)).rejects.toMatchObject({ code: 'response_invalid' })
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...action, status: 'gateway_removed', action: 'access' })))
+    await expect(new HttpGatewayAdminApi().getTeamAction(actionId)).rejects.toMatchObject({ code: 'response_invalid' })
+  })
+
   it('accepts only this gateway’s own operation handoff shape', () => {
     const expected = 'https://manage.example.com'
     expect(validHandoffUrl(`${expected}/__ankka/operation#${'a'.repeat(40)}`, expected)).toContain('/__ankka/operation#')

@@ -306,6 +306,33 @@ Cloudflare and remove its Worker binding. Removing the binding does not revoke
 the token or erase historical versions. Neither step clears restrictions caused
 by a possibly applied legacy Team policy write.
 
+### If removal was interrupted
+
+Removal takes two Cloudflare approvals. The first, on your gateway, removes its
+Portal, MCP servers, their Access applications and policies, the DNS record,
+and any managed BigQuery bridge. Your gateway then sends your browser to the
+installer with a signed receipt that is valid for ten minutes. The second
+approval, on the installer, removes the management page, stored configuration,
+and Worker.
+
+If you lose the page between the two, for example through a closed tab, a
+network failure, or a receipt that expired, open your gateway's management URL
+again. The dashboard shows **Removal in progress**. Choose **Continue removing
+this gateway** and authorize the removal in Cloudflare once more. Your gateway
+resumes from its saved progress, deletes nothing twice, and sends you to the
+installer with a fresh receipt. Until removal finishes, **Team** may fail to
+load because its access policies are already gone.
+
+Do the same when the installer reports that a removal receipt has expired or
+could not be verified; reloading that page cannot help. If the final removal
+had already started there and you saved its recovery receipt, choose that
+receipt on the installer's removal page instead.
+
+If your gateway answers that another teardown action is active, the previous
+authorization is still open. It lapses after ten minutes; then continue again.
+If the dashboard shows no removal notice, **Settings → Review teardown plan**
+continues the same removal.
+
 ## Experimental browser tools
 
 When a browser provides `document.modelContext`, the installer and gateway

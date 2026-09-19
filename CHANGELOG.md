@@ -13,6 +13,17 @@ Notable public product and repository changes are recorded here.
   at once and would confirm too early. An attempt that was not applied hands over at once, as before. Both releases
   must carry the step: an update from an earlier release, or a rollback to one, still hands over at once.
 
+- Give an interrupted removal a way back. Once a removal has begun deleting the
+  gateway's connected resources, the dashboard shows **Removal in progress** on
+  every page, and in place of the load failure screen, with one action that
+  authorizes the removal again; the gateway resumes from its saved progress and
+  signs a fresh receipt. The dashboard reads the state from the recorded
+  removal action and now accepts its `gateway_removed` status. The installer's
+  removal page no longer tells you to reload when no reload can help: an expired
+  receipt names the gateway whose management page signs a new one, and an
+  unverifiable receipt or a browser without an open removal says the same
+  without a hostname. Failures a reload can get past keep the reload wording.
+
 - Fix the dashboard refusing to load on gateway-v0.1.64 ("The gateway response could not be verified"). The gateway's
   status gained `serviceIdentity`, and source and Team actions gained `actorKind`, without the dashboard's strict
   response schemas learning them, so every status answer was rejected. The dashboard now accepts all three, and the

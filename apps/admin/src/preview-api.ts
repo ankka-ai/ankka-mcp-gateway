@@ -17,11 +17,13 @@ import type {
   TeamAction,
   TeamActionResult,
   TeamMember,
+  TeardownAction,
 } from './api'
 
 const PREVIEW_SCENARIOS = [
   'empty', 'ready', 'update', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential',
   'source-pending', 'source-applying', 'source-expired', 'source-recovery', 'source-completed', 'source-late-success', 'source-lifecycle',
+  'removal-interrupted',
 ] as const
 type PreviewScenario = typeof PREVIEW_SCENARIOS[number]
 const PREVIEW_STORAGE_KEY = 'ankka-gateway-ui-preview-scenario'
@@ -179,6 +181,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   async getSources(): Promise<ManagedSources> { return structuredClone(this.#sources) }
   async getTeam(): Promise<Team> {
     if (this.#scenario === 'error') throw new Error('Synthetic preview error: team access could not be loaded.')
+    // Once the Portal's policies are gone, a gateway with a management credential cannot read its Team.
+    if (this.#scenario === 'removal-interrupted') throw new GatewayApiError(503, 'team_unavailable')
     return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })) })
   }
 
@@ -292,7 +296,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const teamAction = this.#team.pendingAction
     const blockingAction: SourceActions['blockingAction'] = pending ? { kind: 'source', actionId: pending.actionId, sourceId: pending.sourceId } :
       teamAction && !['succeeded', 'failed'].includes(teamAction.status) ? { kind: 'team', actionId: teamAction.actionId } :
-      this.#scenario === 'source-lifecycle' ? { kind: 'runtime', actionId: ACTION_ID } : null
+      this.#scenario === 'source-lifecycle' ? { kind: 'runtime', actionId: ACTION_ID } :
+      this.#scenario === 'removal-interrupted' ? { kind: 'teardown', actionId: ACTION_ID } : null
     return structuredClone({ schemaVersion: 1, actions: this.#sourceActions, blockingAction })
   }
 
@@ -342,8 +347,11 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), handoffUrl: HANDOFF }
   }
 
-  async getTeardownAction(_actionId: string) {
-    return { schemaVersion: 1 as const, actionId: ACTION_ID, status: 'applying' as const, expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: null }
+  async getTeardownAction(_actionId: string): Promise<TeardownAction> {
+    if (this.#scenario === 'removal-interrupted') {
+      return { schemaVersion: 1, actionId: ACTION_ID, status: 'recovery_required', expiresAt: new Date(Date.now() - 60_000).toISOString(), failureCode: 'fresh_authorization_required' }
+    }
+    return { schemaVersion: 1, actionId: ACTION_ID, status: 'applying', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: null }
   }
 }
 

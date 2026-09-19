@@ -45,7 +45,7 @@ import {
   NOW,
   selectionInput,
 } from './fixtures';
-import { createGatewayTeardownHandoff, verifyGatewayTeardownHandoff, GATEWAY_TEARDOWN_HANDOFF_TTL_MS } from '../src/gateway-teardown-handoff';
+import { createGatewayTeardownHandoff, expiredGatewayTeardownHandoffHostname, verifyGatewayTeardownHandoff, GATEWAY_TEARDOWN_HANDOFF_TTL_MS } from '../src/gateway-teardown-handoff';
 import { createGatewayTeardownJob, verifyGatewayTeardownJobAuthority } from '../src/gateway-teardown-job';
 import { readyInstallationReceiptFixture } from './provider-neutral-installation-receipt-fixture';
 
@@ -882,6 +882,13 @@ describe('gateway teardown handoff from a real installation journal', () => {
     statement.management.applicationId = 'foreign-application';
     tampered.statement = canonicalJson(statement);
     await expect(verifyGatewayTeardownHandoff({ handoff: canonicalJson(tampered), trust: input.trust, now: input.now })).rejects.toThrow();
+    // Only a closed window names the gateway that can sign again; an open window or any other defect names nothing.
+    const closed = input.now + GATEWAY_TEARDOWN_HANDOFF_TTL_MS;
+    expect(await expiredGatewayTeardownHandoffHostname({ handoff: encoded, trust: input.trust, now: closed }))
+      .toBe(input.plan.gatewayConfiguration.managementHostname);
+    expect(await expiredGatewayTeardownHandoffHostname({ handoff: encoded, trust: input.trust, now: closed - 1 })).toBeNull();
+    expect(await expiredGatewayTeardownHandoffHostname({ handoff: canonicalJson(tampered), trust: input.trust, now: closed })).toBeNull();
+    expect(await expiredGatewayTeardownHandoffHostname({ handoff: 'not a receipt', trust: input.trust, now: closed })).toBeNull();
   });
 
   it('states the receipt-owned service policy beside the administrator policy for an opted-in installation', async () => {
