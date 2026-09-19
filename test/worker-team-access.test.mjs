@@ -3394,9 +3394,12 @@ test('source OAuth connects through the customer callback with PKCE; tokens neve
     assert.equal(attempt.url.searchParams.get('resource'), SIGN_IN_URL);
     assert.equal(attempt.url.searchParams.get('code_challenge_method'), 'S256');
     assert.equal(gateway.registrations[0].token_endpoint_auth_method, 'none');
-    const [completed, replay] = await Promise.all([gateway.finish(attempt), gateway.finish(attempt)]);
-    assert.equal(completed.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=connected`);
-    assert.equal(replay.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+    const callbacks = await Promise.all([gateway.finish(attempt), gateway.finish(attempt)]);
+    // Access verification is asynchronous, so either callback can reach the
+    // mutation queue first. Exactly one may exchange and import the grant.
+    assert.deepEqual(callbacks.map((response) => response.headers.get('location')).sort(), [
+      `${MANAGEMENT_ORIGIN}/sources?source_oauth=connected`, `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`,
+    ]);
     assert.equal(gateway.exchanges.length, 1);
     assert.equal(gateway.imports.length, 1);
     assert.equal(gateway.exchanges[0].get('redirect_uri'), `${MANAGEMENT_ORIGIN}${OAUTH_CALLBACK}`);
@@ -3407,7 +3410,7 @@ test('source OAuth connects through the customer callback with PKCE; tokens neve
     assert.equal(imported.tokens.refresh_token, gateway.refreshToken);
     assert.equal(imported.registration_info.redirect_uris[0], `${MANAGEMENT_ORIGIN}${OAUTH_CALLBACK}`);
     assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
-    const evidence = JSON.stringify([attempt.body, [...completed.headers], gateway.managementStorage.writes]);
+    const evidence = JSON.stringify([attempt.body, callbacks.map((response) => [...response.headers]), gateway.managementStorage.writes]);
     assert.ok(!evidence.includes(gateway.accessToken));
     assert.ok(!evidence.includes(gateway.refreshToken));
     assert.equal(portalMapping(gateway, gateway.installed.serverId), undefined);
