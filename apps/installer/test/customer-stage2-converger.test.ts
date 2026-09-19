@@ -1150,7 +1150,7 @@ describe('management credential in Stage 2 convergence', () => {
     const test = await fixture();
     const withValue = await chunkedPasses(test, `attempt_${'p'.repeat(24)}`, (input) =>
       convergeCustomerStage2({ ...input, managementCredential: MANAGEMENT_VALUE }));
-    expect(without.calls).toEqual([22, 8, 17, 23]);
+    expect(without.calls).toEqual([26, 10, 22, 24]);
     expect(withValue.calls).toEqual(without.calls);
     expect(test.cloudflare.calls).toEqual(plain.cloudflare.calls);
     expect(managementBindings(test)).toEqual([MANAGEMENT_SECRET]);
@@ -1206,7 +1206,7 @@ describe('management credential in Stage 2 convergence', () => {
       runConvergerPassWithManagementCredential(holder, (managementCredential) =>
         convergeCustomerStage2({ ...input, managementCredential })));
     expect(passes.result).toMatchObject({ verified: true, finalRuntime: 'active-recovery-capable' });
-    expect(passes.calls).toEqual([22, 8, 17, 23]);
+    expect(passes.calls).toEqual([26, 10, 22, 24]);
     expect(test.journal.value?.completedAt).not.toBeNull();
     expect(managementBindings(test)).toEqual([]);
     expect(test.cloudflare.uploadedMetadata).toHaveLength(1);
