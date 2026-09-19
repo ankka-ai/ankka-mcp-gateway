@@ -1,3 +1,5 @@
+import { customerPageEnd, customerPageStart } from './customer-page-shell';
+import { customerLoadingIndicator } from './customer-page-theme';
 import type { CustomerBootstrapCallbackOutcome } from './customer-bootstrap-router';
 import { CUSTOMER_INSTALL_ROOT_PATH, CUSTOMER_INSTALL_STATUS_PATH } from './customer-install-paths';
 
@@ -40,7 +42,7 @@ export function customerInstallProgressPage(
   for (const cookie of cookies) headers.append('set-cookie', cookie);
   if (outcome.status === 'INCOMPLETE' && outcome.failureCode === 'authorization_rejected') {
     headers.set('content-security-policy', "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'");
-    return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Cloudflare approval did not complete</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}a{color:#1d4ed8}</style><main><h1>Cloudflare approval did not complete</h1><p>Cloudflare did not authorize this setup attempt. Return to your gateway setup to review the settings and try the approval again.</p><p><a href="${CUSTOMER_INSTALL_ROOT_PATH}">Return to gateway setup</a></p></main></html>`, {
+    return new Response(`${customerPageStart('Cloudflare approval did not complete', 'message')}<h1>Cloudflare approval did not complete</h1><p>Cloudflare did not authorize this setup attempt. Return to your gateway setup to review the settings and try the approval again.</p><p><a href="${CUSTOMER_INSTALL_ROOT_PATH}">Return to gateway setup</a></p>${customerPageEnd}`, {
       status: 200,
       headers,
     });
@@ -49,7 +51,7 @@ export function customerInstallProgressPage(
     status: outcome.status,
     failure: outcome.failureCode === null ? null : { code: outcome.failureCode, reason: outcome.failureReason },
   });
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Install Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}code{font:.9375em ui-monospace,monospace}a{color:#1d4ed8}</style><h1 id="title">Finishing your Ankka Gateway</h1><p id="message">Cloudflare approved the install. Setting up the Gateway takes a few minutes; this page updates itself.</p><p id="detail"></p><p id="credential"></p><script nonce="${nonce}">
+  return new Response(`${customerPageStart('Install Ankka Gateway', 'message')}<h1 id="title">Finishing your Ankka Gateway</h1><div id="progress">${customerLoadingIndicator}</div><p id="message" role="status" aria-live="polite">Cloudflare approved the install. Setting up the Gateway takes a few minutes; this page updates itself.</p><p id="detail"></p><p id="credential"></p><script nonce="${nonce}">
 (()=>{
   const management=${scriptLiteral(`https://${managementHostname}/?setup=finishing`)};
   const title=document.querySelector('#title');
@@ -63,11 +65,12 @@ export function customerInstallProgressPage(
     skipped:'You continued without a management token. Adding sources and managing team access stay disabled until you add it in Settings.',
     dropped:'Your gateway no longer held the management token you pasted, so setup is finishing without it. Adding sources and managing team access stay disabled until you add it in Settings.',
   };
+  const progress=document.querySelector('#progress');
   let misses=0;
   let active=true;
   let timer;
   let controller;
-  const stop=()=>{active=false;clearTimeout(timer);if(controller)controller.abort()};
+  const stop=()=>{active=false;progress.hidden=true;clearTimeout(timer);if(controller)controller.abort()};
   addEventListener('pagehide',stop);
   const openManagement=()=>{
     if(!active)return;
@@ -85,6 +88,7 @@ export function customerInstallProgressPage(
     credential.textContent=state.status==='CONVERGING'&&Object.hasOwn(notes,String(state.managementCredential))?notes[state.managementCredential]:'';
     if(state.status==='READY'){openManagement();return true}
     if(state.status==='INCOMPLETE'){
+      stop();
       title.textContent='Setup did not complete';
       message.textContent='The Gateway stopped before it was ready. Return to deploy.ankka.ai to remove this install and try again.';
       const failure=state.failure;
@@ -114,7 +118,7 @@ export function customerInstallProgressPage(
   };
   if(!show(${initial}))timer=setTimeout(poll,3000);
 })();
-</script></html>`, {
+</script>${customerPageEnd}`, {
     status: 200,
     headers,
   });

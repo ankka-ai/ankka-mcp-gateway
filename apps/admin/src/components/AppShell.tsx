@@ -1,10 +1,10 @@
 import { ArrowUpRight, Database, GearSix, Users, WarningCircle, X } from '@phosphor-icons/react'
 import { Link, Outlet } from '@tanstack/react-router'
-import { Loader } from '@cloudflare/kumo'
-import { Button } from './Button'
+import { LifecycleScreen } from './LifecycleScreen'
 import type { ComponentType } from 'react'
 import { useGateway, type RemovalProgress } from '../GatewayContext'
 import { BrandMark } from './BrandMark'
+import { Button } from './Button'
 
 type AppPath = '/sources' | '/team' | '/settings'
 
@@ -39,13 +39,9 @@ export function AppShell() {
 
   if (isLoading && !hasLoaded) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-canvas px-5">
-        <div className="flex flex-col items-center text-center">
-          <BrandMark className="text-brand" />
-          <Loader size="lg" className="mt-5" />
-          <p className="mt-3 text-sm text-kumo-subtle">Loading your gateway…</p>
-        </div>
-      </div>
+      <LifecycleScreen title="Loading your gateway…" loading>
+        <p role="status">Reading your gateway’s current status.</p>
+      </LifecycleScreen>
     )
   }
 
@@ -76,18 +72,14 @@ export function AppShell() {
 
   if (error && !hasLoaded) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-canvas px-5">
-        <div className="surface-card w-full max-w-md p-6 text-center">
-          <div className="mx-auto flex size-11 items-center justify-center rounded-xl bg-danger-soft text-danger">
-            <WarningCircle size={21} weight="fill" />
-          </div>
-          <h1 className="mt-4 text-lg font-semibold text-kumo-strong">Couldn’t load the gateway</h1>
-          <p className="mt-2 text-pretty text-sm leading-6 text-kumo-subtle">{error}</p>
-          <Button variant="primary" className="pressable mt-5" onClick={() => void reload()}>
+      <LifecycleScreen title="Couldn’t load the gateway">
+        <p role="alert">{error}</p>
+        <div className="actions">
+          <button type="button" onClick={() => void reload()}>
             Try again
-          </Button>
+          </button>
         </div>
-      </div>
+      </LifecycleScreen>
     )
   }
 
@@ -124,7 +116,7 @@ export function AppShell() {
           {update?.status === 'available' && update.available ? (
             <Link
               to="/settings"
-              className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-warning-soft px-3 py-2 text-xs text-warning-strong underline-offset-4 hover:underline"
+              className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-white/20 px-3 py-3 font-mono text-xs text-sidebar-ink underline-offset-4 hover:underline"
             >
               <span className="min-w-0">
                 <span className="block font-medium">Update available</span>

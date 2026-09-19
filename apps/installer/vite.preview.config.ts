@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url'
 import { defineConfig, type Plugin } from 'vite'
 import { installerPreviewApi } from './preview/mock-api'
+import { workerPagesPreview } from './preview/worker-pages'
 
 const installerRoot = fileURLToPath(new URL('../../payload/installer', import.meta.url))
 
@@ -8,6 +9,7 @@ function installerPreviewPlugin(): Plugin {
   return {
     name: 'ankka-installer-preview',
     configureServer(server) {
+      server.middlewares.use(workerPagesPreview())
       server.middlewares.use(installerPreviewApi())
     },
     handleHotUpdate(context) {

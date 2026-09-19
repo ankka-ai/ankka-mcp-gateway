@@ -1,0 +1,23 @@
+:root { color-scheme: dark; font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; background: #141414; color: #ededed; font-synthesis: none; -webkit-font-smoothing: antialiased; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; }
+main { width: min(960px, 100%); min-height: 100svh; margin-inline: auto; display: flex; flex-direction: column; padding: 38px 40px 28px; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 32px; }
+.cube-wordmark { width: 210px; height: auto; mask-image: linear-gradient(to bottom, #000 20%, transparent 100%); }
+header span { font: 10px/1.5 "SFMono-Regular", Consolas, monospace; letter-spacing: .12em; color: #787878; }
+.cube-stage { position: relative; flex: 1; min-height: 400px; height: min(68vw, 650px); }
+.cube-stage canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; cursor: grab; outline-offset: -8px; }
+.cube-stage canvas:active { cursor: grabbing; }
+.cube-error { position: absolute; top: 40%; left: 15%; right: 15%; color: #f3b0a9; text-align: center; line-height: 1.6; }
+footer { display: grid; grid-template-columns: 1fr auto; align-items: end; column-gap: 24px; border-top: 1px solid #ffffff18; padding-top: 22px; }
+h1 { font-size: 22px; font-weight: 400; letter-spacing: -.025em; margin: 0 0 6px; }
+.cube-caption p { color: #919191; margin: 0; font-size: 13px; }
+.cube-controls { display: flex; align-items: center; gap: 26px; }
+button { min-height: 40px; border: 1px solid #ffffff30; border-radius: 10px; background: transparent; color: #d4d4d4; padding: 9px 14px; font: inherit; font-size: 12px; cursor: pointer; user-select: none; }
+button:active { transform: scale(.98); }
+label { display: grid; gap: 8px; color: #919191; font-size: 11px; }
+input[type=range] { width: 115px; margin: 0; accent-color: #dedede; cursor: pointer; }
+.cube-hint { grid-column: 1 / -1; margin: 22px 0 0; color: #666; font: 10px/1.6 "SFMono-Regular", Consolas, monospace; }
+:focus-visible { outline: 2px solid #dedede; outline-offset: 4px; }
+@media (hover:hover) { button:hover { background: #ffffff09; border-color: #ffffff60; } }
+@media (max-width:600px) { main { padding: 26px 20px; } header { gap: 20px; } .cube-wordmark { width: 170px; } header span { font-size: 8px; } .cube-stage { min-height: 360px; } footer { grid-template-columns: 1fr; gap: 22px; } .cube-controls { justify-content: space-between; } .cube-hint { margin: 0; } }

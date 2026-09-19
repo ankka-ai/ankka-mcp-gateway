@@ -16,6 +16,9 @@ const previews = [
 console.log(`
 Ankka MCP Gateway UI studio
 
+UI library — every current screen and component
+  Browse      http://127.0.0.1:5730/preview/index.html
+
 Deployment wizard
   Start       http://127.0.0.1:5731/
   Connected   http://127.0.0.1:5731/?preview=connected
@@ -27,7 +30,6 @@ Deployment wizard
   Success     http://127.0.0.1:5731/result?preview=success
   Failure     http://127.0.0.1:5731/result?preview=failed
   Removal     http://127.0.0.1:5731/result?preview=removal
-  Source auth http://127.0.0.1:5731/manage
 
 Gateway dashboard
   Overview    http://127.0.0.1:5730/?preview=ready
@@ -39,7 +41,7 @@ Gateway dashboard
   Error       http://127.0.0.1:5730/?preview=error
   Removal     http://127.0.0.1:5730/settings?preview=removal-interrupted
 
-No Cloudflare account, OAuth grant, or server is used. Press Ctrl+C to stop.
+All previews use synthetic data without Cloudflare requests. Press Ctrl+C to stop.
 `)
 
 const children = previews.map(({ label, command, env }) => {

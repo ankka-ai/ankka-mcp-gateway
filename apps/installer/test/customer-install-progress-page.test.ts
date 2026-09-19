@@ -4,7 +4,7 @@ import { customerInstallProgressPage } from '../src/customer-install-progress-pa
 import type { CustomerBootstrapCallbackOutcome } from '../src/customer-bootstrap-router';
 
 function element() {
-  return { textContent: '', href: '', append: vi.fn() };
+  return { textContent: '', href: '', hidden: false, append: vi.fn() };
 }
 
 async function openPage(outcome: CustomerBootstrapCallbackOutcome, fetch: typeof globalThis.fetch) {
@@ -12,7 +12,7 @@ async function openPage(outcome: CustomerBootstrapCallbackOutcome, fetch: typeof
   const html = await response.text();
   const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/u.exec(html)?.[1];
   if (!script) throw new Error('progress script missing');
-  const nodes = new Map(['#title', '#message', '#detail', '#credential'].map((selector) => [selector, element()]));
+  const nodes = new Map(['#title', '#message', '#detail', '#credential', '#progress'].map((selector) => [selector, element()]));
   const navigate = vi.fn();
   const listeners = new Map<string, () => void>();
   runInNewContext(script, {
@@ -34,6 +34,7 @@ describe('customer install final navigation', () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     const page = await openPage({ ...converging, status: 'READY' }, fetch);
     expect(page.navigate).toHaveBeenCalledExactlyOnceWith('https://manage.example.com/?setup=finishing');
+    expect(page.nodes.get('#progress')?.hidden).toBe(true);
     expect(fetch).not.toHaveBeenCalled();
     expect(page.response.headers.get('content-security-policy')).toContain("connect-src 'self'");
     expect(page.response.headers.get('referrer-policy')).toBe('no-referrer');
@@ -42,6 +43,7 @@ describe('customer install final navigation', () => {
   it('continues to management after the temporary address retires without claiming readiness', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockRejectedValue(new Error('temporary_address_closed'));
     const page = await openPage(converging, fetch);
+    expect(page.nodes.get('#progress')?.hidden).toBe(false);
     // Quick misses are not proof that the temporary address retired: a name that does not exist yet would be cached.
     await vi.advanceTimersByTimeAsync(9_000);
     expect(page.navigate).not.toHaveBeenCalled();
@@ -87,6 +89,7 @@ describe('customer install final navigation', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(page.nodes.get('#title')?.textContent).toBe('Setup did not complete');
     expect(page.nodes.get('#detail')?.textContent).toBe('Reason: convergence_failed');
+    expect(page.nodes.get('#progress')?.hidden).toBe(true);
   });
 
   it('says in one fixed sentence what happens to the management token while the install runs', async () => {
