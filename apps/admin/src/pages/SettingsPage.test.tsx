@@ -43,7 +43,7 @@ function api(): GatewayAdminApi {
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn(),
-    removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(),
+    prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(),
     prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(),
     cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),

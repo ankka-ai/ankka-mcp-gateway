@@ -288,6 +288,13 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
 
   useEffect(() => {
     const url = new URL(window.location.href)
+    const removal = url.searchParams.get('sourceRemovalResult')
+    if (removal !== null) {
+      for (const parameter of ['sourceRemoval', 'sourceRemovalResult', 'sourceRemovalReason']) removeResultParameter(parameter)
+      setSourceNotice(removal === 'applied' ? { tone: 'success', message: 'Source and BigQuery bridge removed.' }
+        : removal === 'revocation_unconfirmed' ? { tone: 'neutral', message: 'Source and BigQuery bridge removed. The temporary Cloudflare approval could not be confirmed revoked; review your active OAuth grants in Cloudflare.' }
+          : { tone: 'neutral', message: 'BigQuery removal did not finish. Its cleanup records are saved. Use Continue removal to authorize another attempt.' })
+    }
     const actionId = url.searchParams.get('sourceAction')
     const result = url.searchParams.get('sourceActionResult')
     const rawReason = url.searchParams.get('sourceActionReason')

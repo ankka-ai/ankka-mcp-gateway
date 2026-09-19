@@ -124,7 +124,7 @@ const sourceActionFailureCodes = new Set([
   'source_action_authorization_failed', 'source_resource_collision', 'source_action_legacy_policy',
   'source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'bigquery_setup_required',
   // A sign-in source waits with nothing enabled: for its tools to be chosen, then for the chosen tools to be attached.
-  'source_tools_required', 'source_tools_chosen',
+  'source_tools_required', 'source_tools_chosen', 'source_removal_required',
 ])
 /** Who prepared an action: an administrator, or the gateway's one configured service identity. */
 const actorKindSchema = v.optional(v.picklist(['human', 'service']))
@@ -372,6 +372,7 @@ export interface GatewayAdminApi {
   getBigQuerySetups(): Promise<BigQuerySetups>
   prepareBigQuery(input: BigQuerySetupInput): Promise<BigQueryPrepared>
   resumeBigQuery(actionId: string): Promise<BigQueryPrepared>
+  prepareBigQueryRemoval(revision: number, sourceId: string): Promise<BigQueryPrepared>
   getSources(): Promise<ManagedSources>
   getTeam(): Promise<Team>
   prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
@@ -412,6 +413,8 @@ export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually r
 const ERROR_MESSAGES = new Map([
   ['source_not_found', 'This source has already been removed. Refresh Sources.'],
   ['source_removal_requires_cleanup', 'This source has started provisioning. Check its installation status; its resources must be cleaned up before it can be removed.'],
+  ['source_removal_unavailable', 'This source cannot be removed while another operation or an uncertain resource write needs attention. Check its installation status.'],
+  ['source_removal_unverified', 'The gateway could not verify removal of the BigQuery bridge. Its cleanup records are saved. Continue removal with a fresh Cloudflare approval.'],
   ['source_oauth_invalid', 'This authorization attempt is no longer valid. Start again from your source.'],
   ['source_oauth_unavailable', 'This source could not be authorized here. Try again, or open it in Cloudflare for manual OAuth setup.'],
   ['bigquery_setup_invalid', 'Review the query project and dataset names before continuing.'],
@@ -573,6 +576,11 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   }
   resumeBigQuery(actionId: string): Promise<BigQueryPrepared> {
     return this.#request('/api/bigquery/resume', bigQueryPreparedSchema, { method: 'POST', body: JSON.stringify({ schemaVersion: 1, actionId }) })
+  }
+  prepareBigQueryRemoval(revision: number, sourceId: string): Promise<BigQueryPrepared> {
+    return this.#request('/api/bigquery/remove', bigQueryPreparedSchema, {
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, sourceId }),
+    })
   }
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }

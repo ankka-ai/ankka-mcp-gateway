@@ -462,7 +462,7 @@ describe('production-shaped relay topology: customer account to auth.ankka.ai ov
   async function ticketAndStart(
     f: Awaited<ReturnType<typeof relayFixture>>,
     transport: CustomerCloudflareTransport,
-    operation: typeof OPERATIONS_BEFORE[number] | 'management-credential',
+    operation: typeof OPERATIONS_BEFORE[number] | 'management-credential' | 'bigquery-remove',
   ) {
     const kinds = operation === 'uninstall' ? { receiptResourceKinds: ['worker', 'dns_record'] as const } : {};
     const ticket = await requestCustomerGatewayRelayTicket({
@@ -538,6 +538,26 @@ describe('production-shaped relay topology: customer account to auth.ankka.ai ov
       { redirect: 'manual' },
     ), f.env);
     expect(widened.status).not.toBe(302);
+  });
+
+  it('certifies bridge removal as its own fixed operation through the deployed relay routes', async () => {
+    const f = await relayFixture();
+    const started = await ticketAndStart(f, f.publicHttps, 'bigquery-remove');
+    expect(f.shardNames).toEqual(['v1:bigquery-remove', 'v1:bigquery-remove']);
+    expect(f.calls.map(call => new URL(call.url).pathname)).toEqual([
+      '/oauth/relay-ticket/challenge/bigquery-remove', '/oauth/relay-ticket/issue/bigquery-remove', '/oauth/start/bigquery-remove',
+    ]);
+    const authorization = new URL(started.authorizationUrl);
+    const scope = 'zone-access.write mcp-portals.write workers-scripts.write workers-routes.read';
+    expect(authorization.searchParams.get('scope')).toBe(scope);
+    const state = v.parse(relayStateSchema, authorization.searchParams.get('state'));
+    const callback = await f.relay.fetch(new Request(
+      `${CLOUDFLARE_CODE_RELAY_CALLBACK}?code=${AUTHORIZATION_CODE}&scope=${encodeURIComponent(scope)}&state=${state}`,
+      { redirect: 'manual' }), f.env);
+    expect(callback.status).toBe(302);
+    const location = new URL(callback.headers.get('location') ?? '');
+    expect(`${location.origin}${location.pathname}`).toBe(GATEWAY_CALLBACK);
+    expect([...location.searchParams.keys()].sort()).toEqual(['code', 'state']);
   });
 
   it('serves only the fixed public origin and its deployable config declares exactly that route and no token or secret binding', async () => {

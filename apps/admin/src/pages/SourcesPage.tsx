@@ -55,6 +55,7 @@ function sourceDraftLabel(action: SourceActionSummary | undefined): string {
 }
 
 function actionLabel(action: SourceActionSummary): string {
+  if (action.failureCode === 'source_removal_required') return action.state === 'applying' ? 'Removing source' : 'Finish removing source'
   if (action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)) return 'BigQuery setup failed'
   if (action.state === 'recovery_required') {
     if (action.failureCode === 'source_connection_required') return 'Connect your source'
@@ -82,6 +83,9 @@ function unchosenToolsGuidance(action: SourceActionSummary): string | null {
 }
 
 function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, accountToken: boolean, toolsChosen = true, bridgeSetup = false): string {
+  if (action.failureCode === 'source_removal_required') return action.state === 'applying'
+    ? 'Your gateway is removing the saved BigQuery bridge and checking that its resources are gone.'
+    : 'Finish removing this BigQuery bridge with a fresh Cloudflare approval. Your gateway retains its cleanup records until removal is verified.'
   if (action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)) {
     return `${bigQueryPreflightGuidance(action.failureCode)} The bridge was not deployed. Continue BigQuery setup after correcting the issue; it needs fresh Cloudflare approval and another key upload.`
   }
@@ -238,11 +242,33 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     if (!previous || Date.parse(action.issuedAt) >= Date.parse(previous.issuedAt)) latestActions.set(action.sourceId, action)
   }
   const blocker = sourceActions?.blockingAction
+  const needsBridgeCleanup = (sourceId: string) => {
+    const action = latestActions.get(sourceId)
+    const setup = bigQuery?.setups.find((item) => item.sourceId === sourceId)
+    return Boolean(action && setup && !setup.recoveryRequired &&
+      (action.canRenew || action.failureCode === 'source_removal_required') &&
+      action.state !== 'applying' && (!blocker || (blocker.kind === 'source' && blocker.sourceId === sourceId)))
+  }
   const canRemoveDraft = (sourceId: string) => sourceActions !== null && sourceActionsError === null &&
-    (!blocker || (blocker.kind === 'source' && blocker.sourceId === sourceId)) &&
+    (!blocker || blocker.kind === 'source') &&
     sources.sources.some((source) => source.id === sourceId && source.status === 'draft') &&
-    sourceActions.actions.filter((action) => action.sourceId === sourceId)
-      .every((action) => action.state === 'failed' || action.canCancel)
+    (sourceActions.actions.filter((action) => action.sourceId === sourceId)
+      .every((action) => action.state === 'failed' || action.canCancel) || needsBridgeCleanup(sourceId))
+  const removeSource = async (sourceId: string) => {
+    if (!needsBridgeCleanup(sourceId)) return removeSourceDraft(sourceId)
+    setResumingBigQuery(true)
+    setBigQueryError(null)
+    try {
+      const prepared = await api.prepareBigQueryRemoval(sources.revision, sourceId)
+      const destination = validHandoffUrl(prepared.handoffUrl, window.location.origin)
+      if (destination === null) throw new Error('The gateway returned an invalid authorization link.')
+      window.location.assign(destination)
+    } catch (error) {
+      setBigQueryError(error instanceof Error ? error.message : 'BigQuery removal could not start.')
+      await refreshSourceActions().catch(() => {})
+      setResumingBigQuery(false)
+    }
+  }
   const showActionStatus = sources.sources.some((source) => source.status === 'draft') || latestActions.size > 0 || Boolean(blocker) || sourceActionsError !== null
 
   const clearDraftForm = () => {
@@ -431,7 +457,10 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                 {canRemoveDraft(action.sourceId) ? (
                   <Button variant="secondary-destructive" className="pressable mt-3"
                     disabled={isBusy || resumingBigQuery || isCheckingSourceActions}
-                    onClick={() => void removeSourceDraft(action.sourceId).catch(() => {})}>Remove source</Button>
+                    onClick={() => void removeSource(action.sourceId).catch(() => {})}>{action.failureCode === 'source_removal_required' ? 'Continue removal' : 'Remove source'}</Button>
+                ) : null}
+                {canRemoveDraft(action.sourceId) && needsBridgeCleanup(action.sourceId) ? (
+                  <p className="mt-2 text-xs leading-5 text-kumo-subtle">Removes this source’s bridge from your Cloudflare account. Requires one Cloudflare approval; no Google key upload is needed.</p>
                 ) : null}
                 {signInPause && action.canRenew === true ? (
                   <SourceToolChoice
@@ -665,7 +694,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             onAuthorize={(sourceId) => void authorize(sourceId)}
             canRemove={canRemoveDraft}
             removeDisabled={isCheckingSourceActions || resumingBigQuery}
-            onRemove={(sourceId) => void removeSourceDraft(sourceId).catch(() => {})}
+            onRemove={(sourceId) => void removeSource(sourceId).catch(() => {})}
           />
         )}
       </section>

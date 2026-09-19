@@ -34,7 +34,7 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
     getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-    discoverSource: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+    discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   }
@@ -74,6 +74,51 @@ describe('source installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText('No sources yet')
     expect(screen.queryByText('BigQuery setup failed')).not.toBeInTheDocument()
+  })
+
+  it('offers removal for both an empty failed draft and a bridge waiting for recovery', async () => {
+    const user = userEvent.setup()
+    const failed = pendingAction({ state: 'failed', status: 'failed', canCancel: false,
+      failureCode: 'bigquery_google_query_rejected' })
+    const other = { ...draft, id: 'source-3333333333333333', label: 'BigQuery bridge' }
+    const recovery = pendingAction({ actionId: `action_${'b'.repeat(32)}`, sourceId: other.id,
+      state: 'recovery_required', status: 'recovery_required', canCancel: false, canRenew: true,
+      failureCode: 'source_discovery_failed' })
+    const api = actionApi({ ...actionSnapshot(recovery), actions: [failed, recovery] })
+    api.getSources = vi.fn(async () => ({ ...sources, sources: [draft, other] }))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true,
+      setups: [failed, recovery].map(action => ({ sourceId: action.sourceId, actionId: action.actionId,
+        ready: action === recovery, credentialRequired: action === failed, recoveryRequired: false })) }))
+    api.removeSourceDraft = vi.fn().mockResolvedValue({ ...sources, revision: 5, sources: [other] })
+    api.prepareBigQueryRemoval = vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_removal_unverified'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const first = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
+    const second = await screen.findByRole('article', { name: `Installation of ${other.label}` })
+    await waitFor(() => expect(within(second).getByRole('button', { name: 'Remove source' })).toBeEnabled())
+    expect(within(second).getByText(/no Google key upload is needed/)).toBeVisible()
+    await user.click(within(first).getByRole('button', { name: 'Remove source' }))
+    expect(api.removeSourceDraft).toHaveBeenCalledExactlyOnceWith(4, draft.id)
+    await user.click(within(second).getByRole('button', { name: 'Remove source' }))
+    await waitFor(() => expect(api.prepareBigQueryRemoval).toHaveBeenCalledExactlyOnceWith(5, other.id))
+    expect(api.removeSourceDraft).toHaveBeenCalledTimes(1)
+    expect(api.resumeBigQuery).not.toHaveBeenCalled()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it('offers only continued cleanup after an interrupted bridge removal', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction({ state: 'recovery_required', status: 'recovery_required',
+      canCancel: false, canRenew: false, failureCode: 'source_removal_required' })
+    const api = actionApi(actionSnapshot(action))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true,
+      setups: [{ sourceId: draft.id, actionId: action.actionId, ready: true,
+        credentialRequired: false, recoveryRequired: false }] }))
+    api.prepareBigQueryRemoval = vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_removal_unverified'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Continue removal' }))
+    expect(api.prepareBigQueryRemoval).toHaveBeenCalledExactlyOnceWith(4, draft.id)
+    expect(screen.queryByRole('button', { name: 'Resume installation' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Continue BigQuery setup' })).not.toBeInTheDocument()
   })
 
   it('removes an unused draft from its source details', async () => {
@@ -256,7 +301,7 @@ describe('SourcesPage', () => {
       getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      discoverSource: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
@@ -372,7 +417,7 @@ describe('SourcesPage', () => {
           { name: 'execute_sql', description: 'Synthetic write query.', destructiveHint: true, defaultSelected: false },
         ],
       })),
-      removeSourceDraft: vi.fn(), saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
@@ -418,7 +463,7 @@ describe('SourcesPage', () => {
         authentication: 'oauth',
         tools: [],
       })),
-      removeSourceDraft: vi.fn(), saveSourceDraft,
+      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction,
       getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
@@ -479,7 +524,7 @@ describe('SourcesPage', () => {
         authentication: 'none',
         tools: [{ name: 'reports.read', defaultSelected: true }],
       })),
-      removeSourceDraft: vi.fn(), saveSourceDraft,
+      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -510,7 +555,7 @@ describe('SourcesPage', () => {
         schemaVersion: 1, status: 'discovered', endpoint: url, protocolVersion: '2026-07-28', authentication: 'none',
         tools: [{ name: 'search', title: 'Search', description: 'Search documents.', readOnlyHint: true, defaultSelected: true }],
       })),
-      removeSourceDraft: vi.fn(), saveSourceDraft,
+      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -557,7 +602,7 @@ describe('SourcesPage', () => {
       getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource,
-      removeSourceDraft: vi.fn(), saveSourceDraft,
+      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -622,7 +667,7 @@ describe('SourcesPage', () => {
           defaultSelected: false,
         })),
       })),
-      removeSourceDraft: vi.fn(), saveSourceDraft,
+      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -683,7 +728,7 @@ describe('SourcesPage', () => {
         authentication: 'oauth',
         tools: [],
       })),
-      removeSourceDraft: vi.fn(), saveSourceDraft,
+      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),

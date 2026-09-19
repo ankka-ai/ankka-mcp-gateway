@@ -61,11 +61,15 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
     }
     fail();
   }
-  async function describe<Input>(input: Input) {
+  async function describe<Input>(input: Input, sourceId?: string) {
     const snapshot = v.parse(snapshotSchema, input);
+    if (sourceId !== undefined && !/^source-[a-f0-9]{16}$/u.test(sourceId)) fail();
+    const journalKey = sourceId === undefined ? JOURNAL : `${JOURNAL}/${sourceId}`;
+    const progressKey = sourceId === undefined ? PROGRESS : `${PROGRESS}/${sourceId}`;
     const records: BigQueryRecord[] = [];
     const actionIds: string[] = [];
     for await (const [key, raw] of storedRecords()) {
+      if (sourceId !== undefined && key !== PREFIX + sourceId) continue;
       const record = v.parse(bigQueryRecordSchema, raw);
       const hasResources = record.application !== null || record.workerVersion !== null || record.domainId !== null;
       // Unknown creates have no receipt. A fresh grant cannot turn a matching
@@ -91,7 +95,8 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       if (records.length > 32) fail();
       if (action) actionIds.push(action.actionId);
     }
-    if (snapshot.actions.some((action) => action.bigquerySetupStarted === true && !actionIds.includes(action.actionId))) fail();
+    if (snapshot.actions.some((action) => (sourceId === undefined || action.sourceId === sourceId) &&
+        action.bigquerySetupStarted === true && !actionIds.includes(action.actionId))) fail();
     if (records.length === 0) return null;
     records.sort((a, b) => a.sourceId < b.sourceId ? -1 : 1);
     const resources: Resource[] = [];
@@ -104,7 +109,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
     }
     const recordsHash = `sha256:${await bigQueryHex(canonicalJson({ installationId: context.installationId, records }))}`;
     async function readJournal(): Promise<Journal> {
-      const raw = await port.storage.get(JOURNAL);
+      const raw = await port.storage.get(journalKey);
       if (raw === undefined) return { schemaVersion: 1, recordsHash, removed: 0, pending: null };
       const journal = v.parse(journalSchema, raw);
       if (journal.recordsHash !== recordsHash || journal.removed > resources.length ||
@@ -228,7 +233,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
     }
     async function progress(grant: Grant): Promise<Progress> {
       active(grant);
-      const raw = await port.storage.get(PROGRESS);
+      const raw = await port.storage.get(progressKey);
       if (raw === undefined) return { recordsHash, requestId: grant.requestId, phase: 'preflight', checked: 0 };
       const saved = v.parse(progressSchema, raw);
       if (saved.recordsHash !== recordsHash || saved.checked > records.length) fail();
@@ -238,7 +243,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
         { recordsHash, requestId: grant.requestId, phase: 'preflight', checked: 0 };
     }
     async function saveProgress(next: Progress, journal: Journal) {
-      await port.storage.put(PROGRESS, v.parse(progressSchema, next));
+      await port.storage.put(progressKey, v.parse(progressSchema, next));
       return { complete: next.phase === 'complete', progress: `sha256:${await bigQueryHex(canonicalJson({ next, journal }))}`,
         recordsHash, removedResourceCount: resources.length };
     }
@@ -273,7 +278,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
       let journal = await readJournal();
       const current = await progress(grant);
       if (current.phase === 'preflight') fail();
-      const save = async (next: Journal) => { await port.storage.put(JOURNAL, v.parse(journalSchema, next)); journal = next; };
+      const save = async (next: Journal) => { await port.storage.put(journalKey, v.parse(journalSchema, next)); journal = next; };
       if (current.phase === 'complete') return saveProgress(current, journal);
       if (current.phase === 'remove' && journal.removed < resources.length) {
         const resource = resources[journal.removed];
@@ -316,7 +321,15 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
     // never authorizes deleting a Worker.
     const receiptResourceKinds = new Set(resources.map((resource) => resource.kind));
     if (resources.length > 0) receiptResourceKinds.add('worker');
-    return { actionIds, recordsHash, receiptResourceKinds: [...receiptResourceKinds], preflight, remove };
+    async function step(grant: Grant) {
+      if ((await progress(grant)).phase === 'preflight') {
+        const result = await preflight(grant, []);
+        return { complete: false, progress: result.progress };
+      }
+      return remove(grant, []);
+    }
+    return { actionIds, recordsHash, receiptResourceKinds: [...receiptResourceKinds], preflight, remove, step };
   }
-  return { describe, bounded: true };
+  return { describe: <Input>(input: Input) => describe(input),
+    describeSource: <Input>(input: Input, sourceId: string) => describe(input, sourceId), bounded: true };
 }

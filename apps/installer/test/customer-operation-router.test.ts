@@ -195,7 +195,7 @@ function dependencies(input: {
     startRuntimeUpdate: (start) => driver.start(start),
     updateView: (attemptId) => driver.view(attemptId),
     issueRelayTicket: async (operation) => {
-      if (!['source-add', 'bigquery-add', 'upgrade', 'rollback'].includes(operation)) throw new Error('unexpected operation');
+      if (!['source-add', 'bigquery-add', 'bigquery-remove', 'upgrade', 'rollback'].includes(operation)) throw new Error('unexpected operation');
       return { relayTicket: RELAY_TICKET, expiresAt: NOW + 120_000 };
     },
     beginRelay: async ({ operation, gatewayState, pkceChallenge, gatewayCallback }) =>
@@ -756,6 +756,37 @@ describe('BigQuery credential custody in the gateway callback', () => {
     expect(runBigQuerySetup).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('BigQuery removal consent', () => {
+  it.each([true, false])('removes directly after consent and revokes its grant (success=%s)', async (success) => {
+    const port = attemptPort()
+    const scopes = 'zone-access.write mcp-portals.write workers-scripts.write workers-routes.read'
+    const harness = transport(scopes)
+    const removeBigQuery = vi.fn(async () => success ? json(APPLIED_SOURCE_ACTION)
+      : Response.json({ error: 'source_removal_unverified' }, { status: 409 }))
+    const runBigQuerySetup = vi.fn()
+    const target = router({ ...dependencies({ port: port.port, harness, action: null, applied: [] }),
+      readBigQueryRemovalAction: async () => ({ status: 'authorization_required', expiresAt: ACTION_EXPIRES_AT }),
+      removeBigQuery, runBigQuerySetup })
+    const result = await authorize(target, startRequest(Object.assign({}, baseClaim, { actionType: 'bigquery_remove' })), scopes)
+    expect(port.current()?.operation).toBe('bigquery-remove')
+    const response = await target.fetch(new Request(result.callback, { headers: { cookie: result.cookie } }))
+    expect(response.status).toBe(303)
+    const location = new URL(response.headers.get('location') ?? '')
+    expect(location.pathname).toBe('/sources')
+    expect(location.searchParams.get('sourceRemovalResult')).toBe(success ? 'applied' : 'failed')
+    expect(location.searchParams.has('sourceActionResult')).toBe(false)
+    expect(removeBigQuery).toHaveBeenCalledExactlyOnceWith({ actionId: ACTION_ID, actionKey: ACTION_KEY,
+      actorEmail: 'admin@example.com', accessToken: ACCESS_TOKEN, actionExpiresAt: ACTION_EXPIRES_AT })
+    expect(runBigQuerySetup).not.toHaveBeenCalled()
+    expect(harness.revoked()).toBe(true)
+    expect(port.current()).toBeNull()
+    expect(port.writes.join('')).not.toContain(ACCESS_TOKEN)
+    expect(port.writes.join('')).not.toContain(ACTION_KEY)
+    expect((await target.fetch(new Request(result.callback, { headers: { cookie: result.cookie } }))).status).toBe(400)
+    expect(removeBigQuery).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('management token custody in the gateway callback', () => {
   // Synthetic values in Cloudflare's two account token forms, assembled at run time so no literal has a credential's form.

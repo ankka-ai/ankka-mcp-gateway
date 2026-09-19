@@ -8,7 +8,7 @@ const GRANT = 'synthetic-uninstall-grant-never-store';
 export const grant = { accessToken: GRANT, expiresAt: 20_000, requestId: 'x'.repeat(22) };
 export const JOURNAL = 'ankka-mcp-gateway/bigquery-teardown/v1';
 
-export async function fixture({ partial = false, lostDelete = -1, applied = true, fixtureContext = context, journalStorage, index = 0 } = {}) {
+export async function fixture({ partial = false, lostDelete = -1, applied = true, fixtureContext = context, journalStorage, scoped = false, index = 0 } = {}) {
   const context = fixtureContext;
   const suffix = index === 0 ? '' : `-${index}`;
   const applicationId = `bridge-app${suffix}`, domainId = `bridge-domain${suffix}`, versionId = `bridge-version${suffix}`;
@@ -67,7 +67,8 @@ export async function fixture({ partial = false, lostDelete = -1, applied = true
       path === `/workers/scripts/${names.workerName}` ? 'settings' : path === `/access/apps/${applicationId}` ? 'app' : null;
     if (method === 'DELETE') {
       expect(property).not.toBeNull();
-      const journal = journalStorage ? await journalStorage.get(JOURNAL) : values.get(JOURNAL);
+      const journalKey = scoped ? `${JOURNAL}/${source.id}` : JOURNAL;
+      const journal = journalStorage ? await journalStorage.get(journalKey) : values.get(journalKey);
       expect(journal.pending).toMatchObject({ index: journal.removed });
       expect(provider.app).not.toBeNull();
       if (property === 'app') { expect(provider.domain).toBeNull(); expect(provider.settings).toBeNull(); }

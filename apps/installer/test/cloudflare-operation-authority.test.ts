@@ -44,7 +44,7 @@ describe('fixed Cloudflare OAuth operation authority', () => {
 
   it('has the exhaustive fixed operation catalogue and no generic authority', () => {
     expect(FIXED_CLOUDFLARE_OPERATIONS).toEqual([
-      'bootstrap', 'install', 'upgrade', 'rollback', 'source-add', 'bigquery-add', 'source-update',
+      'bootstrap', 'install', 'upgrade', 'rollback', 'source-add', 'bigquery-add', 'bigquery-remove', 'source-update',
       'source-remove', 'management-credential', 'uninstall', 'uninstall-finalize', 'gateway-root-finalize',
     ]);
     expect(isFixedCloudflareOperation('install')).toBe(true);
@@ -193,6 +193,7 @@ describe('fixed Cloudflare OAuth operation authority', () => {
       rollback: ['workers-scripts.write'],
       'source-add': ['zone-access.write', 'mcp-portals.write'],
       'bigquery-add': ['zone-access.write', 'mcp-portals.write', 'workers-scripts.write', 'workers-routes.read'],
+      'bigquery-remove': ['zone-access.write', 'mcp-portals.write', 'workers-scripts.write', 'workers-routes.read'],
       'source-update': ['zone-access.write', 'mcp-portals.write'],
       'source-remove': ['zone-access.write', 'mcp-portals.write'],
     };

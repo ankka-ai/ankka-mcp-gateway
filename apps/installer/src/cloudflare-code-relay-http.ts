@@ -15,7 +15,7 @@ import type { CustomerCloudflareOperation } from './cloudflare-operation-authori
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const MAX_BODY_BYTES = 8192;
-const START_PATH = /^\/oauth\/start\/(install|upgrade|rollback|source-add|bigquery-add|source-update|source-remove|management-credential|uninstall)$/u;
+const START_PATH = /^\/oauth\/start\/(install|upgrade|rollback|source-add|bigquery-add|bigquery-remove|source-update|source-remove|management-credential|uninstall)$/u;
 
 type RelayOperation = CustomerCloudflareOperation;
 
@@ -107,7 +107,7 @@ function operationFromPath(pathname: string): RelayOperation | null {
   const match = START_PATH.exec(pathname);
   const operation = match?.[1];
   return operation === 'install' || operation === 'upgrade' || operation === 'rollback' ||
-    operation === 'source-add' || operation === 'bigquery-add' || operation === 'source-update' || operation === 'source-remove' ||
+    operation === 'source-add' || operation === 'bigquery-add' || operation === 'bigquery-remove' || operation === 'source-update' || operation === 'source-remove' ||
     operation === 'management-credential' || operation === 'uninstall'
     ? operation
     : null;
