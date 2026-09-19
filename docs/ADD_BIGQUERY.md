@@ -66,6 +66,28 @@ the bridge login policy admits the operator who prepared the action.
 
 ## Interrupted setup
 
+If the initial Google check fails before bridge deployment, Sources shows
+**BigQuery setup failed**, a fixed error code, and the next step. The failed
+action is saved, so refreshing or reopening Sources preserves the explanation.
+It is no longer shown as waiting for Cloudflare. No bridge resources were
+created by that attempt. After correcting the issue, choose **Continue BigQuery
+setup** for a new approval and key upload.
+
+| Error code | What to check |
+| --- | --- |
+| `bigquery_google_key_invalid` | Use the original JSON key for an active, dedicated Google service account. The file or signing key could not be used. |
+| `bigquery_google_auth_http_<status>` | Google refused the token request. For HTTP 400, 401, or 403, check that the service account and key are active. |
+| `bigquery_google_query_http_<status>` | The BigQuery test request failed. For HTTP 400, 401, 403, or 404, check the query project ID, API/MCP enablement, and its BigQuery Job User and MCP User grants. |
+| `bigquery_google_query_rejected` | Google returned an MCP error or did not confirm the test query. Check the query project and permissions. |
+| `bigquery_google_auth_unavailable`, `bigquery_google_query_unavailable` | The request could not complete. Check Google service status before retrying. |
+| `bigquery_google_auth_response_invalid`, `bigquery_google_response_invalid` | Google's response could not be validated. Check the gateway release; this code does not establish a permissions failure. |
+| `bigquery_runtime_unavailable`, `bigquery_setup_failed` | The gateway could not start the bridge deployment. Check its release and configuration. |
+
+Only fixed stage/error words and HTTP statuses are retained, never Google's
+response text, the key, an access token, or exception details. Failures recorded
+by older releases without these diagnostics cannot be reconstructed; a new
+attempt on a release containing this change is needed to obtain the error code.
+
 Use **Continue BigQuery setup** for an unstarted attempt, or the recorded resume
 action after a failed deployment. A fresh approval is required; saved resource
 receipts identify what can be checked and resumed. A successful Worker upload

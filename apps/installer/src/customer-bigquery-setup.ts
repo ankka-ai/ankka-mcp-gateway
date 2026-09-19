@@ -7,6 +7,7 @@ import { operationSignature } from './customer-operation-secrets';
 import { BIGQUERY_SETUP_TOOLS, bigQueryHex, bigQueryPrepareSchema, bigQueryRecordSchema,
   bigQueryResumeSchema, bigQuerySourceNames, readBigQueryText, type BigQueryRecord } from './customer-bigquery-contract';
 import { deployBigQueryBridge, type BigQueryDeploymentContext } from './customer-bigquery-deployment';
+import { BigQueryPreflightError } from './customer-bigquery-preflight';
 
 const PREFIX = 'ankka-mcp-gateway/bigquery-source/v1/';
 const sourceSchema = v.object({ id: v.string(), label: v.string(), url: v.string(),
@@ -166,9 +167,16 @@ export function createBigQuerySetup(context: BigQuerySetupContext, port: BigQuer
       await assertActive();
       return await signed('apply', baseClaim);
     } catch (error) {
-      if (began) await signed('bigquery', { ...baseClaim, bigqueryPhase: 'failed' });
       const allowed = ['bigquery_resource_uncertain', 'bigquery_resource_collision', 'bigquery_google_connection_failed'];
-      const code = error instanceof Error && allowed.includes(error.message) ? error.message : 'bigquery_setup_failed';
+      const code = error instanceof BigQueryPreflightError ? error.code
+        : error instanceof Error && allowed.includes(error.message) ? error.message : 'bigquery_setup_failed';
+      if (began) await signed('bigquery', { ...baseClaim, bigqueryPhase: 'failed' });
+      else if (current.record.application === null && current.record.workerVersion === null &&
+          current.record.domainId === null && current.record.pending === null) {
+        // Persist a terminal failure only while the signed action proves no writes began.
+        // Existing partial deployments retain their recovery state and receipts.
+        await signed('bigquery', { ...baseClaim, bigqueryPhase: 'preflight_failed', bigqueryFailureCode: code });
+      }
       return json({ error: code }, 409);
     }
   }

@@ -103,7 +103,7 @@ describe('gateway-owned BigQuery deployment', () => {
   });
   it('refuses an unsuccessful Google preflight before any Cloudflare resource write', async () => {
     const test = await fixture({ googleFailure: true });
-    await expect(test.run()).rejects.toThrow('bigquery_google_connection_failed');
+    await expect(test.run()).rejects.toThrow('bigquery_google_query_rejected');
     expect(test.begin).not.toHaveBeenCalled();
     expect(test.requests).toHaveLength(2);
     expect(test.writes).toEqual([]);
