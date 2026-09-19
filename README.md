@@ -63,8 +63,12 @@ npm ci
 npm run dev:ui
 ```
 
-Open the [gateway dashboard](http://127.0.0.1:5730) or the
-[installer preview](http://127.0.0.1:5731). Stop both with `Ctrl+C`.
+Open the [UI library](http://127.0.0.1:5730/preview/index.html) to browse the
+current installer, Worker setup pages, dashboard states, and real components.
+It includes search, desktop/tablet/mobile widths, and direct screen links.
+The [gateway dashboard](http://127.0.0.1:5730) and
+[installer preview](http://127.0.0.1:5731) also work independently.
+All previews use synthetic data. Stop both servers with `Ctrl+C`.
 
 To inspect a configuration and its deployment plan without making changes,
 run these commands from the repository root:

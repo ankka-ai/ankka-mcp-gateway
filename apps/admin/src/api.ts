@@ -21,6 +21,11 @@ const preparedActionSchema = v.strictObject({
   expiresAt: v.string(),
   handoffUrl: v.string(),
 })
+const sourceApplyResultSchema = v.union([
+  preparedActionSchema,
+  v.strictObject({ schemaVersion: v.literal(1), actionId: v.string(),
+    status: v.literal('succeeded'), expiresAt: v.string() }),
+])
 const controlPlaneOriginSchema = v.pipe(
   v.string(),
   v.check(validControlPlaneOrigin),
@@ -46,6 +51,8 @@ const gatewayStatusSchema = v.strictObject({
     administratorCount: v.number(),
     memberCount: v.number(),
   }),
+  // The one machine identity the gateway admits; null on every gateway the hosted installer deploys.
+  serviceIdentity: v.optional(v.nullable(v.strictObject({ clientId: v.string() }))),
   updatedAt: v.string(),
 })
 const managedSourceSchema = v.strictObject({
@@ -60,8 +67,11 @@ const managedSourceSchema = v.strictObject({
 const managedSourcesSchema = v.strictObject({
   schemaVersion: v.literal(1),
   revision: v.number(),
-  applyMode: v.literal('oauth_per_action'),
+  applyMode: v.picklist(['oauth_per_action', 'account_token']),
   installationEnabled: v.optional(v.boolean(), false),
+  // The release a rollback can still restore today and no longer could once a source installation starts;
+  // null or absent whenever installing decides nothing about rollback. The gateway decides, never this page.
+  installEndsRollbackTo: v.optional(v.nullable(v.string())),
   sources: v.array(managedSourceSchema),
 })
 const discoveredToolSchema = v.strictObject({
@@ -82,16 +92,42 @@ const sourceDiscoverySchema = v.strictObject({
   tools: v.array(discoveredToolSchema),
   connectionBlock: v.optional(v.literal('source_google_shared_oauth_unsupported')),
 })
+const bigQuerySetupsSchema = v.strictObject({
+  schemaVersion: v.literal(1), available: v.boolean(), setups: v.array(v.strictObject({
+    sourceId: v.string(), actionId: v.string(), ready: v.boolean(), credentialRequired: v.boolean(), recoveryRequired: v.boolean(),
+    pendingResource: v.optional(v.nullable(v.picklist(['application', 'worker', 'domain']))),
+    failure: v.optional(v.nullable(v.strictObject({ stage: v.picklist(['application', 'worker', 'domain']),
+      httpStatus: v.nullable(v.pipe(v.number(), v.safeInteger(), v.minValue(100), v.maxValue(599))),
+    }))),
+  })),
+})
+const bigQueryPreparedSchema = v.strictObject({
+  schemaVersion: v.literal(1), actionId: v.string(), sourceId: v.string(), expiresAt: v.string(), handoffUrl: v.string(),
+})
+export type BigQuerySetups = v.InferOutput<typeof bigQuerySetupsSchema>
+export type BigQueryPrepared = v.InferOutput<typeof bigQueryPreparedSchema>
+export interface BigQuerySetupInput {
+  revision: number
+  label: string
+  configuration: { queryProjectId: string; allowedDatasets: { projectId: string; datasetId: string }[] }
+  readOnlyConfirmed: true
+}
+
 const sourceActionFailureCodes = new Set([
   'source_action_denied', 'source_action_recovery_required', 'source_action_state_unavailable',
   'source_action_conflict', 'source_action_drift', 'source_discovery_failed', 'source_action_invalid',
   'source_action_authorization_failed', 'source_resource_collision', 'source_action_legacy_policy',
-  'source_connection_required', 'source_sync_required', 'source_tools_mismatch',
+  'source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'bigquery_setup_required',
+  // A sign-in source waits with nothing enabled: for its tools to be chosen, then for the chosen tools to be attached.
+  'source_tools_required', 'source_tools_chosen',
 ])
+/** Who prepared an action: an administrator, or the gateway's one configured service identity. */
+const actorKindSchema = v.optional(v.picklist(['human', 'service']))
 const sourceActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: v.string(),
   sourceId: v.string(),
+  actorKind: actorKindSchema,
   status: actionStatusSchema,
   expiresAt: v.string(),
   failureCode: v.nullable(v.pipe(v.string(), v.transform((code) => sourceActionFailureCodes.has(code) ? code : 'source_action_failed'))),
@@ -119,6 +155,26 @@ const sourceActionsSchema = v.strictObject({
   actions: v.array(sourceActionSummarySchema),
   blockingAction: v.nullable(sourceActionPointerSchema),
 })
+/**
+ * The real tools of a paused sign-in installation, from Cloudflare's synced list. Cloudflare types a synced tool as an
+ * untyped map, so the gateway passes on a title, a description or a hint only when the record carries it; `tools` is
+ * empty unless `state` is `ready`.
+ */
+const sourceActionToolsSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  actionId: sourceActionPointerSchema.entries.actionId,
+  sourceId: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u)),
+  state: v.picklist(['connection_required', 'sync_required', 'unsupported', 'ready']),
+  tools: v.pipe(v.array(discoveredToolSchema), v.maxLength(500)),
+})
+/** A saved tool choice: the draft revision the paused installation is now bound to, and its exact allowlist. */
+const sourceToolChoiceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  actionId: sourceActionPointerSchema.entries.actionId,
+  sourceId: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u)),
+  revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+  enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.minLength(1), v.maxLength(500)),
+})
 const sourceActionConflictReasonSchema = v.picklist([
   'draft_changed', 'source_pending', 'lifecycle_pending', 'recovery_required',
 ])
@@ -145,6 +201,8 @@ const runtimeUpdateSchema = v.strictObject({
   })),
   rollback: v.union([
     v.strictObject({ available: v.literal(false) }),
+    // A previous release is recorded, but the gateway's saved state no longer allows restoring it.
+    v.strictObject({ available: v.literal(false), reason: v.literal('minimum_runtime_release'), release: v.string() }),
     v.strictObject({
       available: v.literal(true),
       release: v.string(),
@@ -164,16 +222,26 @@ const runtimeActionSchema = v.strictObject({
   expiresAt: v.string(),
   failureCode: v.nullable(v.string()),
 })
+// The removal journal never records `succeeded`: once the connected resources are gone the action reads `gateway_removed`.
+const teardownActionStatusSchema = v.picklist([
+  'authorization_required',
+  'applying',
+  'gateway_removed',
+  'failed',
+  'recovery_required',
+])
 const teardownActionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: v.string(),
-  status: actionStatusSchema,
+  status: teardownActionStatusSchema,
   expiresAt: v.string(),
   failureCode: v.nullable(v.string()),
 })
 const teamActionSchema = v.strictObject({
   ...teardownActionSchema.entries,
+  status: actionStatusSchema,
   action: v.optional(v.literal('access')),
+  actorKind: actorKindSchema,
   canCancel: v.optional(v.boolean(), false),
 })
 const teamActionResultSchema = v.strictObject({
@@ -196,9 +264,10 @@ const teamSchema = v.strictObject({
   revision: v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(Number.MAX_SAFE_INTEGER - 1)),
   editingEnabled: v.boolean(),
   editingDisabledReason: v.nullable(v.picklist([
-    'managed_in_cloudflare', 'release_review_required', 'lifecycle_action_pending',
+    'managed_in_cloudflare', 'release_review_required', 'lifecycle_action_pending', 'management_credential_missing',
   ])),
   managementCredentialConfigured: v.boolean(),
+  observedAt: v.optional(v.nullable(v.string())),
   members: teamMembersSchema,
   adminEmails: v.pipe(v.array(teamEmailSchema), v.minLength(1)),
   sources: v.pipe(v.array(v.strictObject({
@@ -237,11 +306,14 @@ export interface SourceDraftInput {
   enabledTools: string[]
 }
 
+export type SourceApplyResult = v.InferOutput<typeof sourceApplyResultSchema>
 export type PreparedAction = v.InferOutput<typeof preparedActionSchema>
 export type SourceAction = v.InferOutput<typeof sourceActionSchema>
 export type SourceActionState = v.InferOutput<typeof sourceActionStateSchema>
 export type SourceActionSummary = v.InferOutput<typeof sourceActionSummarySchema>
 export type SourceActionPointer = v.InferOutput<typeof sourceActionPointerSchema>
+export type SourceActionTools = v.InferOutput<typeof sourceActionToolsSchema>
+export type SourceToolChoice = v.InferOutput<typeof sourceToolChoiceSchema>
 export type SourceActions = v.InferOutput<typeof sourceActionsSchema>
 export type SourceActionConflictReason = v.InferOutput<typeof sourceActionConflictReasonSchema>
 export type RuntimeVersion = v.InferOutput<typeof runtimeVersionSchema>
@@ -255,6 +327,9 @@ export type TeamActionResult = v.InferOutput<typeof teamActionResultSchema>
 
 export interface GatewayAdminApi {
   getStatus(): Promise<GatewayStatus>
+  getBigQuerySetups(): Promise<BigQuerySetups>
+  prepareBigQuery(input: BigQuerySetupInput): Promise<BigQueryPrepared>
+  resumeBigQuery(actionId: string): Promise<BigQueryPrepared>
   getSources(): Promise<ManagedSources>
   getTeam(): Promise<Team>
   prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
@@ -263,10 +338,14 @@ export interface GatewayAdminApi {
   getUpdate(): Promise<RuntimeUpdate>
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
-  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<PreparedAction>
+  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<SourceApplyResult>
   getSourceActions(): Promise<SourceActions>
   getSourceAction(actionId: string): Promise<SourceAction>
   cancelSourceAction(actionId: string): Promise<SourceAction>
+  /** The real tools of a paused sign-in installation, once Cloudflare has synced them. */
+  getSourceActionTools(actionId: string): Promise<SourceActionTools>
+  /** Saves the tool choice as its own revision-bound step; the recorded installation is resumed separately. */
+  chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
   getRuntimeAction(actionId: string): Promise<RuntimeAction>
   prepareTeardownAction(): Promise<PreparedAction>
@@ -274,14 +353,27 @@ export interface GatewayAdminApi {
 }
 
 export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-source installation is temporarily unavailable in this release. Existing sources and team permissions remain available.'
+/** Shown beside a control that starts or resumes a source installation, only while the gateway reports that it ends a rollback. */
+export function rollbackEndsMessage(release: string): string {
+  return `After this you can no longer roll back to ${release}.`
+}
 export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually registered Google OAuth client. Cloudflare currently documents manual OAuth without an admin credential flow, so one operator connection for your team is not supported. No credentials have been requested. Keep Require user auth off; see the BigQuery setup guide.'
 
 const ERROR_MESSAGES = new Map([
+  ['bigquery_setup_invalid', 'Review the query project and dataset names before continuing.'],
+  ['preview_only', 'This is a local preview. Open your deployed gateway to connect BigQuery.'],
+  ['bigquery_setup_conflict', 'Check the existing BigQuery setup before starting another attempt.'],
+  ['bigquery_setup_required', 'Your BigQuery bridge setup needs to resume before its source can connect.'],
+  ['bigquery_setup_failed', 'BigQuery setup could not be confirmed. Check its recorded status before trying again.'],
+  ['bigquery_google_connection_failed', 'The Google identity could not run the connection check. Review its key and project permissions, then retry setup.'],
+  ['bigquery_resource_collision', 'A Cloudflare resource already uses the bridge address or name. Review it before continuing.'],
+  ['bigquery_resource_uncertain', 'Cloudflare did not confirm a resource creation. Keep this setup record and review the resource in Cloudflare before recovery.'],
   ['webmcp_input_invalid', 'The tool arguments do not match the declared schema. Review the tool inputs before retrying.'],
   ['webmcp_call_cancelled', 'The call was canceled before the operation started.'],
   ['webmcp_handoff_invalid', 'The authorization handoff could not be verified. Check the recorded action before retrying.'],
   ['access_required', 'Your Cloudflare Access session is no longer active. Sign in again and refresh.'],
   ['origin_required', 'Reload this management page before making changes.'],
+  ['management_credential_required', 'Configure a valid gateway management token in Cloudflare before installing sources.'],
   ['team_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
   ['team_invalid', 'Review the email addresses and installed source selections before trying again.'],
   ['team_action_conflict', 'A team access change is already in progress. Refresh to review or resume it.'],
@@ -296,8 +388,8 @@ const ERROR_MESSAGES = new Map([
   ['team_policy_drift', 'Cloudflare access policies no longer match the saved configuration. Review the Cloudflare policies before trying again. This page will not reset them automatically.'],
   ['team_release_review_required', 'Team access editing is not available in this gateway release.'],
   ['team_editing_managed_in_cloudflare', 'Team access is managed directly in Cloudflare for this release. No gateway management credential is accepted.'],
-  ['team_management_credential_missing', 'This legacy Team action cannot continue in the gateway. Review and reconcile its Access policies directly in Cloudflare.'],
-  ['team_management_credential_invalid', 'This legacy Team action cannot continue in the gateway. Review and reconcile its Access policies directly in Cloudflare.'],
+  ['team_management_credential_missing', 'Configure your gateway management token in Cloudflare Settings, then retry.'],
+  ['team_management_credential_invalid', 'Cloudflare rejected the gateway management token. Check its permissions or replace it in Cloudflare.'],
   ['team_prepare_failed', 'The team access request could not be confirmed. Refresh to check whether a change was recorded before trying again.'],
   ['team_cancel_failed', 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.'],
   ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable after source provisioning or team policy changes begin. A compatible removal release is required; do not discard the ownership or recovery records.'],
@@ -321,12 +413,21 @@ const ERROR_MESSAGES = new Map([
   ['source_response_invalid', 'The endpoint returned an invalid or oversized MCP response.'],
   ['source_tool_list_invalid', 'The endpoint returned an invalid or duplicate tool catalogue.'],
   ['source_tools_changed', 'The tool catalogue changed. Inspect it again before saving.'],
+  // An installation that waits for the operator is not a failed request: say what it waits for.
+  ['source_connection_required', 'The source is installed with nothing enabled and nobody assigned. Connect it in Cloudflare, then continue below.'],
+  ['source_sync_required', 'Cloudflare has not finished syncing the tools of this source. Sync its capabilities in Cloudflare, then continue below.'],
+  ['source_tools_required', 'The source is connected and nothing is enabled yet. Choose its tools below to finish installation.'],
+  ['source_tools_mismatch', 'A selected tool is not in the list Cloudflare synced from this source. Review the selection below.'],
+  ['source_tools_unavailable', 'This installation is not waiting for a tool choice. Check its recorded status.'],
+  ['source_tools_invalid', 'Select between 1 and 500 tools from the list, then try again.'],
+  ['source_tools_unsupported', 'Cloudflare’s synced list for this source cannot be offered here. Nothing was enabled.'],
+  ['source_catalogue_unavailable', 'Cloudflare did not return this source’s server record. Try again in a moment.'],
   ['source_unreachable', 'The MCP endpoint could not be reached within the discovery deadline.'],
   ['source_url_invalid', 'Enter a public HTTPS MCP endpoint without credentials, query parameters, or a custom port.'],
   ['runtime_action_conflict', 'Another runtime action is active or the installed version changed.'],
   ['runtime_action_invalid', 'The runtime action is no longer valid.'],
   ['runtime_update_not_available', 'The installed runtime already matches its release channel.'],
-  ['teardown_action_conflict', 'Another teardown action is active or the installed receipt could not be proven. Wait for the active action to expire before trying again.'],
+  ['teardown_action_conflict', 'Finish or cancel any unfinished source installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.'],
   ['teardown_action_invalid', 'The teardown request was rejected. Reload the management page before trying again.'],
   ['teardown_actions_unavailable', 'Receipt-authorized teardown is not available from this gateway release.'],
   ['update_channel_unavailable', 'The signed release channel is temporarily unavailable.'],
@@ -394,7 +495,7 @@ export function validHandoffUrl(value: string, expectedOrigin: string): string |
   try {
     const url = new URL(value)
     return url.origin === expectedOrigin && !url.username && !url.password &&
-      url.pathname === OPERATION_HANDOFF_PATH &&
+      [OPERATION_HANDOFF_PATH, `${OPERATION_HANDOFF_PATH}/teardown`].includes(url.pathname) &&
       url.search === '' && /^#[A-Za-z0-9_-]{40,8192}$/u.test(url.hash) ? url.href : null
   } catch {
     return null
@@ -404,6 +505,19 @@ export function validHandoffUrl(value: string, expectedOrigin: string): string |
 /** Typed same-origin boundary for the gateway management Worker. */
 export class HttpGatewayAdminApi implements GatewayAdminApi {
   getStatus(): Promise<GatewayStatus> { return this.#request('/api/status', gatewayStatusSchema) }
+  async getBigQuerySetups(): Promise<BigQuerySetups> {
+    try { return await this.#request('/api/bigquery', bigQuerySetupsSchema) }
+    catch (error) {
+      if (error instanceof GatewayApiError && error.status === 404) return { schemaVersion: 1, available: false, setups: [] }
+      throw error
+    }
+  }
+  prepareBigQuery(input: BigQuerySetupInput): Promise<BigQueryPrepared> {
+    return this.#request('/api/bigquery', bigQueryPreparedSchema, { method: 'POST', body: JSON.stringify({ schemaVersion: 1, ...input }) })
+  }
+  resumeBigQuery(actionId: string): Promise<BigQueryPrepared> {
+    return this.#request('/api/bigquery/resume', bigQueryPreparedSchema, { method: 'POST', body: JSON.stringify({ schemaVersion: 1, actionId }) })
+  }
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
 
@@ -442,9 +556,9 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
 
-  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<PreparedAction> {
+  prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<SourceApplyResult> {
     const path = renewActionId === undefined ? '/api/source-actions' : `/api/source-actions/${encodeURIComponent(renewActionId)}/renew`
-    return this.#request(path, preparedActionSchema, {
+    return this.#request(path, sourceApplyResultSchema, {
       method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, sourceId }),
     })
   }
@@ -460,6 +574,18 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   cancelSourceAction(actionId: string): Promise<SourceAction> {
     return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}`, sourceActionSchema, {
       method: 'DELETE', body: '{}',
+    })
+  }
+
+  getSourceActionTools(actionId: string): Promise<SourceActionTools> {
+    return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/tools`, sourceActionToolsSchema)
+  }
+
+  chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {
+    return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/tools`, sourceToolChoiceSchema, {
+      method: 'POST',
+      // The gateway accepts only a sorted list without repeats, the form it hashes.
+      body: JSON.stringify({ schemaVersion: 1, revision, sourceId, enabledTools: [...new Set(enabledTools)].sort() }),
     })
   }
 

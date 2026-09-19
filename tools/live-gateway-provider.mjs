@@ -1,0 +1,203 @@
+import * as v from 'valibot';
+import { validateLiveBootstrapOrigin } from './live-gateway-origin.mjs';
+import { LiveLifecycleError } from './live-gateway-lifecycle.mjs';
+
+function requireCondition(value, code) { if (!value) throw new LiveLifecycleError(code); }
+const id = (value) => v.is(v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/u)), value);
+
+/** Provider evidence is read-only: no arbitrary URL, grant forwarding, or deletion. The one write is the operator's
+ * opt-in, the management token as the encrypted secret of the exact recorded Worker. */
+// A read mutates nothing, so a transient transport failure (a timeout or a dropped connection) is retried this many
+// times before it is judged; a rejection by status is never retried.
+const READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
+/** The Worker secret the gateway reads its management token from. */
+const MANAGEMENT_SECRET_NAME = 'ANKKA_MANAGEMENT_TOKEN';
+const managementTokenValue = v.pipe(v.string(), v.minLength(20), v.maxLength(1024));
+
+export function createLiveGatewayProvider({ config, token, transport = fetch, sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) }) {
+  requireCondition(/^[a-f0-9]{32}$/u.test(config.accountId) && /^[a-f0-9]{32}$/u.test(config.zoneId) && token, 'provider_config_invalid');
+  const account = `/accounts/${config.accountId}`;
+  const zone = `/zones/${config.zoneId}`;
+  async function send(url) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await transport(url, { headers: { authorization: `Bearer ${token}` }, redirect: 'error', signal: AbortSignal.timeout(30_000) });
+      } catch {
+        if (attempt >= READ_RETRY_DELAYS_MS.length) throw new LiveLifecycleError('provider_read_failed');
+        await sleep(READ_RETRY_DELAYS_MS[attempt]);
+      }
+    }
+  }
+  async function read(path, allowAbsent = false) {
+    requireCondition(path.startsWith(`${account}/`) || path === zone || path.startsWith(`${zone}/`), 'provider_path_invalid');
+    requireCondition(new URL(`https://api.cloudflare.com/client/v4${path}`).pathname === `/client/v4${path.split('?')[0]}` &&
+      !path.includes('#') && !path.includes('%'), 'provider_path_invalid');
+    const response = await send(`https://api.cloudflare.com/client/v4${path}`);
+    if (allowAbsent && response.status === 404) { await response.body?.cancel(); return null; }
+    if (!response.ok) { await response.body?.cancel(); throw new LiveLifecycleError('provider_read_rejected'); }
+    let body;
+    try {
+      const reader = response.body.getReader();
+      const chunks = []; let size = 0;
+      for (;;) {
+        const item = await reader.read(); if (item.done) break;
+        size += item.value.length;
+        if (size > 4 * 1024 * 1024) { await reader.cancel(); throw new Error(); }
+        chunks.push(item.value);
+      }
+      body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    } catch { throw new LiveLifecycleError('provider_response_invalid'); }
+    requireCondition(body?.success === true && (body.errors?.length ?? 0) === 0, 'provider_response_rejected');
+    return body;
+  }
+  async function list(path) {
+    const values = [];
+    for (let page = 1; page <= 100; page += 1) {
+      const response = await read(`${path}${path.includes('?') ? '&' : '?'}page=${page}&per_page=100`);
+      requireCondition(Array.isArray(response.result), 'provider_list_invalid');
+      values.push(...response.result);
+      const info = response.result_info;
+      const pages = info?.total_pages ?? (Number.isSafeInteger(info?.total_count) && info?.per_page > 0
+        ? Math.max(1, Math.ceil(info.total_count / info.per_page)) : null);
+      // Some bounded account endpoints return an unpaginated array. Do not
+      // assume a full page with missing metadata is the complete inventory.
+      if (pages === null && response.result.length < 100 || pages !== null && page >= pages) return values;
+    }
+    throw new LiveLifecycleError('provider_pagination_incomplete');
+  }
+  const portals = () => list(`${account}/access/ai-controls/mcp/portals`);
+  const apps = () => list(`${account}/access/apps`);
+  const domains = () => list(`${account}/workers/domains`);
+  const dns = () => list(`${zone}/dns_records?name.exact=${encodeURIComponent(config.basics.portalHostname)}`);
+  // The second stage's placeholder record: released before the custom domain is attached, so only an
+  // interrupted second stage leaves one, and a fresh target must carry none.
+  const managementDns = () => list(`${zone}/dns_records?name.exact=${encodeURIComponent(config.basics.managementHostname)}`);
+  async function namespaces(workerName) {
+    return (await list(`${account}/workers/durable_objects/namespaces`)).filter((item) => item.script === workerName || item.script_name === workerName);
+  }
+  function locator(path, item, dependency) {
+    requireCondition(id(item.id), 'provider_resource_id_invalid');
+    return { path: `${path}/${encodeURIComponent(item.id)}`, dependency };
+  }
+  async function absent(inventory, dependenciesOnly) {
+    requireCondition(inventory?.schemaVersion === 1 && inventory.accountId === config.accountId &&
+      inventory.zoneId === config.zoneId && Array.isArray(inventory.resources), 'inventory_invalid');
+    validateLiveBootstrapOrigin(inventory.provision);
+    for (const item of inventory.resources) {
+      if (!dependenciesOnly || item.dependency) requireCondition(await read(item.path, true) === null, 'owned_resource_still_present');
+    }
+    requireCondition((await portals()).every((item) => item.hostname !== config.basics.portalHostname), 'portal_still_present');
+    requireCondition((await dns()).length === 0, 'portal_dns_still_present');
+    if (!dependenciesOnly) {
+      requireCondition((await domains()).every((item) => item.hostname !== config.basics.managementHostname &&
+        item.service !== inventory.provision.workerName), 'management_domain_still_present');
+      requireCondition((await namespaces(inventory.provision.workerName)).length === 0, 'worker_namespace_still_present');
+    }
+  }
+  return {
+    async metrics(provision) {
+      validateLiveBootstrapOrigin(provision);
+      const now = Date.now();
+      const to = new Date(now).toISOString();
+      const from = new Date(now - 30 * 60_000).toISOString();
+      const query = `query($accountTag:string!,$scriptName:string!,$from:Time!,$to:Time!){viewer{accounts(filter:{accountTag:$accountTag}){workersInvocationsAdaptive(limit:100,filter:{scriptName:$scriptName,datetime_geq:$from,datetime_leq:$to}){sum{requests errors subrequests}quantiles{cpuTimeP50 cpuTimeP99 memoryUsageBytesP99}}}}}`;
+      const response = await transport('https://api.cloudflare.com/client/v4/graphql', {
+        method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10_000),
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ query, variables: { accountTag: config.accountId, scriptName: provision.workerName, from, to } }),
+      });
+      if (!response.ok) { await response.body?.cancel(); return null; }
+      const reader = response.body.getReader(); const chunks = []; let size = 0;
+      for (;;) {
+        const item = await reader.read(); if (item.done) break;
+        size += item.value.length;
+        if (size > 128 * 1024) { await reader.cancel(); return null; }
+        chunks.push(item.value);
+      }
+      const result = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      return result.errors?.length ? null : result.data?.viewer?.accounts?.[0]?.workersInvocationsAdaptive;
+    },
+    async assertFresh() {
+      const target = (await read(zone)).result;
+      requireCondition(target?.name === config.basics.zoneName && target.account?.id === config.accountId, 'zone_account_mismatch');
+      requireCondition((await portals()).every((item) => item.hostname !== config.basics.portalHostname) &&
+        (await apps()).every((item) => ![config.basics.portalHostname, config.basics.managementHostname].includes(item.domain)) &&
+        (await domains()).every((item) => item.hostname !== config.basics.managementHostname) && (await dns()).length === 0 &&
+        (await managementDns()).length === 0,
+      'fresh_gateway_hostnames_required');
+    },
+    async assertWorker(provision) {
+      validateLiveBootstrapOrigin(provision);
+      requireCondition(await read(`${account}/workers/workers/${provision.workerName}`, true) !== null, 'worker_account_mismatch');
+    },
+    /** True once the management hostname is a custom domain of this installation's Worker: the earliest safe moment to resolve it. */
+    async managementDomainReady(provision) {
+      validateLiveBootstrapOrigin(provision);
+      return (await domains()).some((item) => item.hostname === config.basics.managementHostname && item.service === provision.workerName);
+    },
+    async capture(provision) {
+      validateLiveBootstrapOrigin(provision);
+      const ownedPortals = (await portals()).filter((item) => item.hostname === config.basics.portalHostname);
+      requireCondition(ownedPortals.length === 1 && v.is(v.string(), ownedPortals[0].description), 'portal_inventory_invalid');
+      const marker = ownedPortals[0].description.match(/^(acg:v1:[^:]+:)/u)?.[1];
+      requireCondition(marker, 'portal_ownership_marker_missing');
+      const portal = (await read(`${account}/access/ai-controls/mcp/portals/${encodeURIComponent(ownedPortals[0].id)}`)).result;
+      requireCondition(portal?.servers?.length === 1, 'portal_mapping_inventory_invalid');
+      const serverId = portal.servers[0].server_id ?? portal.servers[0].id;
+      const servers = (await list(`${account}/access/ai-controls/mcp/servers`)).filter((item) => item.id === serverId);
+      requireCondition(servers.length === 1 && servers[0].hostname === config.source.url, 'source_inventory_invalid');
+      const ownedApps = (await apps()).filter((item) => item.destinations?.some((destination) => destination.mcp_server_id === serverId) ||
+        [config.basics.portalHostname, config.basics.managementHostname].includes(item.domain));
+      requireCondition(ownedApps.length === 3, 'access_inventory_incomplete');
+      const resources = [locator(`${account}/access/ai-controls/mcp/portals`, ownedPortals[0], true),
+        ...servers.map((item) => locator(`${account}/access/ai-controls/mcp/servers`, item, true))];
+      const serviceTokenId = config.serviceAccess?.tokenId ?? null;
+      for (const app of ownedApps) {
+        const dependency = app.domain !== config.basics.managementHostname;
+        const appPath = `${account}/access/apps/${encodeURIComponent(app.id)}`;
+        const policies = await list(`${appPath}/policies`);
+        // Each application carries one policy, except that a management application whose deployment opted into a
+        // service identity also carries exactly one Service Auth policy admitting exactly that token.
+        const servicePolicies = policies.filter((item) => item.decision === 'non_identity');
+        const expectedServicePolicies = !dependency && serviceTokenId !== null ? 1 : 0;
+        requireCondition(policies.length === 1 + expectedServicePolicies && servicePolicies.length === expectedServicePolicies &&
+          servicePolicies.every((item) => item.include?.length === 1 && item.include[0]?.service_token?.token_id === serviceTokenId),
+        'policy_inventory_incomplete');
+        resources.push(...policies.map((item) => locator(`${appPath}/policies`, item, dependency)), locator(`${account}/access/apps`, app, dependency));
+      }
+      const records = await dns();
+      requireCondition(records.length === 1 && records[0].comment?.startsWith(marker), 'dns_inventory_invalid');
+      resources.push(locator(`${zone}/dns_records`, records[0], true));
+      const managementDomains = (await domains()).filter((item) => item.hostname === config.basics.managementHostname && item.service === provision.workerName);
+      requireCondition(managementDomains.length === 1, 'domain_inventory_incomplete');
+      resources.push(locator(`${account}/workers/domains`, managementDomains[0], false));
+      const storage = await namespaces(provision.workerName);
+      requireCondition(storage.length === 1, 'namespace_inventory_incomplete');
+      resources.push({ path: `${account}/workers/workers/${provision.workerName}`, dependency: false });
+      return { schemaVersion: 1, accountId: config.accountId, zoneId: config.zoneId, provision, resources };
+    },
+    assertDependenciesAbsent: (inventory) => absent(inventory, true),
+    assertAllAbsent: (inventory) => absent(inventory, false),
+    /**
+     * The one provider write, and only on the operator's opt-in: the management token as the encrypted secret of the
+     * exact recorded Worker, with the operator token this port already holds. It is sent once and never retried; an
+     * answer that never arrives leaves the write unknown and stops the run. The value rides in the request body and
+     * nowhere else: no URL, error, notice or journal event carries it, and the answer's body is never read.
+     */
+    async installManagementSecret(provision, value) {
+      validateLiveBootstrapOrigin(provision);
+      requireCondition(v.is(managementTokenValue, value), 'management_token_unavailable');
+      let response;
+      try {
+        response = await transport(`https://api.cloudflare.com/client/v4${account}/workers/scripts/${provision.workerName}/secrets`, {
+          method: 'PUT', redirect: 'error', signal: AbortSignal.timeout(30_000),
+          headers: { authorization: `Bearer ${token}`, accept: 'application/json', 'content-type': 'application/json' },
+          body: JSON.stringify({ name: MANAGEMENT_SECRET_NAME, text: value, type: 'secret_text' }),
+        });
+      } catch { throw new LiveLifecycleError('management_token_write_unknown'); }
+      await response.body?.cancel();
+      // The secrets endpoint answers 201 for a new secret and 200 for a replaced one.
+      if (response.status !== 200 && response.status !== 201) throw new LiveLifecycleError('management_token_write_rejected', response.status);
+    },
+  };
+}

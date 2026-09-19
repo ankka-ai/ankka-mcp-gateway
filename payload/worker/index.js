@@ -281,11 +281,24 @@ const INTERNAL_BOOTSTRAP_PATH = '/bootstrap';
 const INTERNAL_PUBLISH_PATH = '/publish-status';
 const INTERNAL_CONTROL_PATH = '/management-control';
 const INTERNAL_ACTIONS_PATH = '/source-actions';
+// The real tool list of a paused sign-in installation (GET), and its choice (POST).
+const INTERNAL_ACTION_TOOLS_ROUTE = /^\/source-actions\/(action_[A-Za-z0-9_-]{32})\/tools$/u;
+const SOURCE_ACTION_TOOLS_ROUTE = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/tools$/u;
 const INTERNAL_UPDATES_PATH = '/runtime-updates';
 const INTERNAL_TEARDOWNS_PATH = '/teardown-actions';
+/** The receipt resource kind of each dependency the root journal tracks: the fixed words the installer and the removal page see. */
+const TEARDOWN_RECEIPT_KINDS = Object.freeze({
+  mcp_server: 'mcp_server', portal: 'mcp_portal', dns_record: 'dns_record',
+  source_access_application: 'access_application', portal_access_application: 'access_application',
+  source_access_policy: 'access_policy', portal_access_policy: 'access_policy',
+});
+/** The phases a bounded removal pass may report, in the order they run. */
+const TEARDOWN_PHASES = Object.freeze(['bridge_preflight', 'sharing_preflight', 'preflight', 'remove', 'sharing_delete', 'delete', 'verify', 'bridges']);
+const TEARDOWN_KIND_WORDS = new Set(['mcp_server', 'mcp_portal', 'access_application', 'access_policy', 'dns_record', 'worker', 'worker_custom_domain']);
 const INTERNAL_TEARDOWN_ROOT_PATH = '/teardown-root';
 const INTERNAL_STATUS_PATH = '/status';
 const INTERNAL_SOURCES_PATH = '/sources';
+const INTERNAL_ROLLBACK_OUTLOOK_PATH = '/rollback-outlook';
 const INTERNAL_TEAM_PATH = '/team';
 const INTERNAL_TEAM_ACTIONS_PATH = '/team-actions';
 const STORAGE_KEY = 'ankka-mcp-gateway/uninstall-state/v1';
@@ -368,6 +381,7 @@ const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
   publicBindings: Object.freeze({
     secrets: Object.freeze([
       Object.freeze({ lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' }),
+      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_MANAGEMENT_TOKEN' }),
     ]),
     variables: Object.freeze([
       'ADMIN_EMAILS', 'ANKKA_INSTALL_ID', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',
@@ -1105,7 +1119,7 @@ async function discoverMcpTools(value) {
   }
 }
 
-async function inspectMcpSource(value) {
+export async function inspectMcpSource(value) {
   const endpoint = publicMcpUrl(value);
   if (!endpoint) throw new SourceDiscoveryError(400, 'source_url_invalid');
   // Google's public catalogue does not make its operations unauthenticated.
@@ -1134,7 +1148,7 @@ function bigQueryConnectionBlock(endpoint) {
     : null;
 }
 
-async function verifyManagedSource(source) {
+export async function verifyManagedSource(source) {
   const connectionBlock = bigQueryConnectionBlock(publicMcpUrl(source.url));
   if (connectionBlock) throw new SourceDiscoveryError(409, connectionBlock);
   const inspected = await inspectMcpSource(source.url);
@@ -1189,18 +1203,6 @@ function parseManagementEnvironment(env) {
     updateChannel: env.ANKKA_UPDATE_CHANNEL,
     updateKeyId: env.ANKKA_UPDATE_KEY_ID,
     updatePublicKey: env.ANKKA_UPDATE_PUBLIC_KEY,
-  });
-}
-
-function exactReleaseIdentity(environment) {
-  return Object.freeze({
-    schemaVersion: 1,
-    channel: environment.updateChannel,
-    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
-    release: environment.release,
-    keyId: environment.updateKeyId,
-    publicKey: environment.updatePublicKey,
-    artifactSha256: environment.releaseSha256.slice('sha256:'.length),
   });
 }
 
@@ -2058,8 +2060,12 @@ async function createResource(state, kind, token) {
       auth_type: oauth ? 'oauth' : 'unauthenticated',
       secure_web_gateway: false,
       description: marker(state.installationId, desired.key),
-      updated_tools: toolProjection(desired.desired.toolPolicy.allowedTools),
     };
+    // A sign-in source is created before its tools can be chosen. It carries
+    // no override then; the Portal mapping alone enables tools, later.
+    if (desired.desired.toolPolicy.allowedTools.length > 0) {
+      body.updated_tools = toolProjection(desired.desired.toolPolicy.allowedTools);
+    }
     if (oauth) body.is_shared_oauth_callback_enabled = true;
   } else if (kind === 'portal') {
     const server = locator(state, 'mcp_server');
@@ -2633,11 +2639,13 @@ function safeManagedSource(value) {
   if (authMode !== 'none' && authMode !== 'oauth') return null;
   const onBehalfOfUser = current ? value.onBehalfOfUser : authMode === 'oauth';
   if (!isBoolean(onBehalfOfUser) || (authMode === 'none' && onBehalfOfUser !== false)) return null;
+  // A sign-in source is saved before its tools can be listed. Only such a
+  // draft may have none; an installed source without tools is invalid state.
   const enabledTools = exactSortedUniqueStrings(
     value.enabledTools,
     toolName,
     MAX_ENABLED_TOOLS_PER_SOURCE,
-    1,
+    authMode === 'oauth' && value.status === 'draft' ? 0 : 1,
   );
   if (!enabledTools) return null;
   return Object.freeze({
@@ -2721,11 +2729,13 @@ export function parseSourceSave(value) {
       !validSourceLabel(value.source.label)) return null;
   const url = publicMcpUrl(value.source.url);
   const authMode = value.source.authMode;
+  // Only a sign-in source may be saved without tools: its real list exists
+  // after the operator connects it. A public source names at least one.
   const enabledTools = exactSortedUniqueStrings(
     value.source.enabledTools,
     toolName,
     MAX_ENABLED_TOOLS_PER_SOURCE,
-    1,
+    authMode === 'oauth' ? 0 : 1,
   );
   if (!url || !enabledTools || (authMode !== 'none' && authMode !== 'oauth')) return null;
   return Object.freeze({
@@ -2807,10 +2817,12 @@ function safeSourceAction(value) {
     'expiresAt', 'status', 'actionKeyHash', 'sourceHash', 'resources', 'pending', 'portalUpdate', 'failureCode',
     ...(Object.hasOwn(value ?? {}, 'initialPolicyVersion') ? ['initialPolicyVersion'] : []),
     ...(Object.hasOwn(value ?? {}, 'renewedAt') ? ['renewedAt'] : []),
+    ...(Object.hasOwn(value ?? {}, 'bigquerySetupStarted') ? ['bigquerySetupStarted'] : []),
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
+      (Object.hasOwn(value, 'bigquerySetupStarted') && value.bigquerySetupStarted !== true) ||
       (Object.hasOwn(value, 'initialPolicyVersion') && value.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) ||
       !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
-      !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
+      !normalizedActor(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
       (Object.hasOwn(value, 'renewedAt') && value.renewedAt !== value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
@@ -2829,7 +2841,7 @@ function safeSourceAction(value) {
       (portalUpdate && resources.length !== SOURCE_ACTION_RESOURCE_ORDER.length)) return null;
   return Object.freeze({
     ...value,
-    actorEmail: normalizedEmail(value.actorEmail),
+    actorEmail: normalizedActor(value.actorEmail),
     resources: Object.freeze(resources),
     pending,
     portalUpdate,
@@ -2851,6 +2863,7 @@ function publicSourceAction(action) {
     schemaVersion: 1,
     actionId: action.actionId,
     sourceId: action.sourceId,
+    actorKind: actorKind(action.actorEmail),
     status: action.status,
     expiresAt: new Date(action.expiresAt).toISOString(),
     failureCode: action.failureCode,
@@ -2858,7 +2871,7 @@ function publicSourceAction(action) {
 }
 
 function sourceActionHasWriteEvidence(action) {
-  return action.resources.length > 0 || action.pending !== null || action.portalUpdate !== null;
+  return action.bigquerySetupStarted === true || action.resources.length > 0 || action.pending !== null || action.portalUpdate !== null;
 }
 
 function sourceActionState(action, now) {
@@ -2873,7 +2886,7 @@ function sourceActionState(action, now) {
 }
 
 function sourceActionCanCancel(action, actorEmail, now) {
-  return action.actorEmail === normalizedEmail(actorEmail) && now >= action.issuedAt &&
+  return action.actorEmail === normalizedActor(actorEmail) && now >= action.issuedAt &&
     action.status === 'authorization_required' && !sourceActionHasWriteEvidence(action);
 }
 
@@ -2882,17 +2895,26 @@ function sourceActionCanRenew(action, actorEmail, now) {
   // work must wait out the previous execution window before rotating its key.
   // An unacknowledged hostname-less app creation has no authoritative locator:
   // the zone listing cannot prove it absent, so it still needs manual review.
-  return action.actorEmail === normalizedEmail(actorEmail) && now >= action.issuedAt &&
-    (action.expiresAt <= now || sourceActionConnectionPaused(action)) &&
+  return action.actorEmail === normalizedActor(actorEmail) && now >= action.issuedAt &&
+    (action.expiresAt <= now || sourceActionConnectionPaused(action) ||
+      (action.bigquerySetupStarted === true && action.failureCode === 'bigquery_setup_required')) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
     sourceActionState(action, now) === 'recovery_required' &&
     !(action.pending?.kind === 'source_access_application' && action.pending.provider === null);
 }
 
+// The fixed reasons an installation waits before the Portal with all three
+// receipts and no write outstanding. `source_tools_required`: connected and
+// synced, nothing chosen yet. `source_tools_chosen`: a choice is saved.
+const SOURCE_CONNECTION_PAUSES = Object.freeze([
+  'source_connection_required', 'source_sync_required', 'source_tools_mismatch',
+  'source_tools_required', 'source_tools_chosen',
+]);
+
 function sourceActionConnectionPaused(action) {
   return action.status === 'recovery_required' && action.pending === null && action.portalUpdate === null &&
     action.resources.length === SOURCE_ACTION_RESOURCE_ORDER.length &&
-    ['source_connection_required', 'source_sync_required', 'source_tools_mismatch'].includes(action.failureCode);
+    SOURCE_CONNECTION_PAUSES.includes(action.failureCode);
 }
 
 function sourceActionBlocks(action) {
@@ -2974,12 +2996,12 @@ function parseSourceActionPrepare(value) {
     'issuedAt', 'expiresAt', 'actionKeyHash', 'sourceHash',
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
       !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
-      !normalizedEmail(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
+      !normalizedActor(value.actorEmail) || !Number.isSafeInteger(value.issuedAt) ||
       !Number.isSafeInteger(value.expiresAt) || value.expiresAt <= value.issuedAt ||
       value.expiresAt - value.issuedAt > 10 * 60 * 1000 ||
       !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
       !isText(value.sourceHash) || !HASH.test(value.sourceHash)) return null;
-  return Object.freeze({ ...value, actorEmail: normalizedEmail(value.actorEmail) });
+  return Object.freeze({ ...value, actorEmail: normalizedActor(value.actorEmail) });
 }
 
 async function prepareSourceAction(storage, input) {
@@ -3019,7 +3041,7 @@ async function prepareSourceAction(storage, input) {
   return action;
 }
 
-async function managedSourceHash(source) {
+export async function managedSourceHash(source) {
   return sha256({
     id: source.id,
     label: source.label,
@@ -3160,9 +3182,10 @@ function sourceActionClaim(value, environment, action, nowMs) {
   if (!exactKeys(value, [
     'schemaVersion', 'actionId', 'actionKey', 'actorEmail', 'accountId',
     'issuedAt', 'expiresAt', 'cloudflareAccessToken',
-  ]) || value.schemaVersion !== 1 || value.actionId !== action.actionId ||
+    ...(Object.hasOwn(value ?? {}, 'bigqueryPhase') ? ['bigqueryPhase'] : []),
+  ]) || (Object.hasOwn(value ?? {}, 'bigqueryPhase') && !['start', 'failed'].includes(value.bigqueryPhase)) || value.schemaVersion !== 1 || value.actionId !== action.actionId ||
       !isText(value.actionKey) || !NONCE.test(value.actionKey) ||
-      normalizedEmail(value.actorEmail) !== action.actorEmail || value.accountId !== environment.accountId ||
+      normalizedActor(value.actorEmail) !== action.actorEmail || value.accountId !== environment.accountId ||
       !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
       value.expiresAt !== action.expiresAt || value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 ||
       value.issuedAt < action.issuedAt || value.expiresAt <= nowMs ||
@@ -3182,7 +3205,8 @@ async function parseSourceActionRequest(request, env, storage, nowMs) {
   try { parsed = JSON.parse(rawBody); } catch { return null; }
   if (!isPlainData(parsed) || canonicalJson(parsed) !== rawBody || !ACTION_ID.test(parsed.actionId)) return null;
   const context = await storedSourceActionContext(storage, parsed.actionId);
-  if (!context || context.action.status !== 'authorization_required') return null;
+  if (!context || (context.action.status !== 'authorization_required' &&
+      !(context.action.bigquerySetupStarted === true && context.action.status === 'applying'))) return null;
   const claim = sourceActionClaim(parsed, environment, context.action, nowMs);
   if (!claim || await sha256(claim.actionKey) !== context.action.actionKeyHash ||
       !await verifyHmac(rawBody, claim.actionKey, request.headers.get('x-ankka-source-action-signature'))) return null;
@@ -3256,8 +3280,37 @@ function sourceConnectionFailure(server, source) {
   if (['required', 'stale'].includes(server.authentication_status)) return 'source_connection_required';
   if (server.status !== 'ready' || !Array.isArray(server.tools) ||
       server.tools.some((tool) => !isRecord(tool) || !toolName(tool.name))) return 'source_sync_required';
+  // Nothing chosen is never a reason to attach: the installation waits here.
+  if (source.enabledTools.length === 0) return 'source_tools_required';
   const names = new Set(server.tools.map((tool) => tool.name));
   return source.enabledTools.every((name) => names.has(name)) ? null : 'source_tools_mismatch';
+}
+
+/**
+ * Cloudflare's synced catalogue of one server record, as a fixed state and the
+ * tools it may be offered as. Cloudflare types a synced tool as an untyped map:
+ * only a valid `name` is required, and a title, a description or a hint is
+ * passed on only when the record really carries it, within the discovery
+ * bounds. Nothing is derived. The first two states mirror the connection check.
+ */
+function syncedSourceCatalogue(server) {
+  const state = (value, tools = []) => Object.freeze({ state: value, tools: Object.freeze(tools) });
+  if (!isRecord(server)) return state('sync_required');
+  if (['required', 'stale'].includes(server.authentication_status)) return state('connection_required');
+  if (server.status !== 'ready' || !Array.isArray(server.tools)) return state('sync_required');
+  if (server.tools.length > MCP_MAX_TOOLS) return state('unsupported');
+  const tools = [];
+  const names = new Set();
+  for (const candidate of server.tools) {
+    const tool = safeToolSummary(candidate);
+    if (!tool || names.has(tool.name)) return state('unsupported');
+    names.add(tool.name);
+    tools.push(Object.freeze({
+      name: tool.name, title: tool.title, description: tool.description, readOnlyHint: tool.readOnlyHint,
+      destructiveHint: tool.destructiveHint, openWorldHint: tool.openWorldHint,
+    }));
+  }
+  return state('ready', tools.sort((left, right) => compareText(left.name, right.name)));
 }
 
 function portalExact(value, control, mappings) {
@@ -3290,7 +3343,8 @@ async function finalizeSourceAction(storage, action) {
     if (!control) return null;
   }
   const source = sources.sources.find((candidate) => candidate.id === action.sourceId);
-  if (!source || await managedSourceHash(source) !== action.sourceHash ||
+  // A source without tools is never recorded as installed.
+  if (!source || source.enabledTools.length === 0 || await managedSourceHash(source) !== action.sourceHash ||
       (source.status !== 'draft' && source.status !== 'installed')) return null;
   if (source.status === 'draft') {
     sources = safeManagementSources({
@@ -3327,6 +3381,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   if (!parsed) return fixedJson(400, { schemaVersion: 1, error: 'source_action_rejected', retryable: false });
   // A release gate is enforced here as well as in the authenticated API.
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  if (parsed.claim.bigqueryPhase !== undefined) return actionRecovery('source_action_rejected');
   let { action } = parsed;
   if (action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) {
     return fixedJson(409, { schemaVersion: 1, error: 'source_action_legacy_policy', retryable: false });
@@ -3464,6 +3519,9 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     }
     const connectionFailure = sourceConnectionFailure(server.result, desiredState.source);
     if (connectionFailure) return failSourceAction(storage, action, connectionFailure);
+    // The connection check already stops an empty allowlist. No Portal write
+    // is ever armed for one, whatever that check answers.
+    if (desiredState.source.enabledTools.length === 0) return failSourceAction(storage, action, 'source_tools_required');
     if (Date.now() >= action.expiresAt) return failSourceAction(storage, action, 'source_action_recovery_required');
     action = await persistSourceAction(storage, {
       ...action,
@@ -3497,10 +3555,168 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   } else if (action.portalUpdate?.desiredHash !== desiredHash && action.portalUpdate !== null) {
     return failSourceAction(storage, action, 'source_action_drift');
   }
+  // This gateway never maps a server with nothing enabled. A Portal that
+  // already does was changed elsewhere; that is drift, not completion.
+  if (desiredState.source.enabledTools.length === 0) return failSourceAction(storage, action, 'portal_drift');
   const completed = await finalizeSourceAction(storage, action);
   return completed
     ? fixedJson(200, publicSourceAction(completed))
     : actionRecovery('source_action_state_unavailable');
+}
+
+const SOURCE_TOOLS_READ_TIMEOUT_MS = 10_000;
+const SOURCE_CATALOGUE_REFUSALS = Object.freeze({
+  connection_required: 'source_connection_required',
+  sync_required: 'source_sync_required',
+  unsupported: 'source_tools_unsupported',
+});
+
+function sourceToolsRefusal(status, error) {
+  return fixedJson(status, { schemaVersion: 1, error });
+}
+
+/** The recorded action with the state it is read against, or the fixed refusal: not found, or state that does not validate. */
+async function recordedSourceToolAction(storage, actionId) {
+  const context = await storedSourceActionContext(storage, actionId);
+  if (context) return context;
+  const raw = await storage.get(ACTIONS_KEY);
+  const actions = raw === undefined ? Object.freeze({ actions: [] }) : safeSourceActions(raw);
+  return actions && !actions.actions.some((candidate) => candidate.actionId === actionId)
+    ? sourceToolsRefusal(404, 'source_action_not_found')
+    : sourceToolsRefusal(409, 'source_action_state_unavailable');
+}
+
+/**
+ * The one installation a tool choice may read or re-bind: exactly
+ * connection-paused (all three receipts, no resource or Portal write
+ * outstanding), prepared by this administrator under the current default-deny
+ * profile, for a sign-in draft that still hashes to what the action was
+ * approved for. Anything else is a fixed refusal, and no provider read happens
+ * before this passes.
+ */
+async function sourceToolChoiceContext(context, env, actorEmail) {
+  const { action } = context;
+  const source = context.sources.sources.find((candidate) => candidate.id === action.sourceId);
+  if (!sourceActionConnectionPaused(action) || action.actorEmail !== normalizedActor(actorEmail) ||
+      action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION || action.bigquerySetupStarted === true ||
+      !source || source.status !== 'draft' || source.authMode !== 'oauth') {
+    return sourceToolsRefusal(409, 'source_tools_unavailable');
+  }
+  if (await managedSourceHash(source) !== action.sourceHash) return sourceActionConflict('draft_changed');
+  if (parseManagementEnvironment(env)?.accountId !== context.control.accountId) {
+    return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  }
+  return Object.freeze({ ...context, source });
+}
+
+/** One provider read: the receipt's own server record, as its synced catalogue. No provider text leaves here. */
+async function readSyncedSourceCatalogue(env, control, action) {
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const serverId = action.resources[0].provider.id;
+  const server = await providerCall(
+    `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`,
+    token, { signal: AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS) },
+  );
+  if (server.status === 'auth') return sourceToolsRefusal(409, 'management_credential_required');
+  if (server.status !== 'ok' || !isRecord(server.result) || server.result.id !== serverId) {
+    return sourceToolsRefusal(502, 'source_catalogue_unavailable');
+  }
+  return syncedSourceCatalogue(server.result);
+}
+
+async function readSourceActionTools(storage, env, actionId, actorEmail) {
+  const recorded = await recordedSourceToolAction(storage, actionId);
+  if (recorded instanceof Response) return recorded;
+  const context = await sourceToolChoiceContext(recorded, env, actorEmail);
+  if (context instanceof Response) return context;
+  const catalogue = await readSyncedSourceCatalogue(env, context.control, context.action);
+  if (catalogue instanceof Response) return catalogue;
+  return fixedJson(200, {
+    schemaVersion: 1, actionId: context.action.actionId, sourceId: context.action.sourceId,
+    state: catalogue.state, tools: catalogue.tools,
+  });
+}
+
+/**
+ * The tool choice of a connected sign-in source, as its own revision-bound
+ * step. It re-binds the paused installation to a new draft revision: the
+ * draft's allowlist, the action's `sourceRevision` and `sourceHash`, and the
+ * server receipt's `desiredHash` (which covers the allowlist, and which removal
+ * re-derives from the installed source) change together in one write. Status,
+ * key, provider locators and the absence of any outstanding write do not. The
+ * executor applies the allowlist afterwards, through the existing renewal.
+ */
+async function chooseSourceActionTools(storage, env, input) {
+  if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  const enabledTools = exactKeys(input, ['schemaVersion', 'actionId', 'sourceId', 'revision', 'enabledTools', 'actorEmail']) &&
+      input.schemaVersion === 1 && isText(input.actionId) && ACTION_ID.test(input.actionId) &&
+      isText(input.sourceId) && SOURCE_ID.test(input.sourceId) &&
+      Number.isSafeInteger(input.revision) && input.revision >= 1 && normalizedActor(input.actorEmail)
+    ? exactSortedUniqueStrings(input.enabledTools, toolName, MAX_ENABLED_TOOLS_PER_SOURCE, 1)
+    : null;
+  if (!enabledTools) return sourceToolsRefusal(400, 'source_tools_invalid');
+  const recorded = await recordedSourceToolAction(storage, input.actionId);
+  if (recorded instanceof Response) return recorded;
+  if (await otherLifecycleBlocksSource(storage, Date.now(), input.actionId) ||
+      await teamActionBlocksLifecycle(storage)) return sourceActionConflict('lifecycle_pending');
+  const context = await sourceToolChoiceContext(recorded, env, input.actorEmail);
+  if (context instanceof Response) return context;
+  const { action, actions, control, source, sources } = context;
+  if (input.revision !== sources.revision || input.sourceId !== action.sourceId) {
+    return sourceActionConflict('draft_changed');
+  }
+  const catalogue = await readSyncedSourceCatalogue(env, control, action);
+  if (catalogue instanceof Response) return catalogue;
+  if (catalogue.state !== 'ready') return sourceToolsRefusal(409, SOURCE_CATALOGUE_REFUSALS[catalogue.state]);
+  const available = new Set(catalogue.tools.map((tool) => tool.name));
+  if (!enabledTools.every((name) => available.has(name))) return sourceToolsRefusal(409, 'source_tools_mismatch');
+  const chosen = (revision) => fixedJson(200, {
+    schemaVersion: 1, actionId: action.actionId, sourceId: action.sourceId, revision, enabledTools,
+  });
+  // The same choice on an action already bound to this revision changes nothing.
+  if (canonicalJson(enabledTools) === canonicalJson(source.enabledTools) &&
+      action.sourceRevision === sources.revision) return chosen(sources.revision);
+  const nextSources = safeManagementSources({
+    ...sources,
+    revision: sources.revision + 1,
+    sources: sources.sources.map((candidate) => candidate.id === source.id
+      ? { ...candidate, enabledTools: [...enabledTools] }
+      : candidate),
+  });
+  if (!nextSources || !managementSourcesInstallProjectionFits(nextSources)) {
+    return sourceToolsRefusal(413, 'source_capacity_exceeded');
+  }
+  const nextSource = nextSources.sources.find((candidate) => candidate.id === source.id);
+  const rebound = {
+    ...action,
+    sourceRevision: nextSources.revision,
+    sourceHash: await managedSourceHash(nextSource),
+    failureCode: 'source_tools_chosen',
+  };
+  const desiredState = await actionDesiredState(control, nextSources, rebound);
+  const serverDesired = desiredState ? resource(desiredState, 'mcp_server') : null;
+  if (!serverDesired) return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  const receipt = receiptResource(desiredState, serverDesired, action.resources[0].provider);
+  // Only the hash of the desired tool policy may differ from the retained receipt.
+  if (canonicalJson({ ...receipt, desiredHash: null }) !== canonicalJson({ ...action.resources[0], desiredHash: null })) {
+    return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  }
+  const reboundAction = safeSourceAction({ ...rebound, resources: [receipt, action.resources[1], action.resources[2]] });
+  const nextActions = reboundAction && safeSourceActions({
+    ...actions,
+    revision: actions.revision + 1,
+    actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? reboundAction : candidate),
+  });
+  if (!nextActions || !sourceActionConnectionPaused(reboundAction)) {
+    return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  }
+  // The installation's first write already armed the floor; a lost Team record must not reopen it.
+  if (!await armSourceCompatibility(storage, env)) return sourceToolsRefusal(409, 'source_action_state_unavailable');
+  // One atomic multi-key write: a restart cannot leave a draft that names
+  // tools its paused action was never bound to, or the reverse.
+  await storage.put({ [SOURCES_KEY]: nextSources, [ACTIONS_KEY]: nextActions });
+  return chosen(nextSources.revision);
 }
 
 const RUNTIME_ACTION_STAGES = Object.freeze([
@@ -3610,6 +3826,7 @@ async function saveRuntimeUpdates(storage, state) {
 }
 
 async function prepareRuntimeAction(storage, environment, input) {
+  if (await currentTeardownLocksRuntime(storage, Date.now())) return null;
   if (await teamActionBlocksLifecycle(storage) || !await teamRuntimeReleaseAllowed(storage, input?.to?.release)) return null;
   if (!exactKeys(input, [
     'actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'issuedAt', 'operation', 'to',
@@ -3759,7 +3976,9 @@ function safeTeardownAction(value) {
   if (!exactKeys(value, [
     'schemaVersion', 'actionId', 'actionKeyHash', 'actorEmail', 'installationId',
     'issuedAt', 'expiresAt', 'status', 'failureCode',
-  ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
+    ...(Object.hasOwn(value ?? {}, 'policyMode') ? ['policyMode'] : []),
+  ]) || (Object.hasOwn(value, 'policyMode') && value.policyMode !== 'receipt_owned') ||
+      value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
       !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
       normalizedEmail(value.actorEmail) !== value.actorEmail ||
       !INSTALLATION_ID.test(value.installationId) || !Number.isSafeInteger(value.issuedAt) ||
@@ -3862,13 +4081,12 @@ async function storedTeardownRoot(storage, environment, installationId) {
   return Object.freeze({ ...value, receipt: retainedReceipt });
 }
 
-async function rootTeardownEvidence(storage, environment, installationId) {
+async function rootTeardownEvidence(storage, environment, installationId, currentStatus = false) {
   const root = await storedTeardownRoot(storage, environment, installationId);
-  return root ? Object.freeze({
-    schemaVersion: 1,
-    installationId,
-    root: Object.freeze({ receipt: root.receipt }),
-  }) : null;
+  if (!root) return null;
+  const evidence = { schemaVersion: 1, installationId, root: Object.freeze({ receipt: root.receipt }) };
+  if (currentStatus) evidence.removalStarted = root.status !== 'ready';
+  return Object.freeze(evidence);
 }
 
 function teardownResourceKey(resource) {
@@ -3889,7 +4107,7 @@ function sameTeardownResourceAuthority(left, right) {
   return canonicalJson(left) === canonicalJson(right);
 }
 
-function teardownResources(root, sourceOwnership) {
+function teardownResources(root, sourceOwnership, currentPolicies = false) {
   if (!Array.isArray(root.receipt?.resources) || !Array.isArray(sourceOwnership)) return null;
   const receiptSources = root.receipt.resources.filter((resource) => (
     SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind)
@@ -3923,9 +4141,14 @@ function teardownResources(root, sourceOwnership) {
   if ((receiptSources.length > 0) !== (receiptSourceOwner !== null)) return null;
   const seenProviderLocators = new Set();
   const ordered = [];
-  // Day-two sources depend on the original Portal graph, so remove them first
-  // in deterministic reverse source/resource order, then unwind the receipt.
-  for (const resource of [...extras].reverse().concat([...root.receipt.resources].reverse())) {
+  // The current flow removes the Portal before its servers. Cloudflare can
+  // remove server mappings when a server is deleted; removing the Portal
+  // first keeps restart verification independent of that cascade.
+  const removal = currentPolicies
+    ? [...root.receipt.resources].filter((resource) => !SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind)).reverse()
+      .concat([...extras].reverse(), [...receiptSources].reverse())
+    : [...extras].reverse().concat([...root.receipt.resources].reverse());
+  for (const resource of removal) {
     const locatorKey = teardownProviderLocatorKey(resource);
     if (seenProviderLocators.has(locatorKey)) return null;
     seenProviderLocators.add(locatorKey);
@@ -3968,7 +4191,7 @@ function teardownReceiptResourceMatchesDesired(actual, desired, identityHash) {
     ((actual.kind !== 'mcp_server' && actual.kind !== 'portal') || actual.provider.id === desired.key);
 }
 
-async function teardownAuthorityState(root, rawControl, rawSources, environment) {
+async function teardownAuthorityState(root, rawControl, rawSources, environment, currentPolicies = false, partialActions = []) {
   const control = safeManagementControl(rawControl);
   const sources = safeManagementSources(rawSources);
   if (!control || !sources || control.installationId !== root.installationId ||
@@ -3981,7 +4204,7 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment)
   const portalReceipt = root.receipt.resources.find((resource) => resource.kind === 'portal');
   if (!portalReceipt || control.portal.id !== portalReceipt.provider.id ||
       control.portal.marker !== portalReceipt.marker) return null;
-  const layout = teardownResources(root, control.sourceOwnership);
+  const layout = teardownResources(root, control.sourceOwnership, currentPolicies);
   if (!layout) return null;
   const installedSources = sources.sources.filter((source) => source.status === 'installed');
   const installedIds = installedSources.map((source) => source.id).sort(compareText);
@@ -4048,7 +4271,53 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment)
       entries.set(key, Object.freeze({ desired, state }));
     }
   }
-  if (entries.size !== layout.resources.length) return null;
+  if (entries.size !== layout.resources.length || !Array.isArray(partialActions) || partialActions.length > 16 ||
+      (!currentPolicies && partialActions.length > 0)) return null;
+  const partialResources = [];
+  const pendingResources = new Set();
+  const partialSourceIds = new Set();
+  const portalAlternatives = [];
+  for (const rawAction of partialActions) {
+    const action = safeSourceAction(rawAction);
+    if (!action || action.bigquerySetupStarted !== true || action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION ||
+        partialSourceIds.has(action.sourceId) || installedIds.includes(action.sourceId) ||
+        (action.pending !== null && action.pending.provider === null)) return null;
+    partialSourceIds.add(action.sourceId);
+    const desiredState = await actionDesiredState(control, sources, action);
+    if (!desiredState || desiredState.source.status !== 'draft') return null;
+    const owned = [...action.resources];
+    if (action.pending !== null) {
+      const desired = desiredState.desiredResources[owned.length];
+      if (!desired || desired.kind !== action.pending.kind) return null;
+      const receipt = receiptResource(desiredState, desired, action.pending.provider);
+      owned.push(receipt);
+      pendingResources.add(teardownResourceKey(receipt));
+    }
+    const state = Object.freeze({ ...desiredState, resources: Object.freeze(owned) });
+    for (let index = 0; index < owned.length; index += 1) {
+      const actual = owned[index];
+      const key = teardownResourceKey(actual);
+      if (entries.has(key) || !teardownReceiptResourceMatchesDesired(actual,
+        desiredState.desiredResources[index], desiredState.accessPolicy.identitiesHash)) return null;
+      entries.set(key, Object.freeze({ desired: desiredState.desiredResources[index], state }));
+    }
+    partialResources.push(...[...owned].reverse());
+    if (action.portalUpdate !== null) {
+      const mappings = portalServerMappings(control, sources, action);
+      if (!mappings || action.portalUpdate.desiredHash !== await sha256({
+        name: control.portal.name, hostname: control.portal.hostname, code_mode: 'default_on',
+        secure_web_gateway: false, description: control.portal.marker, servers: mappings,
+      })) return null;
+      portalAlternatives.push(mappings);
+    }
+  }
+  // A single source action owns a possible Portal update. Do not compose
+  // unobserved combinations of independently interrupted mapping mutations.
+  if (portalAlternatives.length > 1) return null;
+  const resources = [...layout.resources];
+  const firstSource = resources.findIndex((resource) => SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind));
+  resources.splice(firstSource < 0 ? resources.length : firstSource, 0, ...partialResources);
+  if (new Set(resources.map(teardownProviderLocatorKey)).size !== resources.length) return null;
   const portalMappings = portalServerMappings(control, sources, Object.freeze({
     sourceId: '',
     resources: Object.freeze([]),
@@ -4057,9 +4326,11 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment)
   return Object.freeze({
     control,
     sources,
-    resources: layout.resources,
+    resources: Object.freeze(resources),
     entries,
     portalMappings,
+    portalAlternatives,
+    pendingResources,
   });
 }
 
@@ -4082,7 +4353,19 @@ function teardownProviderPath(resource, target) {
   return `/zones/${zone}/dns_records/${id}`;
 }
 
-function teardownPolicyMatches(value, desired, settings) {
+function teardownPolicyMatches(value, desired, settings, currentPolicies = false) {
+  if (currentPolicies) {
+    // Assignment changes do not transfer ownership. The immutable locator and
+    // exact marked name still bind the policy to this installation. Only the
+    // supported email or deny-everyone policy shapes may have changed.
+    const name = `${desired.kind === 'source_access_policy'
+      ? settings.sources[0]?.label : settings.connect.name} users [${marker(
+      desired.desired.metadata.installationId, desired.key,
+    )}]`;
+    try {
+      return teamPolicyMatches(value, teamPolicy(teamPolicyAudience(value), name), value?.id);
+    } catch { return false; }
+  }
   if (!isRecord(value) || !safeProviderId(value.id) || value.decision !== 'allow' ||
       value.name !== `${desired.kind === 'source_access_policy'
         ? settings.sources[0]?.label
@@ -4103,7 +4386,7 @@ function teardownPolicyMatches(value, desired, settings) {
       canonicalJson([...settings.access.adminEmails].sort(compareText));
 }
 
-function teardownOwnershipMatches(resource, result, authority) {
+function teardownOwnershipMatches(resource, result, authority, currentPolicies = false) {
   if (!isRecord(result) || result.id !== resource.provider.id) return false;
   const entry = authority.entries.get(teardownResourceKey(resource));
   if (!entry) return false;
@@ -4111,10 +4394,11 @@ function teardownOwnershipMatches(resource, result, authority) {
     return mcpMatches(result, entry.desired);
   }
   if (resource.kind === 'portal') {
-    return portalExact(result, authority.control, authority.portalMappings);
+    return [authority.portalMappings, ...authority.portalAlternatives].some((mappings) =>
+      portalExact(result, authority.control, mappings));
   }
   if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
-    return teardownPolicyMatches(result, entry.desired, entry.state.settings);
+    return teardownPolicyMatches(result, entry.desired, entry.state.settings, currentPolicies);
   }
   if (resource.kind === 'dns_record') {
     return dnsMatches(result, entry.desired);
@@ -4122,18 +4406,62 @@ function teardownOwnershipMatches(resource, result, authority) {
   return accessApplicationIdentityMatches(result, resource.kind, entry.state);
 }
 
-async function teardownResourceRead(root, resource, authority, token) {
+async function teardownResourceRead(root, resource, authority, token, currentPolicies = false) {
   const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token);
   if (response.status === 'absent' || response.status === 'auth' || response.status === 'unknown') {
     return response.status;
   }
   if (response.status !== 'ok') return 'conflict';
-  return teardownOwnershipMatches(resource, response.result, authority) ? 'present' : 'conflict';
+  return teardownOwnershipMatches(resource, response.result, authority, currentPolicies) ? 'present' : 'conflict';
+}
+
+async function teardownServersUnshared(root, authority, token) {
+  const serverIds = new Set(authority.resources.filter((resource) => resource.kind === 'mcp_server')
+    .map((resource) => resource.provider.id));
+  if (serverIds.size === 0) return true;
+  const path = `/accounts/${encodeURIComponent(root.receipt.target.accountId)}/access/ai-controls/mcp/portals`;
+  const portals = await providerList(path, token);
+  if (portals.status !== 'ok') return false;
+  const seen = new Set();
+  for (const portal of portals.result) {
+    if (!safeProviderId(portal?.id) || seen.has(portal.id)) return false;
+    seen.add(portal.id);
+    if (portal.id === authority.control.portal.id) continue;
+    const read = await providerCall(`${path}/${encodeURIComponent(portal.id)}`, token);
+    if (read.status !== 'ok' || !isRecord(read.result) || read.result.id !== portal.id) return false;
+    const mappings = Object.hasOwn(read.result, 'servers') ? read.result.servers : [];
+    if (!Array.isArray(mappings) || mappings.some((mapping) => !isRecord(mapping) ||
+      !safeProviderId(mapping.server_id ?? mapping.id) ||
+      (mapping.server_id !== undefined && mapping.id !== undefined && mapping.server_id !== mapping.id) ||
+      serverIds.has(mapping.server_id ?? mapping.id))) return false;
+  }
+  return true;
+}
+
+async function teardownApplicationChildrenMatch(root, resource, authority, token) {
+  if (!['source_access_application', 'portal_access_application'].includes(resource.kind)) return true;
+  const path = `${teardownProviderPath(resource, root.receipt.target)}/policies`;
+  const listed = await providerList(path, token);
+  if (listed.status !== 'ok') return false;
+  const owned = authority.resources.filter((entry) =>
+    ['source_access_policy', 'portal_access_policy'].includes(entry.kind) &&
+    entry.provider.parentId === resource.provider.id);
+  const seen = new Set();
+  for (const policy of listed.result) {
+    const receipt = owned.find((entry) => entry.provider.id === policy?.id);
+    if (!receipt || seen.has(policy.id) || !teardownOwnershipMatches(receipt, policy, authority, true)) return false;
+    seen.add(policy.id);
+  }
+  return true;
 }
 
 async function teardownResourceDelete(root, resource, token) {
   const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE' });
-  if (response.status === 'ok') return 'submitted';
+  // Access may accept deletion asynchronously. Acceptance is not absence:
+  // the caller still verifies the exact resource before recording removal.
+  const accessResource = ['source_access_application', 'portal_access_application',
+    'source_access_policy', 'portal_access_policy'].includes(resource.kind);
+  if (response.status === 'ok' || (accessResource && response.status === 'blocked' && response.httpStatus === 202)) return 'submitted';
   return response.status;
 }
 
@@ -4160,10 +4488,140 @@ function safeRootTeardown(value, root, resources, resourcesHash) {
   return Object.freeze({ ...value, removedKeys: Object.freeze([...value.removedKeys]), pending });
 }
 
-async function processRootTeardownApply(storage, environment, input, nowMs = Date.now()) {
+function rootRemovalCompletion(root, removedResourceCount, resumed, resourcesHash, currentPolicies) {
+  const result = { schemaVersion: 1, status: 'removed', installationId: root.installationId, removedResourceCount, resumed };
+  if (currentPolicies) Object.assign(result, { readyReceiptChecksum: root.receipt.checksum, dependencyResourcesHash: resourcesHash });
+  return Object.freeze(result);
+}
+
+// Progress belongs to one callback request and one exact dependency graph.
+// A new consent rechecks the full graph; it retains only deletion receipts.
+const ROOT_TEARDOWN_PROGRESS_KEY = 'ankka-mcp-gateway/root-teardown-progress/v1';
+
+async function processBoundedRootTeardown(storage, root, teardown, authority, resourcesHash, input) {
+  const resources = authority.resources;
+  const raw = await storage.get(ROOT_TEARDOWN_PROGRESS_KEY);
+  if (raw !== undefined && (!exactKeys(raw, ['requestId', 'resourcesHash', 'phase', 'checked', 'portalIds', 'portalIndex']) ||
+      !REQUEST_ID.test(raw.requestId) || raw.resourcesHash !== resourcesHash ||
+      !['sharing_preflight', 'preflight', 'remove', 'sharing_delete', 'delete', 'verify', 'complete'].includes(raw.phase) ||
+      !Number.isSafeInteger(raw.checked) || raw.checked < 0 || raw.checked > resources.length ||
+      !Number.isSafeInteger(raw.portalIndex) || raw.portalIndex < 0 ||
+      !(raw.portalIds === null || (Array.isArray(raw.portalIds) && raw.portalIds.length <= MAX_PROVIDER_PAGES * PROVIDER_PAGE_SIZE &&
+        raw.portalIds.every((id) => safeProviderId(id)) && new Set(raw.portalIds).size === raw.portalIds.length)) ||
+      raw.portalIndex > (raw.portalIds?.length ?? 0))) return null;
+  let progress = raw?.requestId === input.requestId ? raw : {
+    requestId: input.requestId, resourcesHash, phase: 'sharing_preflight', checked: 0, portalIds: null, portalIndex: 0,
+  };
+  const active = () => Date.now() < input.expiresAt;
+  const pause = async () => {
+    await storage.put(ROOT_TEARDOWN_PROGRESS_KEY, progress);
+    // Beside the opaque progress, the fixed words the removal page shows: the phase and the kinds already gone.
+    const removedKinds = [...new Set(resources.slice(0, teardown.removedKeys.length)
+      .map((resource) => TEARDOWN_RECEIPT_KINDS[resource.kind]).filter((kind) => kind !== undefined))];
+    return Object.freeze({ schemaVersion: 1, status: 'removing', installationId: root.installationId,
+      progress: await sha256({ progress, teardown }), phase: progress.phase, removedKinds });
+  };
+  const saveTeardown = async (next) => {
+    teardown = next;
+    root = { ...root, teardown };
+    await storage.put(STORAGE_KEY, root);
+  };
+  if (!active()) return null;
+  if (progress.phase === 'complete') {
+    return teardown.status === 'removed' ? rootRemovalCompletion(root, resources.length, true, resourcesHash, true) : null;
+  }
+  if (['sharing_preflight', 'sharing_delete'].includes(progress.phase)) {
+    const serverIds = new Set(resources.filter((resource) => resource.kind === 'mcp_server').map((resource) => resource.provider.id));
+    const path = `/accounts/${encodeURIComponent(root.receipt.target.accountId)}/access/ai-controls/mcp/portals`;
+    if (serverIds.size > 0 && progress.portalIds === null) {
+      // A bounded catalogue read (at most 20 requests) is a separate pass
+      // from the detail reads. Never assume the list includes server mappings.
+      const listed = await providerList(path, input.cloudflareAccessToken);
+      if (listed.status !== 'ok' || listed.result.some((portal) => !safeProviderId(portal?.id))) return null;
+      const ids = listed.result.map((portal) => portal.id);
+      if (new Set(ids).size !== ids.length) return null;
+      progress = { ...progress, portalIds: ids.filter((id) => id !== authority.control.portal.id), portalIndex: 0 };
+      return pause();
+    }
+    const ids = progress.portalIds ?? [];
+    const end = Math.min(progress.portalIndex + 20, ids.length);
+    for (let index = progress.portalIndex; index < end; index++) {
+      if (!active()) return null;
+      const read = await providerCall(`${path}/${encodeURIComponent(ids[index])}`, input.cloudflareAccessToken);
+      if (read.status !== 'ok' || !isRecord(read.result) || read.result.id !== ids[index]) return null;
+      const mappings = Object.hasOwn(read.result, 'servers') ? read.result.servers : [];
+      if (!Array.isArray(mappings) || mappings.some((mapping) => !isRecord(mapping) ||
+        !safeProviderId(mapping.server_id ?? mapping.id) ||
+        (mapping.server_id !== undefined && mapping.id !== undefined && mapping.server_id !== mapping.id) ||
+        serverIds.has(mapping.server_id ?? mapping.id))) return null;
+    }
+    progress = end === ids.length ? { ...progress, phase: progress.phase === 'sharing_preflight' ? 'preflight' : 'delete',
+      portalIds: null, portalIndex: 0 } : { ...progress, portalIndex: end };
+    return pause();
+  }
+  if (progress.phase === 'preflight' || progress.phase === 'verify') {
+    const resource = resources[progress.checked];
+    if (!resource) return null;
+    const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true);
+    if (observed === 'present' && !await teardownApplicationChildrenMatch(root, resource, authority, input.cloudflareAccessToken)) return null;
+    if (progress.checked < teardown.removedKeys.length) {
+      if (observed !== 'absent') return null;
+    } else if (progress.checked === teardown.removedKeys.length && teardown.pending !== null) {
+      if (!['absent', 'present'].includes(observed)) return null;
+    } else if (observed !== 'present' && !(observed === 'absent' && authority.pendingResources.has(teardownResourceKey(resource)))) return null;
+    const checked = progress.checked + 1;
+    if (checked < resources.length) { progress = { ...progress, checked }; return pause(); }
+    if (teardown.removedKeys.length === resources.length) {
+      teardown = { ...teardown, status: 'removed', pending: null, removedAt: Date.now() };
+      root = { ...root, status: 'removed', teardown };
+      await storage.put(STORAGE_KEY, root);
+      progress = { ...progress, phase: 'complete', checked };
+      await storage.put(ROOT_TEARDOWN_PROGRESS_KEY, progress);
+      return rootRemovalCompletion(root, resources.length, true, resourcesHash, true);
+    }
+    progress = { ...progress, phase: 'remove', checked: 0 };
+    return pause();
+  }
+  if (teardown.removedKeys.length === resources.length) {
+    progress = { ...progress, phase: 'verify', checked: 0 };
+    return pause();
+  }
+  const resource = resources[teardown.removedKeys.length];
+  if (progress.phase === 'remove' && resource.kind === 'mcp_server') {
+    progress = { ...progress, phase: 'sharing_delete', portalIds: null, portalIndex: 0 };
+    return pause();
+  }
+  const key = teardownResourceKey(resource);
+  const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true);
+  if (observed === 'absent') {
+    await saveTeardown({ ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] });
+    progress = { ...progress, phase: 'remove' };
+    return pause();
+  }
+  if (observed !== 'present' || !await teardownApplicationChildrenMatch(root, resource, authority, input.cloudflareAccessToken)) return null;
+  if (teardown.pending?.requestId === input.requestId && teardown.pending.phase !== 'not_applied') return null;
+  // The resource and any Access children have just been re-read. Arm before
+  // the single DELETE; an unknown response stops the callback and needs consent.
+  await saveTeardown({ ...teardown, pending: { key, requestId: input.requestId, phase: 'send_armed' } });
+  if (!active()) return null;
+  const deleted = await teardownResourceDelete(root, resource, input.cloudflareAccessToken);
+  if (deleted === 'auth' || deleted === 'blocked') {
+    await saveTeardown({ ...teardown, pending: { ...teardown.pending, phase: 'not_applied' } });
+    return null;
+  }
+  if (deleted === 'unknown') return null;
+  await saveTeardown({ ...teardown, pending: { ...teardown.pending, phase: 'submitted' } });
+  if (await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, true) !== 'absent') return null;
+  await saveTeardown({ ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] });
+  progress = { ...progress, phase: 'remove' };
+  return pause();
+}
+
+async function processRootTeardownApply(storage, environment, input, nowMs = Date.now(), currentPolicies = false, managed = null) {
   if (!isRecord(input) || !exactKeys(input, [
     'schemaVersion', 'actionId', 'installationId', 'requestId', 'control', 'sources',
     'cloudflareAccessToken', 'issuedAt', 'expiresAt',
+    ...(currentPolicies && managed !== null && Object.hasOwn(input, 'managedSourceActions') ? ['managedSourceActions'] : []),
   ]) || input.schemaVersion !== 1 || !ACTION_ID.test(input.actionId) ||
       !INSTALLATION_ID.test(input.installationId) || !REQUEST_ID.test(input.requestId) ||
       !isText(input.cloudflareAccessToken) || input.cloudflareAccessToken.length < 20 ||
@@ -4172,14 +4630,23 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       input.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 || input.expiresAt <= nowMs) return null;
   let root = await storedTeardownRoot(storage, environment, input.installationId);
   if (!root) return null;
-  const authority = await teardownAuthorityState(root, input.control, input.sources, environment);
+  const authority = await teardownAuthorityState(root, input.control, input.sources, environment, currentPolicies, input.managedSourceActions ?? []);
   const resources = authority?.resources ?? null;
-  const resourcesHash = authority ? await sha256({
-    schemaVersion: 1,
-    resources,
-    control: authority.control,
-    sources: authority.sources,
-  }) : null;
+  let resourcesHash = null;
+  if (authority) {
+    // The journal binds to the exact dependency graph: the ordered
+    // receipt-owned resources under one policy mode and one set of partial
+    // bridge actions. The authority check above already pins every management
+    // field the graph depends on, so the mutable management records stay out
+    // of the identity: a source draft saved between consents must not strand
+    // a recorded removal or the replay of its completion. The retired
+    // executor keeps its historical identity.
+    const identity = currentPolicies
+      ? { schemaVersion: 2, resources, policyMode: 'receipt_owned' }
+      : { schemaVersion: 1, resources, control: authority.control, sources: authority.sources };
+    if (input.managedSourceActions?.length > 0) identity.managedSourceActions = input.managedSourceActions;
+    resourcesHash = await sha256(identity);
+  }
   if (!authority || !resources || !resourcesHash) return null;
   let teardown = root.teardown === undefined ? null : safeRootTeardown(
     root.teardown, root, resources, resourcesHash,
@@ -4198,6 +4665,10 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
     root = { ...root, status: 'tearing_down', teardown };
     await storage.put(STORAGE_KEY, root);
   } else if (!teardown) return null;
+  if (currentPolicies && managed?.bounded === true) {
+    return processBoundedRootTeardown(storage, root, teardown, authority, resourcesHash, input);
+  }
+  if (currentPolicies && !await teardownServersUnshared(root, authority, input.cloudflareAccessToken)) return null;
   // Prove the complete graph before the first provider mutation. A resource
   // outside the already removed prefix may be absent only at the one journaled
   // ambiguous boundary; every other live resource must still have the exact
@@ -4205,8 +4676,11 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
   // partial teardown before it is discovered.
   for (let index = 0; index < resources.length; index += 1) {
     const observed = await teardownResourceRead(
-      root, resources[index], authority, input.cloudflareAccessToken,
+      root, resources[index], authority, input.cloudflareAccessToken, currentPolicies,
     );
+    if (currentPolicies && observed === 'present' && !await teardownApplicationChildrenMatch(
+      root, resources[index], authority, input.cloudflareAccessToken,
+    )) return null;
     if (index < teardown.removedKeys.length) {
       if (observed !== 'absent') return null;
       continue;
@@ -4215,17 +4689,14 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       if (observed !== 'absent' && observed !== 'present') return null;
       continue;
     }
-    if (observed !== 'present') return null;
+    if (observed !== 'present' && !(observed === 'absent' && authority.pendingResources.has(teardownResourceKey(resources[index])))) return null;
   }
-  if (teardown.status === 'removed') return Object.freeze({
-    schemaVersion: 1, status: 'removed', installationId: root.installationId,
-    removedResourceCount: resources.length, resumed: true,
-  });
+  if (teardown.status === 'removed') return rootRemovalCompletion(root, resources.length, true, resourcesHash, currentPolicies);
   let resumed = teardown.removedKeys.length > 0 || teardown.pending !== null;
   while (teardown.removedKeys.length < resources.length) {
     const resource = resources[teardown.removedKeys.length];
     const key = teardownResourceKey(resource);
-    const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken);
+    const observed = await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, currentPolicies);
     if (observed === 'absent') {
       teardown = { ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] };
       root = { ...root, teardown };
@@ -4233,6 +4704,9 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
       continue;
     }
     if (observed !== 'present') return null;
+    if (currentPolicies && !await teardownApplicationChildrenMatch(
+      root, resource, authority, input.cloudflareAccessToken,
+    )) return null;
     if (teardown.pending && teardown.pending.requestId === input.requestId &&
         teardown.pending.phase !== 'not_applied') return null;
     if (teardown.pending) {
@@ -4243,6 +4717,10 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
     teardown = { ...teardown, pending: { key, requestId: input.requestId, phase: 'send_armed' } };
     root = { ...root, teardown };
     await storage.put(STORAGE_KEY, root);
+    if (currentPolicies && (Date.now() >= input.expiresAt ||
+        (resource.kind === 'mcp_server' && !await teardownServersUnshared(
+          root, authority, input.cloudflareAccessToken,
+        )))) return null;
     const deleted = await teardownResourceDelete(root, resource, input.cloudflareAccessToken);
     if (deleted === 'auth' || deleted === 'blocked') {
       teardown = { ...teardown, pending: { ...teardown.pending, phase: 'not_applied' } };
@@ -4253,7 +4731,7 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
     teardown = { ...teardown, pending: { ...teardown.pending, phase: 'submitted' } };
     root = { ...root, teardown };
     await storage.put(STORAGE_KEY, root);
-    if (await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken) !== 'absent') return null;
+    if (await teardownResourceRead(root, resource, authority, input.cloudflareAccessToken, currentPolicies) !== 'absent') return null;
     teardown = { ...teardown, pending: null, removedKeys: [...teardown.removedKeys, key] };
     root = { ...root, teardown };
     await storage.put(STORAGE_KEY, root);
@@ -4261,13 +4739,10 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
   teardown = { ...teardown, status: 'removed', pending: null, removedAt: nowMs };
   root = { ...root, status: 'removed', teardown };
   await storage.put(STORAGE_KEY, root);
-  return Object.freeze({
-    schemaVersion: 1, status: 'removed', installationId: root.installationId,
-    removedResourceCount: resources.length, resumed,
-  });
+  return rootRemovalCompletion(root, resources.length, resumed, resourcesHash, currentPolicies);
 }
 
-async function rootTeardownAuthority(storage, environment, installationId, env) {
+async function rootTeardownAuthority(storage, environment, installationId, env, partialActions = []) {
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   if (!control || !sources || control.installationId !== installationId ||
@@ -4293,7 +4768,7 @@ async function rootTeardownAuthority(storage, environment, installationId, env) 
     receipt: rootEvidence.root.receipt,
     teardown: null,
   });
-  if (!await teardownAuthorityState(root, control, sources, environment)) return null;
+  if (!await teardownAuthorityState(root, control, sources, environment, partialActions.length > 0, partialActions)) return null;
   return Object.freeze({
     ...rootEvidence,
     control,
@@ -4315,13 +4790,16 @@ async function rootTeardownAuthority(storage, environment, installationId, env) 
   });
 }
 
-async function prepareTeardownAction(storage, environment, input, env) {
-  if (await teamTeardownBlocked(storage)) return null;
+async function prepareTeardownAction(storage, environment, input, env, currentPolicies = false, managed = null) {
+  const currentState = currentPolicies ? await currentTeardownState(storage, env, managed) : null;
+  if (currentPolicies ? currentState === null : await teamTeardownBlocked(storage)) return null;
   if (!exactKeys(input, [
     'schemaVersion', 'actionId', 'actionKeyHash', 'actorEmail', 'installationId', 'issuedAt', 'expiresAt',
   ]) || input.schemaVersion !== 1) return null;
-  const candidate = safeTeardownAction({ ...input, status: 'authorization_required', failureCode: null });
-  if (!candidate || !await rootTeardownAuthority(storage, environment, candidate.installationId, env)) return null;
+  const proposed = { ...input, status: 'authorization_required', failureCode: null };
+  if (currentPolicies) proposed.policyMode = 'receipt_owned';
+  const candidate = safeTeardownAction(proposed);
+  if (!candidate || !await rootTeardownAuthority(storage, environment, candidate.installationId, env, currentState?.partialActions ?? [])) return null;
   const current = safeTeardownActions(await storage.get(TEARDOWNS_KEY)) ?? Object.freeze({
     schemaVersion: 1, revision: 1, actions: Object.freeze([]),
   });
@@ -4339,8 +4817,9 @@ async function prepareTeardownAction(storage, environment, input, env) {
   return candidate;
 }
 
-async function processTeardownActionProof(request, env, storage, nowMs = Date.now()) {
-  if (await teamTeardownBlocked(storage)) return null;
+async function processTeardownActionProof(request, env, storage, nowMs = Date.now(), currentPolicies = false, managed = null) {
+  const currentState = currentPolicies ? await currentTeardownState(storage, env, managed) : null;
+  if (currentPolicies ? currentState === null : await teamTeardownBlocked(storage)) return null;
   if (!(request instanceof Request) || request.method !== 'POST' || request.headers.has('authorization') ||
       request.headers.has('cookie') || request.headers.has('referer') || request.headers.has('origin') ||
       request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
@@ -4359,21 +4838,28 @@ async function processTeardownActionProof(request, env, storage, nowMs = Date.no
       value.issuedAt > nowMs + MAX_CLOCK_SKEW_SECONDS * 1000 || value.expiresAt <= nowMs) return null;
   const actions = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
   const action = actions?.actions.find((candidate) => candidate.actionId === value.actionId);
-  if (!actions || !action || !['authorization_required', 'applying', 'gateway_removed'].includes(action.status) ||
+  if (!actions || !action || (action.policyMode === 'receipt_owned') !== currentPolicies ||
+      !['authorization_required', 'applying', 'gateway_removed'].includes(action.status) ||
       action.actorEmail !== value.actorEmail || action.installationId !== value.installationId ||
       action.expiresAt !== value.expiresAt || value.issuedAt < action.issuedAt ||
       await sha256(value.actionKey) !== action.actionKeyHash ||
       !await verifyHmac(rawBody, value.actionKey, request.headers.get('x-ankka-teardown-action-signature'))) {
     return null;
   }
-  const authority = await rootTeardownAuthority(storage, environment, action.installationId, env);
+  const authority = await rootTeardownAuthority(storage, environment, action.installationId, env, currentState?.partialActions ?? []);
   if (!authority) return null;
+  const layout = currentPolicies ? teardownResources(authority.root, authority.control.sourceOwnership, true) : null;
+  if (currentPolicies && !layout) return null;
+  const receiptScopeEvidence = currentPolicies ? {
+    receiptResourceKinds: [...new Set([...layout.resources.map((resource) => TEARDOWN_RECEIPT_KINDS[resource.kind]),
+      ...(currentState?.bridges?.receiptResourceKinds ?? [])])].sort(compareText),
+  } : {};
   // The proof response can be lost after the action is durably authorized but
   // before the hosted session imports the receipt. Replaying the exact HMAC
   // action is read-only and returns the same authority until gateway removal
   // begins, so that narrow crash window remains recoverable.
-  if (action.status === 'applying' || action.status === 'gateway_removed') {
-    return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority });
+  if (currentPolicies || action.status === 'applying' || action.status === 'gateway_removed') {
+    return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority, ...receiptScopeEvidence });
   }
   const applying = safeTeardownAction({ ...action, status: 'applying', failureCode: null });
   const next = applying && safeTeardownActions({
@@ -4383,11 +4869,12 @@ async function processTeardownActionProof(request, env, storage, nowMs = Date.no
   });
   if (!applying || !next) return null;
   await storage.put(TEARDOWNS_KEY, next);
-  return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority });
+  return Object.freeze({ schemaVersion: 1, actionId: action.actionId, status: 'authorized', authority, ...receiptScopeEvidence });
 }
 
-async function processTeardownActionApply(request, env, storage, nowMs = Date.now()) {
-  if (await teamTeardownBlocked(storage)) return null;
+async function processTeardownActionApply(request, env, storage, nowMs = Date.now(), currentPolicies = false, managed = null) {
+  const currentState = currentPolicies ? await currentTeardownState(storage, env, managed) : null;
+  if (currentPolicies ? currentState === null : await teamTeardownBlocked(storage)) return null;
   if (!(request instanceof Request) || request.method !== 'POST' || request.headers.has('authorization') ||
       request.headers.has('cookie') || request.headers.has('referer') || request.headers.has('origin') ||
       request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
@@ -4411,7 +4898,8 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   const action = actions?.actions.find((candidate) => candidate.actionId === value.actionId);
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
-  if (!actions || !action || !control || !sources || !['applying', 'gateway_removed'].includes(action.status) ||
+  if (!actions || !action || (action.policyMode === 'receipt_owned') !== currentPolicies ||
+      !control || !sources || !(currentPolicies ? ['authorization_required', 'applying', 'gateway_removed'] : ['applying', 'gateway_removed']).includes(action.status) ||
       action.actorEmail !== value.actorEmail || action.installationId !== value.installationId ||
       action.expiresAt !== value.expiresAt || control.installationId !== value.installationId ||
       value.issuedAt < action.issuedAt || await sha256(value.actionKey) !== action.actionKeyHash ||
@@ -4420,52 +4908,131 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   }
   const rootStub = adminStateStub(env, `v1:${action.installationId}`);
   if (!rootStub) return null;
+  const ownedServerIds = [...control.sourceOwnership.flatMap((source) => source.resources),
+    ...(currentState?.partialActions ?? []).flatMap((source) => [...source.resources,
+      ...(source.pending?.kind === 'mcp_server' ? [source.pending] : [])])]
+    .filter((resource) => resource.kind === 'mcp_server').map((resource) => resource.provider.id);
+  const bridgeGrant = { accessToken: value.cloudflareAccessToken, expiresAt: value.expiresAt, requestId: value.requestId };
+  const paused = async (phase, progress, detail = null) => {
+    const result = { schemaVersion: 1, actionId: action.actionId, status: 'removing', installationId: action.installationId,
+      progress: await sha256({ phase, progress }) };
+    // The fixed words for the removal page: the root pass's own phase and removed kinds when it reported them, else this phase.
+    const reported = detail !== null && TEARDOWN_PHASES.includes(detail.phase) ? detail.phase : phase;
+    if (TEARDOWN_PHASES.includes(reported)) result.phase = reported;
+    if (detail !== null && Array.isArray(detail.removedKinds) && detail.removedKinds.length <= TEARDOWN_KIND_WORDS.size &&
+        detail.removedKinds.every((kind) => TEARDOWN_KIND_WORDS.has(kind))) result.removedKinds = [...detail.removedKinds];
+    return Object.freeze(result);
+  };
+  try {
+    const preflight = await currentState?.bridges?.preflight(bridgeGrant, ownedServerIds);
+    if (preflight && !preflight.complete) return paused('bridge_preflight', preflight.progress);
+  } catch { return null; }
+  if (currentPolicies && action.status === 'authorization_required') {
+    // Receipt proof and consent navigation are read-only. Arm the persistent
+    // lifecycle lock only when an actual apply is about to reach the root.
+    const applying = safeTeardownAction({ ...action, status: 'applying', failureCode: null });
+    const armed = applying && safeTeardownActions({ ...actions, revision: actions.revision + 1,
+      actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? applying : candidate) });
+    if (!armed) return null;
+    await storage.put(TEARDOWNS_KEY, armed);
+  }
   let removed;
   try {
-    const response = await rootStub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/apply`, {
+    const rootInput = {
+      schemaVersion: 1, actionId: action.actionId, installationId: action.installationId,
+      requestId: value.requestId, control, sources, cloudflareAccessToken: value.cloudflareAccessToken,
+      issuedAt: value.issuedAt, expiresAt: value.expiresAt,
+    };
+    if (currentState?.partialActions.length > 0) rootInput.managedSourceActions = currentState.partialActions;
+    const response = await rootStub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/${currentPolicies ? 'apply-current' : 'apply'}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: canonicalJson({
-        schemaVersion: 1,
-        actionId: action.actionId,
-        installationId: action.installationId,
-        requestId: value.requestId,
-        control,
-        sources,
-        cloudflareAccessToken: value.cloudflareAccessToken,
-        issuedAt: value.issuedAt,
-        expiresAt: value.expiresAt,
-      }),
+      body: canonicalJson(rootInput),
     }));
     removed = response instanceof Response && response.status === 200 ? await response.json() : null;
   } catch { removed = null; }
+  if (currentPolicies && managed?.bounded === true && removed?.schemaVersion === 1 &&
+      removed.status === 'removing' && removed.installationId === action.installationId && HASH.test(removed.progress)) {
+    return paused('dependencies', removed.progress, removed);
+  }
   if (!isRecord(removed) || removed.schemaVersion !== 1 || removed.status !== 'removed' ||
-      removed.installationId !== action.installationId || !Number.isSafeInteger(removed.removedResourceCount)) {
+      removed.installationId !== action.installationId || !Number.isSafeInteger(removed.removedResourceCount) ||
+      (currentPolicies && (!HASH.test(removed.readyReceiptChecksum) || !HASH.test(removed.dependencyResourcesHash)))) {
     return null;
   }
+  if (currentState?.bridges !== null && currentState?.bridges !== undefined) {
+    try {
+      const bridges = await currentState.bridges.remove(bridgeGrant, ownedServerIds);
+      if (!bridges.complete) return paused('bridges', bridges.progress);
+      removed = { ...removed, removedResourceCount: removed.removedResourceCount + bridges.removedResourceCount,
+        dependencyResourcesHash: await sha256({ schemaVersion: 1, dependencies: removed.dependencyResourcesHash, bridges: bridges.recordsHash }) };
+    } catch { return null; }
+  }
   if (action.status !== 'gateway_removed') {
+    const latest = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
+    if (!latest) return null;
     const updated = safeTeardownAction({ ...action, status: 'gateway_removed', failureCode: null });
     const next = updated && safeTeardownActions({
       schemaVersion: 1,
-      revision: actions.revision + 1,
-      actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? updated : candidate),
+      revision: latest.revision + 1,
+      actions: latest.actions.map((candidate) => candidate.actionId === action.actionId ? updated : candidate),
     });
     if (!updated || !next) return null;
     await storage.put(TEARDOWNS_KEY, next);
   }
-  return Object.freeze({
-    schemaVersion: 1,
-    actionId: action.actionId,
-    status: 'gateway_removed',
-    installationId: action.installationId,
+  const result = {
+    schemaVersion: 1, actionId: action.actionId, status: 'gateway_removed', installationId: action.installationId,
     removedResourceCount: removed.removedResourceCount,
-  });
+  };
+  if (currentPolicies) Object.assign(result, { readyReceiptChecksum: removed.readyReceiptChecksum, dependencyResourcesHash: removed.dependencyResourcesHash });
+  return Object.freeze(result);
+}
+
+/** End a current consent attempt without erasing its receipt or deletion boundary. */
+async function settleCurrentTeardownAction(request, env, storage, nowMs = Date.now()) {
+  if (request.method !== 'POST' || ['authorization', 'cookie', 'referer', 'origin'].some((name) => request.headers.has(name)) ||
+      request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
+  const raw = await readBoundedText(request, REQUEST_LIMIT_BYTES);
+  let value;
+  try { value = raw === null ? null : JSON.parse(raw); } catch { return null; }
+  if (!isPlainData(value) || canonicalJson(value) !== raw || !exactKeys(value, [
+    'schemaVersion', 'command', 'actionId', 'actionKey', 'actorEmail', 'accountId',
+    'installationId', 'issuedAt', 'expiresAt',
+  ]) || value.schemaVersion !== 1 || value.command !== 'settle' || !ACTION_ID.test(value.actionId) ||
+      !NONCE.test(value.actionKey) || !Number.isSafeInteger(value.issuedAt) || value.issuedAt > nowMs + 30_000) return null;
+  const actions = safeTeardownActions(await storage.get(TEARDOWNS_KEY));
+  const action = actions?.actions.find((candidate) => candidate.actionId === value.actionId);
+  if (!actions || !action || action.policyMode !== 'receipt_owned' ||
+      action.actorEmail !== value.actorEmail || action.installationId !== value.installationId ||
+      action.expiresAt !== value.expiresAt || value.issuedAt < action.issuedAt ||
+      await sha256(value.actionKey) !== action.actionKeyHash ||
+      !await verifyHmac(raw, value.actionKey, request.headers.get('x-ankka-teardown-action-signature'))) return null;
+  const environment = parseManagementEnvironment(env);
+  if (!environment || value.accountId !== environment.accountId) return null;
+  let untouched = false;
+  try {
+    const stub = adminStateStub(env, `v1:${action.installationId}`);
+    const response = await stub?.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/status-current`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ schemaVersion: 1, installationId: action.installationId }),
+    }));
+    const evidence = response?.status === 200 ? await response.json() : null;
+    untouched = evidence?.schemaVersion === 1 && evidence.installationId === action.installationId && evidence.removalStarted === false;
+  } catch { /* Unknown state keeps the recovery lock. */ }
+  const updated = safeTeardownAction({ ...action, status: untouched ? 'failed' : 'recovery_required',
+    failureCode: 'fresh_authorization_required' });
+  const next = updated && safeTeardownActions({ ...actions, revision: actions.revision + 1,
+    actions: actions.actions.map((candidate) => candidate.actionId === action.actionId ? updated : candidate) });
+  if (!next) return null;
+  await storage.put(TEARDOWNS_KEY, next);
+  return publicTeardownAction(updated);
 }
 
 export class AdminState {
-  constructor(state, env) {
+  constructor(state, env, managedTeardown = null) {
     this.state = state;
     this.env = env;
+    this.managedTeardown = managedTeardown;
     this.queue = Promise.resolve();
   }
 
@@ -4473,7 +5040,8 @@ export class AdminState {
     const requestUrl = new URL(request.url);
     // Status must remain available while a serialized mutation awaits the
     // provider. These reads neither authorize work nor change the journal.
-    if (request.method === 'GET' && ([INTERNAL_ACTIONS_PATH, INTERNAL_SOURCES_PATH, INTERNAL_STATUS_PATH].includes(requestUrl.pathname) ||
+    if (request.method === 'GET' && ([INTERNAL_ACTIONS_PATH, INTERNAL_SOURCES_PATH, INTERNAL_STATUS_PATH,
+      INTERNAL_ROLLBACK_OUTLOOK_PATH].includes(requestUrl.pathname) ||
         requestUrl.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`))) {
       return this.readSourceManagementState(request, requestUrl);
     }
@@ -4515,21 +5083,21 @@ export class AdminState {
         return control ? fixedJson(200, control) :
           fixedJson(503, { schemaVersion: 1, error: 'control_unavailable' });
       }
-      if (url.pathname === INTERNAL_TEARDOWN_ROOT_PATH && request.method === 'POST') {
+      if ([INTERNAL_TEARDOWN_ROOT_PATH, `${INTERNAL_TEARDOWN_ROOT_PATH}/status-current`].includes(url.pathname) && request.method === 'POST') {
         const environment = parseManagementEnvironment(this.env);
         const input = await request.json().catch(() => null);
         const evidence = environment && exactKeys(input, ['schemaVersion', 'installationId']) &&
           input.schemaVersion === 1 && INSTALLATION_ID.test(input.installationId)
-          ? await rootTeardownEvidence(this.state.storage, environment, input.installationId)
+          ? await rootTeardownEvidence(this.state.storage, environment, input.installationId, url.pathname.endsWith('/status-current'))
           : null;
         return evidence ? fixedJson(200, evidence) :
           fixedJson(409, { schemaVersion: 1, error: 'teardown_root_unavailable' });
       }
-      if (url.pathname === `${INTERNAL_TEARDOWN_ROOT_PATH}/apply` && request.method === 'POST') {
+      if ([`${INTERNAL_TEARDOWN_ROOT_PATH}/apply`, `${INTERNAL_TEARDOWN_ROOT_PATH}/apply-current`].includes(url.pathname) && request.method === 'POST') {
         const environment = parseManagementEnvironment(this.env);
         const input = await request.json().catch(() => null);
         const removed = environment ? await processRootTeardownApply(
-          this.state.storage, environment, input,
+          this.state.storage, environment, input, Date.now(), url.pathname.endsWith('/apply-current'), this.managedTeardown,
         ) : null;
         return removed ? fixedJson(200, removed) :
           fixedJson(409, { schemaVersion: 1, error: 'teardown_root_recovery_required' });
@@ -4547,6 +5115,26 @@ export class AdminState {
         if (!ACTION_ID.test(actionId) || input?.actionId !== actionId) return sourceActionConflict();
         const action = await renewSourceAction(this.state.storage, input, this.env);
         return action instanceof Response ? action : fixedJson(200, publicSourceAction(action));
+      }
+      const toolChoice = request.method === 'POST' ? INTERNAL_ACTION_TOOLS_ROUTE.exec(url.pathname) : null;
+      if (toolChoice) {
+        const input = await request.json().catch(() => null);
+        if (input?.actionId !== toolChoice[1]) return sourceToolsRefusal(400, 'source_tools_invalid');
+        return chooseSourceActionTools(this.state.storage, this.env, input);
+      }
+      if (url.pathname === `${INTERNAL_ACTIONS_PATH}/bigquery` && request.method === 'POST') {
+        const parsed = await parseSourceActionRequest(request, this.env, this.state.storage, Date.now());
+        if (!parsed || !['start', 'failed'].includes(parsed.claim.bigqueryPhase)) return actionRecovery('source_action_rejected');
+        if (await otherLifecycleBlocksSource(this.state.storage, Date.now(), parsed.action.actionId)) return sourceActionConflict();
+        if (parsed.claim.bigqueryPhase === 'start' && !await armSourceCompatibility(this.state.storage, this.env)) {
+          return actionRecovery('source_action_state_unavailable');
+        }
+        const action = await persistSourceAction(this.state.storage, {
+          ...parsed.action, bigquerySetupStarted: true,
+          status: parsed.claim.bigqueryPhase === 'start' ? 'applying' : 'recovery_required',
+          failureCode: parsed.claim.bigqueryPhase === 'start' ? null : 'bigquery_setup_required',
+        });
+        return action ? fixedJson(200, publicSourceAction(action)) : actionRecovery('source_action_state_unavailable');
       }
       if (url.pathname === `${INTERNAL_ACTIONS_PATH}/apply` && request.method === 'POST') {
         const raw = await readBoundedText(request.clone(), REQUEST_LIMIT_BYTES);
@@ -4569,6 +5157,31 @@ export class AdminState {
           ? fixedJson(200, publicSourceAction(action))
           : sourceSnapshotConflict(await sourceActionSnapshot(this.state.storage, input?.actorEmail, Date.now())) ??
             sourceActionConflict();
+      }
+      // The current gateway coordinator uses these internal-only routes. Old
+      // hosted handoffs cannot opt into the new receipt-owned policy matcher.
+      if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/prepare-current` && request.method === 'POST') {
+        const environment = parseManagementEnvironment(this.env);
+        const input = await request.json().catch(() => null);
+        const action = environment ? await prepareTeardownAction(
+          this.state.storage, environment, input, this.env, true, this.managedTeardown,
+        ) : null;
+        return action ? fixedJson(200, publicTeardownAction(action)) :
+          fixedJson(409, { schemaVersion: 1, error: 'teardown_action_conflict' });
+      }
+      if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/prove-current` && request.method === 'POST') {
+        const proof = await processTeardownActionProof(request, this.env, this.state.storage, Date.now(), true, this.managedTeardown);
+        return proof ? fixedJson(200, proof) :
+          fixedJson(409, { schemaVersion: 1, error: 'teardown_action_rejected' });
+      }
+      if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/settle-current` && request.method === 'POST') {
+        const settled = await settleCurrentTeardownAction(request, this.env, this.state.storage);
+        return settled ? fixedJson(200, settled) : fixedJson(409, { schemaVersion: 1, error: 'teardown_action_rejected' });
+      }
+      if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/apply-current` && request.method === 'POST') {
+        const applied = await processTeardownActionApply(request, this.env, this.state.storage, Date.now(), true, this.managedTeardown);
+        return applied ? fixedJson(200, applied) :
+          fixedJson(409, { schemaVersion: 1, error: 'teardown_action_recovery_required' });
       }
       if (url.pathname === INTERNAL_TEARDOWNS_PATH && request.method === 'POST') {
         if (await teamTeardownBlocked(this.state.storage)) return fixedJson(409, {
@@ -4609,6 +5222,9 @@ export class AdminState {
           revision: updates.revision,
           current: updates.current,
           previous: updates.previous,
+          // The same rule that refuses the action decides whether it is offered.
+          previousRestorable: updates.previous !== null &&
+            await teamRuntimeReleaseAllowed(this.state.storage, updates.previous.release),
         }) : fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
       }
       if (url.pathname === INTERNAL_UPDATES_PATH && request.method === 'POST') {
@@ -4636,7 +5252,16 @@ export class AdminState {
         return snapshot ? fixedJson(200, snapshot) : fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' });
       }
       if (url.pathname === INTERNAL_TEAM_ACTIONS_PATH && request.method === 'POST') {
-        return fixedJson(409, { schemaVersion: 1, error: 'team_editing_managed_in_cloudflare' });
+        const input = await readJsonInput(request, REQUEST_LIMIT_BYTES + 2048);
+        try {
+          const action = await prepareTeamAction(this.state.storage, this.env, input);
+          const applied = action && await processTeamAction(this.env, this.state.storage, action, Date.now());
+          return applied || fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
+        } catch (error) {
+          const code = error instanceof TeamAccessError ? error.code : 'team_action_conflict';
+          return fixedJson(code === 'team_access_invalid_request' || code === 'team_access_admin_required' ? 400 : 409,
+            { schemaVersion: 1, error: code });
+        }
       }
       if (url.pathname.startsWith(`${INTERNAL_TEAM_ACTIONS_PATH}/`) && ['GET', 'DELETE'].includes(request.method)) {
         const state = await readTeamState(this.state.storage, this.env);
@@ -4687,6 +5312,12 @@ export class AdminState {
           error: 'source_capacity_exceeded',
           revision: current.revision,
         });
+        // Older runtimes cannot read a source without tools. Every other draft
+        // still arms nothing: only this record needs the floor before it exists.
+        if (input.source.enabledTools.length === 0 &&
+            !await armSourceCompatibility(this.state.storage, this.env)) {
+          return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+        }
         await this.state.storage.put(SOURCES_KEY, updated);
         return fixedJson(200, updated);
       }
@@ -4706,11 +5337,22 @@ export class AdminState {
       const sources = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
       return sources ? fixedJson(200, sources) : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     }
+    if (url.pathname === INTERNAL_ROLLBACK_OUTLOOK_PATH) {
+      const environment = parseManagementEnvironment(this.env);
+      return fixedJson(200, { schemaVersion: 1, installEndsRollbackTo: environment
+        ? await sourceInstallEndsRollbackTo(this.state.storage, environment) : null });
+    }
     if (url.pathname === INTERNAL_ACTIONS_PATH) {
       const snapshot = await sourceActionSnapshot(this.state.storage,
         request.headers.get('x-ankka-actor-email'), Date.now());
       return snapshot ? fixedJson(200, snapshot) :
         fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    }
+    // The real tool list of one paused sign-in installation: one provider read, no write.
+    const toolsRoute = INTERNAL_ACTION_TOOLS_ROUTE.exec(url.pathname);
+    if (toolsRoute) {
+      return readSourceActionTools(this.state.storage, this.env, toolsRoute[1],
+        request.headers.get('x-ankka-actor-email'));
     }
     const actionId = url.pathname.slice(`${INTERNAL_ACTIONS_PATH}/`.length);
     const actions = safeSourceActions(await this.state.storage.get(ACTIONS_KEY));
@@ -4744,57 +5386,125 @@ function accessConfiguration(env) {
     ? [...new Set(env.ADMIN_EMAILS.split(',').map(normalizedEmail).filter(Boolean))].sort(compareText)
     : [];
   if (emails.length < 1) return null;
-  return Object.freeze({ aud: env.CF_ACCESS_AUD, issuer: issuer.origin, emails: Object.freeze(emails) });
+  // The one service identity this gateway accepts, set only by a deployment configuration that opted in.
+  if (env.ANKKA_SERVICE_CLIENT_ID !== undefined && (!isText(env.ANKKA_SERVICE_CLIENT_ID) || !SERVICE_CLIENT_ID.test(env.ANKKA_SERVICE_CLIENT_ID))) return null;
+  const serviceClientId = isText(env.ANKKA_SERVICE_CLIENT_ID) ? env.ANKKA_SERVICE_CLIENT_ID : null;
+  return Object.freeze({ aud: env.CF_ACCESS_AUD, issuer: issuer.origin, emails: Object.freeze(emails), serviceClientId });
 }
 
-async function verifyAccess(request, env, nowMs = Date.now()) {
+const SERVICE_CLIENT_ID = /^[a-f0-9]{32}\.access$/u;
+const SERVICE_ACTOR = /^service:[a-f0-9]{32}\.access$/u;
+
+/** An actor identity as action records carry it: an administrator's normalized email or `service:<client id>`. */
+function normalizedActor(value) {
+  if (!isText(value)) return null;
+  return SERVICE_ACTOR.test(value) ? value : normalizedEmail(value);
+}
+function actorKind(actorEmail) { return SERVICE_ACTOR.test(actorEmail) ? 'service' : 'human'; }
+function actorId(actor) { return actor.kind === 'human' ? actor.email : `service:${actor.clientId}`; }
+function serviceActorOf(configuration) {
+  return configuration?.serviceClientId ? `service:${configuration.serviceClientId}` : null;
+}
+function teamActorAllowed(actorEmail, configuration) {
+  return configuration !== null && (configuration.emails.includes(actorEmail) || actorEmail === serviceActorOf(configuration));
+}
+
+// Service identities act only on these routes; everything else is denied to them, including update and
+// teardown action creation and source action cancellation.
+const SERVICE_ROUTES = Object.freeze([
+  ['GET', /^\/api\/status$/u], ['GET', /^\/api\/update$/u],
+  ['POST', /^\/api\/sources\/discover$/u], ['GET', /^\/api\/sources$/u], ['PUT', /^\/api\/sources$/u],
+  ['GET', /^\/api\/source-actions(?:\/action_[A-Za-z0-9_-]{32})?$/u], ['POST', /^\/api\/source-actions$/u],
+  ['POST', /^\/api\/source-actions\/action_[A-Za-z0-9_-]{32}\/renew$/u],
+  ['GET', /^\/api\/team$/u], ['POST', /^\/api\/team-actions$/u], ['GET', /^\/api\/team-actions\/action_[A-Za-z0-9_-]{32}$/u],
+]);
+function serviceOperationAllowed(method, pathname) {
+  return SERVICE_ROUTES.some(([allowedMethod, route]) => allowedMethod === method && route.test(pathname));
+}
+
+/** The verified actor of a management request, or the fixed refusal: unauthenticated, or a service identity outside its allowlist. */
+async function managementActor(request, env) {
+  const actor = await verifyAccessActor(request, env);
+  if (!actor) return { response: fixedJson(401, { schemaVersion: 1, error: 'access_required' }) };
+  let pathname;
+  try { pathname = new URL(request.url).pathname; } catch { return { response: fixedJson(400, { schemaVersion: 1, error: 'request_invalid' }) }; }
+  if (actor.kind === 'service' && !serviceOperationAllowed(request.method, pathname)) {
+    return { response: fixedJson(403, { schemaVersion: 1, error: 'service_operation_denied' }) };
+  }
+  return { actor, actorEmail: actorId(actor) };
+}
+
+/** The administrator named by a verified Access token, or false. Routes that admit the service identity use verifyAccessActor. */
+export async function verifyAccess(request, env, nowMs = Date.now()) {
+  const actor = await verifyAccessActor(request, env, nowMs);
+  return actor?.kind === 'human' ? actor.email : false;
+}
+
+/**
+ * The verified caller of a management request: an administrator, identified by the
+ * email claim that must match the identity header and the configured administrators,
+ * or the one configured service identity, identified by the exact `common_name` of a
+ * token that carries no email claim and no identity header. `type: app` appears on
+ * both kinds of token and distinguishes nothing. Issuer, audience, validity window
+ * and the signature against the issuer's published keys are verified for both.
+ */
+export async function verifyAccessActor(request, env, nowMs = Date.now()) {
   const configuration = accessConfiguration(env);
   const assertion = request.headers.get('cf-access-jwt-assertion');
   const claimedEmail = normalizedEmail(request.headers.get('cf-access-authenticated-user-email'));
-  if (!configuration || !assertion || !claimedEmail || !configuration.emails.includes(claimedEmail)) return false;
+  if (!configuration || !assertion) return null;
   const segments = assertion.split('.');
-  if (segments.length !== 3) return false;
+  if (segments.length !== 3) return null;
   const headerBytes = decodeBase64Url(segments[0]);
   const payloadBytes = decodeBase64Url(segments[1]);
   const signature = decodeBase64Url(segments[2]);
   if (!headerBytes || !payloadBytes || !signature || headerBytes.byteLength > 4096 ||
-      payloadBytes.byteLength > 16 * 1024 || signature.byteLength > 1024) return false;
+      payloadBytes.byteLength > 16 * 1024 || signature.byteLength > 1024) return null;
   let header;
   let payload;
   try {
     header = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(headerBytes));
     payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(payloadBytes));
   } catch {
-    return false;
+    return null;
   } finally {
     headerBytes.fill(0);
     payloadBytes.fill(0);
   }
   const now = Math.floor(nowMs / 1000);
   const audiences = isText(payload.aud) ? [payload.aud] : payload.aud;
-  const email = normalizedEmail(payload.email);
   if (!isRecord(header) || header.alg !== 'RS256' || !isText(header.kid) ||
       !/^[A-Za-z0-9_.:-]{1,256}$/u.test(header.kid) || !isRecord(payload) ||
       payload.iss !== configuration.issuer || !Array.isArray(audiences) ||
-      !audiences.includes(configuration.aud) || email !== claimedEmail ||
+      !audiences.includes(configuration.aud) ||
       !Number.isSafeInteger(payload.exp) || payload.exp <= now ||
-      (Object.hasOwn(payload, 'nbf') && (!Number.isSafeInteger(payload.nbf) || payload.nbf > now + 30))) return false;
+      (Object.hasOwn(payload, 'nbf') && (!Number.isSafeInteger(payload.nbf) || payload.nbf > now + 30))) return null;
+  let actor;
+  if (Object.hasOwn(payload, 'email') && payload.email !== '') {
+    const email = normalizedEmail(payload.email);
+    if (!email || email !== claimedEmail || !configuration.emails.includes(email)) return null;
+    actor = Object.freeze({ kind: 'human', email });
+  } else {
+    if (claimedEmail || configuration.serviceClientId === null || !isText(payload.common_name) ||
+        payload.common_name !== configuration.serviceClientId) return null;
+    actor = Object.freeze({ kind: 'service', clientId: payload.common_name });
+  }
   let response;
   try {
     response = await fetch(new Request(`${configuration.issuer}/cdn-cgi/access/certs`, {
       method: 'GET', headers: { accept: 'application/json' }, redirect: 'manual',
     }));
-  } catch { return false; }
+  } catch { return null; }
   if (!(response instanceof Response) || response.status !== 200 || response.redirected) {
     if (response instanceof Response) await discardBody(response);
-    return false;
+    return null;
   }
   let jwks;
-  try { jwks = await readBoundedProviderJson(response); } catch { return false; }
-  if (!isRecord(jwks) || !Array.isArray(jwks.keys)) return false;
+  try { jwks = await readBoundedProviderJson(response); } catch { return null; }
+  if (!isRecord(jwks) || !Array.isArray(jwks.keys)) return null;
   const keys = jwks.keys.filter((key) => isRecord(key) && key.kid === header.kid &&
     key.kty === 'RSA' && key.alg === 'RS256' && key.use === 'sig');
-  if (keys.length !== 1) return false;
+  if (keys.length !== 1) return null;
   try {
     const key = await crypto.subtle.importKey(
       'jwk', keys[0], { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
@@ -4803,9 +5513,9 @@ async function verifyAccess(request, env, nowMs = Date.now()) {
       'RSASSA-PKCS1-v1_5', key, signature,
       new TextEncoder().encode(`${segments[0]}.${segments[1]}`),
     );
-    return verified ? email : false;
+    return verified ? actor : null;
   } catch {
-    return false;
+    return null;
   } finally {
     signature.fill(0);
   }
@@ -4910,9 +5620,8 @@ async function handleStatus(request, env) {
   if (request.method !== 'GET') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET' });
   }
-  if (!await verifyAccess(request, env)) {
-    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
-  }
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
   const environment = parseManagementEnvironment(env);
   if (!environment) return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   const stub = adminStateStub(env, 'v1:management');
@@ -4925,8 +5634,10 @@ async function handleStatus(request, env) {
     if (response.status !== 200) return response;
     let status;
     try { status = await response.json(); } catch { status = null; }
+    // The one machine identity this gateway admits, so an operator can see the opt-in without reading bindings.
+    const serviceClientId = accessConfiguration(env)?.serviceClientId ?? null;
     return isRecord(status)
-      ? fixedJson(200, { ...status, controlPlaneOrigin: CONTROL_PLANE_ORIGIN })
+      ? fixedJson(200, { ...status, controlPlaneOrigin: CONTROL_PLANE_ORIGIN, serviceIdentity: serviceClientId === null ? null : { clientId: serviceClientId } })
       : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
   } catch {
     return fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
@@ -4937,9 +5648,8 @@ async function handleRuntimeUpdate(request, env) {
   if (request.method !== 'GET') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET' });
   }
-  if (!await verifyAccess(request, env)) {
-    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
-  }
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
   const environment = parseManagementEnvironment(env);
   const stub = adminStateStub(env, 'v1:management');
   let updateState = null;
@@ -4949,6 +5659,7 @@ async function handleRuntimeUpdate(request, env) {
   } catch { updateState = null; }
   const previous = runtimeVersion(updateState?.previous);
   const current = runtimeVersion(updateState?.current);
+  const rollback = publicRollback(previous, updateState?.previousRestorable === true);
   const discovered = await discoverRuntimeUpdate(env);
   if (!discovered) {
     return fixedJson(200, {
@@ -4957,12 +5668,7 @@ async function handleRuntimeUpdate(request, env) {
       status: 'unavailable',
       current: current ? { release: current.release, artifactSha256: current.artifactSha256 } : null,
       available: null,
-      rollback: previous ? {
-        available: true,
-        release: previous.release,
-        artifactSha256: previous.artifactSha256,
-        dataRollback: false,
-      } : { available: false },
+      rollback,
     });
   }
   const available = discovered.comparison < 0;
@@ -4981,13 +5687,18 @@ async function handleRuntimeUpdate(request, env) {
       classification: discovered.channel.classification,
       notes: discovered.channel.notes,
     } : null,
-    rollback: previous ? {
-      available: true,
-      release: previous.release,
-      artifactSha256: previous.artifactSha256,
-      dataRollback: false,
-    } : { available: false },
+    rollback,
   });
+}
+
+// A recorded previous release is offered only while the minimum compatible
+// runtime still allows it; past that, the answer names the release and says
+// why with one fixed word instead of offering an action that is then refused.
+function publicRollback(previous, restorable) {
+  if (!previous) return { available: false };
+  return restorable
+    ? { available: true, release: previous.release, artifactSha256: previous.artifactSha256, dataRollback: false }
+    : { available: false, reason: 'minimum_runtime_release', release: previous.release };
 }
 
 function sameOriginMutation(request) {
@@ -5015,9 +5726,8 @@ async function handleSourceDiscovery(request, env) {
   if (request.method !== 'POST') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
   }
-  if (!await verifyAccess(request, env)) {
-    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
-  }
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   const input = await readJsonInput(request);
   if (!exactKeys(input, ['url'])) return fixedJson(400, { schemaVersion: 1, error: 'source_url_invalid' });
@@ -5042,9 +5752,8 @@ async function handleSources(request, env) {
   if (request.method !== 'GET' && request.method !== 'PUT') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, PUT' });
   }
-  if (!await verifyAccess(request, env)) {
-    return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
-  }
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
   if (request.method === 'PUT' && !sameOriginMutation(request)) {
     return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   }
@@ -5057,7 +5766,7 @@ async function handleSources(request, env) {
       if (!(response instanceof Response)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
       if (response.status !== 200) return response;
       const sources = safeManagementSources(await response.json());
-      return sources ? fixedJson(200, { ...sources, installationEnabled: !SOURCE_ADDITION_PAUSED }) :
+      return sources ? fixedJson(200, await publicSources(sources, stub, env)) :
         fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     } catch {
       return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
@@ -5075,11 +5784,30 @@ async function handleSources(request, env) {
     if (!(response instanceof Response)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     if (response.status !== 200) return response;
     const sources = safeManagementSources(await response.json());
-    return sources ? fixedJson(200, { ...sources, installationEnabled: !SOURCE_ADDITION_PAUSED }) :
+    return sources ? fixedJson(200, await publicSources(sources, stub, env)) :
       fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
   } catch {
     return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
   }
+}
+
+// What the dashboard loads for Sources, after a read and after a save alike.
+// `installEndsRollbackTo` names the release that can be restored today and no
+// longer could once a source installation starts here; it is null whenever
+// installing decides nothing about rollback, or cannot start at all.
+async function publicSources(sources, stub, env) {
+  const installationEnabled = !SOURCE_ADDITION_PAUSED && managementCredential(env) !== null;
+  let installEndsRollbackTo = null;
+  if (installationEnabled) {
+    try {
+      const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_ROLLBACK_OUTLOOK_PATH}`));
+      const outlook = response instanceof Response && response.status === 200 ? await response.json() : null;
+      if (isText(outlook?.installEndsRollbackTo) && updateSemver(outlook.installEndsRollbackTo)) {
+        installEndsRollbackTo = outlook.installEndsRollbackTo;
+      }
+    } catch { installEndsRollbackTo = null; }
+  }
+  return { ...sources, applyMode: 'account_token', installationEnabled, installEndsRollbackTo };
 }
 
 function teamSources(sources) {
@@ -5093,7 +5821,8 @@ function safeTeamAction(value, context) {
   if (!exactKeys(value, ['schemaVersion', 'actionId', 'actorEmail', 'issuedAt', 'expiresAt',
     'actionKeyHash', 'status', 'failureCode', 'request', 'sourceRevision', 'planHash', 'journal']) ||
       value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) ||
-      normalizedEmail(value.actorEmail) !== value.actorEmail || !context.adminEmails.includes(value.actorEmail) ||
+      normalizedActor(value.actorEmail) !== value.actorEmail ||
+      !(context.adminEmails.includes(value.actorEmail) || value.actorEmail === context.serviceActor) ||
       !Number.isSafeInteger(value.issuedAt) || !Number.isSafeInteger(value.expiresAt) ||
       value.expiresAt <= value.issuedAt || value.expiresAt - value.issuedAt > 600_000 ||
       !HASH.test(value.actionKeyHash) || !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
@@ -5114,12 +5843,12 @@ function safeTeamAction(value, context) {
   return Object.freeze(structuredClone(value));
 }
 
-function safeTeamState(value, control, sources, admins) {
+function safeTeamState(value, control, sources, admins, serviceActor = null) {
   if (!exactKeys(value, ['schemaVersion', 'revision', 'members', 'sourceBaselines', 'minimumRuntimeRelease', 'teardownDisabled', 'pendingAction']) ||
       value.schemaVersion !== 1 || !isBoolean(value.teardownDisabled) ||
       (value.minimumRuntimeRelease !== null && !updateSemver(value.minimumRuntimeRelease)) ||
       value.teardownDisabled !== (value.minimumRuntimeRelease !== null)) return null;
-  const context = { revision: value.revision, adminEmails: admins, sources: teamSources(sources) };
+  const context = { revision: value.revision, adminEmails: admins, serviceActor, sources: teamSources(sources) };
   let normalized;
   try { normalized = normalizeTeamAccessRequest({ schemaVersion: 1, expectedRevision: value.revision, members: value.members }, context); }
   catch { return null; }
@@ -5138,7 +5867,8 @@ async function readTeamState(storage, env) {
   if (!control || !sources || !admins || !environment ||
       control.accountId !== environment.accountId || control.zoneId !== environment.zoneId) return null;
   const raw = await storage.get(TEAM_KEY);
-  if (raw !== undefined) return safeTeamState(raw, control, sources, admins);
+  const serviceActor = serviceActorOf(accessConfiguration(env));
+  if (raw !== undefined) return safeTeamState(raw, control, sources, admins, serviceActor);
   const legacyAudienceHash = await sha256({ emails: control.audienceEmails });
   const emptyAudienceHash = await sha256({ emails: [] });
   const installed = sources.sources.filter((source) => source.status === 'installed');
@@ -5160,7 +5890,7 @@ async function readTeamState(storage, env) {
       email, sourceIds: control.audienceEmails.includes(email) ? sourceIds : [],
     })),
     pendingAction: null,
-  }, control, sources, admins);
+  }, control, sources, admins, serviceActor);
   if (initial) await storage.put(TEAM_KEY, initial);
   return initial;
 }
@@ -5188,8 +5918,7 @@ async function otherLifecycleBlocksSource(storage, now, currentActionId) {
       if (action.actionId === currentActionId || action.status === 'succeeded') return false;
       // An expired grant is not evidence that its provider mutation never ran.
       // Retain source journals even if a historical status says unstarted/failed.
-      if (key === ACTIONS_KEY && (action.resources.length > 0 || action.pending !== null ||
-        action.portalUpdate !== null)) return true;
+      if (key === ACTIONS_KEY && sourceActionHasWriteEvidence(action)) return true;
       if (action.status === 'failed') return false;
       if (action.status !== 'authorization_required' || action.expiresAt > now) return true;
       return key === UPDATES_KEY && action.stage !== null;
@@ -5216,6 +5945,63 @@ async function teamRuntimeReleaseAllowed(storage, release) {
     compareUpdateRelease(release, team.minimumRuntimeRelease) !== -1;
 }
 
+// A source installation arms the minimum compatible runtime at the running
+// release. That decides something only while an older recorded release can
+// still be restored: name that release, so the dashboard can say so beside
+// the install control. Reads only, so it stays answerable during a mutation.
+async function sourceInstallEndsRollbackTo(storage, environment) {
+  const updates = safeRuntimeUpdates(await storage.get(UPDATES_KEY));
+  if (!updates) return null;
+  // Until the journal follows a release received outside an action, the
+  // recorded current release is the one a rollback would restore.
+  const target = updates.current.release === environment.release &&
+    updates.current.artifactSha256 === environment.releaseSha256 ? updates.previous : updates.current;
+  return target && compareUpdateRelease(target.release, environment.release) === -1 &&
+    await teamRuntimeReleaseAllowed(storage, target.release) ? target.release : null;
+}
+
+async function currentTeardownLocksRuntime(storage, now) {
+  const raw = await storage.get(TEARDOWNS_KEY);
+  if (raw === undefined) return false;
+  const state = safeTeardownActions(raw);
+  if (!state) return true;
+  return state.actions.some((action) => action.policyMode === 'receipt_owned' &&
+    (['applying', 'gateway_removed', 'recovery_required'].includes(action.status) ||
+      (action.status === 'authorization_required' && action.expiresAt > now)));
+}
+
+async function currentTeardownState(storage, env, managed) {
+  if (!await readTeamState(storage, env) || await teamActionBlocksLifecycle(storage)) return null;
+  const rawActions = await storage.get(ACTIONS_KEY);
+  const sourceActions = rawActions === undefined ? { actions: [] } : safeSourceActions(rawActions);
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  if (!sourceActions || !sources) return null;
+  let bridges = null;
+  if (managed !== null) {
+    try { bridges = await managed.describe({ actions: sourceActions.actions, sources }); } catch { return null; }
+  }
+  const partialActions = [];
+  for (const [key, parse] of [[ACTIONS_KEY, safeSourceActions], [UPDATES_KEY, safeRuntimeUpdates]]) {
+    const raw = await storage.get(key);
+    if (raw === undefined) continue;
+    const state = parse(raw);
+    if (!state) return null;
+    for (const action of state.actions) {
+      if (key === ACTIONS_KEY && action.bigquerySetupStarted === true) {
+        if (!bridges?.actionIds.includes(action.actionId) || action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION ||
+            (['authorization_required', 'applying'].includes(action.status) && action.expiresAt > Date.now()) ||
+            (action.pending !== null && action.pending.provider === null)) return null;
+        const source = sources.sources.find((candidate) => candidate.id === action.sourceId);
+        if (!source) return null;
+        if (source.status === 'draft') partialActions.push(action);
+      } else if (action.status !== 'succeeded' && (action.status !== 'failed' ||
+          (key === ACTIONS_KEY && sourceActionHasWriteEvidence(action)) ||
+          (key === UPDATES_KEY && action.stage !== null))) return null;
+    }
+  }
+  return { bridges, partialActions };
+}
+
 async function teamTeardownBlocked(storage) {
   const team = await storage.get(TEAM_KEY);
   if (team === undefined) return false;
@@ -5226,45 +6012,248 @@ async function teamTeardownBlocked(storage) {
 }
 
 async function otherLifecycleBlocksTeam(storage, now) {
-  for (const key of [ACTIONS_KEY, UPDATES_KEY, TEARDOWNS_KEY]) {
-    const raw = await storage.get(key);
-    if (raw === undefined) continue;
-    const state = key === ACTIONS_KEY ? safeSourceActions(raw) : key === UPDATES_KEY
-      ? safeRuntimeUpdates(raw) : safeTeardownActions(raw);
-    if (!state || state.actions.some((action) => !['succeeded', 'failed'].includes(action.status) &&
-      (action.status !== 'authorization_required' || action.expiresAt > now))) return true;
-  }
-  return false;
+  return otherLifecycleBlocksSource(storage, now, null);
 }
 
 function publicTeamAction(action) {
-  return { schemaVersion: 1, action: 'access', actionId: action.actionId, status: action.status,
+  return { schemaVersion: 1, action: 'access', actionId: action.actionId, actorKind: actorKind(action.actorEmail), status: action.status,
     expiresAt: new Date(action.expiresAt).toISOString(), failureCode: action.failureCode,
     canCancel: ['authorization_required', 'recovery_required'].includes(action.status) && action.journal.length === 0 };
 }
 
+function managementCredential(env) {
+  const value = env.ANKKA_MANAGEMENT_TOKEN;
+  return isText(value) && /^[A-Za-z0-9._~-]{20,8192}$/u.test(value) ? value : null;
+}
+
+async function verifyManagementCredential(env) {
+  const token = managementCredential(env);
+  const environment = parseManagementEnvironment(env);
+  if (!token || !environment) return false;
+  const verified = await providerCall(`/accounts/${environment.accountId}/tokens/verify`, token,
+    { signal: AbortSignal.timeout(10_000) });
+  return verified.status === 'ok' && verified.result?.status === 'active';
+}
+
 async function teamSnapshot(storage, env) {
-  const state = await readTeamState(storage, env);
+  let state = await readTeamState(storage, env);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const admins = accessConfiguration(env)?.emails;
   if (!state || !sources || !admins) return null;
   const blocked = await otherLifecycleBlocksTeam(storage, Date.now());
-  return { schemaVersion: 1, revision: state.revision, members: state.members, adminEmails: admins,
+  const configured = managementCredential(env) !== null;
+  let members = state.members;
+  let observedAt = null;
+  if (configured) {
+    if (!await verifyManagementCredential(env)) return null;
+    const context = await teamRuntimeContext(storage, env);
+    if (!context) return null;
+    context.signal = AbortSignal.timeout(30_000);
+    const plan = planTeamAccessChange({ schemaVersion: 1, expectedRevision: state.revision,
+      members: state.members }, context.planner);
+    const audiences = await verifyTeamPolicies(context, plan, managementCredential(env), [], null, true);
+    if (!audiences) return null;
+    const portal = plan.policies.find((policy) => policy.kind === 'portal');
+    const emails = audiences.get(portal.policyId);
+    if (admins.some((email) => !emails.includes(email))) return null;
+    const sourcePolicies = plan.policies.filter((policy) => policy.kind === 'source');
+    const inconsistent = sourcePolicies.some((policy) => audiences.get(policy.policyId).some((email) => !emails.includes(email)));
+    if (inconsistent && (!state.pendingAction || ['failed', 'succeeded'].includes(state.pendingAction.status))) return null;
+    // A partially applied proposal may temporarily disagree across policies.
+    // Keep it resumable, but do not label the saved roster as a live snapshot.
+    if (!inconsistent) {
+      members = emails.map((email) => ({ email, sourceIds: sourcePolicies
+        .filter((policy) => audiences.get(policy.policyId).includes(email)).map((policy) => policy.sourceId).sort(compareText) }));
+      observedAt = new Date().toISOString();
+    }
+    if ((!state.pendingAction || ['succeeded', 'failed'].includes(state.pendingAction.status)) &&
+        canonicalJson(members) !== canonicalJson(state.members)) {
+      state = { ...state, revision: state.revision + 1, members, pendingAction: null };
+      await storage.put(TEAM_KEY, state);
+    }
+  }
+  return { schemaVersion: 1, revision: state.revision, members, adminEmails: admins,
+    observedAt,
     sources: sources.sources.map((source) => ({ id: source.id, label: source.label,
       enabledTools: source.enabledTools, status: source.status })),
     pendingAction: state.pendingAction ? publicTeamAction(state.pendingAction) : null,
     proposedMembers: state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
       ? state.pendingAction.request.members : null,
-    // Kept for response compatibility with installed previews. V1 never
-    // provisions or consumes a standing Cloudflare management credential.
-    managementCredentialConfigured: false,
-    editingEnabled: false,
-    editingDisabledReason: blocked ? 'lifecycle_action_pending' : 'managed_in_cloudflare' };
+    managementCredentialConfigured: configured,
+    editingEnabled: configured && !blocked,
+    editingDisabledReason: blocked ? 'lifecycle_action_pending' : configured ? null : 'management_credential_missing' };
+}
+
+async function teamRuntimeContext(storage, env) {
+  const team = await readTeamState(storage, env);
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const environment = parseManagementEnvironment(env);
+  const admins = accessConfiguration(env)?.emails;
+  if (!team || !control || !sources || !environment || !admins) return null;
+  const evidence = await rootTeardownAuthority(storage, environment, control.installationId, env);
+  if (!evidence) return null;
+  const root = { installationId: control.installationId, receipt: evidence.root.receipt };
+  const authority = await teardownAuthorityState(root, control, sources, environment);
+  if (!authority) return null;
+  const target = (resourceValue, sourceId) => {
+    const name = `${sourceId === undefined ? control.portal.name : sources.sources.find((s) => s.id === sourceId).label} users [${resourceValue.marker}]`;
+    const value = { applicationId: resourceValue.provider.parentId, policyId: resourceValue.provider.id, policyName: name };
+    if (sourceId !== undefined) value.sourceId = sourceId;
+    return value;
+  };
+  const portalResource = root.receipt.resources.find((value) => value.kind === 'portal_access_policy');
+  if (!portalResource) return null;
+  const portal = target(portalResource);
+  const sourceTargets = control.sourceOwnership.map((source) => target(source.resources[2], source.sourceId));
+  return { team, control, sources, environment, authority,
+    planner: { revision: team.revision, adminEmails: admins, serviceActor: serviceActorOf(accessConfiguration(env)), sources: teamSources(sources),
+      currentMembers: team.members, portalTarget: portal, sourceTargets } };
+}
+
+async function prepareTeamAction(storage, env, input) {
+  if (!await verifyManagementCredential(env)) return null;
+  if (!exactKeys(input, ['request', 'actorEmail', 'actionId', 'actionKeyHash', 'issuedAt', 'expiresAt']) ||
+      !ACTION_ID.test(input.actionId) || !HASH.test(input.actionKeyHash) ||
+      !Number.isSafeInteger(input.issuedAt) || !Number.isSafeInteger(input.expiresAt) ||
+      input.expiresAt - input.issuedAt !== 600_000 ||
+      !teamActorAllowed(input.actorEmail, accessConfiguration(env)) ||
+      await otherLifecycleBlocksTeam(storage, input.issuedAt)) return null;
+  const context = await teamRuntimeContext(storage, env);
+  if (!context) return null;
+  const plan = planTeamAccessChange(input.request, context.planner);
+  const previous = context.team.pendingAction;
+  const unfinished = previous && !['failed', 'succeeded'].includes(previous.status);
+  // Resume only the exact retained proposal, including legacy OAuth proposals.
+  // Keep its write journal: a lost response never proves a write rolled back.
+  // The Durable Object queue serializes preparation and execution together.
+  if (unfinished && canonicalJson(previous.request.members) !== canonicalJson(plan.nextState.members)) return null;
+  const planHash = await sha256({ plan, sourceRevision: context.sources.revision });
+  if (unfinished && previous.planHash !== planHash) return null;
+  const action = safeTeamAction({ schemaVersion: 1, actionId: unfinished ? previous.actionId : input.actionId, actorEmail: input.actorEmail,
+    actionKeyHash: input.actionKeyHash, issuedAt: input.issuedAt, expiresAt: input.expiresAt,
+    status: 'authorization_required', failureCode: null, request: { schemaVersion: 1,
+      expectedRevision: context.team.revision, members: plan.nextState.members },
+    sourceRevision: context.sources.revision, planHash, journal: unfinished ? previous.journal : [],
+  }, context.planner);
+  if (!action) return null;
+  await storage.put(TEAM_KEY, { ...context.team, pendingAction: action });
+  return action;
+}
+
+async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy = null, readAudience = false) {
+  const account = context.environment.accountId;
+  const applications = await providerList(`/accounts/${account}/access/apps`, token, {}, context.signal);
+  if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return null;
+  const observed = new Map();
+  for (const policy of plan.policies) {
+    if (onlyPolicy !== null && policy.policyId !== onlyPolicy) continue;
+    const kind = policy.kind === 'portal' ? 'portal_access_application' : 'source_access_application';
+    const resourceValue = context.authority.resources.find((value) => value.kind === kind && value.provider.id === policy.applicationId);
+    const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
+    if (!entry) return null;
+    const candidates = applications.result.filter((value) => accessApplicationCandidate(value, kind, entry.state));
+    if (candidates.length !== 1 || candidates[0].id !== policy.applicationId ||
+        (Object.hasOwn(candidates[0], 'account_id') && candidates[0].account_id !== account)) return null;
+    const path = `/accounts/${account}/access/apps/${encodeURIComponent(policy.applicationId)}`;
+    const app = await providerCall(path, token, { signal: context.signal });
+    if (!teamProviderOk(context, app) || app.result?.id !== policy.applicationId ||
+        (Object.hasOwn(app.result, 'account_id') && app.result.account_id !== account) ||
+        !accessApplicationIdentityMatches(app.result, kind, entry.state)) return null;
+    const policies = await providerList(`${path}/policies`, token, {}, context.signal);
+    if (!teamProviderOk(context, policies) || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
+    const live = policies.result[0];
+    if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return null;
+    if (readAudience) {
+      let audience;
+      try { audience = teamPolicyAudience(live); } catch { return null; }
+      if (!teamPolicyMatches(live, teamPolicy(audience, policy.policyName), policy.policyId)) return null;
+      observed.set(policy.policyId, audience);
+      continue;
+    }
+    const armed = journal.find((value) => value.policyId === policy.policyId);
+    const before = teamPolicyMatches(live, policy.before, policy.policyId);
+    const after = teamPolicyMatches(live, policy.after, policy.policyId);
+    if ((!armed && !before) || (armed?.phase === 'verified' && !after) ||
+        (armed?.phase === 'send_armed' && !before && !after)) return null;
+    observed.set(policy.policyId, after ? 'after' : 'before');
+  }
+  const portal = await providerCall(`/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`, token, { signal: context.signal });
+  if (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings)) return null;
+  return observed;
+}
+
+function teamProviderOk(context, response) {
+  if (response.status === 'auth') context.credentialRejected = true;
+  return response.status === 'ok';
+}
+
+async function processTeamAction(env, storage, prepared, nowMs) {
+  const context = await teamRuntimeContext(storage, env);
+  let action = context?.team.pendingAction;
+  if (!context || !action || action.actionId !== prepared.actionId ||
+      action.status !== 'authorization_required' || action.expiresAt <= nowMs ||
+      await otherLifecycleBlocksTeam(storage, nowMs)) return null;
+  const plan = planTeamAccessChange(action.request, context.planner);
+  if (action.sourceRevision !== context.sources.revision || action.planHash !== await sha256({ plan, sourceRevision: context.sources.revision }) ||
+      action.journal.some((entry) => !plan.policyChanges.some((policy) => policy.policyId === entry.policyId))) return null;
+  let teamState = context.team;
+  const persist = async (next) => {
+    action = { ...action, ...next };
+    await storage.put(TEAM_KEY, { ...teamState, pendingAction: action });
+  };
+  const fail = async (code) => {
+    if (context.credentialRejected) code = 'team_management_credential_invalid';
+    await persist({ status: 'recovery_required', failureCode: code });
+    return fixedJson(409, { schemaVersion: 1, error: code });
+  };
+  // The customer secret never enters action state or a browser response.
+  // Only the fixed Cloudflare operations below receive its value.
+  const token = managementCredential(env);
+  if (!token) return fail(env.ANKKA_MANAGEMENT_TOKEN === undefined || env.ANKKA_MANAGEMENT_TOKEN === ''
+    ? 'team_management_credential_missing' : 'team_management_credential_invalid');
+  // Bound the complete operation, including response body reads.
+  context.signal = AbortSignal.timeout(Math.max(1, Math.min(60_000, action.expiresAt - Date.now())));
+  await persist({ status: 'applying', failureCode: null });
+  let observed = await verifyTeamPolicies(context, plan, token, action.journal);
+  if (!observed) return fail('team_policy_drift');
+  for (const policy of plan.policyChanges) {
+    const fresh = await verifyTeamPolicies(context, plan, token, action.journal, policy.policyId);
+    if (!fresh) return fail('team_policy_drift');
+    observed.set(policy.policyId, fresh.get(policy.policyId));
+    if (Date.now() >= action.expiresAt || context.signal.aborted) return fail('team_action_recovery_required');
+    if (observed.get(policy.policyId) !== 'after') {
+      const journal = action.journal.filter((entry) => entry.policyId !== policy.policyId);
+      teamState = { ...teamState, teardownDisabled: true,
+        minimumRuntimeRelease: teamState.minimumRuntimeRelease ?? context.environment.release };
+      await persist({ journal: [...journal, { policyId: policy.policyId, phase: 'send_armed' }] });
+      const updated = await providerCall(`/accounts/${context.environment.accountId}/access/apps/${encodeURIComponent(policy.applicationId)}/policies/${encodeURIComponent(policy.policyId)}`,
+        token, { method: 'PUT', body: canonicalJson(policy.after), signal: context.signal });
+      if (!teamProviderOk(context, updated) || !teamPolicyMatches(updated.result, policy.after, policy.policyId) ||
+          (Object.hasOwn(updated.result, 'account_id') && updated.result.account_id !== context.environment.accountId)) {
+        return fail('team_action_recovery_required');
+      }
+    }
+    // Verify this target after each write, then the entire graph once at the
+    // end. The number of provider requests stays linear in source count.
+    const verified = await verifyTeamPolicies(context, plan, token, action.journal, policy.policyId);
+    if (!verified || verified.get(policy.policyId) !== 'after') return fail('team_action_recovery_required');
+    observed.set(policy.policyId, 'after');
+    await persist({ journal: [...action.journal.filter((entry) => entry.policyId !== policy.policyId),
+      { policyId: policy.policyId, phase: 'verified' }] });
+  }
+  observed = await verifyTeamPolicies(context, plan, token, action.journal);
+  if (!observed || plan.policies.some((policy) => observed.get(policy.policyId) !== 'after')) return fail('team_action_recovery_required');
+  const completed = { ...teamState, ...plan.nextState,
+    pendingAction: { ...action, status: 'succeeded', failureCode: null } };
+  await storage.put(TEAM_KEY, completed);
+  return fixedJson(200, { schemaVersion: 1, action: publicTeamAction(completed.pendingAction) });
 }
 
 async function handleTeam(request, env) {
-  const actorEmail = await verifyAccess(request, env);
-  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const { actorEmail } = access;
   const url = new URL(request.url);
   const environment = parseManagementEnvironment(env);
   if (!environment || url.hostname !== environment.managementHostname) {
@@ -5287,12 +6276,27 @@ async function handleTeam(request, env) {
   }
   if (request.method !== 'POST' || url.pathname !== '/api/team-actions') return fixedJson(404, { schemaVersion: 1, error: 'team_action_not_found' });
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
-  return fixedJson(409, { schemaVersion: 1, error: 'team_editing_managed_in_cloudflare' });
+  const input = await readJsonInput(request, REQUEST_LIMIT_BYTES);
+  const now = Date.now();
+  const expiresAt = now + 600_000;
+  const nextId = `action_${randomBase64Url(24)}`;
+  // Retain the stored v1 action shape for migration; no key or handoff is issued.
+  const actionKeyHash = await sha256(randomBase64Url(32));
+  let prepared;
+  try {
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEAM_ACTIONS_PATH}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ request: input, actorEmail, actionId: nextId, actionKeyHash, issuedAt: now, expiresAt }),
+    }));
+  } catch { prepared = null; }
+  return prepared instanceof Response
+    ? prepared : fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
 }
 
 async function handleSourceActions(request, env) {
-  const actorEmail = await verifyAccess(request, env);
-  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const { actorEmail } = access;
   const environment = parseManagementEnvironment(env);
   let url;
   try { url = new URL(request.url); } catch { return fixedJson(400, { schemaVersion: 1, error: 'source_action_invalid' }); }
@@ -5302,9 +6306,10 @@ async function handleSourceActions(request, env) {
   const stub = adminStateStub(env, 'v1:management');
   if (!stub) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
   if (request.method === 'GET') {
-    const actionId = url.pathname.slice('/api/source-actions/'.length);
+    const toolsRoute = SOURCE_ACTION_TOOLS_ROUTE.exec(url.pathname);
+    const actionId = toolsRoute ? `${toolsRoute[1]}/tools` : url.pathname.slice('/api/source-actions/'.length);
     const collection = url.pathname === '/api/source-actions';
-    if (!collection && !ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
+    if (!collection && !toolsRoute && !ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
     try {
       const response = await stub.fetch(new Request(
         `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}${collection ? '' : `/${actionId}`}`,
@@ -5342,11 +6347,33 @@ async function handleSourceActions(request, env) {
   }
   const renewal = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/renew$/u.exec(url.pathname);
   const renewActionId = renewal?.[1] ?? null;
-  if (url.pathname !== '/api/source-actions' && renewActionId === null) {
+  const toolChoice = SOURCE_ACTION_TOOLS_ROUTE.exec(url.pathname);
+  if (url.pathname !== '/api/source-actions' && renewActionId === null && !toolChoice) {
     return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
   }
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  if (toolChoice) {
+    // The tool choice of a connected sign-in source. The management object
+    // checks everything else inside its queue, with its one provider read.
+    const choice = await readJsonInput(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES);
+    if (!exactKeys(choice, ['schemaVersion', 'revision', 'sourceId', 'enabledTools'])) {
+      return sourceToolsRefusal(400, 'source_tools_invalid');
+    }
+    try {
+      const response = await stub.fetch(new Request(
+        `https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/${toolChoice[1]}/tools`,
+        { method: 'POST', headers: { 'content-type': 'application/json' },
+          body: canonicalJson({ ...choice, actionId: toolChoice[1], actorEmail }) },
+      ));
+      return response instanceof Response
+        ? response
+        : fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    } catch {
+      return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    }
+  }
+  if (!await verifyManagementCredential(env)) return fixedJson(409, { schemaVersion: 1, error: 'management_credential_required' });
   const input = await readJsonInput(request);
   if (!exactKeys(input, ['schemaVersion', 'revision', 'sourceId']) || input.schemaVersion !== 1 ||
       !Number.isSafeInteger(input.revision) || input.revision < 1 || !SOURCE_ID.test(input.sourceId)) {
@@ -5411,28 +6438,25 @@ async function handleSourceActions(request, env) {
     return prepared instanceof Response ? prepared :
       fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
   }
-  const managementOrigin = `https://${environment.managementHostname}`;
-  const claim = canonicalJson({
-    schemaVersion: 1,
-    actionId,
-    actionKey,
-    actorEmail,
-    accountId: environment.accountId,
-    controlPlaneOrigin: CONTROL_PLANE_ORIGIN,
-    workerName: environment.workerName,
-    workersSubdomain: environment.workersSubdomain,
-    managementOrigin,
-    releaseIdentity: exactReleaseIdentity(environment),
-    expiresAt,
-  });
-  const fragment = base64UrlEncode(new TextEncoder().encode(claim));
-  return fixedJson(200, {
-    schemaVersion: 1,
-    actionId,
-    status: 'authorization_required',
-    expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `${managementOrigin}${OPERATION_PATH}#${fragment}`,
-  });
+  const token = managementCredential(env);
+  if (!token) return fixedJson(409, { schemaVersion: 1, error: 'management_credential_required' });
+  const body = canonicalJson({ schemaVersion: 1, actionId, actionKey, actorEmail,
+    accountId: environment.accountId, issuedAt: now, expiresAt, cloudflareAccessToken: token });
+  const keyBytes = canonicalBase64Url32(actionKey);
+  const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  keyBytes.fill(0);
+  const signature = [...new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(body)))]
+    .map((byte) => byte.toString(16).padStart(2, '0')).join('');
+  try {
+    const result = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/apply`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-source-action-signature': `sha256=${signature}` },
+      body,
+    }));
+    if (result.status !== 200) return result;
+    return fixedJson(200, { schemaVersion: 1, actionId, status: 'succeeded',
+      expiresAt: new Date(expiresAt).toISOString() });
+  } catch { return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' }); }
+
 }
 
 async function handleSourceActionApply(request, env) {
@@ -5461,8 +6485,9 @@ async function handleSourceActionApply(request, env) {
 }
 
 async function handleRuntimeActions(request, env) {
-  const actorEmail = await verifyAccess(request, env);
-  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const { actorEmail } = access;
   const environment = parseManagementEnvironment(env);
   let url;
   try { url = new URL(request.url); } catch { return fixedJson(400, { schemaVersion: 1, error: 'runtime_action_invalid' }); }
@@ -5597,9 +6622,10 @@ async function handleRuntimeActionApply(request, env) {
   } catch { return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' }); }
 }
 
-async function handleTeardownActions(request, env) {
-  const actorEmail = await verifyAccess(request, env);
-  if (!actorEmail) return fixedJson(401, { schemaVersion: 1, error: 'access_required' });
+async function handleTeardownActions(request, env, currentPolicies = false) {
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const { actorEmail } = access;
   const environment = parseManagementEnvironment(env);
   let url;
   try { url = new URL(request.url); } catch {
@@ -5648,7 +6674,7 @@ async function handleTeardownActions(request, env) {
   const actionKey = randomBase64Url(32);
   let prepared;
   try {
-    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWNS_PATH}`, {
+    prepared = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWNS_PATH}${currentPolicies ? '/prepare-current' : ''}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: canonicalJson({
@@ -5687,8 +6713,16 @@ async function handleTeardownActions(request, env) {
     actionId,
     status: 'authorization_required',
     expiresAt: new Date(expiresAt).toISOString(),
-    handoffUrl: `${CONTROL_PLANE_ORIGIN}/manage#${fragment}`,
+    handoffUrl: `${currentPolicies ? `https://${environment.managementHostname}/__ankka/operation/teardown` : `${CONTROL_PLANE_ORIGIN}/manage`}#${fragment}`,
   });
+}
+
+/** The release builder substitutes this fixed origin before hashing the Worker. */
+export function gatewayControlPlaneOrigin() { return CONTROL_PLANE_ORIGIN; }
+
+/** Enabled by the certified final gateway entrypoint, never by a browser flag. */
+export function prepareCurrentGatewayTeardown(request, env) {
+  return handleTeardownActions(request, env, true);
 }
 
 async function handleTeardownActionProof(request, env) {

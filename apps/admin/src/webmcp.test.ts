@@ -113,6 +113,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     to: { release: 'gateway-v1.0.1', artifactSha256: nextDigest }, expiresAt, failureCode: null,
   }
   const api = {
+    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status),
     getSources: vi.fn(async () => sources),
     getTeam: vi.fn(async () => team),
@@ -128,6 +129,8 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
     getSourceAction: vi.fn(async (_actionId: string) => sourceAction),
     cancelSourceAction: vi.fn<GatewayAdminApi['cancelSourceAction']>(async () => ({ ...sourceAction, status: 'failed' })),
+    getSourceActionTools: vi.fn<GatewayAdminApi['getSourceActionTools']>(),
+    chooseSourceActionTools: vi.fn<GatewayAdminApi['chooseSourceActionTools']>(),
     prepareRuntimeAction: vi.fn<GatewayAdminApi['prepareRuntimeAction']>(async (operation) => ({ ...prepared, operation })),
     getRuntimeAction: vi.fn(async (_actionId: string) => runtimeAction),
     prepareTeardownAction: vi.fn(async () => prepared),
@@ -404,7 +407,7 @@ describe('source pause and current state', () => {
     expect(tool('apply_mcp_source').description).toContain('denied to everyone')
     expect(tool('apply_mcp_source').description).toContain('explicit Team grant')
     expect(tool('apply_mcp_source').description).toContain('preparation alone does not')
-    expect(tool('apply_mcp_source').description).toContain('disables automatic teardown')
+    expect(tool('apply_mcp_source').description).toContain('Finish or recover this action before gateway removal')
     expect(tool('apply_mcp_source').description).toContain('blocks older-runtime rollback')
     expectNoApiCalls(api)
   })
@@ -422,6 +425,13 @@ describe('source pause and current state', () => {
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
     expect(api.saveSourceDraft).not.toHaveBeenCalled()
     expect(api.getStatus).not.toHaveBeenCalled()
+  })
+
+  it('reports direct source completion without prompting for consent', async () => {
+    const { api, call, sources } = fixture()
+    api.getSources.mockResolvedValue({ ...sources, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
+    api.prepareSourceAction.mockResolvedValue({ schemaVersion: 1, actionId, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z' })
+    expect(await call('apply_mcp_source', { sourceId })).toMatchObject({ ok: true, result: { actionId, status: 'succeeded' } })
   })
 
   it('uses the fresh source revision for a draft and never changes the live Portal directly', async () => {

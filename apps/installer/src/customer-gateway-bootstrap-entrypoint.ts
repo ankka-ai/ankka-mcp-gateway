@@ -44,6 +44,14 @@ import {
 } from './customer-install-paths';
 import type { CustomerInstallStatus } from './customer-install-status';
 import { customerInstallProgressPage } from './customer-install-progress-page';
+import {
+  CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH,
+  CustomerManagementCredentialHolder,
+  createCustomerManagementCredentialStep,
+  customerConvergerRunsOnAlarm,
+  runConvergerPassWithManagementCredential,
+  tendCustomerManagementCredential,
+} from './customer-management-credential';
 import { customerPayloadEnvironment } from './customer-payload-environment';
 
 declare const __ANKKA_FINAL_RUNTIME_SOURCE__: string;
@@ -141,6 +149,20 @@ export class AdminState extends RuntimeAdminState {
   private readonly bootstrapReady: Promise<void>;
   /** Grant and pass count of the running attempt, in memory only. */
   private readonly convergence: CustomerBootstrapConvergenceDriver;
+  /**
+   * The management credential the setup page received, in memory only, next
+   * to the grant. Storage receives one fixed word about the customer's
+   * choice and never the value; a restart loses the value, and the install
+   * then finishes without it.
+   */
+  private readonly managementCredential = new CustomerManagementCredentialHolder(Date.now);
+  /**
+   * True while the one alarm that is set is this object's own keep-alive tick
+   * for a held management credential and not the converger's. Memory only: a
+   * restarted object starts false and treats every alarm as the converger's,
+   * exactly as it did before the tick existed.
+   */
+  private keepAliveArmed = false;
 
   constructor(
     private readonly bootstrapState: BootstrapDurableObjectState,
@@ -167,15 +189,48 @@ export class AdminState extends RuntimeAdminState {
       converge: (accessToken, attemptId, handover) => this.converge(accessToken, attemptId, handover),
       now: Date.now,
       // Every alarm is its own invocation with its own subrequest budget; the
-      // delayed one fires on the final runtime after the handover.
-      schedule: (delayMs) => bootstrapState.storage.setAlarm(Date.now() + delayMs),
+      // delayed one fires on the final runtime after the handover. An alarm
+      // the driver sets replaces any keep-alive tick and is the driver's own.
+      schedule: (delayMs) => {
+        this.keepAliveArmed = false;
+        return bootstrapState.storage.setAlarm(Date.now() + delayMs);
+      },
     });
   }
 
   /** One converger pass per alarm; the driver re-arms until the attempt settles. */
   async alarm(): Promise<void> {
     await this.bootstrapReady;
-    await this.convergence.continue();
+    const keepAliveTick = this.keepAliveArmed;
+    this.keepAliveArmed = false;
+    if (customerConvergerRunsOnAlarm(keepAliveTick, this.convergence.holdsGrant)) await this.convergence.continue();
+    await this.tendManagementCredential();
+  }
+
+  /**
+   * While a pasted management credential waits for the customer's approval,
+   * this object keeps one alarm ahead of itself so the platform does not evict
+   * it and the value with it. It runs after the driver, never replaces an
+   * alarm the driver or the handover set, makes no provider call, and must
+   * never fail an alarm or a request: the install does not depend on it.
+   * With no value held it does nothing at all, so an install without a
+   * management credential runs its alarms exactly as before.
+   */
+  private async tendManagementCredential(): Promise<void> {
+    if (this.managementCredential.value() === undefined) return;
+    try {
+      const storage = this.bootstrapState.storage;
+      const state = await new CustomerBootstrapDurableStatePort(storage).read();
+      await tendCustomerManagementCredential(this.managementCredential, state, {
+        getAlarm: () => storage.getAlarm(),
+        setAlarm: async (scheduledTime) => {
+          await storage.setAlarm(scheduledTime);
+          this.keepAliveArmed = true;
+        },
+      }, Date.now());
+    } catch {
+      // A value that is lost this way is reported as dropped; setup goes on without it.
+    }
   }
 
   private converge(
@@ -184,13 +239,17 @@ export class AdminState extends RuntimeAdminState {
     handover: (() => Promise<void>) | undefined,
   ): Promise<CustomerStage2ConvergerResult> {
     const config = parsedEnv(this.bootstrapEnv);
-    return convergeCustomerStage2({
+    // Whatever memory still holds when this pass runs; only the pass that
+    // uploads the final runtime uses it. None held: the install goes on without.
+    return runConvergerPassWithManagementCredential(this.managementCredential, (managementCredential) => convergeCustomerStage2({
       accessToken,
       attemptId,
       handover,
+      managementCredential,
       storage: this.bootstrapState.storage,
       journal: new CustomerStage2DurableStatePort(this.bootstrapState.storage),
       runtime: {
+        controlPlaneOrigin: config.ANKKA_INSTALLER_ORIGIN,
         updateChannel: config.ANKKA_UPDATE_CHANNEL,
         updateKeyId: config.ANKKA_UPDATE_KEY_ID,
         updatePublicKey: config.ANKKA_UPDATE_PUBLIC_KEY,
@@ -263,7 +322,7 @@ export class AdminState extends RuntimeAdminState {
       transport: (target, init) => fetch(target, init),
       now: Date.now,
       checkpoints: CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
-    });
+    }));
   }
 
   private installationObject(): DurableObjectStub {
@@ -283,12 +342,13 @@ export class AdminState extends RuntimeAdminState {
       now: Date.now,
     });
     if (installation !== null) return installation;
+    const managementStep = createCustomerManagementCredentialStep(this.managementCredential, this.bootstrapState.storage);
     if (request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_STATUS_PATH) {
       const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage);
       const state = await new CustomerBootstrapDurableStatePort(this.bootstrapState.storage).read();
       // Typed against the schema the hosted readiness check parses with, so
       // the shell cannot answer in a shape the hosted runtime rejects.
-      const body: CustomerInstallStatus = {
+      const answer: CustomerInstallStatus = {
         schemaVersion: 1,
         role: 'customer-gateway-bootstrap',
         status: state?.status ?? 'INCOMPLETE',
@@ -300,10 +360,20 @@ export class AdminState extends RuntimeAdminState {
           ? { code: state.failureCode, reason: state.failureReason ?? null }
           : null,
       };
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: secureHeaders('application/json; charset=utf-8'),
-      });
+      // One fixed word once the customer has chosen at the management
+      // credential step; until then the key is absent, so a freshly deployed
+      // shell answers the hosted readiness check exactly as before. The
+      // install's status never depends on it: an unreadable word is no word.
+      const managementCredential = await managementStep.word().catch(() => undefined);
+      const body: CustomerInstallStatus = managementCredential === undefined
+        ? answer
+        : { ...answer, managementCredential };
+      const headers = secureHeaders('application/json; charset=utf-8');
+      // Only the installer may read this public status from a browser. This
+      // route accepts no credentials and never exposes the setup capability.
+      headers.set('access-control-allow-origin', config.ANKKA_INSTALLER_ORIGIN);
+      headers.set('vary', 'Origin');
+      return new Response(JSON.stringify(body), { status: 200, headers });
     }
     if (request.method === 'GET' && url.pathname === '/health' && url.search === '') {
       const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage);
@@ -321,6 +391,7 @@ export class AdminState extends RuntimeAdminState {
       }), { status: 200, headers });
     }
     if (url.pathname !== '/__ankka/install/setup' && url.pathname !== '/__ankka/install/configuration' &&
+        url.pathname !== CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH &&
         url.pathname !== CUSTOMER_INSTALL_CONTINUE_PATH &&
         url.pathname !== CUSTOMER_INSTALL_OAUTH_START_PATH &&
         url.pathname !== CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH) {
@@ -362,6 +433,7 @@ export class AdminState extends RuntimeAdminState {
       secretCommitment: config.ANKKA_BOOTSTRAP_SECRET_SHA256,
       capabilityExpiresAt: config.expiresAt,
       publicClientId: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
+      managementHostname: config.ANKKA_MANAGEMENT_HOSTNAME,
     }, {
       state: new CustomerBootstrapDurableStatePort(this.bootstrapState.storage),
       transport: (input, init) => fetch(input, init),
@@ -408,8 +480,12 @@ export class AdminState extends RuntimeAdminState {
       },
       startConvergence: (input) => this.convergence.start(input),
       callbackResponse: (outcome, cookies) => customerInstallProgressPage(managementHostname, outcome, cookies),
+      managementCredential: managementStep,
     });
-    return router.fetch(request);
+    const response = await router.fetch(request);
+    // A value the step just took starts being looked after here; with none held this does nothing.
+    if (url.pathname === CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH) await this.tendManagementCredential();
+    return response;
   }
 }
 
@@ -427,9 +503,10 @@ export default {
           url.pathname === CUSTOMER_INSTALL_STATUS_PATH ||
           url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH) ||
         request.method === 'POST' && (url.pathname === '/__ankka/install/configuration' || url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH ||
+          url.pathname === CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH ||
           url.pathname === CUSTOMER_INSTALL_OAUTH_START_PATH)
       )) return new Response(null, { status: 404, headers: secureHeaders('text/plain; charset=utf-8') });
-      return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
+      return await env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
     } catch {
       return unavailable();
     }

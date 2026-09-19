@@ -19,6 +19,8 @@ const FINAL_VERSION = '22222222-2222-4222-8222-222222222222';
 const OLD_DEPLOYMENT = '33333333-3333-4333-8333-333333333333';
 const FINAL_DEPLOYMENT = '44444444-4444-4444-8444-444444444444';
 const ACCESS_TOKEN = `token_${'c'.repeat(32)}`;
+// A synthetic value in Cloudflare's account token form, assembled at run time.
+const MANAGEMENT_VALUE = `cfat_${'Sv4u'.repeat(10)}${'1e'.repeat(4)}`;
 const FINAL_SOURCE = 'export class AdminState { fetch() { return new Response("ready"); } }\n';
 
 const BINDINGS: GatewayWorkerPlainTextBindings = Object.freeze({
@@ -71,7 +73,7 @@ function finalBindings(overrides: readonly BoundaryObject[] = []): readonly Boun
   return values;
 }
 
-function finalVersion(bindings = finalBindings()): BoundaryObject {
+function finalVersion(bindings = finalBindings(), source = FINAL_SOURCE): BoundaryObject {
   return {
     id: FINAL_VERSION,
     main_module: 'index.js',
@@ -80,7 +82,7 @@ function finalVersion(bindings = finalBindings()): BoundaryObject {
     modules: [{
       name: 'index.js',
       content_type: 'application/javascript+module',
-      content_base64: base64(FINAL_SOURCE),
+      content_base64: base64(source),
     }],
     bindings,
     exports: { AdminState: { type: 'durable-object', storage: 'sqlite' } },
@@ -89,19 +91,43 @@ function finalVersion(bindings = finalBindings()): BoundaryObject {
 
 interface ProviderFixtureOptions {
   readonly activeFinal?: boolean;
+  readonly source?: string;
   readonly workerId?: string;
   readonly finalBindings?: readonly BoundaryObject[];
+}
+
+/**
+ * What the provider lists for an uploaded version: inherited bindings
+ * resolved, plain text as sent, and a secret by name and type only. The
+ * provider never reads a secret's value back.
+ */
+function providerView(metadata: BoundaryObject): readonly BoundaryObject[] {
+  const uploaded = metadata.bindings;
+  if (!Array.isArray(uploaded)) throw new TypeError('metadata bindings');
+  return uploaded.map((value) => {
+    const binding = v.parse(boundaryObjectSchema, value);
+    if (binding.type === 'inherit') {
+      const inherited = finalBindings().find((candidate) => candidate.name === binding.name);
+      if (inherited === undefined) throw new TypeError('unexpected inherited binding');
+      return inherited;
+    }
+    return binding.type === 'secret_text' ? { name: binding.name, type: 'secret_text' } : binding;
+  });
 }
 
 function providerFixture(options: ProviderFixtureOptions = {}) {
   let activeFinal = options.activeFinal ?? false;
   const calls: string[] = [];
+  const bodies: string[] = [];
   let uploadedMetadata: BoundaryObject | null = null;
+  let uploadedMetadataText: string | null = null;
   let uploadedSource: string | null = null;
   const transport = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
     calls.push(`${request.method} ${url.pathname}${url.search}`);
+    // Everything a request exposes outside the upload's own metadata part.
+    bodies.push(request.url, JSON.stringify([...request.headers]));
     expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
     if (url.pathname.endsWith(`/workers/workers/${WORKER_NAME}`)) {
       return envelope({
@@ -121,7 +147,9 @@ function providerFixture(options: ProviderFixtureOptions = {}) {
     }
     if (url.pathname.endsWith(`/workers/workers/${WORKER_ID}/versions/${FINAL_VERSION}`)) {
       expect(url.searchParams.get('include')).toBe('modules');
-      return envelope(finalVersion(options.finalBindings ?? finalBindings()));
+      const listed = options.finalBindings ??
+        (uploadedMetadata === null ? finalBindings() : providerView(uploadedMetadata));
+      return envelope(finalVersion(listed, options.source));
     }
     if (url.pathname.endsWith(`/workers/scripts/${WORKER_NAME}/secrets/ANKKA_BOOTSTRAP_NONCE`) &&
         request.method === 'DELETE') {
@@ -137,7 +165,9 @@ function providerFixture(options: ProviderFixtureOptions = {}) {
       const metadata = body.get('metadata');
       const source = body.get('index.js');
       if (!(metadata instanceof Blob) || !(source instanceof Blob)) throw new TypeError('upload files');
-      const parsedMetadata = v.safeParse(boundaryObjectSchema, JSON.parse(await metadata.text()));
+      expect([...body.keys()].sort()).toEqual(['index.js', 'metadata']);
+      uploadedMetadataText = await metadata.text();
+      const parsedMetadata = v.safeParse(boundaryObjectSchema, JSON.parse(uploadedMetadataText));
       if (!parsedMetadata.success) throw new TypeError('upload metadata');
       uploadedMetadata = parsedMetadata.output;
       uploadedSource = await source.text();
@@ -148,8 +178,11 @@ function providerFixture(options: ProviderFixtureOptions = {}) {
   };
   return {
     calls,
+    /** URLs and headers of every request: what leaves the process outside the upload's metadata part. */
+    exposed: () => bodies.join('\n'),
     transport,
     uploadedMetadata: () => uploadedMetadata,
+    uploadedMetadataText: () => uploadedMetadataText,
     uploadedSource: () => uploadedSource,
   };
 }
@@ -169,6 +202,18 @@ async function input(transport: (input: RequestInfo | URL, init?: RequestInit) =
 }
 
 describe('customer Worker final self-update', () => {
+  it('uploads and verifies a 4 MiB final runtime with inherited state', async () => {
+    const source = 'a'.repeat(4 * 1024 * 1024);
+    const provider = providerFixture({ source });
+    await expect(publishCustomerWorkerFinalRuntime({
+      ...await input(provider.transport),
+      finalRuntimeSource: source,
+      finalRuntimeSha256: await sha256Hex(source),
+      previousVersionId: OLD_VERSION,
+    })).resolves.toMatchObject({ versionId: FINAL_VERSION });
+    expect(provider.uploadedSource() === source).toBe(true);
+  });
+
   it('strictly inherits only customer-owned state and verifies the exact active result', async () => {
     const provider = providerFixture();
     const result = await publishCustomerWorkerFinalRuntime({
@@ -218,6 +263,24 @@ describe('customer Worker final self-update', () => {
     expect(provider.calls.some((call) => call.startsWith('PUT '))).toBe(false);
   });
 
+  it.each(['declared', 'streamed'] as const)('bounds %s version responses before parsing', async (kind) => {
+    const provider = providerFixture({ activeFinal: true });
+    const transport = async (target: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const url = target instanceof Request ? target.url : target.toString();
+      if (url.includes(`/versions/${FINAL_VERSION}`)) {
+        const oversized = 16 * 1024 * 1024 + 1;
+        return kind === 'declared'
+          ? new Response('{}', { headers: { 'content-length': String(oversized) } })
+          : new Response('x'.repeat(oversized));
+      }
+      return provider.transport(target, init);
+    };
+    await expect(inspectCustomerWorkerFinalRuntime(await input(transport))).rejects.toMatchObject({
+      code: 'provider_unknown', stage: 'version_read', outcome: 'unknown',
+    });
+    expect(provider.calls.every((call) => call.startsWith('GET '))).toBe(true);
+  });
+
   it('rejects a substituted Worker identity before upload', async () => {
     const provider = providerFixture({ workerId: '9'.repeat(32) });
     await expect(publishCustomerWorkerFinalRuntime({
@@ -237,5 +300,98 @@ describe('customer Worker final self-update', () => {
       finalBindings: finalBindings([{ name: 'ANKKA_BOOTSTRAP_NONCE', type: 'plain_text', text: 'forbidden' }]),
     });
     expect(await inspectCustomerWorkerFinalRuntime(await input(provider.transport))).toBeNull();
+  });
+
+  it('writes the management credential once, as a secret binding of the same upload, and reads the exact result back', async () => {
+    const plain = providerFixture();
+    await publishCustomerWorkerFinalRuntime({ ...await input(plain.transport), previousVersionId: OLD_VERSION });
+    const provider = providerFixture();
+    const result = await publishCustomerWorkerFinalRuntime({
+      ...await input(provider.transport),
+      managementCredential: MANAGEMENT_VALUE,
+      managementCredentialBound: true,
+      previousVersionId: OLD_VERSION,
+    });
+    expect(result).toEqual({
+      workerId: WORKER_ID,
+      deploymentId: FINAL_DEPLOYMENT,
+      versionId: FINAL_VERSION,
+      finalRuntimeSha256: await sha256Hex(FINAL_SOURCE),
+    });
+    const bindings = provider.uploadedMetadata()?.bindings;
+    if (!Array.isArray(bindings)) throw new TypeError('metadata bindings');
+    expect(bindings.filter((binding) => v.is(v.looseObject({ type: v.literal('secret_text') }), binding))).toEqual([
+      { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text', text: MANAGEMENT_VALUE },
+    ]);
+    expect(bindings).toHaveLength(Object.keys(BINDINGS).length + 4);
+    // The value is in the metadata part exactly once and in nothing else the process sent or returned.
+    expect(provider.uploadedMetadataText()?.split(MANAGEMENT_VALUE)).toHaveLength(2);
+    expect(provider.uploadedSource()).not.toContain(MANAGEMENT_VALUE);
+    expect(provider.exposed()).not.toContain(MANAGEMENT_VALUE);
+    expect(JSON.stringify(result)).not.toContain(MANAGEMENT_VALUE);
+    // The secret rides the upload the install already makes: not one call more.
+    expect(provider.calls).toEqual(plain.calls);
+  });
+
+  it('accepts the management secret in a read-back exactly when the install supplied one', async () => {
+    const secret = { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' };
+    const withSecret = () => providerFixture({ activeFinal: true, finalBindings: finalBindings([secret]) });
+    const bound = { ...await input(withSecret().transport), managementCredentialBound: true };
+    expect((await inspectCustomerWorkerFinalRuntime(bound))?.versionId).toBe(FINAL_VERSION);
+    // An install without the credential refuses a version that carries the binding, under any type.
+    expect(await inspectCustomerWorkerFinalRuntime(await input(withSecret().transport))).toBeNull();
+    for (const foreign of [
+      { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'plain_text', text: 'readable' },
+      { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text', text: 'readable' },
+      { name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'secret_text' },
+    ]) {
+      const provider = providerFixture({ activeFinal: true, finalBindings: finalBindings([foreign]) });
+      expect(await inspectCustomerWorkerFinalRuntime(await input(provider.transport))).toBeNull();
+      expect(await inspectCustomerWorkerFinalRuntime({
+        ...await input(provider.transport), managementCredentialBound: true,
+      })).toBeNull();
+    }
+    // An install with the credential refuses a version that lacks the binding.
+    const without = providerFixture({ activeFinal: true });
+    expect(await inspectCustomerWorkerFinalRuntime({
+      ...await input(without.transport), managementCredentialBound: true,
+    })).toBeNull();
+  });
+
+  it('sends nothing when the credential and the expected binding disagree, and names no value in the error', async () => {
+    for (const mismatch of [
+      { managementCredential: MANAGEMENT_VALUE },
+      { managementCredential: MANAGEMENT_VALUE, managementCredentialBound: false },
+      { managementCredentialBound: true },
+      { managementCredential: `cfut_${'a'.repeat(48)}`, managementCredentialBound: true },
+      { managementCredential: `${MANAGEMENT_VALUE}\n`, managementCredentialBound: true },
+    ]) {
+      const provider = providerFixture();
+      const failure = await publishCustomerWorkerFinalRuntime({
+        ...await input(provider.transport), ...mismatch, previousVersionId: OLD_VERSION,
+      }).then(() => null, (error: Error) => error);
+      expect(failure).toMatchObject({ code: 'invalid', stage: 'validate', outcome: 'not_sent' });
+      expect(`${failure?.message} ${failure?.stack} ${JSON.stringify(failure)}`).not.toContain(MANAGEMENT_VALUE);
+      expect(provider.calls).toEqual([]);
+    }
+  });
+
+  it('keeps a rejected upload from naming the credential it carried', async () => {
+    const provider = providerFixture();
+    const transport = async (target: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (init?.method === 'PUT') {
+        return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: 'synthetic' }], messages: [], result: null }), { status: 403 });
+      }
+      return provider.transport(target, init);
+    };
+    const failure = await publishCustomerWorkerFinalRuntime({
+      ...await input(transport),
+      managementCredential: MANAGEMENT_VALUE,
+      managementCredentialBound: true,
+      previousVersionId: OLD_VERSION,
+    }).then(() => null, (error: Error) => error);
+    // The deadline wrapper reports every refused upload as an unknown outcome; what matters here is what the error carries.
+    expect(failure).toMatchObject({ name: CustomerWorkerSelfUpdateError.name, code: 'provider_unknown', stage: 'script_upload', outcome: 'unknown' });
+    expect(`${failure?.message} ${failure?.stack} ${JSON.stringify(failure)}`).not.toContain(MANAGEMENT_VALUE);
   });
 });

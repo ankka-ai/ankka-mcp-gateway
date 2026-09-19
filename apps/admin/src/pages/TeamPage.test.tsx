@@ -30,9 +30,10 @@ const team: Team = {
 
 function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
   return {
+    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(async () => structuredClone(team)), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-    discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+    discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     ...overrides,
   }
@@ -127,7 +128,7 @@ describe('TeamPage', () => {
     expect(within(tools).getByText('search')).toBeInTheDocument()
     expect(within(tools).queryByRole('checkbox')).not.toBeInTheDocument()
     expect(screen.getByText(/Existing cached sessions may remain valid/)).toBeInTheDocument()
-    expect(screen.getByText('After the first permission-policy change, automatic teardown is unavailable until a compatible gateway release supports it.')).toBeInTheDocument()
+    expect(screen.getByText('Finish any active permission change before removing your gateway. Removal checks the saved ownership receipts and current policies.')).toBeInTheDocument()
   })
 
   it('keeps existing-source permission controls usable while source addition is paused', async () => {
@@ -288,26 +289,20 @@ describe('TeamPage', () => {
     expect(window.location.search).toBe('')
   })
 
-  it('keeps V1 Team editing disabled without offering a management-token escape hatch', async () => {
+  it('keeps writes disabled without a management token and links to setup', async () => {
     const user = userEvent.setup()
     const client = renderTeam(api({ getTeam: vi.fn(async () => ({
-      ...team,
-      editingEnabled: false,
-      editingDisabledReason: 'managed_in_cloudflare' as const,
+      ...team, editingEnabled: false, editingDisabledReason: 'management_credential_missing' as const,
       managementCredentialConfigured: false,
     })) }))
     const person = await screen.findByRole('group', { name: 'analyst@example.com' })
     expect(within(person).getByRole('checkbox')).toBeDisabled()
-    expect(screen.getByText(/Team membership is managed directly in Cloudflare/)).toHaveTextContent('does not accept a permanent Cloudflare management credential')
-    expect(screen.getByRole('link', { name: 'Team access guide' })).toHaveAttribute('href', 'https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md')
-    expect(screen.getByRole('link', { name: 'Team access guide' })).toHaveAttribute('rel', 'noreferrer')
-    expect(screen.queryByText('ANKKA_TEAM_MANAGEMENT_TOKEN')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
     const save = screen.getByRole('button', { name: 'Save' })
     expect(save).toBeDisabled()
     await user.click(save)
     expect(client.prepareTeamAction).not.toHaveBeenCalled()
-    expect(screen.queryByRole('button', { name: /Cloudflare/ })).not.toBeInTheDocument()
-    expect(screen.queryByText(/last recorded team access change was applied and verified/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Refresh from Cloudflare' })).toBeEnabled()
   })
 
   it('resumes an expired legacy proposal locally without requiring a hosted callback', async () => {
@@ -338,7 +333,7 @@ describe('TeamPage', () => {
       proposedMembers,
     }))
     const client = renderTeam(api({ getTeam }))
-    expect(await screen.findByText(/Nothing was automatically restored/)).toHaveTextContent('reconcile its Access policies directly in Cloudflare')
+    expect(await screen.findByText(/Nothing was automatically restored/)).toHaveTextContent('Check its permissions or replace it in Cloudflare')
     expect(screen.getByRole('button', { name: 'Resume recorded change' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Cancel recorded change' })).not.toBeInTheDocument()
     expect(within(screen.getByRole('group', { name: 'analyst@example.com' })).getByRole('checkbox')).toBeChecked()
@@ -510,7 +505,7 @@ describe('TeamPage', () => {
     const user = userEvent.setup()
     const client = renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, editingEnabled: false, editingDisabledReason: 'release_review_required' as const })) }))
     expect(await screen.findByText(/disabled until this gateway release is reviewed and approved/)).toBeInTheDocument()
-    expect(screen.getByText(/Changes made directly in Cloudflare are not reflected here/)).toBeInTheDocument()
+    expect(screen.getByText(/Current Cloudflare policy membership has not been verified/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add user' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Remove analyst@example.com' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()

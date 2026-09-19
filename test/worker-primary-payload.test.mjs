@@ -888,7 +888,7 @@ test('team inspection requires an administrator and V1 rejects policy preparatio
     assert.ok(body.members.every((person) => canonicalJson(person.sourceIds) === canonicalJson([body.sources[0].id])));
     assert.equal(body.sources[0].status, 'installed');
     assert.equal(body.editingEnabled, false);
-    assert.equal(body.editingDisabledReason, 'managed_in_cloudflare');
+    assert.equal(body.editingDisabledReason, 'management_credential_missing');
     assert.equal(body.managementCredentialConfigured, false);
     assert.equal(body.pendingAction, null);
     assert.equal(body.proposedMembers, null);
@@ -902,7 +902,7 @@ test('team inspection requires an administrator and V1 rejects policy preparatio
       body: JSON.stringify({ schemaVersion: 1, expectedRevision: body.revision, members: body.members, editingEnabled: true }),
     }), { ...env, TEAM_ACCESS_ENABLED: 'true' });
     assert.equal(save.status, 409);
-    assert.equal((await save.json()).error, 'team_editing_managed_in_cloudflare');
+    assert.equal((await save.json()).error, 'team_action_conflict');
     assert.equal((await worker.fetch(new Request('https://other.example.com/api/team', { headers }), env)).status, 503);
     assert.equal((await worker.fetch(new Request('https://manage.example.com/api/team', { method: 'DELETE', headers }), env)).status, 405);
     assert.equal((await worker.fetch(new Request(`https://manage.example.com/api/team-actions/action_${'A'.repeat(32)}`, { headers }), env)).status, 404);
@@ -966,9 +966,10 @@ test('management status requires a verified Access JWT and exposes no provider o
     assert.equal(response.status, 200);
     const status = await response.json();
     assert.deepEqual(Object.keys(status).sort(), [
-      'access', 'controlPlaneOrigin', 'gateway', 'release', 'schemaVersion', 'source', 'status', 'updatedAt',
+      'access', 'controlPlaneOrigin', 'gateway', 'release', 'schemaVersion', 'serviceIdentity', 'source', 'status', 'updatedAt',
     ]);
     assert.equal(status.controlPlaneOrigin, 'https://deploy.ankka.ai');
+    assert.equal(status.serviceIdentity, null); // no service identity configured for this deployment
     const serialized = JSON.stringify(status);
     assert.doesNotMatch(serialized, /(?:provider|receipt|journal|tombstone|installationId|accountId|zoneId)/iu);
     assert.doesNotMatch(serialized, /synthetic-cloudflare-grant-never-store/u);
@@ -1746,7 +1747,7 @@ test('management API preserves bounded discovery, draft capacity and shared oper
     assert.equal(initial.status, 200);
     const initialSources = await initial.json();
     assert.equal(initialSources.revision, 1);
-    assert.equal(initialSources.applyMode, 'oauth_per_action');
+    assert.equal(initialSources.applyMode, 'account_token');
     assert.deepEqual(initialSources.sources.map(({ status, url }) => ({ status, url })), [{
       status: 'installed', url: 'https://source.example.net/mcp',
     }]);
@@ -1790,8 +1791,8 @@ test('management API preserves bounded discovery, draft capacity and shared oper
     }), env);
     assert.equal(saved.status, 200);
     let currentSources = await saved.json();
-    assert.equal(currentSources.installationEnabled, true);
-    assert.equal(initialSources.installationEnabled, true);
+    assert.equal(currentSources.installationEnabled, false);
+    assert.equal(initialSources.installationEnabled, false);
     assert.equal(mcpRequests.length, expectedCatalogueCursors.length * 2);
     assert.deepEqual(catalogueCursors, [...expectedCatalogueCursors, ...expectedCatalogueCursors]);
 
@@ -1804,7 +1805,7 @@ test('management API preserves bounded discovery, draft capacity and shared oper
       }), env);
       assert.equal(prepared.status, path === '/api/source-actions' ? 409 : 404);
       assert.deepEqual(await prepared.json(), path === '/api/source-actions'
-        ? { schemaVersion: 1, error: 'source_action_conflict', reason: 'draft_changed' }
+        ? { schemaVersion: 1, error: 'management_credential_required' }
         : { schemaVersion: 1, error: 'source_action_not_found' });
     }
     assert.equal(cloudflare.requests.length, sourceMutationStart);
@@ -1919,7 +1920,7 @@ test('management API preserves bounded discovery, draft capacity and shared oper
     ), env);
     assert.equal(maximumSavedResponse.status, 200);
     currentSources = await maximumSavedResponse.json();
-    assert.equal(currentSources.installationEnabled, true);
+    assert.equal(currentSources.installationEnabled, false);
     assert.deepEqual(maximumCursors, [...expectedMaximumCursors, ...expectedMaximumCursors]);
 
     for (const [url, error] of [
@@ -2136,4 +2137,28 @@ test('management API preserves bounded discovery, draft capacity and shared oper
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+// A sign-in source is saved before its tools can be listed. That draft, and nothing else, may have no tools.
+test('only the draft of a sign-in source may be saved or stored without tools', async () => {
+  const save = (authMode, enabledTools) => parseSourceSave({ schemaVersion: 1, revision: 1,
+    source: { label: 'Synthetic source', url: 'https://source.example.com/mcp', authMode, enabledTools } });
+  assert.deepEqual(save('oauth', []).source.enabledTools, []);
+  assert.deepEqual(save('oauth', ['read_records']).source.enabledTools, ['read_records']);
+  assert.equal(save('none', []), null);
+  assert.deepEqual(save('none', ['read_records']).source.enabledTools, ['read_records']);
+
+  const stored = (source) => safeManagementSources({ schemaVersion: 1, revision: 2, applyMode: 'oauth_per_action',
+    sources: [{ id: 'source-1111111111111111', label: 'Synthetic source', url: 'https://source.example.com/mcp', ...source }] });
+  const current = { authMode: 'oauth', onBehalfOfUser: false, enabledTools: [] };
+  assert.deepEqual(stored({ ...current, status: 'draft' }).sources[0].enabledTools, []);
+  assert.deepEqual(stored({ authMode: 'oauth', enabledTools: [], status: 'draft' }).sources[0].enabledTools, [], 'the legacy OAuth shape too');
+  assert.equal(stored({ ...current, status: 'installed' }), null, 'an installed source without tools is invalid state');
+  assert.equal(stored({ ...current, authMode: 'none', status: 'draft' }), null);
+  assert.equal(stored({ enabledTools: [], status: 'draft' }), null, 'the legacy public shape names at least one tool');
+
+  const empty = safeManagementSources({ schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources: [] });
+  const drafted = await saveDraftSource(empty, save('oauth', []));
+  assert.deepEqual([drafted.revision, drafted.sources[0].status, drafted.sources[0].enabledTools], [2, 'draft', []]);
+  assert.equal(managementSourcesInstallProjectionFits(drafted), true);
 });

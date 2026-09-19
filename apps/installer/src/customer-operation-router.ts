@@ -1,4 +1,9 @@
+import { customerPageEnd, customerPageStart } from './customer-page-shell';
+import { customerLoadingIndicator } from './customer-page-theme';
 import * as v from 'valibot';
+import { bigQueryCredentialPage } from './customer-bigquery-credential-page';
+import { readBigQueryText } from './customer-bigquery-contract';
+import type { BigQueryOperationInput } from './customer-bigquery-setup';
 
 import { canonicalJson } from './canonical-json';
 import type { CustomerCloudflareOperation } from './cloudflare-operation-authority';
@@ -24,9 +29,19 @@ import {
   CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH,
   CUSTOMER_OPERATION_OAUTH_START_PATH,
   CUSTOMER_OPERATION_ROOT_PATH,
+  CUSTOMER_OPERATION_UPDATE_PATH,
+  CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH,
 } from './customer-install-paths';
 import { operationSignature } from './customer-operation-secrets';
 import type { CustomerRuntimeUpdateTarget } from './customer-runtime-update';
+import {
+  CUSTOMER_UPDATE_STAGES,
+  customerServingRelease,
+  customerUpdateProgressSchema,
+  type CustomerUpdateProgress,
+  type CustomerUpdateStage,
+  type CustomerUpdateView,
+} from './customer-update-driver';
 
 /**
  * Gateway-local authorization for a later operation.
@@ -36,10 +51,12 @@ import type { CustomerRuntimeUpdateTarget } from './customer-runtime-update';
  * action key. This router turns that handoff into a fresh Cloudflare consent
  * for exactly the operation's scopes, using the public client and callback
  * the ownership trust certified for the install, then runs the operation with
- * the request-local grant and revokes it. Nothing about the grant, the PKCE
- * verifier, or the action key is written to durable storage: the verifier and
- * the key ride in one HttpOnly cookie, the attempt record keeps only hashes,
- * identifiers, and expiries.
+ * the request-local grant and revokes it. An update instead hands the grant
+ * and the key to the management object's memory and answers with the page
+ * that follows the upload. Nothing about the grant, the PKCE verifier, or the
+ * action key is written to durable storage: the verifier and the key ride in
+ * one HttpOnly cookie, the attempt record keeps only hashes, identifiers, and
+ * expiries.
  */
 export const CUSTOMER_OPERATION_COOKIE = '__Host-ankka_operation';
 export const CUSTOMER_OPERATION_ATTEMPT_TTL_MS = 10 * 60 * 1_000;
@@ -107,6 +124,15 @@ const sourceActionClaimSchema = v.strictObject({
   releaseIdentity: releaseIdentitySchema,
 });
 
+const bigQueryActionClaimSchema = v.strictObject({
+  ...sourceActionClaimSchema.entries, actionType: v.literal('bigquery_setup'),
+});
+const bigQueryCallbackSchema = v.strictObject({
+  code: v.pipe(v.string(), v.regex(AUTHORIZATION_CODE)),
+  state: v.pipe(v.string(), v.regex(TOKEN)),
+  serviceAccountJson: v.pipe(v.string(), v.minLength(1), v.maxLength(16_384)),
+});
+
 const runtimeVersionSchema = v.strictObject({
   release: v.pipe(v.string(), v.regex(RELEASE)),
   artifactSha256: v.pipe(v.string(), v.regex(PREFIXED_SHA256)),
@@ -145,8 +171,8 @@ const targetSchema = v.strictObject({
 export const customerOperationAttemptSchema = v.strictObject({
   schemaVersion: v.literal(1),
   attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
-  kind: v.picklist(['source', 'runtime']),
-  operation: v.picklist(['source-add', 'upgrade', 'rollback']),
+  kind: v.picklist(['source', 'bigquery', 'runtime']),
+  operation: v.picklist(['source-add', 'bigquery-add', 'upgrade', 'rollback']),
   actionId: v.pipe(v.string(), v.regex(ACTION_ID)),
   actorEmail: v.pipe(v.string(), v.maxLength(256), v.regex(EMAIL)),
   actionExpiresAt: v.pipe(v.number(), v.safeInteger()),
@@ -164,6 +190,7 @@ type SourceActionClaim = v.InferOutput<typeof sourceActionClaimSchema>;
 type RuntimeActionClaim = v.InferOutput<typeof runtimeActionClaimSchema>;
 type DecodedClaim =
   | { readonly kind: 'source'; readonly claim: SourceActionClaim }
+  | { readonly kind: 'bigquery'; readonly claim: v.InferOutput<typeof bigQueryActionClaimSchema> }
   | { readonly kind: 'runtime'; readonly claim: RuntimeActionClaim };
 
 /** One attempt per gateway, durable so the callback can refuse replays. */
@@ -190,6 +217,8 @@ export interface CustomerOperationRuntimeUpdateInput {
   readonly controlPlaneOrigin: string;
   readonly operation: 'update' | 'rollback';
   readonly target: CustomerRuntimeUpdateTarget;
+  /** Told each stage the update reaches, for the page that follows it. */
+  readonly onStage?: (stage: CustomerUpdateStage) => void;
 }
 
 export interface CustomerOperationRouterConfig {
@@ -209,6 +238,8 @@ export interface CustomerOperationRouterDependencies {
   /** Throws unless the install is complete and the ownership trust names the callback. */
   readonly assertOperational: () => Promise<void>;
   readonly readSourceAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
+  readonly readBigQueryAction?: (actionId: string) => Promise<CustomerOperationActionView | null>;
+  readonly runBigQuerySetup?: (input: BigQueryOperationInput) => Promise<Response>;
   readonly readRuntimeAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
   readonly issueRelayTicket: (operation: CustomerCloudflareOperation) => Promise<{
     readonly relayTicket: string;
@@ -226,8 +257,14 @@ export interface CustomerOperationRouterDependencies {
     readonly body: string;
     readonly signature: string;
   }) => Promise<Response>;
-  /** Runs the gateway's own update with the grant; it hands over before the upload. */
-  readonly runRuntimeUpdate: (input: CustomerOperationRuntimeUpdateInput) => Promise<CustomerOperationResult>;
+  /** Takes an update's grant and action key into the management object's memory and arms the pass that uploads. */
+  readonly startRuntimeUpdate: (input: {
+    readonly attempt: CustomerOperationAttempt;
+    readonly grant: EphemeralCustomerCloudflareGrant;
+    readonly actionKey: string;
+  }) => Promise<'started' | 'failed'>;
+  /** The update attempt as the management object knows it; null for an unknown attempt. */
+  readonly updateView: (attemptId: string) => Promise<CustomerUpdateView | null>;
   readonly now?: () => number;
 }
 
@@ -308,9 +345,8 @@ function sameOriginJsonMutation(request: Request, expectedOrigin: string): boole
 async function startBody(request: Request): Promise<v.InferOutput<typeof startBodySchema> | null> {
   const declared = request.headers.get('content-length');
   if (declared !== null && (!/^\d{1,6}$/u.test(declared) || Number(declared) > MAX_BODY_BYTES)) return null;
-  const body = await request.text();
-  if (body.length > MAX_BODY_BYTES) return null;
   try {
+    const body = await readBigQueryText(request.body, MAX_BODY_BYTES);
     const parsed = v.safeParse(startBodySchema, JSON.parse(body));
     return parsed.success ? parsed.output : null;
   } catch {
@@ -327,6 +363,8 @@ function decodeClaim(handoff: string): DecodedClaim | null {
   }
   const source = v.safeParse(sourceActionClaimSchema, decoded);
   if (source.success) return { kind: 'source', claim: source.output };
+  const bigquery = v.safeParse(bigQueryActionClaimSchema, decoded);
+  if (bigquery.success) return { kind: 'bigquery', claim: bigquery.output };
   const runtime = v.safeParse(runtimeActionClaimSchema, decoded);
   if (runtime.success) return { kind: 'runtime', claim: runtime.output };
   return null;
@@ -338,7 +376,7 @@ function claimMatches(
   now: number,
 ): boolean {
   const { claim } = decoded;
-  const identity = decoded.kind === 'source'
+  const identity = decoded.kind !== 'runtime'
     ? decoded.claim.releaseIdentity.release === config.release &&
       decoded.claim.releaseIdentity.artifactSha256 === config.artifactSha256
     : decoded.claim.from.release === config.release &&
@@ -349,8 +387,9 @@ function claimMatches(
     claim.expiresAt > now && claim.expiresAt <= now + MAX_ACTION_LIFETIME_MS + CLOCK_SKEW_MS;
 }
 
-function relayOperation(decoded: DecodedClaim): 'source-add' | 'upgrade' | 'rollback' {
+function relayOperation(decoded: DecodedClaim): 'source-add' | 'bigquery-add' | 'upgrade' | 'rollback' {
   if (decoded.kind === 'source') return 'source-add';
+  if (decoded.kind === 'bigquery') return 'bigquery-add';
   return decoded.claim.operation === 'rollback' ? 'rollback' : 'upgrade';
 }
 
@@ -410,14 +449,40 @@ function failureReason<Thrown>(error: Thrown): CustomerOperationReason {
   return 'unexpected';
 }
 
-function operationPage(): Response {
+export function operationPage(): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
   const pageHeaders = headers('text/html; charset=utf-8');
   pageHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Authorize in Cloudflare</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}button{font:inherit;padding:.75rem 1rem}a{color:inherit}</style><h1>Authorize this change in Cloudflare</h1><p id="message">Preparing a fresh, temporary Cloudflare approval for your gateway…</p><button id="retry" hidden>Try again</button><p><a href="/sources">Back to the dashboard</a></p><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const run=async()=>{retry.hidden=true;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_OPERATION_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.replace(value.authorizationUrl)}catch{message.textContent='This authorization link could not be started. Go back to the dashboard, check the action status, and authorize again.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script></html>`, {
+  return new Response(`${customerPageStart('Authorize in Cloudflare', 'message')}<h1>Authorize this change in Cloudflare</h1><div id="progress">${customerLoadingIndicator}</div><p id="message" role="status" aria-live="polite">Preparing a fresh, temporary Cloudflare approval for your gateway…</p><button id="retry" hidden>Try again</button><p><a href="/sources">Back to the dashboard</a></p><script nonce="${nonce}">(()=>{const message=document.querySelector('#message');const retry=document.querySelector('#retry');const progress=document.querySelector('#progress');const handoff=location.hash.slice(1);history.replaceState(null,'',location.pathname);const run=async()=>{retry.hidden=true;progress.hidden=false;try{if(!/^[A-Za-z0-9_-]{40,8192}$/.test(handoff))throw new Error();const response=await fetch('${CUSTOMER_OPERATION_OAUTH_START_PATH}',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({schemaVersion:1,handoff}),credentials:'same-origin',cache:'no-store'});const value=await response.json();if(!response.ok||typeof value.authorizationUrl!=='string')throw new Error();location.replace(value.authorizationUrl)}catch{progress.hidden=true;message.textContent='This authorization link could not be started. Go back to the dashboard, check the action status, and authorize again.';retry.hidden=false}};retry.addEventListener('click',run);run()})();</script>${customerPageEnd}`, {
     status: 200,
     headers: pageHeaders,
   });
+}
+
+/** Where the dashboard continues after an operation, with its result and reason words. */
+function dashboardLocation(
+  managementOrigin: string,
+  kind: CustomerOperationAttempt['kind'],
+  actionId: string,
+  outcome: { readonly result: CustomerOperationResult | null; readonly reason: CustomerOperationReason | null },
+): URL {
+  const location = kind !== 'runtime'
+    ? new URL('/sources', managementOrigin)
+    : new URL('/settings', managementOrigin);
+  const parameter = kind !== 'runtime' ? 'sourceAction' : 'runtimeAction';
+  location.searchParams.set(parameter, actionId);
+  if (outcome.result !== null) location.searchParams.set(`${parameter}Result`, outcome.result);
+  if (outcome.reason !== null && REASON.test(outcome.reason)) {
+    location.searchParams.set(`${parameter}Reason`, outcome.reason);
+  }
+  return location;
+}
+
+function redirectTo(location: URL, cookies: readonly string[]): Response {
+  const responseHeaders = headers();
+  responseHeaders.set('location', location.toString());
+  for (const cookie of cookies) responseHeaders.append('set-cookie', cookie);
+  return new Response(null, { status: 303, headers: responseHeaders });
 }
 
 function redirectToDashboard(
@@ -426,19 +491,50 @@ function redirectToDashboard(
   outcome: OperationOutcome,
   cookies: readonly string[],
 ): Response {
-  const location = attempt.kind === 'source'
-    ? new URL('/sources', managementOrigin)
-    : new URL('/settings', managementOrigin);
-  const parameter = attempt.kind === 'source' ? 'sourceAction' : 'runtimeAction';
-  location.searchParams.set(parameter, attempt.actionId);
-  location.searchParams.set(`${parameter}Result`, outcome.result);
-  if (outcome.reason !== null && REASON.test(outcome.reason)) {
-    location.searchParams.set(`${parameter}Reason`, outcome.reason);
-  }
-  const responseHeaders = headers();
-  responseHeaders.set('location', location.toString());
-  for (const cookie of cookies) responseHeaders.append('set-cookie', cookie);
-  return new Response(null, { status: 303, headers: responseHeaders });
+  return redirectTo(dashboardLocation(managementOrigin, attempt.kind, attempt.actionId, outcome), cookies);
+}
+
+const ATTEMPT_QUERY = /^attempt_[A-Za-z0-9_-]{24}$/u;
+
+/** Fixed labels for the update's stages, in order; the page marks them from the stage word it is told. */
+const UPDATE_STEP_LABELS = Object.freeze([
+  'Verify the running version', 'Fetch and verify the signed release', 'Upload the management assets', 'Upload the new Worker version',
+] as const);
+/** The step after the upload: Cloudflare keeps serving the previous version at an edge location for a while. */
+const UPDATE_SERVING_STEP_LABEL = 'Wait for Cloudflare to serve the new version';
+/** How many answers in a row must name the target as the serving release, and how long the page waits for that. */
+const UPDATE_SERVING_CONFIRMATIONS = 2;
+const UPDATE_SERVING_WAIT_MS = 60_000;
+/** How long the sentence about a reload stays readable before the handover it announces. */
+const UPDATE_SERVING_NOTICE_MS = 5_000;
+
+/**
+ * Where an update's consent lands: a loader and the step list, following the
+ * upload the management object runs behind it. Once settled, the page hands
+ * the browser to the dashboard, which follows the action to its end. After an
+ * applied upload it first waits until the release that serves its own polls
+ * is the target on consecutive answers: that is the version the dashboard's
+ * navigation will receive, and an earlier handover lands on the previous
+ * release's dashboard. The wait is bounded; past it the page hands over anyway
+ * and says that a reload may be needed.
+ */
+function updateProgressPage(attemptId: string): Response {
+  const nonce = crypto.randomUUID().replaceAll('-', '');
+  const pageHeaders = headers('text/html; charset=utf-8');
+  pageHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
+  const literal = <Value>(value: Value): string => JSON.stringify(value).replaceAll('<', '\\u003c');
+  return new Response(`${customerPageStart('Updating your Ankka Gateway', 'message')}<h1>Updating your Ankka Gateway</h1><p id="message" role="status" aria-live="polite"><span id="loader" class="page-loader">${customerLoadingIndicator}</span>Cloudflare approved the update. Your gateway is verifying and uploading the signed release; this page updates itself.</p><ol id="steps"></ol><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{
+const attempt=${literal(attemptId)},labels=${literal(UPDATE_STEP_LABELS)},serving=${literal(UPDATE_SERVING_STEP_LABEL)},stages=${literal(CUSTOMER_UPDATE_STAGES)},steps=document.querySelector('#steps'),message=document.querySelector('#message'),loader=document.querySelector('#loader'),served=document.createElement('li');
+let active=true,timer,bound,controller,confirmed=0;const stop=()=>{active=false;clearTimeout(timer);clearTimeout(bound);if(controller)controller.abort()};addEventListener('pagehide',stop);
+const reached=(stage)=>{const index=stages.indexOf(stage);return index<0?0:index>=stages.length-1?labels.length-1:Math.min(index,labels.length-1)};
+const giveUp=(url)=>{stop();served.textContent=serving+' — Not confirmed';message.textContent='Cloudflare is taking longer than usual to serve the new version. Handing over to your dashboard; if it still shows the previous version, reload the page.';timer=setTimeout(()=>location.replace(url),${UPDATE_SERVING_NOTICE_MS})};
+const show=(state)=>{const settled=state.status==='settled',done=settled&&state.applied===true,awaited=done&&typeof state.targetRelease==='string';confirmed=awaited&&state.servingRelease===state.targetRelease?confirmed+1:0;const arrived=confirmed>=${UPDATE_SERVING_CONFIRMATIONS},current=state.status==='running'?reached(state.stage):-1;
+served.textContent=serving+(arrived?' — Done':awaited?' — In progress…':'');steps.replaceChildren(...labels.map((label,index)=>{const item=document.createElement('li');item.textContent=label+(done||index<current?' — Done':index===current?' — In progress…':'');return item}),served);
+if(!settled)return false;const url=state.redirectUrl||'';if(!url.startsWith(location.origin+'/settings')){stop();message.textContent='The update has ended. Open Settings to see its result.';return true}
+if(awaited&&!arrived){if(!bound){message.replaceChildren(loader,'The upload is complete. Waiting for Cloudflare to serve the new version…');bound=setTimeout(()=>giveUp(url),${UPDATE_SERVING_WAIT_MS})}return false}
+stop();message.textContent='Handing over to your dashboard, which follows the update to its end.';location.replace(url);return true};
+const poll=async()=>{controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),5000);try{const response=await fetch(${literal(CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH)}+'?attempt='+encodeURIComponent(attempt),{credentials:'same-origin',cache:'no-store',redirect:'manual',signal:controller.signal});if(!response.ok)throw new Error();const state=await response.json();if(!active)return;if(show(state))return}catch{if(!active)return;confirmed=0}finally{clearTimeout(timeout)}if(active)timer=setTimeout(poll,2000)};
+poll()})();</script>${customerPageEnd}`, { status: 200, headers: pageHeaders });
 }
 
 export function createCustomerOperationRouter(
@@ -469,13 +565,24 @@ export function createCustomerOperationRouter(
     const { claim } = decoded;
     const action = decoded.kind === 'source'
       ? await dependencies.readSourceAction(claim.actionId)
-      : await dependencies.readRuntimeAction(claim.actionId);
+      : decoded.kind === 'bigquery'
+        ? await dependencies.readBigQueryAction?.(claim.actionId) ?? null
+        : await dependencies.readRuntimeAction(claim.actionId);
     if (action === null || action.status !== 'authorization_required' || action.expiresAt !== claim.expiresAt) {
       return json({ schemaVersion: 1, error: 'operation_conflict' }, 409);
     }
     const existing = await dependencies.attempts.read();
-    if (existing !== null && existing.expiresAt > startedAt && existing.actionId !== claim.actionId) {
+    if (existing !== null && existing.expiresAt > startedAt && existing.phase === 'exchanging') {
       return json({ schemaVersion: 1, error: 'operation_pending' }, 409);
+    }
+    if (existing !== null && existing.expiresAt > startedAt && existing.actionId !== claim.actionId) {
+      const previousAction = existing.kind === 'runtime'
+        ? await dependencies.readRuntimeAction(existing.actionId)
+        : await dependencies.readSourceAction(existing.actionId);
+      // A cancelled action invalidates its handoff and may be replaced immediately.
+      if (previousAction?.status !== 'failed') {
+        return json({ schemaVersion: 1, error: 'operation_pending' }, 409);
+      }
     }
     const operation = relayOperation(decoded);
     const verifier = randomBase64Url(32);
@@ -548,40 +655,51 @@ export function createCustomerOperationRouter(
   };
 
   const callback = async (request: Request, url: URL): Promise<Response> => {
+    let uploaded: v.InferOutput<typeof bigQueryCallbackSchema> | null = null;
+    if (request.method === 'POST') {
+      if (!sameOriginJsonMutation(request, config.managementOrigin) || url.search !== '') return json({ error: 'oauth_callback_rejected' }, 400);
+      try { uploaded = v.parse(bigQueryCallbackSchema, JSON.parse(await readBigQueryText(request.body))); }
+      catch { return json({ error: 'oauth_callback_rejected' }, 400); }
+    }
     const callbackAt = now();
     const cookies = [clearCookie()];
     const cookie = readOperationCookie(request, callbackAt);
     const attempt = await dependencies.attempts.read();
-    const oauthState = url.searchParams.get('state') ?? '';
+    const oauthState = uploaded?.state ?? url.searchParams.get('state') ?? '';
     if (cookie === null || attempt === null || attempt.attemptId !== cookie.attemptId ||
         attempt.expiresAt !== cookie.expiresAt || attempt.expiresAt <= callbackAt ||
         attempt.phase !== 'authorizing' || !TOKEN.test(oauthState) ||
         !constantTimeEqual(await sha256(oauthState), attempt.stateHash)) {
       return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
     }
-    const code = url.searchParams.get('code') ?? '';
+    if (uploaded !== null && attempt.kind !== 'bigquery') return json({ error: 'oauth_callback_rejected' }, 400, cookies);
+    const code = uploaded?.code ?? url.searchParams.get('code') ?? '';
     const oauthError = url.searchParams.get('error');
     if (oauthError === 'authorization_rejected' && code === '' && url.searchParams.size === 2) {
       await dependencies.attempts.clear();
       return redirectToDashboard(config.managementOrigin, attempt, { result: 'denied', reason: null }, cookies);
     }
-    if (oauthError !== null || !AUTHORIZATION_CODE.test(code) || url.searchParams.size !== 2) {
+    if (oauthError !== null || !AUTHORIZATION_CODE.test(code) || (uploaded === null && url.searchParams.size !== 2)) {
       return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, cookies);
     }
+    if (attempt.kind === 'bigquery' && uploaded === null) return bigQueryCredentialPage(code, oauthState);
     // The attempt is spent before the exchange: a replayed callback cannot exchange twice.
     await dependencies.attempts.write({ ...attempt, phase: 'exchanging' });
     let grant: EphemeralCustomerCloudflareGrant | null = null;
     let outcome: OperationOutcome;
+    // True once the management object holds the grant: the callback then neither revokes nor waits.
+    let handed = false;
     try {
-      grant = await exchangeCustomerCloudflareAuthorizationCode({
+      const exchanged = await exchangeCustomerCloudflareAuthorizationCode({
         clientId: config.publicClientId,
         code,
         verifier: cookie.verifier,
         operation: attempt.operation,
         transport: dependencies.transport,
       });
-      grant.assertUsable();
-      outcome = await grant.withAccessToken(async (accessToken): Promise<OperationOutcome> => {
+      grant = exchanged;
+      exchanged.assertUsable();
+      outcome = await exchanged.withAccessToken(async (accessToken): Promise<OperationOutcome> => {
         await verifyCustomerCloudflareGrantAccountAccess({
           accessToken,
           expectedAccountId: config.accountId,
@@ -590,6 +708,12 @@ export function createCustomerOperationRouter(
           transport: dependencies.transport,
         });
         if (attempt.kind === 'source') return applySource(attempt, cookie.actionKey, accessToken, callbackAt);
+        if (attempt.kind === 'bigquery') {
+          if (uploaded === null || dependencies.runBigQuerySetup === undefined) return { result: 'failed', reason: 'bigquery_setup_unavailable' };
+          return appliedOutcome(await dependencies.runBigQuerySetup({ actionId: attempt.actionId, actionKey: cookie.actionKey,
+            actorEmail: attempt.actorEmail, accessToken, actionExpiresAt: attempt.actionExpiresAt, serviceAccountJson: uploaded.serviceAccountJson,
+          }), attempt.actionId);
+        }
         if (attempt.target === null || attempt.operation === 'source-add') {
           return { result: 'failed', reason: 'attempt_invalid' };
         }
@@ -598,22 +722,17 @@ export function createCustomerOperationRouter(
         // attempt is spent already, so it is cleared here rather than left
         // to block every other operation until it expires.
         await dependencies.attempts.clear();
-        const result = await dependencies.runRuntimeUpdate({
-          accessToken,
-          actionId: attempt.actionId,
-          actionKey: cookie.actionKey,
-          actorEmail: attempt.actorEmail,
-          actionExpiresAt: attempt.actionExpiresAt,
-          controlPlaneOrigin: attempt.controlPlaneOrigin,
-          operation: attempt.operation === 'rollback' ? 'rollback' : 'update',
-          target: attempt.target,
-        });
-        return { result, reason: result === 'applied' ? null : 'update_failed' };
+        // From here the management object owns the grant and the key, in memory,
+        // and uploads behind the progress page in its own invocation; the
+        // existing handover alarm finishes the journal afterwards.
+        const started = await dependencies.startRuntimeUpdate({ attempt, grant: exchanged, actionKey: cookie.actionKey });
+        handed = started === 'started';
+        return handed ? { result: 'applied', reason: null } : { result: 'failed', reason: 'update_start_failed' };
       });
     } catch (error) {
       outcome = { result: 'failed', reason: failureReason(error) };
     }
-    if (grant !== null) {
+    if (grant !== null && !handed) {
       try {
         await grant.revoke({ clientId: config.publicClientId, transport: dependencies.transport });
       } catch {
@@ -621,13 +740,40 @@ export function createCustomerOperationRouter(
       }
       grant.discard();
     }
-    // A runtime update may have replaced this Worker by now; storage writes can be refused.
     try {
       await dependencies.attempts.clear();
     } catch {
-      // The attempt record expires on its own; the new version finishes the journal.
+      // The attempt record expires on its own.
     }
-    return redirectToDashboard(config.managementOrigin, attempt, outcome, cookies);
+    if (handed) {
+      const progress = new URL(CUSTOMER_OPERATION_UPDATE_PATH, config.managementOrigin);
+      progress.searchParams.set('attempt', attempt.attemptId);
+      return redirectTo(progress, cookies);
+    }
+    const redirect = redirectToDashboard(config.managementOrigin, attempt, outcome, cookies);
+    return uploaded === null ? redirect : json({ redirectUrl: redirect.headers.get('location') }, 200, cookies);
+  };
+
+  /**
+   * The update page's view of one attempt: its stage while the upload runs here, the dashboard's address once settled,
+   * and the two releases the page compares before it hands over: the one the attempt reaches and the one that served
+   * this answer where the browser asked.
+   */
+  const updateProgress = async (request: Request, attemptId: string): Promise<Response> => {
+    const view = await dependencies.updateView(attemptId);
+    if (view === null) return notFound();
+    const settled = view.status === 'settled';
+    const redirectUrl = settled
+      ? dashboardLocation(config.managementOrigin, 'runtime', view.actionId, { result: view.result, reason: view.reason }).toString()
+      : null;
+    // This object running the target proves the upload, also for a version replaced before it could record its end.
+    const applied = settled && (view.result === 'applied' || view.result === 'revocation_unconfirmed' ||
+      view.targetRelease === config.release);
+    const progress: CustomerUpdateProgress = {
+      schemaVersion: 1, attemptId, status: view.status, stage: view.stage, result: view.result, reason: view.reason, redirectUrl,
+      applied, targetRelease: view.targetRelease, servingRelease: customerServingRelease(request),
+    };
+    return json(v.parse(customerUpdateProgressSchema, progress));
   };
 
   return Object.freeze({
@@ -640,7 +786,7 @@ export function createCustomerOperationRouter(
       }
       if (url.origin !== config.managementOrigin || url.username !== '' || url.password !== '' ||
           url.port !== '' || url.hash !== '') return notFound();
-      const isCallback = request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH;
+      const isCallback = ['GET', 'POST'].includes(request.method) && url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH;
       try {
         await dependencies.assertOperational();
       } catch {
@@ -648,6 +794,11 @@ export function createCustomerOperationRouter(
       }
       if (request.method === 'GET' && url.pathname === CUSTOMER_OPERATION_ROOT_PATH && url.search === '') {
         return operationPage();
+      }
+      if (request.method === 'GET' && (url.pathname === CUSTOMER_OPERATION_UPDATE_PATH || url.pathname === CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH)) {
+        const attemptId = url.searchParams.get('attempt');
+        if (url.searchParams.size !== 1 || attemptId === null || !ATTEMPT_QUERY.test(attemptId)) return notFound();
+        return url.pathname === CUSTOMER_OPERATION_UPDATE_PATH ? updateProgressPage(attemptId) : updateProgress(request, attemptId);
       }
       if (request.method === 'POST' && url.pathname === CUSTOMER_OPERATION_OAUTH_START_PATH && url.search === '') {
         return start(request);

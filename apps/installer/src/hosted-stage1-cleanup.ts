@@ -48,12 +48,13 @@ const RETIREMENT_MODULE_PATH = 'payload/worker-retirement/index.js';
 
 const envelopeSchema = v.looseObject({
   success: v.literal(true),
-  errors: v.array(boundaryValueSchema),
-  messages: v.array(boundaryValueSchema),
+  errors: v.nullish(v.array(boundaryValueSchema)),
+  messages: v.nullish(v.array(boundaryValueSchema)),
   result: boundaryValueSchema,
   result_info: v.optional(v.looseObject({
-    total_pages: v.optional(v.number()),
-    total_count: v.optional(v.number()),
+    total_pages: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+    total_count: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(0))),
+    per_page: v.optional(v.pipe(v.number(), v.safeInteger(), v.minValue(1))),
   })),
 });
 const workerSchema = v.looseObject({
@@ -194,11 +195,11 @@ async function providerRequest(
     fail('provider_unknown', stage);
   }
   const envelope = v.safeParse(envelopeSchema, decoded);
-  if (!envelope.success || envelope.output.errors.length !== 0) fail('provider_rejected', stage);
+  if (!envelope.success || (envelope.output.errors?.length ?? 0) !== 0) fail('provider_rejected', stage);
   const info = envelope.output.result_info;
-  const totalPages = info?.total_pages !== undefined && Number.isSafeInteger(info.total_pages)
-    ? Math.max(1, info.total_pages)
-    : 1;
+  const derivedPages = info?.total_count !== undefined && info.per_page !== undefined
+    ? Math.ceil(info.total_count / info.per_page) : 1;
+  const totalPages = Math.max(1, info?.total_pages ?? derivedPages);
   if (totalPages > MAX_LIST_PAGES) fail('provider_unknown', stage);
   return Object.freeze({ status: response.status, value: envelope.output.result, totalPages });
 }
@@ -445,6 +446,7 @@ export async function executeHostedStage1Cleanup(input: HostedStage1CleanupInput
   try {
     result = await executeHostedBootstrapGrant({
       kind: 'cleanup',
+      target: { accountId: root.provision.accountId, workerName: root.provision.deployment.workerName },
       code: input.code,
       verifier: input.verifier,
       config: input.oauth,

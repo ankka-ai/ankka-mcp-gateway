@@ -30,6 +30,61 @@ async function preview() {
 }
 
 describe('synthetic installer preview session', () => {
+  it.each([
+    ['/review', 'draft'],
+    ['/deploy', 'authorizing'],
+    ['/result', 'provisioned'],
+    ['/result?preview=success', 'handed_off'],
+    ['/result?preview=failed', 'failed'],
+    ['/result?preview=removal', 'cleanup_required'],
+  ])('provides the current installer session contract for %s', async (path, phase) => {
+    const api = await preview()
+    try {
+      const fixture = await (await api.request('/api/session', 'GET', path)).json()
+      expect(fixture).toMatchObject({
+        schemaVersion: 1,
+        csrfToken: 'local-preview-csrf',
+        now: expect.any(Number),
+        session: {
+          schemaVersion: 1,
+          phase,
+          plan: { releaseId: 'gateway-v0.1.12', expiresAt: expect.any(Number) },
+        },
+      })
+      const times = v.parse(v.object({
+        now: v.number(),
+        session: v.object({ expiresAt: v.number(), plan: v.object({ expiresAt: v.number() }) }),
+      }), fixture)
+      expect(times.session.expiresAt).toBeGreaterThan(times.now)
+      expect(times.session.plan.expiresAt).toBeGreaterThan(times.now)
+      expect(fixture).not.toHaveProperty('authorizationUrl')
+      expect(fixture).not.toHaveProperty('handoffUrl')
+      if (phase === 'authorizing') {
+        expect(fixture).toMatchObject({ session: { attempt: { kind: 'bootstrap', expiresAt: expect.any(Number) } } })
+      }
+      if (phase === 'failed') expect(fixture).toMatchObject({ session: { failure: { code: 'authorization_rejected' } } })
+      if (phase === 'cleanup_required') expect(fixture).toMatchObject({ session: { cleanup: { reason: 'cookie_lost' } } })
+    } finally {
+      await api.close()
+    }
+  })
+
+  it('keeps handoff polling inert and allows a new local preview session', async () => {
+    const api = await preview()
+    try {
+      const fixture = await (await api.request('/api/session', 'GET', '/result?preview=running')).json()
+      const handoff = await api.request('/api/bootstrap/handoff', 'GET', '/result')
+      expect(handoff.status).toBe(409)
+      expect(await handoff.json()).toEqual({ schemaVersion: 1, code: 'bootstrap_not_ready', retryAfterMs: 15_000 })
+      expect(await (await api.request('/api/session', 'GET', '/result')).json()).toEqual(fixture)
+      const restarted = await (await api.request('/api/session/new', 'POST', '/result')).json()
+      expect(restarted).toMatchObject({ session: { phase: 'draft', selection: null, plan: null, provision: null } })
+      expect(await (await api.request('/api/session')).json()).toEqual(restarted)
+    } finally {
+      await api.close()
+    }
+  })
+
   it('retains configuration and its plan through status refreshes and client-side routes', async () => {
     const api = await preview()
     try {
@@ -80,7 +135,7 @@ describe('synthetic installer preview session', () => {
     const api = await preview()
     try {
       const before = await (await api.request('/api/session')).json()
-      for (const endpoint of ['/api/discovery', '/api/deploy', '/api/uninstall']) {
+      for (const endpoint of ['/api/discovery', '/api/deploy', '/api/uninstall', '/api/bootstrap', '/api/cleanup']) {
         const response = await api.request(endpoint, 'POST')
         expect(response.status).toBe(409)
         expect(await response.json()).toEqual({ schemaVersion: 1, code: 'preview_authorization_unavailable' })

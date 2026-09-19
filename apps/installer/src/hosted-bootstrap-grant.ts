@@ -13,6 +13,7 @@ import { OAUTH_EXCHANGE_URL } from './constants';
 import {
   CustomerCloudflareGrantError,
   resolveSingleAuthorizedCloudflareAccount,
+  verifyCustomerCloudflareGrantAccountAccess,
 } from './customer-cloudflare-grant';
 import { DeployError } from './errors';
 import { readBoundedText } from './http';
@@ -31,7 +32,72 @@ export interface HostedBootstrapExecutionResult<Deployment> {
   readonly accountId: string;
   /** Secret-free output of the fixed bootstrap executor. */
   readonly deployment: Deployment;
-  readonly grantRevocation: 'confirmed';
+  /** `operator-managed`: the credential belongs to the operator and was neither exchanged nor revoked here. */
+  readonly grantRevocation: 'confirmed' | 'operator-managed';
+}
+
+/**
+ * A credential the operator-controlled external runner holds for the fixed
+ * operation, under the catalogue's operator-managed lifecycle. It is read
+ * into the runner's process for the operation and is never persisted,
+ * exchanged, refreshed or revoked by the operation.
+ */
+export interface OperatorManagedCredential {
+  readonly kind: 'operator-managed';
+  readonly accessToken: string;
+}
+
+const BEARER = /^[A-Za-z0-9._~+/=-]{20,16384}$/u;
+
+type HostedBootstrapTarget =
+  | { readonly kind?: 'bootstrap' }
+  | { readonly kind: 'cleanup'; readonly target: { readonly accountId: string; readonly workerName: string } };
+
+type HostedBootstrapDeploy<Deployment> =
+  (input: { readonly accessToken: string; readonly accountId: string }) => Promise<Deployment>;
+
+/** The fixed executor body shared by the hosted grant and the operator-managed credential. */
+async function deployWithAccessToken<Deployment>(
+  input: { readonly transport: FetchTransport; readonly deploy: HostedBootstrapDeploy<Deployment> } & HostedBootstrapTarget,
+  accessToken: string,
+): Promise<{ readonly accountId: string; readonly deployment: Deployment }> {
+  let accountId: string;
+  try {
+    if (input.kind === 'cleanup') {
+      accountId = input.target.accountId;
+      await verifyCustomerCloudflareGrantAccountAccess({
+        accessToken, expectedAccountId: accountId, workerName: input.target.workerName,
+        operation: 'uninstall-finalize', transport: input.transport,
+      });
+    } else {
+      accountId = await resolveSingleAuthorizedCloudflareAccount({ accessToken, transport: input.transport });
+    }
+  } catch (error) {
+    throw accountReadError(error);
+  }
+  try {
+    const deployment = await input.deploy({ accessToken, accountId });
+    return Object.freeze({ accountId, deployment });
+  } catch (error) {
+    throw new DeployError(502, 'oauth_exchange_failed', deployFailureReason(error));
+  }
+}
+
+/**
+ * Runs the same fixed executor with an operator-managed credential. There is
+ * no exchange and no revocation: the credential's lifetime is the operator's,
+ * and the result records that no grant was revoked.
+ */
+export async function executeHostedBootstrapWithOperatorCredential<Deployment>(input: {
+  readonly credential: OperatorManagedCredential;
+  readonly transport: FetchTransport;
+  readonly deploy: HostedBootstrapDeploy<Deployment>;
+} & HostedBootstrapTarget): Promise<HostedBootstrapExecutionResult<Deployment>> {
+  if (input.credential.kind !== 'operator-managed' || !BEARER.test(input.credential.accessToken)) {
+    throw new DeployError(400, 'oauth_grant_invalid', 'operator_credential_invalid');
+  }
+  const result = await deployWithAccessToken(input, input.credential.accessToken);
+  return Object.freeze({ ...result, grantRevocation: 'operator-managed' });
 }
 
 /**
@@ -76,13 +142,15 @@ function accountReadError<Thrown>(error: Thrown): DeployError {
 }
 
 export async function executeHostedBootstrapGrant<Deployment>(input: {
-  readonly kind?: 'bootstrap' | 'cleanup';
   readonly code: string;
   readonly verifier: string;
   readonly config: CloudflareOauthConfig;
   readonly transport: FetchTransport;
   readonly deploy: (input: { readonly accessToken: string; readonly accountId: string }) => Promise<Deployment>;
-}): Promise<HostedBootstrapExecutionResult<Deployment>> {
+} & ({ readonly kind?: 'bootstrap' } | {
+  readonly kind: 'cleanup';
+  readonly target: { readonly accountId: string; readonly workerName: string };
+})): Promise<HostedBootstrapExecutionResult<Deployment> & { readonly grantRevocation: 'confirmed' }> {
   let refreshTokenReturned = false;
   const inspectingTransport: FetchTransport = async (request, init) => {
     const response = await input.transport(request, init);
@@ -112,24 +180,8 @@ export async function executeHostedBootstrapGrant<Deployment>(input: {
   try {
     grant.assertUsable(exactOperationScopes(input.kind === 'cleanup' ? 'uninstall-finalize' : 'bootstrap'));
     if (refreshTokenReturned) throw new DeployError(403, 'oauth_grant_invalid');
-    const result = await grant.withAccessToken(async (accessToken) => {
-      let accountId: string;
-      try {
-        accountId = await resolveSingleAuthorizedCloudflareAccount({
-          accessToken,
-          transport: input.transport,
-        });
-      } catch (error) {
-        throw accountReadError(error);
-      }
-      try {
-        const deployment = await input.deploy({ accessToken, accountId });
-        return Object.freeze({ accountId, deployment });
-      } catch (error) {
-        throw new DeployError(502, 'oauth_exchange_failed', deployFailureReason(error));
-      }
-    });
-    return Object.freeze({ ...result, grantRevocation: 'confirmed' });
+    const result = await grant.withAccessToken((accessToken) => deployWithAccessToken(input, accessToken));
+    return Object.freeze({ ...result, grantRevocation: 'confirmed' as const });
   } finally {
     try {
       await grant.revoke(input.transport, input.config);

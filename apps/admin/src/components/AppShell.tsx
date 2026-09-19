@@ -1,10 +1,10 @@
 import { ArrowUpRight, Database, GearSix, Users, WarningCircle, X } from '@phosphor-icons/react'
 import { Link, Outlet } from '@tanstack/react-router'
-import { Loader } from '@cloudflare/kumo'
-import { Button } from './Button'
+import { LifecycleScreen } from './LifecycleScreen'
 import type { ComponentType } from 'react'
-import { useGateway } from '../GatewayContext'
+import { useGateway, type RemovalProgress } from '../GatewayContext'
 import { BrandMark } from './BrandMark'
+import { Button } from './Button'
 
 type AppPath = '/sources' | '/team' | '/settings'
 
@@ -20,16 +20,51 @@ const navigation: NavItem[] = [
   { to: '/settings', label: 'Settings', icon: GearSix },
 ]
 
+const REMOVAL_TITLE = 'Removal in progress'
+const removalGuidance = {
+  interrupted: 'Removal of this gateway has started, and some of its connected resources may already be gone, so parts of this dashboard can fail to load. If you lost the removal page, continue here: you authorize the removal again in Cloudflare, and it resumes from the saved progress.',
+  running: 'Your gateway is removing its connected resources right now, so parts of this dashboard can fail to load. Keep the removal page open. If you lost it, you can continue here once this attempt has ended.',
+} satisfies Record<RemovalProgress, string>
+
 export function AppShell() {
-  const { error, hasLoaded, isLoading, reload, clearError, status, update } = useGateway()
+  const { error, hasLoaded, isBusy, isLoading, reload, clearError, prepareTeardownAction, removal, status, update } = useGateway()
+
+  // The way back into a removal whose page was lost: the consent Settings starts, resumed from the gateway's saved progress.
+  const continueRemoval = async () => {
+    try {
+      const prepared = await prepareTeardownAction()
+      window.location.assign(prepared.handoffUrl)
+    } catch { /* The provider keeps the safe error visible. */ }
+  }
 
   if (isLoading && !hasLoaded) {
     return (
+      <LifecycleScreen title="Loading your gateway…" loading>
+        <p role="status">Reading your gateway’s current status.</p>
+      </LifecycleScreen>
+    )
+  }
+
+  // A removal that has begun explains a dashboard that cannot load, and its one action does not depend on what failed.
+  if (removal !== null && !hasLoaded) {
+    return (
       <div className="flex min-h-dvh items-center justify-center bg-canvas px-5">
-        <div className="flex flex-col items-center text-center">
-          <BrandMark className="text-brand" />
-          <Loader size="lg" className="mt-5" />
-          <p className="mt-3 text-sm text-kumo-subtle">Loading your gateway…</p>
+        <div className="surface-card w-full max-w-md p-6 text-center">
+          <div className="mx-auto flex size-11 items-center justify-center rounded-xl bg-warning-soft text-warning-strong">
+            <WarningCircle size={21} weight="fill" />
+          </div>
+          <h1 className="mt-4 text-lg font-semibold text-kumo-strong">{REMOVAL_TITLE}</h1>
+          <p className="mt-2 text-pretty text-sm leading-6 text-kumo-subtle">{removalGuidance[removal]}</p>
+          {error ? <p role="alert" className="mt-2 text-pretty text-sm leading-6 text-danger">{error}</p> : null}
+          {removal === 'interrupted' ? (
+            <Button variant="primary" className="pressable mt-5" loading={isBusy} onClick={() => void continueRemoval()}>
+              Continue removing this gateway
+            </Button>
+          ) : (
+            <Button variant="primary" className="pressable mt-5" onClick={() => void reload()}>
+              Try again
+            </Button>
+          )}
         </div>
       </div>
     )
@@ -37,18 +72,14 @@ export function AppShell() {
 
   if (error && !hasLoaded) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-canvas px-5">
-        <div className="surface-card w-full max-w-md p-6 text-center">
-          <div className="mx-auto flex size-11 items-center justify-center rounded-xl bg-danger-soft text-danger">
-            <WarningCircle size={21} weight="fill" />
-          </div>
-          <h1 className="mt-4 text-lg font-semibold text-kumo-strong">Couldn’t load the gateway</h1>
-          <p className="mt-2 text-pretty text-sm leading-6 text-kumo-subtle">{error}</p>
-          <Button variant="primary" className="pressable mt-5" onClick={() => void reload()}>
+      <LifecycleScreen title="Couldn’t load the gateway">
+        <p role="alert">{error}</p>
+        <div className="actions">
+          <button type="button" onClick={() => void reload()}>
             Try again
-          </Button>
+          </button>
         </div>
-      </div>
+      </LifecycleScreen>
     )
   }
 
@@ -85,7 +116,7 @@ export function AppShell() {
           {update?.status === 'available' && update.available ? (
             <Link
               to="/settings"
-              className="mt-3 flex items-center justify-between gap-2 rounded-lg bg-warning-soft px-3 py-2 text-xs text-warning-strong underline-offset-4 hover:underline"
+              className="mt-3 flex items-center justify-between gap-2 rounded-xl border border-white/20 px-3 py-3 font-mono text-xs text-sidebar-ink underline-offset-4 hover:underline"
             >
               <span className="min-w-0">
                 <span className="block font-medium">Update available</span>
@@ -119,6 +150,20 @@ export function AppShell() {
         </header>
 
         <main className="mx-auto min-h-dvh w-full max-w-5xl px-5 py-6 sm:px-8 lg:py-8">
+          {removal !== null ? (
+            <div role="status" className="mb-5 flex items-start gap-3 rounded-xl border border-warning/30 bg-warning-soft px-4 py-3 text-warning-strong">
+              <WarningCircle size={17} className="mt-0.5 shrink-0" weight="fill" />
+              <div className="min-w-0 flex-1 text-sm leading-6">
+                <p className="font-semibold">{REMOVAL_TITLE}</p>
+                <p className="mt-1 max-w-[80ch]">{removalGuidance[removal]}</p>
+                {removal === 'interrupted' ? (
+                  <Button variant="secondary" className="pressable mt-3" loading={isBusy} onClick={() => void continueRemoval()}>
+                    Continue removing this gateway
+                  </Button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
           {error ? (
             <div role="alert" className="mb-5 flex items-start gap-3 rounded-xl border border-danger/15 bg-danger-soft px-4 py-3 text-danger">
               <WarningCircle size={17} className="mt-0.5 shrink-0" weight="fill" />

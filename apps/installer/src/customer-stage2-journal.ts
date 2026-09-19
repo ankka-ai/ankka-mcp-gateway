@@ -8,13 +8,20 @@ import { deepFreezePlainData } from './plain-data';
 import { jsonValueSchema, type JsonObject, type JsonValue } from './boundary';
 
 export const CUSTOMER_STAGE2_JOURNAL_KEY = 'ankka-mcp-gateway/stage2-journal/v1';
-// The final runtime comes last: its upload restarts the Durable Object on the
-// new code and refuses storage to the pass that uploaded it, so everything
-// that must be journaled happens before it.
+// The management hostname's placeholder record comes first, so the name exists
+// at the zone's nameservers minutes before a browser can be sent to it, and is
+// released right before the custom domain takes the hostname: Cloudflare
+// refuses to attach a custom domain over an externally managed record. The
+// final runtime comes last: its upload restarts the Durable Object on the new
+// code and refuses storage to the pass that uploaded it, so everything that
+// must be journaled happens before it.
 export const CUSTOMER_STAGE2_ACTION_ORDER = Object.freeze([
+  'management_dns_record',
   'management_access_application',
   'management_admin_policy',
+  'management_service_policy',
   'gateway_resources',
+  'management_dns_record_release',
   'management_custom_domain',
   'workers_dev_disable',
   'terminal_verify',
@@ -22,6 +29,38 @@ export const CUSTOMER_STAGE2_ACTION_ORDER = Object.freeze([
 ] as const);
 
 export type CustomerStage2ActionName = (typeof CUSTOMER_STAGE2_ACTION_ORDER)[number];
+
+/** The action a plan may omit: the Service Auth policy exists only for a deployment configuration that opted in. */
+export const CUSTOMER_STAGE2_OPTIONAL_ACTION = 'management_service_policy' satisfies CustomerStage2ActionName;
+
+/**
+ * The management hostname's placeholder record and its release. Every journal
+ * created since these actions exist takes both; a journal written by an
+ * earlier release has neither, and its shape stays valid for verification,
+ * update and removal exactly as before.
+ */
+export const CUSTOMER_STAGE2_DNS_RECORD_ACTIONS = Object.freeze([
+  'management_dns_record',
+  'management_dns_record_release',
+] as const satisfies readonly CustomerStage2ActionName[]);
+
+function dnsRecordAction(name: CustomerStage2ActionName): boolean {
+  return CUSTOMER_STAGE2_DNS_RECORD_ACTIONS.some((candidate) => candidate === name);
+}
+
+/**
+ * The sequence a journal follows: the fixed order, with the service policy
+ * slot only when the journal holds that action, and the placeholder record
+ * pair only when the journal opened with the record.
+ */
+export function customerStage2ActionSequence(
+  actions: readonly { readonly name: CustomerStage2ActionName }[],
+): readonly CustomerStage2ActionName[] {
+  const servicePolicy = actions.some((action) => action.name === CUSTOMER_STAGE2_OPTIONAL_ACTION);
+  const dnsRecord = actions.some((action) => action.name === 'management_dns_record');
+  return CUSTOMER_STAGE2_ACTION_ORDER.filter((name) =>
+    (name !== CUSTOMER_STAGE2_OPTIONAL_ACTION || servicePolicy) && (!dnsRecordAction(name) || dnsRecord));
+}
 export type CustomerStage2ActionPhase = 'prepared' | 'send_armed' | 'submitted' | 'verified';
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
@@ -119,8 +158,8 @@ function validTime(value: number): void {
   if (!Number.isSafeInteger(value) || value < 0) fail('invalid');
 }
 
-function validateAction(action: CustomerStage2Action, index: number, updatedAt: number): void {
-  if (action.name !== CUSTOMER_STAGE2_ACTION_ORDER[index] || action.preparedAt > updatedAt) fail('invalid');
+function validateAction(action: CustomerStage2Action, index: number, updatedAt: number, sequence: readonly CustomerStage2ActionName[]): void {
+  if (action.name !== sequence[index] || action.preparedAt > updatedAt) fail('invalid');
   const armed = action.sendArmedAt;
   const submitted = action.submittedAt;
   const verified = action.verifiedAt;
@@ -157,9 +196,10 @@ export function parseCustomerStage2Journal<Input>(value: Input): CustomerStage2J
         )) ||
         (journal.completedAt !== null && (
           journal.lease !== null || journal.completedAt > journal.updatedAt ||
-            journal.actions.length !== CUSTOMER_STAGE2_ACTION_ORDER.length ||
+            journal.actions.length !== customerStage2ActionSequence(journal.actions).length ||
             journal.actions.some((action) => action.phase !== 'verified')))) return null;
-    journal.actions.forEach((action, index) => validateAction(action, index, journal.updatedAt));
+    const sequence = customerStage2ActionSequence(journal.actions);
+    journal.actions.forEach((action, index) => validateAction(action, index, journal.updatedAt, sequence));
     assertSecretFree(journal);
     const serialized = canonicalJson(journal);
     if (new TextEncoder().encode(serialized).byteLength > MAX_JOURNAL_BYTES) return null;
@@ -296,7 +336,8 @@ export function prepareCustomerStage2Action(
 ): CustomerStage2Journal {
   const journal = requireJournal(value);
   assertLease(journal, input.attemptId, input.now);
-  if (input.name !== CUSTOMER_STAGE2_ACTION_ORDER[journal.actions.length]) fail('conflict');
+  // The candidate decides whether the optional slot is taken; either way it must be the next name in that sequence.
+  if (input.name !== customerStage2ActionSequence([...journal.actions, { name: input.name }])[journal.actions.length]) fail('conflict');
   try {
     assertSecretFree(input.record);
   } catch {
@@ -332,7 +373,7 @@ export function armCustomerStage2Action(
 ): CustomerStage2Journal {
   const journal = requireJournal(value);
   assertLease(journal, input.attemptId, input.now);
-  const index = CUSTOMER_STAGE2_ACTION_ORDER.indexOf(input.name);
+  const index = journal.actions.findIndex((candidate) => candidate.name === input.name);
   const action = journal.actions[index];
   if (!action || action.phase !== 'prepared' ||
       journal.actions.slice(0, index).some((item) => item.phase !== 'verified')) fail('conflict');
@@ -354,7 +395,7 @@ export function submitCustomerStage2Action(
 ): CustomerStage2Journal {
   const journal = requireJournal(value);
   assertLease(journal, input.attemptId, input.now);
-  const index = CUSTOMER_STAGE2_ACTION_ORDER.indexOf(input.name);
+  const index = journal.actions.findIndex((candidate) => candidate.name === input.name);
   const action = journal.actions[index];
   if (!action || action.phase !== 'send_armed' || input.locator === null) fail('conflict');
   try {
@@ -376,7 +417,7 @@ export function verifyCustomerStage2Action(
 ): CustomerStage2Journal {
   const journal = requireJournal(value);
   assertLease(journal, input.attemptId, input.now);
-  const index = CUSTOMER_STAGE2_ACTION_ORDER.indexOf(input.name);
+  const index = journal.actions.findIndex((candidate) => candidate.name === input.name);
   const action = journal.actions[index];
   if (!action || action.phase !== 'submitted' || action.locator === null) fail('conflict');
   return replaceAction(journal, index, {
@@ -392,7 +433,7 @@ export function completeCustomerStage2Journal(
 ): CustomerStage2Journal {
   const journal = requireJournal(value);
   assertLease(journal, input.attemptId, input.now);
-  if (journal.actions.length !== CUSTOMER_STAGE2_ACTION_ORDER.length ||
+  if (journal.actions.length !== customerStage2ActionSequence(journal.actions).length ||
       journal.actions.some((action) => action.phase !== 'verified')) fail('conflict');
   return next(journal, { lease: null, completedAt: input.now }, input.now);
 }

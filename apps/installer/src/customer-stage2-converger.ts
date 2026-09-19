@@ -9,6 +9,8 @@ import {
   attachManagementCustomDomain,
   createManagementAccessApplication,
   createManagementAdminAllowPolicy,
+  createManagementDnsRecord,
+  createManagementServicePolicy,
   getAccountWorkersSubdomain,
   getZeroTrustOrganization,
   listAccessIdentityProviders,
@@ -17,9 +19,16 @@ import {
   prepareManagementAccessApplicationIntent,
   prepareManagementAdminPolicyIntent,
   prepareManagementCustomDomainIntent,
+  prepareManagementDnsRecordIntent,
+  prepareManagementDnsRecordReleaseIntent,
+  prepareManagementServicePolicyIntent,
   recoverManagementAccessApplication,
   recoverManagementAdminAllowPolicy,
   recoverManagementCustomDomain,
+  recoverManagementDnsRecord,
+  recoverManagementDnsRecordRelease,
+  recoverManagementServicePolicy,
+  releaseManagementDnsRecord,
   setWorkerBootstrapSubdomain,
   verifyManagementAccessApplicationGet,
   verifyManagementAccessApplicationList,
@@ -27,10 +36,17 @@ import {
   verifyManagementAdminAllowPolicyList,
   verifyManagementCustomDomainGet,
   verifyManagementCustomDomainList,
+  verifyManagementDnsRecordAbsent,
+  verifyManagementDnsRecordGet,
+  verifyManagementDnsRecordList,
+  verifyManagementServicePolicyGet,
+  verifyManagementServicePolicyList,
   verifyWorkerBootstrapSubdomain,
   type ManagementAccessApplicationLocator,
   type ManagementAdminPolicyLocator,
   type ManagementCustomDomainLocator,
+  type ManagementDnsRecordLocator,
+  type ManagementServicePolicyLocator,
   type ZeroTrustOrganization,
 } from './cloudflare-management-surface';
 import type { CustomerBootstrapConvergenceResult } from './customer-bootstrap-callback';
@@ -77,7 +93,6 @@ import {
   type CustomerWorkerActiveRelease,
 } from './customer-worker-self-update';
 import { sha256Hex } from './crypto';
-import { PUBLIC_ORIGIN } from './constants';
 import type { GatewayWorkerPlainTextBindings } from './cloudflare-worker-direct-upload';
 import { isPlainDataTree } from './plain-data';
 import {
@@ -106,6 +121,14 @@ const policyLocatorSchema = v.strictObject({
 });
 const domainLocatorSchema = v.strictObject({
   domainId: v.pipe(v.string(), v.regex(CUSTOM_DOMAIN_ID)),
+});
+const dnsRecordLocatorSchema = v.strictObject({
+  recordId: v.pipe(v.string(), v.regex(PROVIDER_ID)),
+});
+const dnsRecordReleaseLocatorSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  kind: v.literal('management_dns_record_released'),
+  recordId: v.pipe(v.string(), v.regex(PROVIDER_ID)),
 });
 const workerReleaseLocatorSchema = v.strictObject({
   workerId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
@@ -137,6 +160,8 @@ export interface CustomerStage2BootstrapRuntime {
 }
 
 export interface CustomerStage2RuntimeIdentity {
+  /** The control-plane origin the bootstrap shell was bound to: the release manifest's, never a compiled constant. */
+  readonly controlPlaneOrigin: string;
   readonly updateChannel: 'canary' | 'stable';
   readonly updateKeyId: string;
   readonly updatePublicKey: string;
@@ -230,6 +255,22 @@ export interface CustomerStage2ConvergerInput {
   readonly bootstrap?: CustomerStage2BootstrapRuntime;
   /** Present in the restricted runtime; absent after the strict final self-update. */
   readonly finalRuntimeSource?: string;
+  /**
+   * The customer's management credential, present only where the setup page
+   * received one and the owning object still holds it in memory. The final
+   * runtime upload writes it once as the `ANKKA_MANAGEMENT_TOKEN` secret
+   * binding, and the exact read-backs of this run then expect that binding.
+   * Like the grant it is request-local: it never enters the journal, a
+   * receipt, an error, or any durable transition. Absent, the install
+   * completes without it.
+   */
+  readonly managementCredential?: string | undefined;
+  /**
+   * Recovery in the final runtime uploads nothing. It states whether its own
+   * environment carries the management secret, so the exact read-back of the
+   * active version expects the binding set that runtime was installed with.
+   */
+  readonly managementCredentialBound?: boolean | undefined;
   readonly payload: CustomerStage2PayloadAdapter;
   readonly transport: CustomerCloudflareTransport;
   readonly now: () => number;
@@ -381,6 +422,19 @@ function domainLocator(value: JsonValue | null): ManagementCustomDomainLocator {
   return Object.freeze(parsed.output);
 }
 
+function dnsRecordLocator(value: JsonValue | null): ManagementDnsRecordLocator {
+  const parsed = v.safeParse(dnsRecordLocatorSchema, value);
+  if (!parsed.success) fail('journal_mismatch');
+  return Object.freeze(parsed.output);
+}
+
+/** The release locator names the record it released; it must be the journal's own placeholder. */
+function dnsRecordReleaseLocator(value: JsonValue | null, record: ManagementDnsRecordLocator): ManagementDnsRecordLocator {
+  const parsed = v.safeParse(dnsRecordReleaseLocatorSchema, value);
+  if (!parsed.success || parsed.output.recordId !== record.recordId) fail('journal_mismatch');
+  return record;
+}
+
 function workerReleaseLocator(value: JsonValue | null): CustomerWorkerActiveRelease {
   const parsed = v.safeParse(workerReleaseLocatorSchema, value);
   if (!parsed.success) fail('journal_mismatch');
@@ -518,7 +572,7 @@ async function adoptOwnership(input: CustomerStage2ConvergerInput): Promise<Read
     ANKKA_GATEWAY_RELEASE: plan.releaseId,
     ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${plan.releaseArtifactSha256}`,
     ANKKA_INSTALL_ID: plan.managementOwnershipMarker,
-    ANKKA_INSTALLER_ORIGIN: PUBLIC_ORIGIN,
+    ANKKA_INSTALLER_ORIGIN: input.runtime.controlPlaneOrigin,
     ANKKA_MANAGEMENT_HOSTNAME: plan.bootstrapIdentity === undefined ? plan.gatewayConfiguration.managementHostname : new URL(state.trust.bootstrapCallback).hostname,
     ANKKA_PLAN_HASH: plan.bootstrapIdentity?.planHash ?? plan.planHash,
     ANKKA_PLAN_ID: plan.bootstrapIdentity?.planId ?? plan.planId,
@@ -573,7 +627,8 @@ function finalBindings(
   context: Context,
   application: ManagementAccessApplicationLocator,
 ): GatewayWorkerPlainTextBindings {
-  return Object.freeze({
+  const serviceAccess = context.plan.gatewayConfiguration.serviceAccess;
+  const required = {
     ADMIN_EMAILS: context.plan.managementAdminEmails.join(','),
     ANKKA_INSTALL_ID: context.journal.identity.installId,
     ANKKA_GATEWAY_RELEASE: context.plan.releaseId,
@@ -590,7 +645,9 @@ function finalBindings(
     CLOUDFLARE_ZONE_ID: context.target.zoneId,
     CLOUDFLARE_ZONE_NAME: context.target.zoneName,
     ZERO_TRUST_READY: 'true',
-  });
+  } as const;
+  // The service identity the plan opted into reaches the runtime as a binding; every other gateway has none.
+  return Object.freeze(serviceAccess === undefined ? required : { ...required, ANKKA_SERVICE_CLIENT_ID: serviceAccess.clientId });
 }
 
 function providerCall(context: Context) {
@@ -629,6 +686,10 @@ function domainOperation(context: Context) {
   };
 }
 
+function dnsRecordOperation(context: Context) {
+  return domainOperation(context);
+}
+
 function runtimeInspection(context: Context, application: ManagementAccessApplicationLocator) {
   return {
     accessToken: context.input.accessToken,
@@ -637,6 +698,8 @@ function runtimeInspection(context: Context, application: ManagementAccessApplic
     expectedWorkerId: context.journal.identity.workerId,
     finalRuntimeSha256: context.journal.identity.finalRuntimeSha256,
     bindings: finalBindings(context, application),
+    managementCredentialBound: context.input.managementCredential !== undefined ||
+      context.input.managementCredentialBound === true,
     transport: context.input.transport,
   };
 }
@@ -678,6 +741,19 @@ async function provePolicy(
   context.proofs.set(key, true);
 }
 
+async function proveServicePolicy(
+  context: Context,
+  application: ManagementAccessApplicationLocator,
+  locator: ManagementServicePolicyLocator,
+): Promise<void> {
+  const key = `service-policy:${canonicalJson({ application, locator })}`;
+  if (context.proofs.has(key)) return;
+  const operation = policyOperation(context, application);
+  await verifyManagementServicePolicyGet({ ...operation, ...locator });
+  await verifyManagementServicePolicyList({ ...operation, ...locator });
+  context.proofs.set(key, true);
+}
+
 async function proveGatewayResources(context: Context): Promise<void> {
   const key = 'gateway_resources';
   if (context.proofs.has(key)) return;
@@ -691,6 +767,23 @@ async function proveDomain(context: Context, locator: ManagementCustomDomainLoca
   const operation = domainOperation(context);
   await verifyManagementCustomDomainGet({ ...operation, ...locator });
   await verifyManagementCustomDomainList({ ...operation, ...locator });
+  context.proofs.set(key, true);
+}
+
+async function proveDnsRecord(context: Context, locator: ManagementDnsRecordLocator): Promise<void> {
+  const key = `dns-record:${canonicalJson(locator)}`;
+  if (context.proofs.has(key)) return;
+  const operation = dnsRecordOperation(context);
+  await verifyManagementDnsRecordGet({ ...operation, ...locator });
+  await verifyManagementDnsRecordList({ ...operation, ...locator });
+  context.proofs.set(key, true);
+}
+
+/** The placeholder never outlives the installation: its absence by identifier is proven like any other terminal state. */
+async function proveDnsRecordReleased(context: Context, locator: ManagementDnsRecordLocator): Promise<void> {
+  const key = `dns-record-released:${canonicalJson(locator)}`;
+  if (context.proofs.has(key)) return;
+  await verifyManagementDnsRecordAbsent({ ...dnsRecordOperation(context), ...locator });
   context.proofs.set(key, true);
 }
 
@@ -713,6 +806,85 @@ async function proveWorkersDevDisabled(context: Context): Promise<void> {
   context.proofs.set(key, true);
 }
 
+/**
+ * The first Stage 2 mutation: the management hostname's proxied placeholder
+ * record. It exists at the zone's nameservers seconds later, minutes before
+ * the browser can be sent to the hostname, so a resolver asked early caches
+ * a name instead of its absence. The fresh-state attestation must still be
+ * current when it is armed, as it covers this first write.
+ */
+async function convergeDnsRecord(context: Context): Promise<ManagementDnsRecordLocator> {
+  const name = 'management_dns_record' as const;
+  const operation = dnsRecordOperation(context);
+  const intent = prepareManagementDnsRecordIntent(operation);
+  await prepareAction(context, name, jsonObject(intent));
+  let action = customerStage2Action(context.journal, name);
+  let armedHere = false;
+  if (action?.phase === 'prepared') {
+    if (clock(context.input, context.journal.updatedAt) >= context.journal.preflight.expiresAt) {
+      fail('provider_mismatch');
+    }
+    await armAction(context, name);
+    action = customerStage2Action(context.journal, name);
+    armedHere = true;
+  }
+  if (action?.phase === 'send_armed') {
+    const locator = armedHere
+      ? await createManagementDnsRecord({ ...operation, intent })
+      : (await recoverManagementDnsRecord({ ...operation, intent })).locator;
+    await submitAction(context, name, jsonValue(locator));
+    action = customerStage2Action(context.journal, name);
+  }
+  if (action?.phase === 'submitted') {
+    await proveDnsRecord(context, dnsRecordLocator(action.locator));
+    await verifyAction(context, name);
+    action = customerStage2Action(context.journal, name);
+  }
+  const locator = dnsRecordLocator(action?.locator ?? null);
+  // The record stands only until its release: once that boundary is
+  // journaled, the release step owns the record's state.
+  if (customerStage2Action(context.journal, 'management_dns_record_release') === null) {
+    await proveDnsRecord(context, locator);
+  }
+  return locator;
+}
+
+/**
+ * Releases the placeholder immediately before the custom domain takes the
+ * hostname: Cloudflare refuses to attach a custom domain over an externally
+ * managed record, so the transition is its own journaled boundary. A lost
+ * deletion is resolved by reading the identifier under the next consent.
+ */
+async function convergeDnsRecordRelease(
+  context: Context,
+  record: ManagementDnsRecordLocator,
+): Promise<void> {
+  const name = 'management_dns_record_release' as const;
+  const operation = dnsRecordOperation(context);
+  const intent = prepareManagementDnsRecordReleaseIntent({ ...operation, ...record });
+  await prepareAction(context, name, jsonObject(intent));
+  let action = customerStage2Action(context.journal, name);
+  let armedHere = false;
+  if (action?.phase === 'prepared') {
+    await armAction(context, name);
+    action = customerStage2Action(context.journal, name);
+    armedHere = true;
+  }
+  if (action?.phase === 'send_armed') {
+    const released = armedHere
+      ? await releaseManagementDnsRecord({ ...operation, intent })
+      : await recoverManagementDnsRecordRelease({ ...operation, intent });
+    await submitAction(context, name, jsonValue(released));
+    action = customerStage2Action(context.journal, name);
+  }
+  if (action?.phase === 'submitted') {
+    await proveDnsRecordReleased(context, dnsRecordReleaseLocator(action.locator, record));
+    await verifyAction(context, name);
+    action = customerStage2Action(context.journal, name);
+  }
+  await proveDnsRecordReleased(context, dnsRecordReleaseLocator(action?.locator ?? null, record));
+}
+
 async function convergeApplication(context: Context): Promise<ManagementAccessApplicationLocator> {
   const name = 'management_access_application' as const;
   const operation = applicationOperation(context);
@@ -721,9 +893,6 @@ async function convergeApplication(context: Context): Promise<ManagementAccessAp
   let action = customerStage2Action(context.journal, name);
   let armedHere = false;
   if (action?.phase === 'prepared') {
-    if (clock(context.input, context.journal.updatedAt) >= context.journal.preflight.expiresAt) {
-      fail('provider_mismatch');
-    }
     await armAction(context, name);
     action = customerStage2Action(context.journal, name);
     armedHere = true;
@@ -774,6 +943,39 @@ async function convergePolicy(
   }
   const locator = policyLocator(action?.locator ?? null);
   await provePolicy(context, application, locator);
+  return locator;
+}
+
+/** The receipt-owned Service Auth policy, only for a plan that opted into a service identity. */
+async function convergeServicePolicy(
+  context: Context,
+  application: ManagementAccessApplicationLocator,
+): Promise<ManagementServicePolicyLocator> {
+  const name = 'management_service_policy' as const;
+  const operation = policyOperation(context, application);
+  const intent = prepareManagementServicePolicyIntent(operation);
+  await prepareAction(context, name, jsonObject(intent));
+  let action = customerStage2Action(context.journal, name);
+  let armedHere = false;
+  if (action?.phase === 'prepared') {
+    await armAction(context, name);
+    action = customerStage2Action(context.journal, name);
+    armedHere = true;
+  }
+  if (action?.phase === 'send_armed') {
+    const locator = armedHere
+      ? await createManagementServicePolicy({ ...operation, intent })
+      : (await recoverManagementServicePolicy({ ...operation, intent })).locator;
+    await submitAction(context, name, jsonValue(locator));
+    action = customerStage2Action(context.journal, name);
+  }
+  if (action?.phase === 'submitted') {
+    await proveServicePolicy(context, application, policyLocator(action.locator));
+    await verifyAction(context, name);
+    action = customerStage2Action(context.journal, name);
+  }
+  const locator = policyLocator(action?.locator ?? null);
+  await proveServicePolicy(context, application, locator);
   return locator;
 }
 
@@ -923,6 +1125,9 @@ async function convergeFinalRuntime(
     action = customerStage2Action(context.journal, name);
   }
   const inspection = runtimeInspection(context, application);
+  // The journal record above names the plain-text bindings only. The
+  // management credential reaches nothing but the upload's own metadata.
+  const managementCredential = context.input.managementCredential;
   if (action?.phase === 'send_armed') {
     const source = context.input.finalRuntimeSource;
     const handover = context.input.handover;
@@ -933,6 +1138,7 @@ async function convergeFinalRuntime(
       await uploadCustomerWorkerFinalRuntime({
         ...inspection,
         finalRuntimeSource: source,
+        managementCredential,
         previousVersionId: context.journal.identity.bootstrapVersionId,
       });
       return true;
@@ -942,6 +1148,7 @@ async function convergeFinalRuntime(
       : await publishCustomerWorkerFinalRuntime({
         ...inspection,
         finalRuntimeSource: source,
+        managementCredential,
         previousVersionId: context.journal.identity.bootstrapVersionId,
       });
     if (locator === null) fail('runtime_source_unavailable');
@@ -1003,16 +1210,22 @@ async function convergeWorkersDev(context: Context): Promise<void> {
   await proveWorkersDevDisabled(context);
 }
 
-async function terminalProof(
-  context: Context,
-  application: ManagementAccessApplicationLocator,
-  policy: ManagementAdminPolicyLocator,
-  domain: ManagementCustomDomainLocator,
-  runtime: boolean,
-): Promise<void> {
+/** The terminal resources of a journal: the placeholder record is null for a journal written before it existed. */
+interface TerminalLocators {
+  readonly application: ManagementAccessApplicationLocator;
+  readonly policy: ManagementAdminPolicyLocator;
+  readonly servicePolicy: ManagementServicePolicyLocator | null;
+  readonly domain: ManagementCustomDomainLocator;
+  readonly dnsRecord: ManagementDnsRecordLocator | null;
+}
+
+async function terminalProof(context: Context, locators: TerminalLocators, runtime: boolean): Promise<void> {
+  const { application, policy, servicePolicy, domain, dnsRecord } = locators;
   await proveApplication(context, application);
   await provePolicy(context, application, policy);
+  if (servicePolicy !== null) await proveServicePolicy(context, application, servicePolicy);
   await proveGatewayResources(context);
+  if (dnsRecord !== null) await proveDnsRecordReleased(context, dnsRecord);
   await proveDomain(context, domain);
   await proveWorkersDevDisabled(context);
   if (!runtime) return;
@@ -1020,16 +1233,13 @@ async function terminalProof(
   if (release === null) fail('provider_mismatch');
 }
 
-async function convergeTerminal(
-  context: Context,
-  application: ManagementAccessApplicationLocator,
-  policy: ManagementAdminPolicyLocator,
-  domain: ManagementCustomDomainLocator,
-): Promise<void> {
+async function convergeTerminal(context: Context, locators: TerminalLocators): Promise<void> {
   const name = 'terminal_verify' as const;
-  await terminalProof(context, application, policy, domain, false);
+  await terminalProof(context, locators, false);
+  // Every action before this one, whether or not the plan took the service policy slot.
+  const terminalIndex = context.journal.actions.findIndex((action) => action.name === name);
   const prerequisiteHash = `sha256:${await sha256Hex(canonicalJson(
-    context.journal.actions.slice(0, 5),
+    terminalIndex === -1 ? context.journal.actions : context.journal.actions.slice(0, terminalIndex),
   ))}`;
   const record = jsonObject({
     schemaVersion: 1,
@@ -1060,7 +1270,7 @@ async function convergeTerminal(
     action = customerStage2Action(context.journal, name);
   }
   if (action?.phase === 'submitted') {
-    await terminalProof(context, application, policy, domain, false);
+    await terminalProof(context, locators, false);
     await verifyAction(context, name);
   }
 }
@@ -1198,16 +1408,22 @@ export async function convergeCustomerStage2(
         journal,
         proofs: new Map(),
       };
-      const application = applicationLocator(
-        customerStage2Action(journal, 'management_access_application')?.locator ?? null,
-      );
-      const policy = policyLocator(
-        customerStage2Action(journal, 'management_admin_policy')?.locator ?? null,
-      );
-      const domain = domainLocator(
-        customerStage2Action(journal, 'management_custom_domain')?.locator ?? null,
-      );
-      await terminalProof(completed, application, policy, domain, true);
+      const servicePolicyAction = customerStage2Action(journal, 'management_service_policy');
+      // A journal from before the placeholder record existed has no such action and proves nothing about it.
+      const dnsRecordAction = customerStage2Action(journal, 'management_dns_record');
+      await terminalProof(completed, {
+        application: applicationLocator(
+          customerStage2Action(journal, 'management_access_application')?.locator ?? null,
+        ),
+        policy: policyLocator(
+          customerStage2Action(journal, 'management_admin_policy')?.locator ?? null,
+        ),
+        servicePolicy: servicePolicyAction === null ? null : policyLocator(servicePolicyAction.locator),
+        domain: domainLocator(
+          customerStage2Action(journal, 'management_custom_domain')?.locator ?? null,
+        ),
+        dnsRecord: dnsRecordAction === null ? null : dnsRecordLocator(dnsRecordAction.locator),
+      }, true);
       return success();
     }
     const acquiredAt = clock(input, journal.updatedAt);
@@ -1232,12 +1448,16 @@ export async function convergeCustomerStage2(
     proofs: new Map(),
   };
   try {
+    const dnsRecord = await convergeDnsRecord(context);
     const application = await convergeApplication(context);
     const policy = await convergePolicy(context, application);
+    const servicePolicy = context.plan.gatewayConfiguration.serviceAccess === undefined
+      ? null : await convergeServicePolicy(context, application);
     await convergeGatewayResources(context, application);
+    await convergeDnsRecordRelease(context, dnsRecord);
     const domain = await convergeDomain(context);
     await convergeWorkersDev(context);
-    await convergeTerminal(context, application, policy, domain);
+    await convergeTerminal(context, { application, policy, servicePolicy, domain, dnsRecord });
     const handedOver = await convergeFinalRuntime(context, application);
     return handedOver ? Object.freeze({ verified: false, handedOver: true }) : success();
   } catch (error) {

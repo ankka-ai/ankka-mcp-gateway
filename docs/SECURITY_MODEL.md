@@ -34,19 +34,43 @@ It is additionally bound to the selected account and target and is used only
 for the approved provider calls or one exact authenticated gateway Worker
 action.
 
-Both grant types are held only in request-local memory, are never written to
-Durable Object state, logs, analytics, browser output, or support evidence, and
-are subject to bounded revocation attempts before their local copies are
-discarded.
+Both grant types are held only in memory: in the callback request, or, for an
+operation that runs behind a progress page, in the owning Durable Object for
+one bounded attempt window. They are never written to Durable Object state,
+logs, analytics, browser output, or support evidence, and are subject to
+bounded revocation attempts before their local copies are discarded. An object
+restart between passes loses such a grant and stops the attempt as
+recovery-required with an unconfirmed revocation; a fresh consent resumes from
+the durable step receipts.
 
 Revocation is a provider operation and may be unconfirmed. Discarding a local
 copy does not prove provider-side revocation.
 
-V1 has no permanent Cloudflare management credential. Team membership and
-source audiences are managed directly in Cloudflare; the gateway does not
-accept a standing API token for Team policy writes. Installer OAuth grants,
-source credentials, and inbound Access tokens cannot be repurposed for that
-work.
+Routine source installation and Team policy management use the optional
+`ANKKA_MANAGEMENT_TOKEN` secret in the customer's Worker. An administrator of
+the Cloudflare account creates this account-owned credential, and it never
+passes through anything Ankka hosts. It is entered either into the customer's
+own gateway, on the setup page that Worker serves before the second approval,
+or directly in Cloudflare on an installed gateway. During setup the value is
+held like the install grant: only in the owning Durable Object's memory,
+until the final runtime upload the install already makes writes it as a
+secret binding. It is never written to Durable Object storage, the install
+journal, a receipt, a log line, an error, a URL, or any response; an object
+restart loses it, and the install then completes without it. It is used only
+with fixed Cloudflare API operations and is never returned to the browser.
+Cloudflare cannot scope it to the gateway's own resources: it can edit every
+Access policy in the account, and the setup page says so before asking for
+it. Deployment, updates, DNS, teardown and upstream credentials retain
+separate authority. See [Management token](MANAGEMENT_TOKEN.md).
+
+An operator-controlled external runner executes the same fixed lifecycle
+operations for disposable development gateways with an operator-managed
+credential. The operation authority catalogue declares that lifecycle
+separately: the credential lives in the operator's store, is never exchanged,
+persisted or revoked by an operation, and never enters a gateway or an
+Ankka-hosted service. Its runner records and signed removal handoffs are its
+own; the hosted finalizer refuses a handoff that did not come from a revoked
+gateway grant. See [the runner guide](AGENT_LIFECYCLE.md).
 
 Cloudflare support confirmed that account-owned and user-owned API tokens can
 scope resources only at User, Account, or Zone level. **Access: Policies
@@ -54,8 +78,7 @@ Write** on one account therefore authorizes every Access policy in that account;
 it cannot be restricted to one reusable Ankka policy. Per-policy Access Policy
 Admin scoping belongs to the human/member IAM model, whose resource-scoped OAuth
 path currently has a beta gap for individual policy API requests. See
-[Team access](TEAM_ACCESS.md) for the V1 manual workflow and the two future
-options that remain under consideration.
+[Team access](TEAM_ACCESS.md) for policy and existing-session limitations.
 
 ## Authorization
 
@@ -83,17 +106,44 @@ and the Worker independently verifies the Access JWT issuer, audience,
 signature, expiry, verified email, and deployment administrator allowlist.
 Cross-origin API requests are rejected.
 
+A gateway can additionally accept exactly one machine identity: the Access
+service token whose client id its deployment configuration opted into. The
+hosted installer never opts in, so customer installations accept only
+administrators. The Worker verifies a service token exactly like an
+administrator's token and then authorizes the exact `common_name` claim
+(`type: app` appears on both kinds of token and distinguishes nothing): a
+token with an email claim is an administrator or nothing, and a token without
+one must carry no identity header and the configured client id. The service
+identity acts only within a fixed method-and-route allowlist (status and
+update reads, source discovery, draft and apply, Team read and save); update
+and teardown action creation and source action cancellation are denied to it,
+as is every other route. Action records name it `service:<client id>` and
+public views expose the actor kind. A malformed opt-in fails closed for every
+caller rather than widening access.
+
+The opt-in is part of the plan's identity (ownership marker and plan hash).
+It reaches the runtime as one optional binding and the Access application as
+one more receipt-owned policy: a Service Auth policy that admits exactly the
+named service token and no identity, created and verified by Stage 2 like the
+administrators' policy and stated in the signed teardown handoff. The hosted
+finalizer accepts exactly the policies the handoff declares; the Service Auth
+policy leaves with the management application, and any other policy stays
+foreign and stops removal.
+
 The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
-store Cloudflare OAuth grants or upstream tokens.
+store Cloudflare OAuth grants, the management credential, or upstream tokens.
+Of the management credential step of setup it stores one fixed word: whether
+a token was provided or the step was skipped.
 
-The Team page is read-only in V1. It can show the gateway's saved snapshot and
-any retained legacy proposal, but changes made directly in Cloudflare are not
-projected back into that snapshot. The Worker rejects new Team policy-write
-requests and does not read a standing management credential. A definitely
-unstarted legacy proposal may still be canceled through its existing guarded
-path; uncertain writes retain their evidence for manual reconciliation rather
-than being called a rollback.
+The Team page reads receipt-owned policies live and records an observation time.
+A changed live audience advances the local revision before a new proposal can
+be saved. Writes verify the exact owned application, sole policy, audience and
+Portal mapping, then persist a send journal before each provider write. An
+ambiguous response retains the exact proposal for recovery; it is not a rollback.
+An unavailable or unrecognized live policy graph is never labeled verified.
+Policy membership does not guarantee effective access or immediate revocation
+of previously issued sessions.
 
 The default-deny source-onboarding candidate creates each new source with one
 exact deny-Everyone policy and verifies the complete policy list before Portal
@@ -102,6 +152,17 @@ implicitly. Upstream operator authentication and a later Team grant are separate
 steps. Existing receipt audiences remain immutable; only the exact historical
 initial policy and the new empty-audience profile are recognized. Old prepared
 source actions cannot silently become new-profile authorizations.
+
+A source that needs sign-in is created with no tools: no tool override on its
+server, the same deny-Everyone policy, and no Portal mapping. Its administrator
+chooses from the list Cloudflare synced after the operator connection, as a
+revision-bound step that re-binds the paused installation's source hash and
+server receipt atomically and is refused in every state other than the exact
+connection pause. The allowlist is enforced where it is for every source: the
+Portal mapping, deny-by-default, with exactly the chosen names enabled and
+proven by read-back. Nothing is attached while nothing is chosen. The synced
+list is an untrusted review aid like any source-authored text, bounded and
+never a provider body.
 
 Legacy Team authorization and callbacks are refused by the installer before
 OAuth code exchange. The relay and new Worker also reject the old Team grant
@@ -118,6 +179,50 @@ and expected ownership markers.
 The receipt and journal preserve recovery authority after interruptions. A
 missing, corrupt, conflicting, or ambiguous record stops automatic mutation.
 Only receipt-owned resources are removed, in reverse dependency order.
+
+### Recovery of an interrupted dependency removal
+
+Dependency removal journals a prefix of removed resources in removal order and
+at most one pending deletion boundary (`send_armed`, `submitted`, or
+`not_applied`). The compiled gateway performs one provider step per callback
+pass and records its progress under the callback's request identity. The
+synthetic-provider regression `test/worker-teardown-recovery.test.mjs` proves
+these guarantees for an interruption at every pass boundary, an unknown
+provider answer at a read or a DELETE, an Access deletion accepted with HTTP
+202 that still reads present, a rejected DELETE, an ownership conflict, and a
+foreign Portal mapping the gateway's server:
+
+- Settling the interrupted attempt closes its action and leaves the receipt
+  and the journal unchanged; a fresh consent can start at once, or after the
+  unsettled action expires.
+- A fresh consent rechecks Portal sharing and reads every resource before any
+  mutation: removed resources must read absent, live resources must read
+  exactly, and only the pending boundary may read either way.
+- A resource that reads absent is recorded as removed and is never sent a
+  DELETE. A pending boundary is re-read before any DELETE, so a lost or
+  accepted-but-unfinished deletion is confirmed by reading, not repeated. A
+  boundary that still reads present is deleted again only under the fresh
+  grant; the grant that armed or submitted it never resends it.
+- An unknown answer is never absence. A conflicting read or a shared server
+  stops every consent without deleting anything until the resource reads
+  exactly again or the server is unmapped. This is recovery-required by design.
+- The journal is bound to the exact dependency graph: the ordered
+  receipt-owned resources, the policy mode, and any partial bridge actions. It
+  is not bound to the mutable management records, so a source draft saved
+  between consents does not strand the recorded removal, while a journal
+  recorded for another graph is never resumed.
+- Completion records exactly one applied deletion per resource and leaves the
+  installation receipt unchanged.
+The hosted root finalizer bounds what one attempt reads without weakening
+these checks: the complete ownership preflight and the scan of other Workers
+in the account run once per attempt, and only Workers modified at or after
+the gateway's creation are read (a missing timestamp means read it); each
+deletion is preceded by an identity re-read of its own resource; a settling
+write is re-read on the owner-side resources it touched. Every provider and
+journal call counts against a fixed budget of fifty, and an attempt that would
+exceed it stops before the platform's cap with the resumable reason
+`budget_exhausted`, so its grant is still revoked and its pending step stays
+armed for the next consent.
 
 ## Software supply chain
 
@@ -186,8 +291,10 @@ guarantee does not claim that those providers process no metadata.
 - Read-only tool policy depends on both gateway configuration and upstream
   enforcement.
 - Worker rollback does not roll back Durable Object data.
-- Automatic teardown is unavailable after a potentially applied Team policy
-  write or new-profile source creation. Revoking a retired preview token or
-  restoring the original roster does not clear the recorded restriction.
+- Automatic teardown is unavailable while a source, Team, update or removal
+  action is unsettled, and for installations whose Team state was written
+  under the retired legacy policy profile. The current receipt-owned executor
+  accepts changed policy audiences. Revoking a retired preview token or
+  restoring the original roster does not clear a recorded legacy restriction.
 - Provider APIs can return ambiguous outcomes; the system stops for recovery
   instead of claiming success.

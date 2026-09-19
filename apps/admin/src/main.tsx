@@ -3,10 +3,12 @@ import { RouterProvider } from '@tanstack/react-router'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { GatewayProvider } from './GatewayContext'
+import { InstallHandoff } from './InstallHandoff'
 import { createPreviewGatewayAdminApi } from './preview-api'
 import { router } from './router'
 import { WebMcpTools } from './WebMcpTools'
 import './styles.css'
+import { customerLoadingStyles } from '../../installer/src/customer-page-theme'
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing root element')
@@ -25,7 +27,8 @@ createRoot(root).render(
   <StrictMode>
     <TooltipProvider>
       <Toasty>
-        {gateway}
+        <style>{customerLoadingStyles}</style>
+        <InstallHandoff>{gateway}</InstallHandoff>
       </Toasty>
     </TooltipProvider>
   </StrictMode>,

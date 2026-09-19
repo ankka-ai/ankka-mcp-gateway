@@ -17,9 +17,11 @@ of a later source installation.
 | Authorization expired before work began | The retained journal proves execution did not start. Its initiating administrator can cancel, then start a fresh authorization from the saved draft. |
 | Authorization closed | The attempt has ended without retained write evidence. Review the saved draft before a new authorization. |
 | Recovery required | The journal is retained. After the previous approval expires, its initiating administrator can renew consent when the gateway can safely reconcile the recorded resources. Otherwise review ownership in Cloudflare. |
-| Connect your source | Authenticate the recorded server in Cloudflare. Keep Require user auth off, then renew consent after its status becomes Ready. |
+| Connect your source | Authenticate the recorded server in Cloudflare. Keep Require user auth off, then renew consent after its status becomes Ready. A sign-in source installed without tools is not resumed yet: its tools are chosen first. |
 | Sync source tools | Sync capabilities in Cloudflare and resolve any connection error before renewing consent. |
-| Review source tools | The synced catalogue lacks a selected tool. Restore the reviewed tools upstream before resuming; the saved selection is never broadened. |
+| Review source tools | The synced catalogue lacks a selected tool. Restore the reviewed tools upstream before resuming, or, for a sign-in source, choose again from its real list; the saved selection is never broadened. |
+| Choose tools | The sign-in source is connected and synced, and nothing is enabled. Its initiating administrator chooses from the real list below the status. |
+| Finish installation | A tool choice is saved. Resume to attach the source with exactly those tools. |
 
 The page checks a blocking action every five seconds for at most 60 automatic
 checks. It then leaves the status and **Check status** control visible. A manual
@@ -99,6 +101,52 @@ prove absence, so renewal must not create a second application. Legacy source
 policy profiles and drift also require separate review. Denying or abandoning
 a renewed consent retains the journal; check status after its approval expires
 to renew again when eligible.
+
+## Choosing the tools of a sign-in source
+
+A source that needs sign-in cannot list its tools before its operator has
+connected it, so its draft is saved, and installed, with none: the server is
+created without any tool override, its Access application denies everyone, and
+it is not attached to the Portal. That is the connection pause above. Two more
+fixed reasons use it: `source_tools_required` (connected and synced, nothing
+chosen) and `source_tools_chosen` (a choice is saved). With nothing chosen a
+resume pauses again; the gateway never attaches a source with nothing enabled.
+
+`GET /api/source-actions/<actionId>/tools` answers the real list for one paused
+installation: `{ schemaVersion, actionId, sourceId, state, tools }`. `state` is
+`connection_required`, `sync_required`, `unsupported` (more than 500 tools, a
+repeated name, or a name the gateway refuses) or `ready`; `tools` is empty
+unless it is `ready`. Cloudflare types a synced tool as an untyped map, so only
+`name` is required: `title`, `description` and the three hints are passed on
+within the discovery bounds when the record carries them and are `null`
+otherwise. Nothing is derived, and no provider text is returned.
+
+`POST /api/source-actions/<actionId>/tools` with
+`{ schemaVersion, revision, sourceId, enabledTools }` saves the choice and
+answers `{ schemaVersion, actionId, sourceId, revision, enabledTools }`. It is
+its own revision-bound step, not an edit of a running action. Inside the
+management object's serialized queue the gateway requires the initiating
+administrator, the current default-deny profile, no other blocking lifecycle
+action, an installation that is exactly connection-paused (all three receipts,
+no pending resource write, no Portal write), a sign-in draft that still hashes
+to the action's `sourceHash`, the current draft revision, and one to 500 sorted
+names that all exist in the synced list. It then writes, in one atomic
+multi-key put, the draft at the next revision with the chosen tools and the
+action re-bound to it: `sourceRevision`, `sourceHash`, and the server receipt's
+`desiredHash`, which covers the tool policy and which removal re-derives from
+the installed source. Status, action key and provider locators do not change,
+so the renewal above resumes it at once and the executor attaches exactly that
+allowlist. Both routes spend one provider read and no provider write; neither
+is open to the service identity.
+
+A lost response is safe to repeat: the repeat carries the revision the client
+last saw and is refused with `draft_changed`, and the saved draft and recorded
+action show the choice. The same choice on the bound revision writes nothing.
+A different choice is accepted while the installation is still exactly paused
+and refused (`source_tools_unavailable`) once a resume has recorded a Portal
+write. An installation paused under the earlier flow, whose draft names typed
+tools, resumes unchanged; its administrator may also correct a name from the
+real list with this step.
 
 ## Authorization on the gateway
 

@@ -2,7 +2,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type RuntimeUpdate, type SourceActions, type SourceActionSummary, type TeamActionResult } from './api'
+import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type RuntimeUpdate, type SourceActions, type SourceActionSummary, type TeamActionResult, type TeardownAction } from './api'
 import { GatewayProvider, useGateway } from './GatewayContext'
 
 const status: GatewayStatus = {
@@ -34,6 +34,7 @@ const installedSources: ManagedSources = {
 
 function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
   return {
+    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status),
     getSources: vi.fn(async () => sources),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
@@ -43,7 +44,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => emptyActions),
     getSourceAction: vi.fn(),
-    cancelSourceAction: vi.fn(),
+    cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(),
     prepareTeardownAction: vi.fn(),
@@ -104,6 +105,14 @@ function SourceActionsProbe() {
   </div>
 }
 
+function RemovalProbe() {
+  const { removal, refreshSourceActions, sourceActionsError } = useGateway()
+  return <div>
+    <span>{removal ?? 'no removal'}</span><span>{sourceActionsError}</span>
+    <button type="button" onClick={() => { void refreshSourceActions().catch(() => {}) }}>Check status</button>
+  </div>
+}
+
 describe('GatewayProvider', () => {
   afterEach(() => { cleanup(); vi.useRealTimers(); window.history.replaceState(null, '', '/') })
   it('hydrates the production status, source, and update contracts', async () => {
@@ -161,7 +170,8 @@ describe('GatewayProvider', () => {
     const prepareTeamAction = vi.fn(async (): Promise<TeamActionResult> => ({ schemaVersion: 1, action: {
       schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null, canCancel: false,
     } }))
-    const client = api({ getStatus: vi.fn().mockRejectedValue(new Error('Status unavailable')), prepareTeamAction })
+    const client = api({ getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
+    getStatus: vi.fn().mockRejectedValue(new Error('Status unavailable')), prepareTeamAction })
     render(<GatewayProvider api={client}><Probe /><TeamSaveProbe /></GatewayProvider>)
     await screen.findByText('settled')
     await user.click(screen.getByRole('button', { name: 'Save Team' }))
@@ -394,5 +404,28 @@ describe('GatewayProvider', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'External refresh' })) })
     expect(screen.getByText('authorization_required')).toBeVisible()
     expect(client.getSourceActions).toHaveBeenCalledTimes(2)
+  })
+
+  it('follows a recorded removal through each status check, keeps the last answer over an unreadable one, and clears it with the record', async () => {
+    const removalRecorded: SourceActions = { schemaVersion: 1, actions: [], blockingAction: { kind: 'teardown', actionId: pendingAction.actionId } }
+    const recorded: TeardownAction = { schemaVersion: 1, actionId: pendingAction.actionId, status: 'applying', expiresAt: '2999-01-01T00:00:00.000Z', failureCode: null }
+    const client = api({
+      getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>()
+        .mockResolvedValueOnce(removalRecorded).mockResolvedValueOnce(removalRecorded).mockResolvedValueOnce(removalRecorded).mockResolvedValue(emptyActions),
+      getTeardownAction: vi.fn<GatewayAdminApi['getTeardownAction']>()
+        .mockResolvedValueOnce(recorded)
+        .mockResolvedValueOnce({ ...recorded, status: 'recovery_required', failureCode: 'fresh_authorization_required' })
+        .mockRejectedValue(new GatewayApiError(503, 'teardown_actions_unavailable')),
+    })
+    render(<GatewayProvider api={client}><RemovalProbe /></GatewayProvider>)
+    expect(await screen.findByText('running')).toBeVisible()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check status' })) })
+    expect(screen.getByText('interrupted')).toBeVisible()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check status' })) })
+    expect(screen.getByText('interrupted')).toBeVisible()
+    expect(screen.queryByText(/temporarily unavailable/u)).not.toBeInTheDocument()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check status' })) })
+    expect(screen.getByText('no removal')).toBeVisible()
+    expect(client.getTeardownAction).toHaveBeenCalledTimes(3)
   })
 })

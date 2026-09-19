@@ -41,11 +41,12 @@ const update: RuntimeUpdate = {
 
 function fixtureApi(): GatewayAdminApi {
   return {
+    getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
-    getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), prepareRuntimeAction: vi.fn(),
+    getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(), prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
   }
 }
@@ -97,7 +98,7 @@ describe('WebMcpTools', () => {
     expect(result.ok).toBe(!uncertain)
     expect(await screen.findByText('Saved by an agent')).toBeVisible()
     expect(screen.queryByText('No sources yet')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Authorize and apply' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Install source' })).toBeEnabled()
     expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
@@ -112,6 +113,7 @@ describe('WebMcpTools', () => {
     }
     const prepareTeardownAction = vi.fn(async () => prepared)
     const api: GatewayAdminApi = {
+      getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getSources: vi.fn(async () => sources),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
@@ -121,7 +123,7 @@ describe('WebMcpTools', () => {
       prepareSourceAction: vi.fn(),
       getSourceAction: vi.fn(),
       getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
-      cancelSourceAction: vi.fn(),
+      cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(),
       getRuntimeAction: vi.fn(),
       prepareTeardownAction,

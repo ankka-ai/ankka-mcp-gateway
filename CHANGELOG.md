@@ -4,6 +4,167 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Pick the tools of a sign-in source from its real list instead of typing exact names. A source whose endpoint
+  answers discovery with a sign-in challenge cannot list its tools before it is connected, so the form asked for
+  typed names, and a typo surfaced only after installation and connection. The form now says why the list is empty
+  and what happens next, and saves the draft with no tools; the free-text box is gone, for catalog presets too. The
+  gateway installs such a source with nothing enabled: no tool override on its server, a deny-Everyone policy, no
+  Portal mapping. After the operator has connected it in Cloudflare, the paused installation lists the tools
+  Cloudflare synced from it as the checkbox list public sources get (catalog recommendations that exist preselected,
+  nothing preselected from a hint), and the choice is saved as a revision-bound step of its own that re-binds the
+  paused installation atomically; resuming then attaches exactly the chosen tools. Cloudflare does not document
+  what a synced tool record carries beyond its name, so a description or a hint is shown only when the record has
+  one, and the page says when a list has none. With nothing chosen the installation stays paused with a fixed
+  reason and is never attached. An installation already paused with typed names resumes as before, and a typed name
+  can be corrected from the real list. An installation that waits for its operator is no longer shown as "The
+  gateway request failed". Older releases cannot read a source saved without tools, so saving one makes rollback
+  below this release unavailable, as installing any source does, and **Save draft** carries the rollback sentence
+  while that is a real decision; every other draft still restricts nothing. Public sources are unchanged.
+- Set up the gateway's management token inside setup. A freshly installed gateway could not add a source or manage
+  team access until an administrator had created an account API token by hand and added it as a Worker secret in
+  Cloudflare, and nothing in the installer said so. The setup page your own Worker serves before the second approval
+  now has a **Management token** step: a link that opens Cloudflare's token page with **Access: Apps and Policies
+  Edit**, **MCP Portals Edit** and a name containing your management hostname filled in (verified against the
+  dashboard on 2026-09-19), one paste field, and an explicit control to continue without a token. The page says why
+  the token is needed, that creating it takes a Super Administrator or Administrator, and that it can edit every
+  Access policy in the account. The token never passes through anything Ankka hosts: it goes from your browser to
+  your own Worker, which accepts only Cloudflare's two account-token forms, keeps it only in the owning Durable
+  Object's memory beside the install approval, and saves it as the `ANKKA_MANAGEMENT_TOKEN` secret binding with the
+  final runtime upload the install already makes, so no Cloudflare API call is added to any pass. It is never written
+  to Durable Object storage, the journal, a receipt, a log line, an error, a URL or a response. If Cloudflare
+  restarts the object first, the value is lost and the install still completes without it; the install status route
+  and the page that follows the install say so with one fixed word (`held`, `installed`, `skipped` or `dropped`).
+  The exact read-back of the final version accepts the secret binding exactly when the install supplied it. Adding
+  or rotating the token on an installed gateway is unchanged for now: directly in Cloudflare.
+
+- Show the rollback warning on Sources only when it is a real decision, in plain words. The permanent banner
+  ("once source provisioning starts, rollback below this runtime release is unavailable…") is gone. Only when the
+  gateway was updated, its earlier release can still be restored, and starting a source installation would end that,
+  the control that starts or resumes the installation says "After this you can no longer roll back to `<release>`."
+  The gateway reports that release as `installEndsRollbackTo` in the `/api/sources` answer; the dashboard never
+  computes it. `/api/update` no longer offers a rollback that preparation then refuses: once the recorded minimum
+  runtime excludes the retained release it answers
+  `rollback: { available: false, reason: "minimum_runtime_release", release }`, and Settings says why that release
+  can no longer be restored and shows no rollback button. A removal refused for unfinished work now asks to finish
+  or cancel that work, or to wait for an open removal authorization to expire, instead of naming a receipt. The
+  minimum-runtime rule itself is unchanged.
+
+- Land on the new release's dashboard after an update or a rollback, without a manual reload. Cloudflare keeps
+  serving the previous version, Worker and management assets alike, at an edge location for a short while after the
+  upload, so the update page handed the browser to the previous release's dashboard. The page now waits, as its own
+  step, until the release that serves its progress polls is the attempt's target on two answers in a row, for at most
+  sixty seconds, after which it hands over anyway and says that a reload may be needed. The serving release is the
+  stateless entrypoint's, which answers where the browser asks; the one management object restarts on the new version
+  at once and would confirm too early. An attempt that was not applied hands over at once, as before. Both releases
+  must carry the step: an update from an earlier release, or a rollback to one, still hands over at once.
+
+- Give an interrupted removal a way back. Once a removal has begun deleting the
+  gateway's connected resources, the dashboard shows **Removal in progress** on
+  every page, and in place of the load failure screen, with one action that
+  authorizes the removal again; the gateway resumes from its saved progress and
+  signs a fresh receipt. The dashboard reads the state from the recorded
+  removal action and now accepts its `gateway_removed` status. The installer's
+  removal page no longer tells you to reload when no reload can help: an expired
+  receipt names the gateway whose management page signs a new one, and an
+  unverifiable receipt or a browser without an open removal says the same
+  without a hostname. Failures a reload can get past keep the reload wording.
+
+- Fix the dashboard refusing to load on gateway-v0.1.64 ("The gateway response could not be verified"). The gateway's
+  status gained `serviceIdentity`, and source and Team actions gained `actorKind`, without the dashboard's strict
+  response schemas learning them, so every status answer was rejected. The dashboard now accepts all three, and the
+  dashboard's real client runs against the real gateway Worker in the core suite, so a field added on one side only
+  fails there instead of in a customer's browser.
+
+- Update the transitive `sharp` dependency from 0.35.2 to 0.35.4 to resolve
+  the libheif advisories GHSA-g89c-p67h-r497 and GHSA-2jg2-4ch7-h545 reported
+  as GHSA-rgj7-g3m4-5g8c. Miniflare pins the vulnerable version exactly, so
+  the root manifest carries an npm override; the wrangler, esbuild, and
+  Miniflare pins are unchanged.
+- Run every consented operation behind a page of the gateway's or the
+  installer's own instead of inside Cloudflare's authorize callback. The
+  callback exchanges the code, keeps the grant only in the owning Durable
+  Object's memory, and answers at once with a page that shows the steps live;
+  the hosted root finalizer, the gateway's dependency removal and its update
+  then run by alarm, one bounded pass per invocation. An object restart loses
+  the grant and stops the attempt as recovery-required with an unconfirmed
+  revocation; a fresh consent resumes from the durable receipts. No grant is
+  ever persisted.
+
+- Bound what one hosted root-removal attempt reads: scan other Workers once
+  per attempt and only those modified since the gateway was created, re-read
+  each resource by identity before its deletion, and re-read only the owner
+  side while a write settles. Count every provider and journal call against a
+  fixed budget and stop before the platform's cap with the resumable reason
+  `budget_exhausted`, so the grant is still revoked and the next consent
+  continues from the verified steps. No ownership check is weakened.
+
+- Keep admin license generation working when npm loses development flags on
+  optional TypeScript, lightningcss, and fsevents binaries. Retain license
+  checks for other dependencies and the existing esbuild/rolldown notices.
+
+- Use the selected zone's Access API for managed BigQuery setup and removal,
+  matching the approved permission. Show the pending resource and bounded
+  HTTP failure details while keeping uncertain creates blocked for review.
+
+- Reopen the saved setup review after a final approval expires before token
+  exchange. Request fresh consent within the original setup window, keep
+  configuration edits locked, and preserve active or potentially applied work.
+  Explain that full setup expiry may leave an unfinished gateway in Cloudflare.
+
+- Verify large Worker modules during installation and updates without overflowing
+  the base64 validator stack. Keep canonical encoding, byte bounds, and exact
+  content hashes; allow self-update readback to fit the accepted source size.
+
+- Show the saved, bounded failure reference when hosted setup stops. Do not
+  claim that a failed provisioning attempt left no Cloudflare resources.
+
+- Include gateway-managed BigQuery bridges in receipt-bound gateway removal.
+  Verify resource identities and sharing before deletion; detach the bridge
+  domain, delete its Worker and key, and remove Access protection last. Resume
+  known partial setup and interrupted deletions with fresh consent, and keep
+  unknown creates blocked for manual reconciliation. Bound bridge and ordinary
+  source cleanup to separate signed invocations with durable progress so
+  multiple sources fit Workers Free request limits without storing the grant.
+
+- Raise the bounded local release publisher from 6 MB to 10 MB to accommodate
+  signed gateway packages that embed the BigQuery bridge. Signature, digest,
+  per-file, and generated-module checks remain enforced.
+
+- Read the installation receipt from its separate Durable Object when preparing
+  automated teardown. Keep the ownership key requirement on the management
+  object and reject missing or invalid receipts before removal.
+
+- Wait for the browser to reach a new workers.dev address securely before
+  releasing the one-time setup handoff. The installer retries temporary TLS
+  and connection failures on its progress page, verifies the expected Worker,
+  and continues automatically once ready without requiring a manual reload.
+
+- Allow the first Cloudflare approval to deploy gateway setup without a custom
+  domain. Accounts with no active domains see a guide on their setup Worker,
+  with example addresses and links to Cloudflare. Final gateway configuration
+  still requires an active domain from the approved account.
+
+- Add a gateway-hosted BigQuery setup flow: review project and datasets, approve
+  Cloudflare, upload a dedicated Google key directly to your gateway, deploy the
+  protected bridge, and resume its recorded Portal connection. The key becomes
+  a Worker secret; drafts and recovery receipts contain no credentials.
+
+
+- Support the Google-hosted BigQuery MCP bridge as a manually deployed,
+  self-hosted source. Explicit `allowQueries: true` enables bounded read-only
+  SQL with Google IAM controlling data access; existing deployments keep the
+  constant connectivity probe. Query-byte ceilings are optional. Qualify useful
+  aggregates, excluded-table denial, read-only enforcement, and Claude Desktop
+  session continuity and reconnection. Link the setup guide from the dashboard
+  and document bridge updates, rotation, and removal.
+
+- Connect Settings to automated removal with two temporary Cloudflare approvals.
+  The gateway verifies and removes its receipt-owned Portal and source resources;
+  a signed handoff lets the hosted finalizer remove management resources, storage,
+  and the Worker. Both phases retain progress for fresh-consent recovery after an
+  interrupted request. Foreign dependencies stop deletion and unresolved grant
+  revocation remains visible. Disposable live qualification is still required.
+
 - Fetch an approved update or rollback release by its exact version and artifact
   digest, so moving the release channel no longer makes rollback unavailable.
   Serve retained signed releases from the existing bucket without a session or
@@ -14,8 +175,8 @@ Notable public product and repository changes are recorded here.
   discovery and fixed diagnostics. Record the hosted query-cost limitation and
   distinguish fresh authorization, refreshed grants, and Portal-wide revocation.
   Record Claude Desktop connectivity, session lifetime, and reconnection checks,
-  plus a separate real-Google REST query-budget test. General hosted SQL stays
-  disabled.
+  plus a separate real-Google REST query-budget test. That initial qualification
+  kept general hosted SQL disabled.
 
 - Add ChatGPT and Cursor web OAuth callback defaults to newly created Portals
   alongside Claude. ChatGPT's variable callback is limited to its documented
@@ -39,11 +200,11 @@ Notable public product and repository changes are recorded here.
   successful apply. The return notice now agrees with the verified action
   status instead of reporting `apply_response_invalid`; incomplete or
   mismatched receipts remain rejected.
-- Add an experimental customer-owned bridge to Google's hosted BigQuery MCP.
+- Add an initial experimental self-hosted bridge to Google's hosted BigQuery MCP.
   It exposes dataset-scoped table listing and metadata plus the exact constant
-  query `SELECT 1 AS bridge_ok`. General SQL remains disabled pending cost
-  controls; the existing budget-capped REST reader is unchanged. The setup guide
-  covers direct secret configuration, the operator callback, and Portal checks.
+  query `SELECT 1 AS bridge_ok`. General SQL was initially disabled pending
+  qualification; the existing budget-capped REST reader is unchanged. The setup
+  guide covers direct secret configuration, the operator callback, and Portal checks.
 - Pause source installation before Portal attachment when Cloudflare still
   needs operator authentication, tool synchronization, or a missing selected
   tool. The dashboard links to the recorded server and explains the next step.

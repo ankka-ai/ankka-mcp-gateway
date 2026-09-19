@@ -1,8 +1,16 @@
 import * as v from 'valibot';
+import { handleGatewayTeardownStore } from './gateway-teardown-store-client';
 
 import { boundaryObjectSchema, type BoundaryObject } from './boundary';
 import type { BootstrapRandomBytes } from './customer-bootstrap-state';
 import { DeployError, isDeployErrorCode, isFailureReason, type DeployErrorCode, FAILURE_REASON_PATTERN } from './errors';
+import { assertExactReleaseBundleIdentity, type ExactReleaseBundleIdentity } from './exact-release-bundle';
+import { GatewayTeardownDurableStatePort, initializeGatewayTeardownSql } from './gateway-teardown-durable-state';
+import { GatewayTeardownFinalizerDriver, type GatewayTeardownFinalizerStep } from './gateway-teardown-finalizer';
+import type { GatewayTeardownTrust } from './gateway-teardown-handoff';
+import type { CloudflareOauthConfig, FetchTransport } from './oauth';
+import { PinnedR2ReleaseBundleProvider, type R2ReleaseReadBucket } from './r2-release-provider';
+import type { VerifiedReleaseBundle } from './release';
 import { parseHostedStage1Provision, type HostedStage1Provision } from './hosted-stage1-bootstrap';
 import {
   HOSTED_STAGE1_CLEANUP_REASONS,
@@ -124,14 +132,71 @@ export interface TwoStageDeploySessionNamespace {
   get(id: DurableObjectId): TwoStageDeploySessionStub;
 }
 
-/** The object reads no bindings; the Worker environment only carries its own namespace. */
+/**
+ * A Stage 1 session object reads no binding. A hosted removal job object
+ * reads the OAuth client, the ownership trust and the release bucket, which
+ * its finalizer needs to exchange a callback's code, load the exact signed
+ * retirement release, and revoke the grant it keeps only in memory.
+ */
 export interface TwoStageDeploySessionEnv {
   readonly TWO_STAGE_DEPLOY_SESSION?: TwoStageDeploySessionNamespace;
+  readonly GATEWAY_RELEASE_BUCKET?: R2ReleaseReadBucket;
+  readonly CLOUDFLARE_OAUTH_CLIENT_ID?: string;
+  readonly CLOUDFLARE_OAUTH_CLIENT_SECRET?: string;
+  readonly CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID?: string;
+  readonly CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY?: string;
+  readonly CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID?: string;
+}
+
+/** What the removal finalizer needs besides the job; production derives it from the environment. */
+export interface TwoStageDeploySessionTeardownDependencies {
+  readonly oauth: CloudflareOauthConfig;
+  readonly trust: GatewayTeardownTrust;
+  readonly transport: FetchTransport;
+  readonly loadBundle: (identity: ExactReleaseBundleIdentity) => Promise<VerifiedReleaseBundle>;
+  readonly wait?: (milliseconds: number) => Promise<void>;
 }
 
 export interface TwoStageDeploySessionClock {
   readonly now?: () => number;
   readonly randomBytes?: BootstrapRandomBytes;
+  /** Test seam only; production reads the environment. */
+  readonly teardown?: TwoStageDeploySessionTeardownDependencies;
+}
+
+const teardownEnvSchema = v.object({
+  CLOUDFLARE_OAUTH_CLIENT_ID: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{16,128}$/u)),
+  CLOUDFLARE_OAUTH_CLIENT_SECRET: v.pipe(v.string(), v.minLength(16), v.maxLength(512)),
+  CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{16,128}$/u)),
+  CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY: v.pipe(v.string(), v.regex(TOKEN)),
+  CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID: v.pipe(v.string(), v.regex(/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/u)),
+});
+const releaseBucketSchema = v.object({ get: v.function(), list: v.function() });
+
+function teardownDependenciesFromEnv(env: TwoStageDeploySessionEnv | undefined): TwoStageDeploySessionTeardownDependencies {
+  const parsed = v.safeParse(teardownEnvSchema, env);
+  const bucket = env?.GATEWAY_RELEASE_BUCKET;
+  if (!parsed.success || bucket === undefined || !v.is(releaseBucketSchema, bucket)) {
+    throw new DeployError(500, 'internal_error', 'teardown_config_invalid');
+  }
+  const config = parsed.output;
+  const dependencies: TwoStageDeploySessionTeardownDependencies = {
+    oauth: { clientId: config.CLOUDFLARE_OAUTH_CLIENT_ID, clientSecret: config.CLOUDFLARE_OAUTH_CLIENT_SECRET },
+    trust: {
+      pinnedIssuerPublicKey: config.CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY,
+      expectedKeyId: config.CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID,
+      expectedPublicClientId: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
+    },
+    transport: (input, init) => fetch(input, init),
+    // The identity comes only from the immutable accepted job, never a request; a
+    // recovery loads its original signed retirement release from the bucket.
+    loadBundle: async (identity) => {
+      const bundle = await new PinnedR2ReleaseBundleProvider(identity).loadVerifiedReleaseBundle(bucket);
+      assertExactReleaseBundleIdentity(bundle, identity);
+      return bundle;
+    },
+  };
+  return Object.freeze(dependencies);
 }
 
 interface SessionResult {
@@ -210,14 +275,18 @@ export class TwoStageDeploySession {
   private readonly port: HostedStage1SessionPort;
   private readonly now: () => number;
   private readonly randomBytes: BootstrapRandomBytes | undefined;
+  private readonly teardownDependencies: TwoStageDeploySessionTeardownDependencies | undefined;
+  /** The removal finalizer of a job object: its grant lives here, in memory, for one attempt. */
+  private finalizer: GatewayTeardownFinalizerDriver | null = null;
 
   constructor(
     private readonly state: TwoStageDeploySessionState,
-    _env?: TwoStageDeploySessionEnv,
+    private readonly env?: TwoStageDeploySessionEnv,
     clock: TwoStageDeploySessionClock = {},
   ) {
     this.now = clock.now ?? Date.now;
     this.randomBytes = clock.randomBytes;
+    this.teardownDependencies = clock.teardown;
     this.port = new HostedStage1SessionDurableStatePort(state.storage);
     this.ready = state.blockConcurrencyWhile(async () => {
       initializeHostedStage1SessionSql(state.storage);
@@ -230,6 +299,9 @@ export class TwoStageDeploySession {
       const url = new URL(request.url);
       if (url.origin !== TWO_STAGE_SESSION_INTERNAL_ORIGIN || url.search !== '' || url.hash !== '') {
         throw new DeployError(404, 'bad_request');
+      }
+      if (url.pathname.startsWith('/teardown/')) {
+        return handleGatewayTeardownStore(request, this.state.storage, (input) => this.teardownFinalizer().begin(input));
       }
       if (url.pathname === '/session') {
         if (request.method !== 'GET') throw new DeployError(405, 'bad_request');
@@ -246,9 +318,13 @@ export class TwoStageDeploySession {
     }
   }
 
-  /** Alarm-driven housekeeping: erase, escalate to cleanup, or fail an expired attempt. */
+  /**
+   * Alarm-driven housekeeping: a removal job's finalizer pass, or a session's
+   * erase, escalation to cleanup, or expiry of an attempt.
+   */
   async alarm(): Promise<void> {
     await this.ready;
+    if (await this.continueTeardown()) return;
     const current = await this.port.read();
     if (current === null) {
       await this.state.storage.deleteAlarm();
@@ -276,6 +352,42 @@ export class TwoStageDeploySession {
     const now = this.now();
     if (!Number.isSafeInteger(now) || now < 0) throw new DeployError(500, 'internal_error');
     return now;
+  }
+
+  /** One finalizer per object; the grant it holds never leaves this object's memory. */
+  private teardownFinalizer(): GatewayTeardownFinalizerDriver {
+    if (this.finalizer !== null) return this.finalizer;
+    const dependencies = this.teardownDependencies ?? teardownDependenciesFromEnv(this.env);
+    initializeGatewayTeardownSql(this.state.storage);
+    const ports = {
+      ...dependencies,
+      port: new GatewayTeardownDurableStatePort(this.state.storage),
+      now: () => this.currentTime(),
+      // Every alarm is its own invocation with its own subrequest budget.
+      schedule: (delayMs: number) => this.state.storage.setAlarm(this.currentTime() + delayMs),
+    };
+    this.finalizer = new GatewayTeardownFinalizerDriver(ports);
+    return this.finalizer;
+  }
+
+  /**
+   * Runs one finalizer pass when this object holds a removal job whose attempt
+   * is exchanging; true when a further pass was scheduled and the alarm must
+   * stay. A job that stopped or never started leaves the alarm to the
+   * session housekeeping, which releases it.
+   */
+  private async continueTeardown(): Promise<boolean> {
+    let step: GatewayTeardownFinalizerStep;
+    try {
+      initializeGatewayTeardownSql(this.state.storage);
+      const job = await new GatewayTeardownDurableStatePort(this.state.storage).read();
+      if (job === null || job.phase !== 'exchanging') return false;
+      step = await this.teardownFinalizer().continue();
+    } catch {
+      // Without its dependencies the attempt is left to expire; the next consent records the unconfirmed revocation.
+      return false;
+    }
+    return step === 'scheduled';
   }
 
   private async schedule(session: HostedStage1Session, now: number, minDelayMs = 1_000): Promise<void> {

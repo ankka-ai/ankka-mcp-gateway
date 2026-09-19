@@ -7,6 +7,7 @@ import {
 import {
   type CustomerBootstrapRelayStart,
   type CustomerBootstrapStatePort,
+  parseCustomerBootstrapOauthCallback,
   validCustomerBootstrapRelayAuthorization,
 } from './customer-bootstrap-router';
 import {
@@ -32,7 +33,6 @@ const SESSION_COOKIE = '__Host-ankka_bootstrap_session';
 const PKCE_COOKIE = '__Host-ankka_bootstrap_pkce';
 const ATTEMPT_ID = /^attempt_[A-Za-z0-9_-]{24}$/u;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
-const AUTHORIZATION_CODE = /^[A-Za-z0-9._~-]{8,4096}$/u;
 const RELAY_TICKET = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{43}$/u;
 const MAX_COOKIE_BYTES = 8 * 1024;
 
@@ -301,18 +301,23 @@ export function createCustomerStage2RecoveryRouter(
           const callbackAt = now();
           const sessionSecret = readSessionCookie(request);
           const pkce = readPkceCookie(request, callbackAt);
-          const code = url.searchParams.get('code') ?? '';
-          const oauthState = url.searchParams.get('state') ?? '';
-          const oauthError = url.searchParams.get('error');
+          // The same certified callback as the shell's, so the same admitted
+          // query: code and state, an exact install scope echo, or the relay's
+          // fixed denial with the standard fields. A rejection spends nothing.
+          const query = parseCustomerBootstrapOauthCallback(url);
           const matchingAttempt = pkce !== null && current.oauth?.attemptId === pkce.attemptId &&
             current.oauth.expiresAt === pkce.expiresAt;
-          if (sessionSecret !== null && matchingAttempt && oauthError === 'authorization_rejected' &&
-              code === '' && TOKEN.test(oauthState) && url.searchParams.size === 2) {
+          if (sessionSecret === null || !matchingAttempt || query === null) {
+            return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, [
+              clearCookie(PKCE_COOKIE), clearCookie(SESSION_COOKIE),
+            ]);
+          }
+          if (query.denied) {
             const rejected = await rejectCustomerBootstrapOauthCallback({
               current,
               sessionSecret,
               attemptId: pkce.attemptId,
-              state: oauthState,
+              state: query.state,
               now: callbackAt,
             });
             await persist(current, rejected);
@@ -328,20 +333,13 @@ export function createCustomerStage2RecoveryRouter(
               failureCode: 'authorization_rejected',
             }, 200, cookies);
           }
-          if (sessionSecret === null || !matchingAttempt || oauthError !== null ||
-              !AUTHORIZATION_CODE.test(code) || !TOKEN.test(oauthState) ||
-              url.searchParams.size !== 2) {
-            return json({ schemaVersion: 1, error: 'oauth_callback_rejected' }, 400, [
-              clearCookie(PKCE_COOKIE), clearCookie(SESSION_COOKIE),
-            ]);
-          }
           const begun = await beginCustomerBootstrapCallback({
             current,
             sessionSecret,
             attemptId: pkce.attemptId,
             verifier: pkce.verifier,
-            oauthState,
-            code,
+            oauthState: query.state,
+            code: query.code,
             accountId: config.accountId,
             publicClientId: config.publicClientId,
             now: callbackAt,

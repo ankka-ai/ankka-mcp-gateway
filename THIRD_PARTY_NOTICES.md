@@ -19,6 +19,10 @@ The gateway dashboard and experimental adapter dependencies include:
 - Vite and Vitest — their respective contributors, MIT License; and
 - TypeScript — Microsoft Corporation, Apache License 2.0.
 
+The local Worker integration tests directly consume Miniflare, under the MIT
+License, at the same version already locked for Wrangler. It is a development-only
+npm dependency; no Miniflare source is vendored or included in gateway payloads.
+
 The experimental Google Search Console adapter consumes the Cloudflare Code
 Mode package, Cloudflare Agents SDK, Model Context Protocol TypeScript SDK, and
 Zod at the exact versions recorded in `package-lock.json`. These packages are

@@ -1,5 +1,17 @@
 # Cloudflare two-stage installation candidate
 
+> **Source change: management token step of setup (2026-09-19).** The setup
+> page the customer's Worker serves before the second approval now also takes
+> the gateway's standing management credential: an account-owned API token the
+> customer creates from a Cloudflare template link and pastes into their own
+> gateway. It is distinct from the temporary Stage 2 OAuth grant that this
+> document calls a management token. It never passes through anything Ankka
+> hosts, is held only in the owning Durable Object's memory beside the grant,
+> and is written as the `ANKKA_MANAGEMENT_TOKEN` secret binding by the final
+> runtime upload, which adds no provider call. See
+> [Management token](MANAGEMENT_TOKEN.md). The statements below that V1
+> provisions no permanent management credential record the earlier boundary.
+
 > **Source change: Worker-hosted configuration (2026-09-04).** The initial
 > `bootstrap` operation now requests `workers-scripts.write zone.read`, discovers
 > up to 100 active domains in the selected account, and registers an account
@@ -327,6 +339,13 @@ negative live canary before release.
 
 ### Team management is outside V1
 
+> **Superseded.** Routine source and Team operations now use the opt-in,
+> account-wide token this section describes as the second path, with its
+> account-wide reach disclosed where it is asked for: see
+> [Management token](MANAGEMENT_TOKEN.md). Since 2026-09-19 the setup page
+> offers it as a step the customer may skip. The record below is kept for
+> Cloudflare's scoping answers, which still hold.
+
 The default V1 installer does not provision a permanent Cloudflare management
 credential, and the Team policy editor remains disabled. Administrators manage
 team policy directly in Cloudflare for V1. The retired optional
@@ -442,6 +461,15 @@ must explain the policy block without asking for broader permissions.
    key signs a token-free request to the hosted issuer, which certifies the
    exact final callback and plan for the already-deployed Worker. Stage 2
    starts only after review. See [the setup contract](WORKER_HOSTED_SETUP.md).
+9. On the same review page the Worker offers the management token step: a
+   Cloudflare template link that fills in **Access: Apps and Policies Edit**,
+   **MCP Portals Edit** and a name containing the management hostname, one
+   paste field, and an explicit control to continue without a token. The page
+   offers the second approval only once the customer has chosen. The pasted
+   value is sent once by same-origin POST under the setup session, checked
+   against Cloudflare's two account-token forms, and kept only in the
+   Durable Object's memory. Storage receives one fixed word about the
+   choice. The step is locked while an approval or an install runs.
 
 The restricted runtime exposes only:
 
@@ -452,6 +480,7 @@ GET  /__ankka/install/status
 POST /__ankka/install/continue
 GET  /__ankka/install/setup
 POST /__ankka/install/configuration
+POST /__ankka/install/management-token
 POST /__ankka/install/oauth/start
 GET  /__ankka/install/oauth/callback
 ```
@@ -470,7 +499,15 @@ to start or take over an installation.
    caller supplies scopes or arbitrary endpoint authority.
 4. Cloudflare redirects its code to `auth.ankka.ai`. The relay verifies state
    and redirects only the code and original Gateway state to the exact signed
-   Gateway callback. It has no token-exchange transport.
+   Gateway callback. It has no token-exchange transport. The Gateway callback
+   accepts `code` and `state`, alone or beside an echo of exactly the install
+   scope set (Cloudflare appends the granted scope to its code response), or
+   the relay's fixed `authorization_rejected` denial, with or without the
+   standard `error_description` and `error_uri` fields. Any other parameter,
+   scope echo, error, or repeated key is refused with `oauth_callback_rejected`
+   without consuming the attempt, so a stray hit cannot burn the callback the
+   browser is still carrying. The final runtime's recovery callback on the
+   same route admits the same query.
 5. The Gateway atomically arms the attempt before exchange, exchanges directly
    with Cloudflare, rejects refresh tokens or a non-exact scope set, and checks
    that `/accounts` returns only the handoff account.
@@ -484,6 +521,12 @@ to start or take over an installation.
    so no pass makes more than about 30 provider calls where a Workers Free
    account allows 50 per invocation; one invocation needed 113. It refuses
    foreign or ambiguous resources instead of adopting or overwriting them.
+   Its first write is a proxied placeholder record at the management
+   hostname, so the zone's nameservers serve the name from the first pass
+   rather than only once the custom domain publishes its own record;
+   Cloudflare refuses to attach a custom domain over an existing record, so
+   the placeholder is released as its own journaled step immediately before
+   the attachment and its absence is re-proven with the terminal resources.
    An object restart between passes loses the grant; the next pass then
    settles `INCOMPLETE` with `grant_lost` rather than resuming from anything
    durable, and an attempt older than fifteen minutes is revoked and settled
@@ -498,7 +541,16 @@ to start or take over an installation.
 7. The last pass disables `workers.dev`, records the terminal verification
    of everything but the runtime, marks the attempt finalizing, arms an
    alarm, and only then publishes the clean recovery-capable final runtime,
-   drops the bootstrap nonce and revokes the grant. Cloudflare restarts the
+   drops the bootstrap nonce and revokes the grant. When the object's memory
+   still holds a management credential from the setup page, that same upload
+   carries it as the `secret_text` binding `ANKKA_MANAGEMENT_TOKEN`: no
+   further provider call, and nothing durable names it (the journal records
+   the plain-text bindings only). An object restart before this pass loses the
+   value like the grant; the install then completes without the secret and
+   the status route says `dropped`. The exact read-back of the final version
+   expects the secret binding exactly when the install supplied it, and
+   recovery in the final runtime expects it exactly when its own environment
+   carries it. Cloudflare restarts the
    Durable Object on the new code as soon as the Worker has a new version
    and refuses storage to the pass that uploaded it, so that pass writes
    nothing after the upload: the journal keeps `final_runtime` armed, and
@@ -532,6 +584,7 @@ follows the status route behind Access.
 | `install` | customer Gateway | the seven exact Stage 2 scopes above |
 | `upgrade` / `rollback` | customer Gateway | `workers-scripts.write` |
 | `source-add` / `source-update` / `source-remove` | customer Gateway | `zone-access.write`, `mcp-portals.write` |
+| `bigquery-add` | customer Gateway | `zone-access.write`, `mcp-portals.write`, `workers-scripts.write`, `workers-routes.read` |
 | `uninstall` | customer Gateway | union derived only from checksum-valid receipt resource kinds |
 | `uninstall-finalize` | hosted installer | `workers-scripts.write` |
 
@@ -738,6 +791,8 @@ The candidate remains unwired. Before activation it still needs:
 - [Create an MCP server](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/ai_controls/subresources/mcp/subresources/servers/methods/create/)
 - [Create an MCP Portal](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/ai_controls/subresources/mcp/subresources/portals/methods/create/)
 - [Create a DNS record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/create/)
+- [DNS record details](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/get/)
+- [Delete a DNS record](https://developers.cloudflare.com/api/resources/dns/subresources/records/methods/delete/)
 
 The relay boundary is modeled after the reviewed behavior in
 [HQBase/hqbase](https://github.com/HQBase/hqbase) and

@@ -1,5 +1,6 @@
 import type { ServerResponse } from 'node:http'
 import type { Connect } from 'vite'
+import type { HostedStage1PublicSession } from '../src/hosted-stage1-session'
 
 type InstallerScenario =
   | 'start'
@@ -7,6 +8,7 @@ type InstallerScenario =
   | 'no-zones'
   | 'configured'
   | 'planned'
+  | 'authorizing'
   | 'running'
   | 'success'
   | 'failed'
@@ -16,7 +18,7 @@ const targetIdHash = `sha256:${'a'.repeat(64)}`
 const previewCsrf = 'local-preview-csrf'
 
 const selection = {
-  schemaVersion: 1,
+  schemaVersion: 1 as const,
   basics: {
     gatewayName: 'Example MCP Gateway',
     zoneName: 'example.com',
@@ -95,6 +97,7 @@ function requestedScenario(location: URL): InstallerScenario | null {
     requested === 'no-zones' ||
     requested === 'configured' ||
     requested === 'planned' ||
+    requested === 'authorizing' ||
     requested === 'running' ||
     requested === 'success' ||
     requested === 'failed' ||
@@ -108,8 +111,8 @@ function scenarioFromLocation(location: URL): InstallerScenario {
   if (requested) return requested
 
   if (location.pathname === '/gateway') return 'connected'
-  if (location.pathname === '/review') return 'configured'
-  if (location.pathname === '/deploy') return 'planned'
+  if (location.pathname === '/review') return 'planned'
+  if (location.pathname === '/deploy') return 'authorizing'
   if (location.pathname === '/result') return 'running'
   return 'start'
 }
@@ -119,7 +122,7 @@ function hasSelection(scenario: InstallerScenario): boolean {
 }
 
 function hasPlan(scenario: InstallerScenario): boolean {
-  return ['planned', 'running', 'success', 'failed', 'removal'].includes(scenario)
+  return ['planned', 'authorizing', 'running', 'success', 'failed', 'removal'].includes(scenario)
 }
 
 function operations(scenario: InstallerScenario) {
@@ -190,9 +193,51 @@ const removal = {
   receipt: null,
 }
 
-function session(scenario: InstallerScenario) {
+function publicSession(scenario: InstallerScenario, now: number): HostedStage1PublicSession {
+  const phase = scenario === 'authorizing' ? 'authorizing'
+    : scenario === 'running' ? 'provisioned'
+      : scenario === 'success' ? 'handed_off'
+        : scenario === 'failed' ? 'failed'
+          : scenario === 'removal' ? 'cleanup_required'
+            : 'draft'
   return {
     schemaVersion: 1,
+    sessionId: `s1s_${'p'.repeat(24)}`,
+    phase,
+    revision: 1,
+    expiresAt: now + 3_600_000,
+    selection: hasSelection(scenario) ? selection : null,
+    plan: hasPlan(scenario) ? {
+      planId: plan.planId,
+      releaseId: plan.release.version,
+      expiresAt: now + 1_800_000,
+      managementHostname: selection.basics.managementHostname,
+      portalHostname: selection.basics.portalHostname,
+    } : null,
+    attempt: phase === 'authorizing' ? {
+      attemptId: `attempt_${'p'.repeat(24)}`,
+      kind: 'bootstrap',
+      expiresAt: now + 600_000,
+    } : null,
+    provision: ['provisioned', 'handed_off', 'cleanup_required'].includes(phase) ? {
+      installId: `acg-${'p'.repeat(24)}`,
+      workerName: 'ankka-gateway-preview',
+      // This reserved example domain cannot point to a real gateway.
+      bootstrapOrigin: 'https://gateway.example.invalid/',
+      capabilityExpiresAt: now + 600_000,
+    } : null,
+    failure: phase === 'failed' ? { code: 'authorization_rejected', attemptId: null, at: now } : null,
+    cleanup: phase === 'cleanup_required' ? { reason: 'cookie_lost', requiredAt: now, completedAt: null } : null,
+  }
+}
+
+function session(scenario: InstallerScenario, now: number) {
+  return {
+    schemaVersion: 1,
+    csrfToken: previewCsrf,
+    now,
+    session: publicSession(scenario, now),
+    // Retain earlier synthetic fixture projections for the local preview routes.
     csrf: previewCsrf,
     recovery: null,
     authorization: { status: 'anonymous', email: null, expiresAt: null },
@@ -241,6 +286,7 @@ function sendJson<Body>(response: ServerResponse, status: number, body: Body): v
 }
 
 export function installerPreviewApi(): Connect.NextHandleFunction {
+  const now = Date.now()
   let retainedScenario: InstallerScenario | null = null
   let activeFixture: InstallerScenario | null = null
 
@@ -265,7 +311,17 @@ export function installerPreviewApi(): Connect.NextHandleFunction {
     const scenario = retainedScenario
 
     if (request.method === 'GET' && url.pathname === '/api/session') {
-      sendJson(response, 200, session(scenario))
+      sendJson(response, 200, session(scenario, now))
+      return
+    }
+    if (request.method === 'POST' && url.pathname === '/api/session/new') {
+      retainedScenario = 'start'
+      sendJson(response, 200, session(retainedScenario, now))
+      return
+    }
+    if (request.method === 'GET' && url.pathname === '/api/bootstrap/handoff') {
+      // Keep the waiting state visible without issuing a capability or redirect.
+      sendJson(response, 409, { schemaVersion: 1, code: 'bootstrap_not_ready', retryAfterMs: 15_000 })
       return
     }
     if (url.pathname === '/api/discovery') {
@@ -278,24 +334,26 @@ export function installerPreviewApi(): Connect.NextHandleFunction {
     }
     if (request.method === 'PUT' && url.pathname === '/api/selection') {
       retainedScenario = 'configured'
-      sendJson(response, 200, session(retainedScenario))
+      sendJson(response, 200, session(retainedScenario, now))
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/plan') {
       retainedScenario = 'planned'
-      sendJson(response, 200, session(retainedScenario))
+      sendJson(response, 200, session(retainedScenario, now))
       return
     }
     if (request.method === 'POST' && (
       url.pathname === '/api/deploy' ||
-      url.pathname === '/api/uninstall'
+      url.pathname === '/api/uninstall' ||
+      url.pathname === '/api/bootstrap' ||
+      url.pathname === '/api/cleanup'
     )) {
       sendJson(response, 409, { schemaVersion: 1, code: 'preview_authorization_unavailable' })
       return
     }
     if (request.method === 'POST' && url.pathname === '/api/uninstall/plan') {
       retainedScenario = 'removal'
-      sendJson(response, 200, session(retainedScenario))
+      sendJson(response, 200, session(retainedScenario, now))
       return
     }
     sendJson(response, 404, { schemaVersion: 1, code: 'preview_route_not_found' })

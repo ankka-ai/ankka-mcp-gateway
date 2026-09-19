@@ -18,10 +18,16 @@ client identifiers are allowed. See [Contributing](CONTRIBUTING.md).
 
 - MCP source-provider credentials must never transit or be stored by Ankka.
   The distinct Cloudflare installer grant is operation-scoped: it exists only
-  in the connected callback's request-local memory and, where a reviewed relay
-  requires it, is forwarded once to the exact HMAC-authenticated gateway
+  in memory, in the connected callback's request or in the owning Durable
+  Object for one bounded attempt behind a progress page, and, where a reviewed
+  relay requires it, is forwarded once to the exact HMAC-authenticated gateway
   Worker. It is never persisted, logged, exposed to any other destination, or
   reused for another action.
+- The distinct optional `ANKKA_MANAGEMENT_TOKEN` is an account-owned secret
+  configured directly on the customer Worker. Only fixed routine source and
+  Team operations may use it. Never send it through Ankka-hosted infrastructure,
+  return it to a browser, or persist it in Durable Object state. Its account-wide
+  provider authority must be disclosed; ownership checks constrain our code.
 - Secrets must not appear in configuration files, logs, exceptions, telemetry,
   tests, snapshots, or deployment output.
 - Self-hosted gateways send no telemetry to Ankka. The Ankka-hosted
@@ -51,6 +57,12 @@ client identifiers are allowed. See [Contributing](CONTRIBUTING.md).
 - Keep existing protocol fields, configuration values, routes, and published
   document paths stable when changing copy.
 
+## Brand presentation
+
+- Use the existing Ankka wordmark prominently, large and centered, with a vertical
+  gradient fading to transparent at the bottom. Preserve the original vector
+  letterforms; this is the Ankka brand treatment.
+
 ## Development
 
 - Keep dependencies small. Record transferred material in `ORIGINS.md` and
@@ -68,3 +80,35 @@ client identifiers are allowed. See [Contributing](CONTRIBUTING.md).
   signing keys and deployment credentials stay outside this repository.
 - Read [Contributing](CONTRIBUTING.md) for toolchain and public-history rules,
   and [Operations](docs/OPERATIONS.md) when changing release or deployment tools.
+- Use `npm run lifecycle` for unattended disposable gateway runs with an
+  operator-managed credential (install, manage, update, interrupt, resume,
+  remove); read `docs/AGENT_LIFECYCLE.md` for the job file, credential custody
+  and what it does not prove.
+- Use `npm run test:runtime` for bootstrap state, SQLite, and crypto runtime
+  changes. `npm run dev:runtime` prints a synthetic localhost fixture and its
+  inspection API; query traces before adding temporary logs. Read
+  `docs/LOCAL_RUNTIME.md` for the local/provider/deployed test boundaries.
+- Keep the dependency graph small.
+- Record the origin and license of any transferred or vendored material in
+  `ORIGINS.md` and `THIRD_PARTY_NOTICES.md`.
+- Run `npm run check:fast` while developing. The full `npm run check` release
+  gate runs in continuous integration on every pull request and must pass
+  before merge.
+- The toolchain is pinned by `.nvmrc`, `packageManager`, and `devEngines`.
+  Local drift warns; `check:toolchain` enforces the exact versions in
+  continuous integration and at the head of the full gate.
+- `main` accepts only pull requests with a passing `check` status. Work on a
+  branch; merge with rebase or squash (`gh land` opens the pull request and
+  auto-merges when checks pass).
+- A working clone may carry the intentionally private `private-history`
+  remote, private local branches, and private tags. Never push private refs
+  to `origin`. The public-history check audits the publishable surface only:
+  `HEAD`, `origin` refs, and tags.
+- Bumping wrangler moves reviewed toolchain pins: restate the version,
+  lockfile path, and tool-file locations in
+  `apps/installer/scripts/generate-reviewed-canary.mjs` and its test, and
+  keep the esbuild pin aligned with wrangler's bundled esbuild.
+- Never commit `.env`, `.dev.vars`, Cloudflare account/resource IDs, API tokens,
+  Terraform state, private keys, or generated deployment output.
+- Production deployment credentials, signing keys, and CI authority remain
+  outside this repository even when the implementation they invoke is public.

@@ -39,6 +39,8 @@
     "build:preview": "npm run build:admin && npm run build --workspace @ankka/search-console-adapter && npm run build --workspace @ankka/read-only-connectors",
     "canary:fixture:serve": "node fixtures/synthetic-mcp/server.mjs --host 127.0.0.1 --port 9610",
     "canary:fixture:test": "node --test test/synthetic-mcp.test.mjs",
+    "validate:lifecycle": "node scripts/validate-lifecycle.mjs",
+    "validate:lifecycle:live": "node tools/live-gateway-command.mjs",
     "canary:lifecycle": "node src/canary-lifecycle-cli.ts",
     "canary:live": "node tools/live-portal-canary.mjs",
     "canary:preflight": "node src/cli.ts canary preflight",
@@ -50,6 +52,7 @@
     "check:code": "npm run lint && npm run typecheck",
     "check:core": "npm run build:admin && npm run test:core",
     "check:fast": "npm run check:code && npm run typecheck --workspace @ankka/gateway-installer && npm run check:boundary && npm run build:preview && npm run test:preview && npm run test:core",
+    "check:fast": "npm run lint && npm run typecheck && npm run typecheck --workspace @ankka/gateway-installer && npm run typecheck --workspace @ankka/search-console-adapter && npm run typecheck --workspace @ankka/read-only-connectors && npm run check:boundary && npm run build:admin && npm run build --workspace @ankka/search-console-adapter && npm run build --workspace @ankka/read-only-connectors && npm run test --workspace @ankka/gateway-admin && npm run test --workspace @ankka/search-console-adapter && npm run test --workspace @ankka/read-only-connectors && npm run test:core && npm run test:runtime",
     "check:history": "node scripts/check-public-history.mjs --allow-retired-product-name-through 4ba4c065aa67a761287bd74fc56f4911f7e558b3",
     "check:public": "npm run check:boundary && npm run check:history",
     "check:toolchain": "node scripts/check-toolchain.mjs",
@@ -61,20 +64,28 @@
     "plan:example": "node src/cli.ts plan examples/gateway.config.json --observed examples/observed.empty.json --access examples/access-input.json",
     "release": "node scripts/release.mjs",
     "test": "npm run build:admin && npm run test:core && npm run test:apps",
-    "test:apps": "npm run test --workspaces --if-present",
+    "test:apps": "npm run test --workspaces --if-present && npm run test:runtime",
     "test:core": "node --test test/*.test.mjs",
     "test:payload": "npm run build:admin && node --test test/release-payload-layout.test.mjs test/worker-primary-payload.test.mjs test/worker-uninstall-payload.test.mjs",
     "test:preview": "npm run test --workspace @ankka/gateway-admin && npm run test --workspace @ankka/search-console-adapter && npm run test --workspace @ankka/read-only-connectors",
     "typecheck": "tsc --noEmit",
-    "validate": "node src/cli.ts"
+    "validate": "node src/cli.ts",
+    "lifecycle": "node tools/lifecycle-command.mjs",
+    "test:runtime": "node --test apps/installer/test-runtime/*.test.mjs",
+    "dev:runtime": "node apps/installer/scripts/dev-runtime.mjs"
   },
   "devDependencies": {
     "@oxlint/plugins": "1.80.0",
     "@types/node": "22.20.1",
     "oxlint": "1.80.0",
-    "typescript": "7.0.2"
+    "playwright-core": "1.63.0",
+    "typescript": "7.0.2",
+    "miniflare": "5.20260826.0-alpha"
   },
   "dependencies": {
     "valibot": "^1.4.2"
+  },
+  "overrides": {
+    "sharp": "0.35.4"
   }
 }

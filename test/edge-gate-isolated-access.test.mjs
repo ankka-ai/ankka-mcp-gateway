@@ -105,6 +105,23 @@ test('isolated Access contract derives exact non-live domains and refuses live',
   );
 });
 
+test('isolated readback accepts only exact duplicate Cloudflare destination selectors', () => {
+  const contract = createIsolatedPrivateAccessContract(TARGET.hostname);
+  for (const specification of contract.bypassApplications) {
+    const body = contract.bypassApplicationBody(specification);
+    const returned = { ...body, destinations: [{ type: 'public', uri: specification.domain }],
+      self_hosted_domains: [specification.domain] };
+    assert.equal(contract.assessBypassApplication(returned, specification).ok, true);
+    for (const destinations of [
+      [{ type: 'public', uri: TARGET.hostname }],
+      [{ type: 'public', uri: `*.${TARGET.hostname}` }],
+      [{ type: 'private', uri: specification.domain }],
+      [...returned.destinations, { type: 'public', uri: 'foreign.example.com' }],
+    ]) assert.equal(contract.assessBypassApplication({ ...returned, destinations }, specification).ok, false);
+    assert.equal(contract.assessBypassApplication({ ...returned, self_hosted_domains: [TARGET.hostname] }, specification).ok, false);
+  }
+});
+
 test('legacy live Access mutator is a credential-free fail-closed stub', async () => {
   const script = new URL(
     '../apps/installer/scripts/edge-gate/apply-access.mjs',
@@ -228,6 +245,17 @@ test('isolated verifier proves exact inventory and cookie-free behavior without 
     status: 'verified',
   });
   assert.doesNotMatch(JSON.stringify(result), /example\.net|app-|account-member|1{16}/u);
+  const callbackResponse = (status, code) => async (url, init) =>
+    new URL(url).pathname === '/oauth/callback'
+      ? new Response(JSON.stringify({ code }), { status, headers: { 'content-type': 'application/json' } })
+      : behaviorFetch(url, init);
+  const current = await verifyIsolatedAccess({ fetchImpl: callbackResponse(400, 'callback_invalid'),
+    readToken: async () => TOKEN, runtimeMode: 'active', target: TARGET });
+  assert.equal(current.status, 'verified');
+  for (const [status, code] of [[500, 'internal_error'], [200, 'callback_invalid'], [400, 'bad_request']]) {
+    await assert.rejects(verifyIsolatedAccess({ fetchImpl: callbackResponse(status, code),
+      readToken: async () => TOKEN, runtimeMode: 'active', target: TARGET }), /callback_boundary_not_verified/u);
+  }
 });
 
 test('isolated verifier distinguishes the exact disabled shell from active callback state', async () => {

@@ -11,23 +11,38 @@ import type {
   SourceAction,
   SourceActions,
   SourceActionSummary,
+  SourceActionTools,
+  SourceApplyResult,
   SourceDiscovery,
   SourceDraftInput,
+  SourceToolChoice,
   Team,
   TeamAction,
   TeamActionResult,
   TeamMember,
+  TeardownAction,
 } from './api'
 
 const PREVIEW_SCENARIOS = [
-  'empty', 'ready', 'update', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential',
+  'empty', 'ready', 'update', 'update-running', 'update-failed', 'loading', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential',
   'source-pending', 'source-applying', 'source-expired', 'source-recovery', 'source-completed', 'source-late-success', 'source-lifecycle',
+  'source-sign-in',
+  'removal-interrupted',
 ] as const
 type PreviewScenario = typeof PREVIEW_SCENARIOS[number]
 const PREVIEW_STORAGE_KEY = 'ankka-gateway-ui-preview-scenario'
 const ACTION_ID = `action_${'a'.repeat(32)}`
 const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai'
 const HANDOFF = `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}`
+// A sign-in source installed with nothing enabled. Its synced list mixes what such a list may carry: full hints, a
+// description only, and a bare name.
+const SIGN_IN_SOURCE_ID = 'source-3333333333333333'
+const SIGN_IN_TOOLS: SourceActionTools['tools'] = [
+  { name: 'contacts_delete', title: null, description: 'Delete one contact.', readOnlyHint: false, destructiveHint: true, openWorldHint: null },
+  { name: 'contacts_get', title: null, description: 'Read one contact by identifier.', readOnlyHint: true, destructiveHint: false, openWorldHint: null },
+  { name: 'contacts_search', title: 'Search contacts', description: 'Search contacts by name or company.', readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  { name: 'reports_export', title: null, description: null, readOnlyHint: null, destructiveHint: null, openWorldHint: null },
+]
 
 const status: GatewayStatus = {
   schemaVersion: 1,
@@ -126,12 +141,23 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   #sources: ManagedSources
   #team: Team
   #sourceActions: SourceActionSummary[] = []
+  #firstToolRead: number | null = null
   readonly #scenario: PreviewScenario
 
   constructor(scenario: PreviewScenario) {
     this.#scenario = scenario
     this.#sources = structuredClone(scenario === 'empty' ? { ...installedSources, revision: 1, sources: [] } : installedSources)
-    if (scenario.startsWith('source-') && scenario !== 'source-lifecycle') {
+    if (scenario === 'source-sign-in') {
+      this.#sources.sources.push({ id: SIGN_IN_SOURCE_ID, label: 'Customer records', url: 'https://records.example.com/mcp',
+        authMode: 'oauth', onBehalfOfUser: false, enabledTools: [], status: 'draft' })
+      this.#sourceActions = [{
+        schemaVersion: 1, actionId: ACTION_ID, sourceId: SIGN_IN_SOURCE_ID,
+        issuedAt: new Date(Date.now() - 60_000).toISOString(), expiresAt: new Date(Date.now() + 540_000).toISOString(),
+        status: 'recovery_required', state: 'recovery_required', canCancel: false, canRenew: true,
+        failureCode: 'source_connection_required',
+        connectionUrl: `https://dash.cloudflare.com/${'1'.repeat(32)}/one/access-controls/ai-controls/mcp-server/edit/mcp-records-example`,
+      }]
+    } else if (scenario.startsWith('source-') && scenario !== 'source-lifecycle') {
       const state = scenario === 'source-expired' ? 'authorization_expired' : scenario === 'source-recovery' ? 'recovery_required' :
         scenario === 'source-completed' ? 'succeeded' : scenario === 'source-applying' ? 'applying' : 'authorization_required'
       const expired = scenario === 'source-expired' || scenario === 'source-recovery'
@@ -172,6 +198,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
 
   async getStatus(): Promise<GatewayStatus> {
+    // Keep the development-only loading screen available for visual inspection.
+    if (this.#scenario === 'loading') return new Promise<GatewayStatus>(() => {});
     if (this.#scenario === 'error') throw new Error('Synthetic preview error: the gateway could not be reached.')
     return structuredClone(status)
   }
@@ -179,6 +207,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   async getSources(): Promise<ManagedSources> { return structuredClone(this.#sources) }
   async getTeam(): Promise<Team> {
     if (this.#scenario === 'error') throw new Error('Synthetic preview error: team access could not be loaded.')
+    // Once the Portal's policies are gone, a gateway with a management credential cannot read its Team.
+    if (this.#scenario === 'removal-interrupted') throw new GatewayApiError(503, 'team_unavailable')
     return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })) })
   }
 
@@ -211,9 +241,13 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     this.#team.proposedMembers = null
     return structuredClone(this.#team.pendingAction)
   }
-  async getUpdate(): Promise<RuntimeUpdate> { return update(this.#scenario === 'update') }
+  async getUpdate(): Promise<RuntimeUpdate> { return update(this.#scenario.startsWith('update')) }
 
   async discoverSource(url: string): Promise<SourceDiscovery> {
+    // A host named `signin.` answers like a source that needs sign-in: a challenge, and no list.
+    if (url.startsWith('https://signin.')) {
+      return { schemaVersion: 1, status: 'authorization_required', endpoint: url, protocolVersion: '2026-07-28', authentication: 'oauth', tools: [] }
+    }
     return {
       schemaVersion: 1,
       status: 'discovered',
@@ -226,6 +260,14 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
         { name: 'publish_document', title: 'Publish document', description: 'Publish a changed document.', destructiveHint: true, defaultSelected: false },
       ],
     }
+  }
+
+  async getBigQuerySetups() { return { schemaVersion: 1 as const, available: true, setups: [] } }
+  async prepareBigQuery(_input: import('./api').BigQuerySetupInput): Promise<import('./api').BigQueryPrepared> {
+    throw new GatewayApiError(409, 'preview_only')
+  }
+  async resumeBigQuery(_actionId: string): Promise<import('./api').BigQueryPrepared> {
+    throw new GatewayApiError(409, 'preview_only')
   }
 
   async saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources> {
@@ -244,13 +286,26 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone(this.#sources)
   }
 
-  async prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<PreparedAction> {
+  async prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<SourceApplyResult> {
     if (!this.#sources.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
     if (revision !== this.#sources.revision || !this.#sources.sources.some((source) => source.id === sourceId && source.status === 'draft')) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })
     const { blockingAction, actions } = await this.getSourceActions()
     if (renewActionId !== undefined) {
       const action = this.#sourceActions.find((entry) => entry.actionId === renewActionId && entry.sourceId === sourceId)
       if (!action || action.canRenew !== true || blockingAction?.kind !== 'source' || blockingAction.actionId !== renewActionId) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'recovery_required' })
+      const signInSource = sourceId === SIGN_IN_SOURCE_ID ? this.#sources.sources.find((source) => source.id === sourceId) : undefined
+      if (signInSource) {
+        // The gateway resumes with its own credential: it attaches exactly the chosen tools, or keeps waiting for a choice.
+        if (signInSource.enabledTools.length === 0) {
+          action.failureCode = 'source_tools_required'
+          throw new GatewayApiError(409, 'source_tools_required')
+        }
+        Object.assign(action, { status: 'succeeded', state: 'succeeded', failureCode: null, canCancel: false, canRenew: false })
+        delete action.connectionUrl
+        signInSource.status = 'installed'
+        this.#sources.revision += 1
+        return { schemaVersion: 1, actionId: action.actionId, status: 'succeeded', expiresAt: action.expiresAt }
+      }
       Object.assign(action, { status: 'authorization_required', state: 'authorization_required',
         issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 600_000).toISOString(), canCancel: false, canRenew: false })
       return { schemaVersion: 1, actionId: action.actionId, status: 'authorization_required', expiresAt: action.expiresAt, handoffUrl: HANDOFF }
@@ -284,7 +339,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const teamAction = this.#team.pendingAction
     const blockingAction: SourceActions['blockingAction'] = pending ? { kind: 'source', actionId: pending.actionId, sourceId: pending.sourceId } :
       teamAction && !['succeeded', 'failed'].includes(teamAction.status) ? { kind: 'team', actionId: teamAction.actionId } :
-      this.#scenario === 'source-lifecycle' ? { kind: 'runtime', actionId: ACTION_ID } : null
+      this.#scenario === 'source-lifecycle' ? { kind: 'runtime', actionId: ACTION_ID } :
+      this.#scenario === 'removal-interrupted' ? { kind: 'teardown', actionId: ACTION_ID } : null
     return structuredClone({ schemaVersion: 1, actions: this.#sourceActions, blockingAction })
   }
 
@@ -309,6 +365,37 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return legacySourceAction(action)
   }
 
+  #signInAction(actionId: string): SourceActionSummary {
+    const action = this.#sourceActions.find((candidate) => candidate.actionId === actionId)
+    if (!action) throw new GatewayApiError(404, 'source_action_not_found')
+    if (action.sourceId !== SIGN_IN_SOURCE_ID || action.state !== 'recovery_required' || action.connectionUrl === undefined) {
+      throw new GatewayApiError(409, 'source_tools_unavailable')
+    }
+    return action
+  }
+
+  async getSourceActionTools(actionId: string): Promise<SourceActionTools> {
+    const action = this.#signInAction(actionId)
+    // The first reads find the source unconnected; two seconds on, the operator has connected it in Cloudflare.
+    this.#firstToolRead ??= Date.now()
+    const ready = Date.now() - this.#firstToolRead >= 2_000
+    return structuredClone({ schemaVersion: 1, actionId, sourceId: action.sourceId,
+      state: ready ? 'ready' : 'connection_required', tools: ready ? SIGN_IN_TOOLS : [] })
+  }
+
+  async chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {
+    const action = this.#signInAction(actionId)
+    const source = this.#sources.sources.find((candidate) => candidate.id === sourceId && candidate.id === action.sourceId)
+    if (!source || revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })
+    const chosen = [...new Set(enabledTools)].sort()
+    if (chosen.length === 0) throw new GatewayApiError(400, 'source_tools_invalid')
+    if (chosen.some((name) => !SIGN_IN_TOOLS.some((tool) => tool.name === name))) throw new GatewayApiError(409, 'source_tools_mismatch')
+    source.enabledTools = chosen
+    this.#sources.revision += 1
+    action.failureCode = 'source_tools_chosen'
+    return { schemaVersion: 1, actionId, sourceId, revision: this.#sources.revision, enabledTools: [...chosen] }
+  }
+
   async prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }> {
     const current = await this.getUpdate()
     const target = operation === 'update' ? current.available : current.rollback.available ? current.rollback : null
@@ -321,12 +408,12 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       schemaVersion: 1,
       actionId: ACTION_ID,
       operation: 'update',
-      status: 'succeeded',
-      stage: 'activated',
+      status: this.#scenario === 'update-running' ? 'applying' : this.#scenario === 'update-failed' ? 'recovery_required' : 'succeeded',
+      stage: this.#scenario === 'update-running' ? 'verifying_release' : 'activated',
       from: { release: 'gateway-v0.1.12', artifactSha256: `sha256:${'1'.repeat(64)}` },
       to: { release: 'gateway-v0.1.13', artifactSha256: `sha256:${'2'.repeat(64)}` },
       expiresAt: new Date(Date.now() + 600_000).toISOString(),
-      failureCode: null,
+      failureCode: this.#scenario === 'update-failed' ? 'update_failed' : null,
     }
   }
 
@@ -334,8 +421,11 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return { schemaVersion: 1, actionId: ACTION_ID, status: 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), handoffUrl: HANDOFF }
   }
 
-  async getTeardownAction(_actionId: string) {
-    return { schemaVersion: 1 as const, actionId: ACTION_ID, status: 'applying' as const, expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: null }
+  async getTeardownAction(_actionId: string): Promise<TeardownAction> {
+    if (this.#scenario === 'removal-interrupted') {
+      return { schemaVersion: 1, actionId: ACTION_ID, status: 'recovery_required', expiresAt: new Date(Date.now() - 60_000).toISOString(), failureCode: 'fresh_authorization_required' }
+    }
+    return { schemaVersion: 1, actionId: ACTION_ID, status: 'applying', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: null }
   }
 }
 

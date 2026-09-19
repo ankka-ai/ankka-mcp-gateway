@@ -73,10 +73,11 @@ function signedManifest(manifest) {
   };
 }
 
-test('the signer and runtime accept one exact V1 contract without a standing Team secret', async () => {
+test('the signer and runtime accept one exact V1 contract with only the optional customer management secret', async () => {
   assert.deepEqual(APPROVED_CLOUDFLARE_CONTRACT, runtimeContract);
   assert.deepEqual(APPROVED_CLOUDFLARE_CONTRACT.publicBindings.secrets, [
     { lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' },
+    { lifecycle: 'customer-managed-optional', name: 'ANKKA_MANAGEMENT_TOKEN' },
   ]);
   const manifest = manifestFor();
   const { envelope, environment } = signedManifest(manifest);

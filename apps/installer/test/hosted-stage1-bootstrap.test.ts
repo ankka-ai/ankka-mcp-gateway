@@ -12,9 +12,11 @@ import { base64UrlDecode, base64UrlEncode } from '../src/crypto';
 import {
   completeHostedStage1Handoff,
   createHostedStage1Secrets,
+  expectedCustomerBootstrapBindings,
   provisionHostedStage1,
   type HostedStage1Provider,
 } from '../src/hosted-stage1-bootstrap';
+import { parseVerifiedReleaseBundle } from '../src/verified-release-bundle';
 import type { VerifiedReleaseBundle, VerifiedReleasePayloadBlob } from '../src/release';
 import {
   APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
@@ -133,7 +135,8 @@ async function releaseBundle(): Promise<VerifiedReleaseBundle> {
   });
 }
 
-function oauthTransport(events: string[]) {
+function oauthTransport(events: string[], freshAccount = false) {
+  let subdomain: string | null = freshAccount ? null : 'tenant';
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const request = new Request(input, init);
     const url = new URL(request.url);
@@ -156,12 +159,22 @@ function oauthTransport(events: string[]) {
     }
     if (url.pathname === '/client/v4/zones') {
       events.push('zone-discovery');
-      return Response.json({ success: true, errors: [], result: [{ id: '1'.repeat(32), name: 'example.com', status: 'active', account: { id: ACCOUNT_ID } }] });
+      return Response.json({ success: true, errors: [], result: freshAccount ? [] : [{ id: '1'.repeat(32), name: 'example.com', status: 'active', account: { id: ACCOUNT_ID } }] });
     }
     if (url.pathname.endsWith('/workers/subdomain')) {
+      if (request.method === 'PUT') {
+        expect(freshAccount).toBe(true);
+        const body = v.parse(v.object({ subdomain: v.string() }), await request.json());
+        expect(body.subdomain).toMatch(/^ankka-[a-f0-9]{32}$/u);
+        subdomain = body.subdomain;
+        events.push('subdomain-create');
+        return Response.json({ success: true, errors: [], result: { subdomain } });
+      }
       expect(request.method).toBe('GET');
       events.push('subdomain-read');
-      return Response.json({ success: true, errors: [], result: { subdomain: 'tenant' } });
+      return subdomain === null
+        ? Response.json({ success: false, errors: [{ code: 10007 }], result: null }, { status: 404 })
+        : Response.json({ success: true, errors: [], result: { subdomain } });
     }
     if (url.pathname === '/oauth2/revoke') {
       events.push('revoke');
@@ -221,7 +234,7 @@ function provider(events: string[]): HostedStage1Provider {
   });
 }
 
-async function setup(workerSetup = false) {
+async function setup(workerSetup = false, freshAccount = false) {
   const bundle = await releaseBundle();
   const selection = parseDeploySelection({
     schemaVersion: 1,
@@ -247,7 +260,7 @@ async function setup(workerSetup = false) {
     code: `code_${'h'.repeat(32)}`,
     verifier: 'i'.repeat(43),
     oauth: { clientId: HOSTED_CLIENT_ID, clientSecret: HOSTED_CLIENT_SECRET },
-    transport: oauthTransport(events),
+    transport: oauthTransport(events, freshAccount),
     bundle,
     plan,
     secrets,
@@ -294,12 +307,13 @@ function streamedHealth(value: BoundaryValue, signal: AbortSignal | null | undef
 }
 
 describe('hosted Stage 1 coordinator', () => {
-  it.each([false, true])('revokes before token-free readiness and releases the capability only in the customer fragment (Worker setup: %s)', async (workerSetup) => {
-    const fixture = await setup(workerSetup);
+  it.each([[false, false], [true, false], [true, true]])('revokes before token-free readiness and releases the capability only in the customer fragment (Worker setup: %s, fresh account: %s)', async (workerSetup, freshAccount) => {
+    const fixture = await setup(workerSetup, freshAccount);
     expect(fixture.events).toEqual([
       'token-exchange',
       'account-read',
       ...(workerSetup ? ['zone-discovery'] : []),
+      ...(freshAccount ? ['subdomain-read', 'subdomain-read', 'subdomain-create'] : []),
       'subdomain-read',
       'worker-deploy',
       'subdomain-enable',
@@ -349,7 +363,7 @@ describe('hosted Stage 1 coordinator', () => {
       const payload = v.parse(v.strictObject({ bootstrapId: v.string(), secret: v.string(), setupPermit: v.string() }),
         JSON.parse(new TextDecoder().decode(base64UrlDecode(url.hash.slice(1)))));
       const permit = await verifyWorkerSetupPermit(payload.setupPermit, fixture.publicKey, NOW + 3);
-      expect(permit.availableZones).toEqual([{ id: '1'.repeat(32), name: 'example.com' }]);
+      expect(permit.availableZones).toEqual(freshAccount ? [] : [{ id: '1'.repeat(32), name: 'example.com' }]);
       expect(permit.bootstrapPlan.planId).toBe(fixture.plan.planId);
       expect(payload.secret).toBe(fixture.secrets.capability.secret);
       expect(payload.setupPermit).not.toContain(ACCESS_TOKEN);
@@ -377,7 +391,9 @@ describe('hosted Stage 1 coordinator', () => {
   });
 
   it('accepts a shell that names an earlier failure and stays strict about unknown keys and status', async () => {
-    type Answer = Partial<CustomerInstallStatus> & { readonly extra?: true };
+    // The management word is widened to any string so a foreign word can be sent to the strict parse.
+    type Answer = Omit<Partial<CustomerInstallStatus>, 'managementCredential'> &
+      { readonly extra?: true; readonly managementCredential?: string };
     const answer = (extra: Answer) => async (_input: RequestInfo | URL, init?: RequestInit) => {
       const value = {
         schemaVersion: 1,
@@ -422,6 +438,12 @@ describe('hosted Stage 1 coordinator', () => {
     // Shells from a release before the field existed answer without it.
     const legacy = await attempt({ failure: undefined });
     expect(new URL(legacy.handoffUrl).pathname).toBe('/__ankka/install');
+    // The shell and this readiness check share one schema, so the fixed word
+    // about the management token step reads here too; only a fixed word does.
+    const chosen = await attempt({ managementCredential: 'skipped' });
+    expect(new URL(chosen.handoffUrl).pathname).toBe('/__ankka/install');
+    await expect(attempt({ managementCredential: 'configured' }))
+      .rejects.toMatchObject({ code: 'bootstrap_failed', status: 502, reason: 'readiness_schema_invalid' });
     await expect(attempt({ extra: true }))
       .rejects.toMatchObject({ code: 'bootstrap_failed', status: 502, reason: 'readiness_schema_invalid' });
     await expect(attempt({ failure: { code: 'provider_recovery_required', reason: 'not a reason' } }))
@@ -477,3 +499,60 @@ describe('hosted Stage 1 coordinator', () => {
     })).rejects.toMatchObject({ code: 'bootstrap_not_ready', status: 503, reason: 'readiness_transport_failed' });
   });
 });
+
+describe('Stage 1 with the operator-managed credential', () => {
+  it('provisions the same exact shell without an OAuth exchange or revocation', async () => {
+    const { provisionHostedStage1WithOperatorCredential } = await import('../src/hosted-stage1-bootstrap');
+    const bundle = await releaseBundle();
+    const selection = parseDeploySelection({
+      schemaVersion: 1,
+      basics: {
+        gatewayName: 'Example Gateway', zoneName: 'example.com', adminEmail: 'owner@example.com',
+        additionalAdminEmails: [], managementHostname: 'manage.example.com', portalHostname: 'mcp.example.com',
+      },
+      firstSource: null,
+    });
+    const plan = await buildStaticDeployPlan(selection, bundle.manifest, NOW + 20 * 60_000);
+    const secrets = await createHostedStage1Secrets({ now: NOW });
+    // SAFETY: Ed25519 generateKey always yields a key pair; the union only exists for symmetric algorithms.
+    const keys = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']) as CryptoKeyPair;
+    const publicKey = base64UrlEncode(new Uint8Array(await crypto.subtle.exportKey('raw', keys.publicKey)));
+    const events: string[] = [];
+    const provision = await provisionHostedStage1WithOperatorCredential({
+      credential: { kind: 'operator-managed', accessToken: ACCESS_TOKEN },
+      transport: oauthTransport(events),
+      bundle, plan, secrets,
+      customerOauthClientId: CUSTOMER_CLIENT_ID, issuerKeyId: ISSUER_KEY_ID, issuerPublicKey: publicKey, issuerPrivateKey: keys.privateKey,
+      now: () => NOW + 1, provider: provider(events),
+    });
+    expect(provision.grantRevocation).toBe('operator-managed');
+    expect(provision.deployment.workerName).toMatch(/^ankka-gateway-.*acg-[a-f0-9]{24}$/u);
+    expect(provision.installId).toBe(plan.managementOwnershipMarker);
+    expect(events).not.toContain('token-exchange');
+    expect(events).not.toContain('revoke');
+    expect(events).toContain('worker-deploy');
+    expect(JSON.stringify(provision)).not.toContain(ACCESS_TOKEN);
+  });
+});
+
+test('the shell is bound to the control-plane origin of the release that produced it, not to a compiled constant', async () => {
+  const bundle = await releaseBundle();
+  const parsed = parseVerifiedReleaseBundle(bundle);
+  const isolated = { ...parsed, manifest: { ...parsed.manifest, controlPlaneOrigin: 'https://installer.example.net' } };
+  const selection = parseDeploySelection({
+    schemaVersion: 1,
+    basics: { gatewayName: 'Example Gateway', zoneName: 'example.com', adminEmail: 'owner@example.com', additionalAdminEmails: [],
+      managementHostname: 'manage.example.com', portalHostname: 'mcp.example.com' },
+    firstSource: null,
+  });
+  const plan = await buildStaticDeployPlan(selection, bundle.manifest, NOW + 20 * 60_000);
+  const secrets = await createHostedStage1Secrets({ now: NOW });
+  const input = {
+    accountId: ACCOUNT_ID, bootstrapCallback: 'https://ankka-gateway-example.tenant.workers.dev/__ankka/install/oauth/callback',
+    customerOauthClientId: 'c'.repeat(32), issuerKeyId: 'issuer-v1', issuerPublicKey: 'A'.repeat(43),
+    plan, capability: secrets.capability, workerName: 'ankka-gateway-example',
+  };
+  expect(expectedCustomerBootstrapBindings({ ...input, release: isolated }).ANKKA_INSTALLER_ORIGIN).toBe('https://installer.example.net');
+  expect(expectedCustomerBootstrapBindings({ ...input, release: parsed }).ANKKA_INSTALLER_ORIGIN).toBe('https://deploy.ankka.ai');
+});
+

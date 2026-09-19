@@ -76,6 +76,7 @@ export function createCustomerWorkerSetup(input: {
       const permit = await verified(state.permit);
       const ownership = await readCustomerGatewayOwnershipState(storage);
       if (ownership.serializedHandoff !== null) invalid();
+      if (permit.availableZones.length === 0) throw new DeployError(409, 'bad_request', 'active_zone_required');
       const selection = parseDeploySelection(value);
       if (selection.firstSource !== null || !permit.availableZones.some((zone) => zone.name === selection.basics.zoneName)) invalid();
       const key = await openCustomerGatewayOwnershipPrivateKey({ storage, wrappingKey: config.wrappingKey });
@@ -86,7 +87,9 @@ export function createCustomerWorkerSetup(input: {
       if (!response.response.ok) invalid();
       const configured = v.parse(configuredSetupSchema, JSON.parse(response.text));
       const plan = await verifyStaticDeployPlanIntegrity(JSON.parse(configured.serializedPlan));
-      if (canonicalJson(deploySelectionFromStaticPlan(plan)) !== canonicalJson(selection) ||
+      // The installer deployment may have opted the plan into a service identity; everything the browser chose must match exactly.
+      const { serviceAccess: _installerServiceAccess, ...certified } = deploySelectionFromStaticPlan(plan);
+      if (canonicalJson(certified) !== canonicalJson(selection) ||
           plan.bootstrapIdentity?.planId !== config.planId || plan.bootstrapIdentity.planHash !== config.planHash ||
           plan.managementOwnershipMarker !== config.installId) invalid();
       await storage.put(KEY, { permit: state.permit, configured });

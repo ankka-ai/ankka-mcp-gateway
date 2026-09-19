@@ -104,6 +104,12 @@ function containsControlCharacter(value: string): boolean {
   });
 }
 
+/** The one machine identity a gateway will accept on its management routes; never part of browser input. */
+export interface DeployServiceAccess {
+  readonly clientId: string;
+  readonly tokenId: string;
+}
+
 export interface DeploySelection {
   schemaVersion: 1;
   basics: {
@@ -120,6 +126,38 @@ export interface DeploySelection {
     enabledTools: readonly string[];
     portalUserEmails: readonly string[];
   } | null;
+  serviceAccess?: DeployServiceAccess;
+}
+
+const SERVICE_CLIENT_ID_PATTERN = /^[a-f0-9]{32}\.access$/u;
+const SERVICE_TOKEN_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+const serviceAccessSchema = v.strictObject({
+  clientId: v.pipe(v.string(), v.regex(SERVICE_CLIENT_ID_PATTERN)),
+  tokenId: v.pipe(v.string(), v.regex(SERVICE_TOKEN_ID_PATTERN)),
+});
+
+/**
+ * Attaches the service identity a deployment configuration opts into. Browser
+ * input cannot carry it: only a runner or an installer deployment that holds
+ * the identity in its own configuration calls this.
+ */
+export function withDeployServiceAccess(selection: DeploySelection, serviceAccess: DeployServiceAccess): DeploySelection {
+  const parsed = v.safeParse(serviceAccessSchema, serviceAccess);
+  if (!parsed.success || selection.serviceAccess !== undefined) throw new DeployError(400, 'bad_request', 'service_access_invalid');
+  return Object.freeze({ ...selection, serviceAccess: Object.freeze({ clientId: parsed.output.clientId, tokenId: parsed.output.tokenId }) });
+}
+
+/**
+ * Re-validates a selection the installer itself produced (from a session or a
+ * plan), which may carry the service identity a plan opted into. Browser input
+ * goes through parseDeploySelection and can never carry one.
+ */
+export function parseCanonicalDeploySelection<Input>(value: Input): DeploySelection {
+  const record = v.safeParse(v.looseObject({ serviceAccess: v.optional(serviceAccessSchema) }), value);
+  if (!record.success) throw new DeployError(400, 'bad_request', 'selection_contract_invalid');
+  const { serviceAccess, ...base } = record.output;
+  const selection = parseDeploySelection(base);
+  return serviceAccess === undefined ? selection : withDeployServiceAccess(selection, serviceAccess);
 }
 
 export function parseDeploySelection<Input>(value: Input): DeploySelection {
@@ -276,6 +314,7 @@ export interface StaticDeployPlan {
       url: string;
       enabledTools: readonly string[];
     } | null;
+    serviceAccess?: DeployServiceAccess | undefined;
   };
   managementResources: readonly ManagementResource[];
   gatewayResources: readonly GatewayResource[];
@@ -287,7 +326,8 @@ export type ManagementResourceKind =
   | 'management_durable_object'
   | 'management_assets'
   | 'management_access_application'
-  | 'management_access_policy';
+  | 'management_access_policy'
+  | 'management_service_policy';
 
 export type GatewayResourceKind =
   | 'mcp_server'
@@ -318,6 +358,7 @@ const managementResourceKindSchema = v.picklist([
   'management_assets',
   'management_access_application',
   'management_access_policy',
+  'management_service_policy',
 ]);
 const gatewayResourceKindSchema = v.picklist([
   'mcp_server',
@@ -371,6 +412,7 @@ const staticDeployPlanSchema = v.strictObject({
       url: stringSchema,
       enabledTools: v.array(stringSchema),
     })),
+    serviceAccess: v.optional(serviceAccessSchema),
   }),
   managementResources: v.array(managementResourceSchema),
   gatewayResources: v.array(gatewayResourceSchema),
@@ -415,6 +457,9 @@ export async function buildStaticDeployPlan(
     { kind: 'management_assets', key: 'management-assets', name: `${workerName}-assets`, hostname: selection.basics.managementHostname },
     { kind: 'management_access_application', key: 'management-access-app', name: `${selection.basics.gatewayName} management [${managementOwnershipMarker}]`, hostname: selection.basics.managementHostname },
     { kind: 'management_access_policy', key: 'management-access-policy', name: `${selection.basics.gatewayName} administrators [${managementOwnershipMarker}]`, hostname: selection.basics.managementHostname },
+    ...(selection.serviceAccess === undefined ? [] : [
+      { kind: 'management_service_policy', key: 'management-service-policy', name: `${selection.basics.gatewayName} automation [${managementOwnershipMarker}]`, hostname: selection.basics.managementHostname } as const,
+    ]),
   ]);
   const sourceResources: readonly GatewayResource[] = selection.firstSource === null
     ? Object.freeze([])
@@ -435,6 +480,21 @@ export async function buildStaticDeployPlan(
     planId: bootstrapIdentity.planId, planHash: bootstrapIdentity.planHash,
     installId: bootstrapIdentity.installId, workerName: bootstrapIdentity.workerName,
   };
+  const gatewayConfiguration: StaticDeployPlan['gatewayConfiguration'] = {
+    gatewayName: selection.basics.gatewayName,
+    zoneName: selection.basics.zoneName,
+    managementHostname: selection.basics.managementHostname,
+    portalHostname: selection.basics.portalHostname,
+    capabilityMode: 'read_only',
+    codeMode: 'default_on',
+    firstSource: selection.firstSource === null ? null : Object.freeze({
+      name: selection.firstSource.name,
+      url: selection.firstSource.url,
+      enabledTools: selection.firstSource.enabledTools,
+    }),
+  };
+  // The service identity is part of the plan's identity: it changes the ownership marker and the plan hash.
+  if (selection.serviceAccess !== undefined) gatewayConfiguration.serviceAccess = Object.freeze({ ...selection.serviceAccess });
   const boundPlan = {
     ...identity,
     schemaVersion: 1,
@@ -449,19 +509,7 @@ export async function buildStaticDeployPlan(
     primaryAdminEmail: selection.basics.adminEmail,
     managementAdminEmails,
     portalAudienceEmails: selection.firstSource?.portalUserEmails ?? managementAdminEmails,
-    gatewayConfiguration: Object.freeze({
-      gatewayName: selection.basics.gatewayName,
-      zoneName: selection.basics.zoneName,
-      managementHostname: selection.basics.managementHostname,
-      portalHostname: selection.basics.portalHostname,
-      capabilityMode: 'read_only',
-      codeMode: 'default_on',
-      firstSource: selection.firstSource === null ? null : Object.freeze({
-        name: selection.firstSource.name,
-        url: selection.firstSource.url,
-        enabledTools: selection.firstSource.enabledTools,
-      }),
-    }),
+    gatewayConfiguration: Object.freeze(gatewayConfiguration),
     managementResources,
     gatewayResources,
     requiredScopes: REQUIRED_OAUTH_SCOPES,
@@ -484,6 +532,7 @@ const MANAGEMENT_KINDS = new Set<ManagementResourceKind>([
   'management_assets',
   'management_access_application',
   'management_access_policy',
+  'management_service_policy',
 ]);
 const GATEWAY_KINDS = new Set<GatewayResourceKind>([
   'mcp_server',
@@ -533,7 +582,9 @@ export function parseStaticDeployPlan<Input>(value: Input): StaticDeployPlan {
     (input.gatewayConfiguration.firstSource !== null && (
       input.gatewayConfiguration.firstSource.enabledTools.length < 1
     )) ||
-    !resourcesMatch(input.managementResources, 5, MANAGEMENT_KINDS) ||
+    !resourcesMatch(input.managementResources, input.gatewayConfiguration.serviceAccess === undefined ? 5 : 6, MANAGEMENT_KINDS) ||
+    input.managementResources.some((resource) => resource.kind === 'management_service_policy') !==
+      (input.gatewayConfiguration.serviceAccess !== undefined) ||
     !resourcesMatch(
       input.gatewayResources,
       input.gatewayConfiguration.firstSource === null ? 4 : 7,
@@ -593,6 +644,9 @@ export function parseStaticDeployPlan<Input>(value: Input): StaticDeployPlan {
       { kind: 'management_assets', key: 'management-assets', name: `${workerName}-assets`, hostname: canonical.basics.managementHostname },
       { kind: 'management_access_application', key: 'management-access-app', name: `${canonical.basics.gatewayName} management [${marker}]`, hostname: canonical.basics.managementHostname },
       { kind: 'management_access_policy', key: 'management-access-policy', name: `${canonical.basics.gatewayName} administrators [${marker}]`, hostname: canonical.basics.managementHostname },
+      ...(config.serviceAccess === undefined ? [] : [
+        { kind: 'management_service_policy', key: 'management-service-policy', name: `${canonical.basics.gatewayName} automation [${marker}]`, hostname: canonical.basics.managementHostname } as const,
+      ]),
     ];
     const sourceResources: readonly GatewayResource[] = canonical.firstSource === null ? [] : [
       { kind: 'mcp_server', key: 'first-mcp-server', name: canonical.firstSource.name, hostname: new URL(canonical.firstSource.url).hostname },
@@ -620,7 +674,7 @@ export function parseStaticDeployPlan<Input>(value: Input): StaticDeployPlan {
 export function deploySelectionFromStaticPlan(plan: StaticDeployPlan): DeploySelection {
   const parsed = parseStaticDeployPlan(plan);
   const config = parsed.gatewayConfiguration;
-  return parseDeploySelection({
+  const selection = parseDeploySelection({
     schemaVersion: 1,
     basics: {
       gatewayName: config.gatewayName,
@@ -638,6 +692,7 @@ export function deploySelectionFromStaticPlan(plan: StaticDeployPlan): DeploySel
       portalUserEmails: parsed.portalAudienceEmails,
     },
   });
+  return config.serviceAccess === undefined ? selection : withDeployServiceAccess(selection, config.serviceAccess);
 }
 
 /**

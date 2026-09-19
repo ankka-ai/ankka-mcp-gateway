@@ -37,6 +37,14 @@ import {
   CUSTOMER_INSTALL_OAUTH_START_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
+import {
+  CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH,
+  customerManagementCredentialName,
+  customerManagementCredentialSchema,
+  customerManagementCredentialTemplateLink,
+  type CustomerManagementCredentialStep,
+} from './customer-management-credential';
+import { parseOauthCallbackQuery, type OauthCallbackQuery } from './oauth-callback-query';
 
 const SESSION_COOKIE = '__Host-ankka_bootstrap_session';
 const PKCE_COOKIE = '__Host-ankka_bootstrap_pkce';
@@ -45,6 +53,13 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const AUTHORIZATION_CODE = /^[A-Za-z0-9._~-]{8,4096}$/u;
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_HANDOFF_BYTES = 60 * 1024;
+/** An account token is at most 69 characters here; nothing larger is read on the management step. */
+const MAX_MANAGEMENT_STEP_BYTES = 512;
+/** Either the pasted value or the explicit choice to continue without one; never both, never anything else. */
+const managementStepSchema = v.union([
+  v.strictObject({ managementToken: customerManagementCredentialSchema }),
+  v.strictObject({ skip: v.literal(true) }),
+]);
 
 export interface CustomerBootstrapStatePort {
   read(): Promise<CustomerBootstrapState | null | undefined>;
@@ -67,6 +82,8 @@ export interface CustomerBootstrapRouterDependencies {
   readonly randomBytes?: BootstrapRandomBytes;
   readonly state: CustomerBootstrapStatePort;
   readonly transport: CustomerCloudflareTransport;
+  /** Answers whether the management hostname resolves; DNS-over-HTTPS when absent. */
+  readonly resolvesManagementHostname?: (hostname: string) => Promise<boolean>;
   /**
    * Verifies and adopts the exact deploy-signed Worker/namespace handoff and
    * ownership certificate. It must be idempotent for byte-identical evidence.
@@ -109,6 +126,13 @@ export interface CustomerBootstrapRouterDependencies {
     outcome: CustomerBootstrapCallbackOutcome,
     cookies: readonly string[],
   ) => Response;
+  /**
+   * The management credential step of setup. The router validates the pasted
+   * value's form and hands it over exactly once; it keeps no copy, and no
+   * response or error of this router carries it. Absent: the step is not
+   * offered and its route does not exist.
+   */
+  readonly managementCredential?: CustomerManagementCredentialStep;
 }
 
 export interface CustomerBootstrapCallbackOutcome {
@@ -124,6 +148,8 @@ export interface CustomerBootstrapRouterConfig {
   readonly secretCommitment: string;
   readonly capabilityExpiresAt: number;
   readonly publicClientId: string;
+  /** The final management hostname; READY is reported only once it resolves. */
+  readonly managementHostname?: string | undefined;
 }
 
 const configSchema = v.strictObject({
@@ -133,7 +159,26 @@ const configSchema = v.strictObject({
   secretCommitment: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)),
   capabilityExpiresAt: v.pipe(v.number(), v.safeInteger()),
   publicClientId: v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{16,128}$/u)),
+  /** When present, READY is reported only once this hostname resolves, so a browser never caches its absence. */
+  managementHostname: v.optional(v.pipe(v.string(), v.regex(/^[a-z0-9](?:[a-z0-9.-]{1,251}[a-z0-9])?$/u))),
 });
+
+/** Resolver-agnostic DNS check through Cloudflare's DNS-over-HTTPS endpoint; absence is never cached here. */
+async function hostnameResolvesOverHttps(hostname: string): Promise<boolean> {
+  for (const type of ['A', 'AAAA']) {
+    try {
+      const response = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=${type}`, {
+        headers: { accept: 'application/dns-json' }, redirect: 'manual', signal: AbortSignal.timeout(3_000),
+      });
+      if (!response.ok) continue;
+      const parsed = v.safeParse(v.looseObject({ Status: v.number(), Answer: v.optional(v.array(v.looseObject({ type: v.number() }))) }), await response.json());
+      if (parsed.success && parsed.output.Status === 0 && (parsed.output.Answer?.length ?? 0) > 0) return true;
+    } catch {
+      // A failed lookup only defers readiness; the next status poll asks again.
+    }
+  }
+  return false;
+}
 
 function headers(contentType = 'application/json; charset=utf-8'): Headers {
   return new Headers({
@@ -239,15 +284,38 @@ async function smallJson<Schema extends v.GenericSchema>(
   return v.parse(schema, JSON.parse(serialized));
 }
 
+/**
+ * Reads the management step's small body without ever throwing what it read:
+ * a refused body yields null, so no exception, message, or response can carry
+ * a pasted value.
+ */
+async function managementStepInput(
+  request: Request,
+): Promise<v.InferOutput<typeof managementStepSchema> | null> {
+  const declared = Number(request.headers.get('content-length'));
+  if (Number.isFinite(declared) && declared > MAX_MANAGEMENT_STEP_BYTES) return null;
+  let decoded: unknown;
+  try {
+    const serialized = await request.text();
+    if (serialized.length > MAX_MANAGEMENT_STEP_BYTES) return null;
+    decoded = JSON.parse(serialized);
+  } catch {
+    return null;
+  }
+  const parsed = v.safeParse(managementStepSchema, decoded);
+  return parsed.success ? parsed.output : null;
+}
+
 export function validCustomerBootstrapRelayAuthorization(
   value: CustomerBootstrapRelayStart,
   publicClientId: string,
   challenge: string,
   operation: CustomerCloudflareOperation = 'install',
+  receiptResourceKinds?: readonly import('./cloudflare-operation-authority').ReceiptOwnedCloudflareResourceKind[],
 ): boolean {
   try {
     const url = new URL(value.authorizationUrl);
-    const expectedScopes = exactOperationScopes(operation).join(' ');
+    const expectedScopes = exactOperationScopes(operation, receiptResourceKinds).join(' ');
     const expectedKeys = [
       'response_type', 'client_id', 'redirect_uri', 'scope', 'state',
       'code_challenge', 'code_challenge_method',
@@ -270,6 +338,21 @@ export function validCustomerBootstrapRelayAuthorization(
   }
 }
 
+/**
+ * Parses the query the relay sends to the certified install callback: the
+ * relayed `code` and `state`, or the relay's one fixed denial. Cloudflare
+ * echoes the granted scope beside a code, so an echo of exactly the install
+ * operation's scope set is admitted beside them, and the standard denial
+ * fields beside the denial; nothing else is. Rejecting here never consumes
+ * the armed attempt.
+ */
+export function parseCustomerBootstrapOauthCallback(url: URL): OauthCallbackQuery | null {
+  const query = parseOauthCallbackQuery(url, exactOperationScopes('install'));
+  if (query === null) return null;
+  if (query.denied) return url.searchParams.get('error') === 'authorization_rejected' ? query : null;
+  return AUTHORIZATION_CODE.test(query.code) ? query : null;
+}
+
 export function createCustomerBootstrapRouter(
   rawConfig: CustomerBootstrapRouterConfig,
   dependencies: CustomerBootstrapRouterDependencies,
@@ -277,6 +360,7 @@ export function createCustomerBootstrapRouter(
   const parsedConfig = v.safeParse(configSchema, rawConfig);
   if (!parsedConfig.success) throw new CustomerBootstrapStateError('invalid');
   const config = Object.freeze(parsedConfig.output);
+  let managementResolved = false;
   const now = dependencies.now ?? Date.now;
 
   const persistTransition = async (
@@ -310,6 +394,24 @@ export function createCustomerBootstrapRouter(
     return current;
   };
 
+  /**
+   * What the setup page needs to show the management credential step: the
+   * fixed word so far, and, once a plan names the management hostname, the
+   * token name and Cloudflare's template link built from it. Never a value.
+   */
+  const withManagementStep = async (setup: CustomerWorkerSetupPublicState) => {
+    if (dependencies.managementCredential === undefined) return setup;
+    const hostname = setup.plan?.gatewayConfiguration.managementHostname;
+    return {
+      ...setup,
+      managementCredential: {
+        state: await dependencies.managementCredential.word() ?? null,
+        name: hostname === undefined ? null : customerManagementCredentialName(hostname),
+        createUrl: hostname === undefined ? null : customerManagementCredentialTemplateLink(hostname),
+      },
+    };
+  };
+
   return Object.freeze({
     async fetch(request: Request): Promise<Response> {
       let url: URL;
@@ -326,7 +428,14 @@ export function createCustomerBootstrapRouter(
       try {
         const current = await readState();
         if (request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_STATUS_PATH) {
-          return json(publicCustomerBootstrapStatus(current));
+          const status = publicCustomerBootstrapStatus(current);
+          // The browser navigates to the management hostname on READY. Resolvers cache a missing name for the
+          // zone's negative TTL, so READY waits until the name resolves; the install itself is already complete.
+          if (status.status === 'READY' && config.managementHostname !== undefined && !managementResolved) {
+            managementResolved = await (dependencies.resolvesManagementHostname ?? hostnameResolvesOverHttps)(config.managementHostname);
+            if (!managementResolved) return json({ ...status, status: 'CONVERGING' });
+          }
+          return json(status);
         }
         // READY is terminal. A clean release serves the final Gateway; this
         // restricted bootstrap version never reopens any setup endpoint.
@@ -390,12 +499,46 @@ export function createCustomerBootstrapRouter(
           const secret = readSessionCookie(request);
           if (secret === null) return json({ error: 'bootstrap_session_required' }, 403);
           await authenticatedSession(current, secret, now());
+          // A callback that never reached exchange may be replaced by fresh
+          // PKCE within the original setup window. Keep the reviewed plan
+          // locked, and leave any exchanged or converging work to recovery.
+          if (request.method === 'GET' && current.status === 'INCOMPLETE' &&
+              current.oauth?.phase === 'authorizing' && current.oauth.expiresAt <= now() &&
+              dependencies.readSetup !== undefined) {
+            return json({ ...await withManagementStep(await dependencies.readSetup()), approvalExpired: true });
+          }
           if (current.oauth !== null || current.status !== 'INCOMPLETE') return json({ error: 'setup_locked' }, 409);
-          if (request.method === 'GET' && dependencies.readSetup !== undefined) return json(await dependencies.readSetup());
+          if (request.method === 'GET' && dependencies.readSetup !== undefined) {
+            return json(await withManagementStep(await dependencies.readSetup()));
+          }
           if (request.method === 'POST' && dependencies.configureSetup !== undefined) {
-            return json(await dependencies.configureSetup(parseDeploySelection(await smallJson(request, boundaryObjectSchema))));
+            return json(await withManagementStep(
+              await dependencies.configureSetup(parseDeploySelection(await smallJson(request, boundaryObjectSchema))),
+            ));
           }
           return notFound();
+        }
+
+        // The management credential step. The pasted value arrives once, by
+        // same-origin POST under the setup session, and leaves this function
+        // only into the host's memory; the answer is a fixed word.
+        if (request.method === 'POST' && url.pathname === CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH &&
+            url.search === '' && dependencies.managementCredential !== undefined) {
+          if (!sameOriginMutation(request)) return json({ schemaVersion: 1, error: 'forbidden' }, 403);
+          const secret = readSessionCookie(request);
+          if (secret === null) return json({ schemaVersion: 1, error: 'bootstrap_session_required' }, 403);
+          await authenticatedSession(current, secret, now());
+          // Open exactly while the review is: before an approval starts, and
+          // again once an approval expired unexchanged. A running approval or
+          // install never changes what it will upload.
+          const reviewOpen = current.status === 'INCOMPLETE' && (current.oauth === null ||
+            (current.oauth.phase === 'authorizing' && current.oauth.expiresAt <= now()));
+          if (!reviewOpen) return json({ schemaVersion: 1, error: 'setup_locked' }, 409);
+          const input = await managementStepInput(request);
+          if (input === null) return json({ schemaVersion: 1, error: 'management_token_invalid' }, 400);
+          if ('skip' in input) await dependencies.managementCredential.skip();
+          else await dependencies.managementCredential.accept(input.managementToken);
+          return json({ schemaVersion: 1, managementCredential: await dependencies.managementCredential.word() ?? null });
         }
 
         if (request.method === 'POST' && url.pathname === CUSTOMER_INSTALL_OAUTH_START_PATH) {
@@ -456,18 +599,22 @@ export function createCustomerBootstrapRouter(
           const callbackAt = now();
           const sessionSecret = readSessionCookie(request);
           const pkce = readPkceCookie(request, callbackAt);
-          const code = url.searchParams.get('code') ?? '';
-          const oauthState = url.searchParams.get('state') ?? '';
-          const oauthError = url.searchParams.get('error');
+          const query = parseCustomerBootstrapOauthCallback(url);
           const matchingAttempt = pkce !== null && current.oauth?.attemptId === pkce.attemptId &&
             current.oauth.expiresAt === pkce.expiresAt;
-          if (sessionSecret !== null && matchingAttempt && oauthError === 'authorization_rejected' &&
-              code === '' && TOKEN.test(oauthState) && url.searchParams.size === 2) {
+          if (sessionSecret === null || !matchingAttempt || query === null) {
+            return json(
+              { schemaVersion: 1, error: 'oauth_callback_rejected' },
+              400,
+              [clearPkceCookie()],
+            );
+          }
+          if (query.denied) {
             const rejected = await rejectCustomerBootstrapOauthCallback({
               current,
               sessionSecret,
               attemptId: pkce.attemptId,
-              state: oauthState,
+              state: query.state,
               now: callbackAt,
             });
             await persistTransition(current, rejected);
@@ -483,22 +630,13 @@ export function createCustomerBootstrapRouter(
               failureCode: 'authorization_rejected',
             }, 200, cookies);
           }
-          if (sessionSecret === null || !matchingAttempt || oauthError !== null ||
-              !AUTHORIZATION_CODE.test(code) ||
-              !TOKEN.test(oauthState) || url.searchParams.size !== 2) {
-            return json(
-              { schemaVersion: 1, error: 'oauth_callback_rejected' },
-              400,
-              [clearPkceCookie()],
-            );
-          }
           const begun = await beginCustomerBootstrapCallback({
             current,
             sessionSecret,
             attemptId: pkce.attemptId,
             verifier: pkce.verifier,
-            oauthState,
-            code,
+            oauthState: query.state,
+            code: query.code,
             accountId: config.accountId,
             publicClientId: config.publicClientId,
             now: callbackAt,

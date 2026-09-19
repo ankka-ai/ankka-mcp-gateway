@@ -10,6 +10,7 @@ import {
   type CustomerRuntimeControlCommand,
   type CustomerRuntimeUpdateInput,
 } from '../src/customer-runtime-update';
+import { publishCustomerWorkerFinalRuntime } from '../src/customer-worker-self-update';
 import { releaseSignatureCanonicalJson, type VerifiedReleaseBundle, type VerifiedReleasePayloadBlob } from '../src/release';
 import {
   APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
@@ -183,7 +184,11 @@ function envelope(result: BoundaryValue, status = 200): Response {
 
 function providerFake(release: SignedRelease, options: {
   readonly currentRelease?: string;
+  readonly managementBinding?: { name: string; type: string };
+  readonly serviceBinding?: { name: string; type: string; text?: string };
   readonly controlPlane?: (request: Request) => Promise<Response>;
+  /** The active version's bindings exactly as the provider lists them, in place of the assembled default. */
+  readonly currentVersionBindings?: readonly BoundaryValue[];
 } = {}): ProviderFake {
   const requests: Recorded[] = [];
   const events: string[] = [];
@@ -234,9 +239,11 @@ function providerFake(release: SignedRelease, options: {
         id: OLD_VERSION,
         compatibility_date: '2026-08-08',
         main_module: 'index.js',
-        bindings: [
+        bindings: options.currentVersionBindings !== undefined ? [...options.currentVersionBindings] : [
           { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
           { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'secret_text' },
+          ...(options.managementBinding ? [options.managementBinding] : []),
+          ...(options.serviceBinding ? [options.serviceBinding] : []),
           { name: 'ASSETS', type: 'assets' },
           ...Object.entries(bindings).map(([name, text]) => ({ name, type: 'plain_text', text })),
         ],
@@ -433,9 +440,9 @@ describe('gateway-local runtime update', () => {
     expect(await file.text()).toBe(retained.workerSource);
   });
 
-  it('verifies the exact bundle against its own update key, hands over, then replaces itself with inherited secrets', async () => {
+  it.each([false, true])('preserves only the declared secret bindings across updates (management configured: %s)', async (configured) => {
     const release = await signedRelease();
-    const fake = providerFake(release);
+    const fake = providerFake(release, configured ? { managementBinding: { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' } } : {});
     const commands: CustomerRuntimeControlCommand[] = [];
     const handovers: string[] = [];
     const result = await runCustomerRuntimeUpdate(input(fake, release, commands, handovers));
@@ -474,11 +481,80 @@ describe('gateway-local runtime update', () => {
     });
     expect(bindingsByName.get('ANKKA_INSTALL_ID')).toEqual({ name: 'ANKKA_INSTALL_ID', type: 'plain_text', text: `acg-${'c'.repeat(24)}` });
     expect(bindingsByName.has('ANKKA_BOOTSTRAP_NONCE')).toBe(false);
-    expect(metadata.bindings).toHaveLength(19);
+    expect(metadata.bindings).toHaveLength(configured ? 20 : 19);
+    expect(bindingsByName.get('ANKKA_MANAGEMENT_TOKEN')).toEqual(configured ? { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'inherit', version_id: 'latest' } : undefined);
     const module = upload.form.get('index.js');
     if (!(module instanceof Blob)) throw new Error('module missing');
     expect(await module.text()).toBe(release.workerSource);
     expect(JSON.stringify(fake.requests.map((entry) => entry.url))).not.toContain(ACCESS_TOKEN);
+  });
+
+  it('updates an install that was made with the management token and keeps the secret without ever reading it', async () => {
+    // A synthetic value in Cloudflare's account token form, assembled at run time.
+    const managementValue = `cfat_${'Bx9m'.repeat(10)}${'5a'.repeat(4)}`;
+    const release = await signedRelease();
+    const installSource = 'export class AdminState {}\nexport default {};\n';
+    const bootstrapVersion = '55555555-5555-4555-8555-555555555555';
+    // The install's own final upload, against a provider that lists what was uploaded the way Cloudflare does:
+    // inherited bindings resolved, plain text as sent, and a secret by name and type only.
+    let listed: BoundaryValue[] | null = null;
+    const installProvider: CustomerCloudflareTransport = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const path = new URL(request.url).pathname.replace(`/client/v4/accounts/${ACCOUNT_ID}`, '');
+      if (request.method === 'GET' && path === `/workers/workers/${WORKER_NAME}`) {
+        return envelope({ id: WORKER_ID, name: WORKER_NAME, tags: ['ankka-mcp-gateway'] });
+      }
+      if (request.method === 'GET' && path === `/workers/scripts/${WORKER_NAME}/deployments`) {
+        return envelope({ deployments: [{ id: DEPLOYMENT, versions: [{ version_id: listed === null ? bootstrapVersion : OLD_VERSION, percentage: 100 }] }] });
+      }
+      if (request.method === 'GET' && path === `/workers/workers/${WORKER_ID}/versions/${OLD_VERSION}`) {
+        return Response.json({ success: true, errors: [], messages: [], result: {
+          id: OLD_VERSION, main_module: 'index.js', compatibility_date: '2026-08-08', compatibility_flags: [],
+          modules: [{ name: 'index.js', content_type: 'application/javascript+module', content_base64: btoa(installSource) }],
+          bindings: listed, exports: { AdminState: { type: 'durable-object', storage: 'sqlite' } },
+        } });
+      }
+      if (request.method === 'DELETE' && path.endsWith('/secrets/ANKKA_BOOTSTRAP_NONCE')) return envelope(null);
+      if (request.method === 'PUT' && path === `/workers/scripts/${WORKER_NAME}`) {
+        const metadata = (await request.formData()).get('metadata');
+        if (!(metadata instanceof Blob)) throw new Error('metadata missing');
+        const uploaded = v.parse(v.object({ bindings: v.array(v.looseObject({ name: v.string(), type: v.string() })) }), JSON.parse(await metadata.text()));
+        listed = uploaded.bindings.map((binding) => {
+          if (binding.type === 'secret_text') return { name: binding.name, type: 'secret_text' };
+          if (binding.type !== 'inherit') return binding;
+          if (binding.name === 'ADMIN_STATE') return { name: binding.name, type: 'durable_object_namespace', class_name: 'AdminState' };
+          return binding.name === 'ASSETS' ? { name: binding.name, type: 'assets' } : { name: binding.name, type: 'secret_text' };
+        });
+        return envelope({ id: WORKER_NAME });
+      }
+      throw new Error(`unexpected install request ${request.method} ${path}`);
+    };
+    await publishCustomerWorkerFinalRuntime({
+      accessToken: ACCESS_TOKEN, accountId: ACCOUNT_ID, workerName: WORKER_NAME, expectedWorkerId: WORKER_ID,
+      finalRuntimeSource: installSource, finalRuntimeSha256: await sha256(installSource),
+      bindings: currentBindings(release.publicKey), managementCredential: managementValue, managementCredentialBound: true,
+      previousVersionId: bootstrapVersion, transport: installProvider, wait: async () => undefined,
+    });
+    if (listed === null) throw new Error('install upload missing');
+    expect(listed).toContainEqual({ name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' });
+    expect(JSON.stringify(listed)).not.toContain(managementValue);
+
+    // The update reads exactly that version, inherits the secret by name, and never sees or sends its value.
+    const fake = providerFake(release, { currentVersionBindings: listed });
+    const commands: CustomerRuntimeControlCommand[] = [];
+    const handovers: string[] = [];
+    await expect(runCustomerRuntimeUpdate(input(fake, release, commands, handovers)))
+      .resolves.toEqual({ status: 'uploaded', fromVersionId: OLD_VERSION });
+    const upload = fake.requests.find((entry) => entry.method === 'PUT');
+    const metadataFile = upload?.form?.get('metadata');
+    if (!(metadataFile instanceof Blob)) throw new Error('metadata missing');
+    const metadataText = await metadataFile.text();
+    const metadata = v.parse(metadataSchema, JSON.parse(metadataText));
+    expect(metadata.bindings).toHaveLength(20);
+    expect(metadata.bindings).toContainEqual({ name: 'ANKKA_MANAGEMENT_TOKEN', type: 'inherit', version_id: 'latest' });
+    expect(metadata.bindings.some((binding) => binding.type === 'secret_text')).toBe(false);
+    expect(metadataText).not.toContain(managementValue);
+    expect(JSON.stringify(fake.requests.map((entry) => [entry.url, entry.authorization]))).not.toContain(managementValue);
   });
 
   it('refuses a control plane that serves another release or altered bytes, and fails the journal before any upload', async () => {
@@ -514,6 +590,56 @@ describe('gateway-local runtime update', () => {
         command: 'fail', failureCode: `runtime_${stage}_${code}`, recoveryRequired: false,
       });
     }
+  });
+
+  it.each([
+    { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'plain_text' },
+    { name: 'OTHER_TOKEN', type: 'secret_text' },
+    { name: 'ANKKA_TEAM_MANAGEMENT_TOKEN', type: 'secret_text' },
+  ])('rejects a plaintext or unreviewed management binding: $name ($type)', async (managementBinding) => {
+    const release = await signedRelease();
+    const fake = providerFake(release, { managementBinding });
+    const commands: CustomerRuntimeControlCommand[] = [];
+    const handovers: string[] = [];
+    await expect(runCustomerRuntimeUpdate(input(fake, release, commands, handovers))).rejects.toMatchObject({
+      code: 'provider_rejected', stage: 'current_read',
+    });
+    expect(handovers).toEqual([]);
+    expect(fake.events).not.toContain('asset-session');
+    expect(fake.events).not.toContain('script-upload');
+  });
+
+  it('carries the optional service identity across an update as the same plain-text binding', async () => {
+    const release = await signedRelease();
+    const clientId = `${'d'.repeat(32)}.access`;
+    const fake = providerFake(release, { serviceBinding: { name: 'ANKKA_SERVICE_CLIENT_ID', type: 'plain_text', text: clientId },
+      managementBinding: { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' } });
+    const commands: CustomerRuntimeControlCommand[] = [];
+    const handovers: string[] = [];
+    await expect(runCustomerRuntimeUpdate(input(fake, release, commands, handovers))).resolves.toEqual({ status: 'uploaded', fromVersionId: OLD_VERSION });
+    const upload = fake.requests.find((entry) => entry.method === 'PUT');
+    if (upload === undefined || upload.form === null) throw new Error('script upload missing');
+    const metadataFile = upload.form.get('metadata');
+    if (!(metadataFile instanceof Blob)) throw new Error('metadata missing');
+    const metadata = v.parse(metadataSchema, JSON.parse(await metadataFile.text()));
+    expect(metadata.bindings).toHaveLength(21);
+    expect(metadata.bindings.find((binding) => binding.name === 'ANKKA_SERVICE_CLIENT_ID')).toEqual({ name: 'ANKKA_SERVICE_CLIENT_ID', type: 'plain_text', text: clientId });
+  });
+
+  it.each([
+    { name: 'ANKKA_SERVICE_CLIENT_ID', type: 'plain_text', text: 'not-a-common-name' },
+    { name: 'ANKKA_SERVICE_CLIENT_ID', type: 'secret_text' },
+    { name: 'ANKKA_SERVICE_TOKEN_ID', type: 'plain_text', text: '11111111-2222-3333-4444-555555555555' },
+  ])('rejects a malformed or unreviewed service binding: $name ($type)', async (serviceBinding) => {
+    const release = await signedRelease();
+    const fake = providerFake(release, { serviceBinding });
+    const commands: CustomerRuntimeControlCommand[] = [];
+    const handovers: string[] = [];
+    await expect(runCustomerRuntimeUpdate(input(fake, release, commands, handovers))).rejects.toMatchObject({
+      code: 'provider_rejected', stage: 'current_read',
+    });
+    expect(handovers).toEqual([]);
+    expect(fake.events).not.toContain('script-upload');
   });
 
   it('reports an unknown upload without failing the journal it already handed over', async () => {

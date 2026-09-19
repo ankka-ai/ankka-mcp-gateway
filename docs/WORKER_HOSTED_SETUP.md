@@ -5,7 +5,9 @@ gateway name, domain, or administrator email. The first Cloudflare approval
 requests exactly `workers-scripts.write zone.read` and selects one account.
 
 The hosted callback lists active zones using the exact account filter. It
-rejects an empty, incomplete, or inconsistent list before deploying the Worker.
+rejects an incomplete or inconsistent list before deploying the Worker.
+An empty list is allowed: the first approval can create the setup Worker and
+register its account workers.dev subdomain without a custom domain.
 Discovery is bounded to 100 domains so the signed handoff fits its size limits.
 It reads the account Workers subdomain and reuses it. Explicit missing-subdomain
 responses permit registration of a generated `ankka-<random>` label, followed
@@ -20,6 +22,21 @@ It does not predict the final domain or derive Worker identity from a display
 name. The initial grant is revoked before token-free Worker readiness checks
 and browser handoff.
 
+Before requesting the one-time handoff, the installer page checks the exact
+Worker's public `/__ankka/install/status` route from the browser. A successful
+Cloudflare-to-Cloudflare read alone cannot prove that a newly registered
+workers.dev hostname's TLS certificate is ready for that browser. Network,
+TLS, and temporary HTTP failures leave the page open with an automatic retry.
+Each attempt has a five-second deadline and an 8 KiB response limit; retries
+stop at the existing setup expiry. The answer must identify the expected
+installation and release before the server's independent readiness check and
+handoff proceed. Leaving the page cancels the browser check.
+
+This cross-origin GET omits credentials and referrers, follows no redirects,
+and carries no setup capability or Cloudflare grant. The installer's CSP adds
+only the HTTPS workers.dev status path, and the Worker allows CORS reads only
+from the fixed installer origin. No additional session or grant is retained.
+
 The handoff contains a signed setup permit: the initial plan and ownership
 handoff, eligible domain choices, exact bootstrap callback, and the ownership
 public key read from the deployed Worker. The existing one-time capability
@@ -27,8 +44,29 @@ authenticates the browser to that Worker. The permit and configuration draft
 contain no Cloudflare grant and may be stored in its Durable Object. The setup
 session and permit expire with the original ten-minute capability.
 
-The Worker serves the gateway form, domain dropdown, and review page. Each
-review signs the selected configuration and permit digest with its existing
+The Worker serves the gateway form, domain dropdown, and review page. When no
+active domain was discovered, it instead explains the custom-domain requirement,
+shows example management and MCP addresses, and links to Cloudflare's dashboard
+and domain setup guide. Final configuration and certification still require a
+domain from the signed list. Domain choices are a snapshot from the first
+approval: after adding and activating a domain, start a new deployment to
+discover it with a fresh grant. No grant is retained to refresh that list.
+
+The review page also holds the management token step: the link that opens
+Cloudflare's account-token page with both permissions and a name containing
+the management hostname filled in, one paste field, and an explicit control to
+continue without a token. The second approval is offered once the customer
+has chosen. `POST /__ankka/install/management-token` takes either the pasted
+value or the choice to skip, once, by same-origin JSON POST under the setup
+session; it accepts only Cloudflare's two account-token forms, answers with a
+fixed word, and is locked while an approval or an install runs. The value is
+kept only in the Durable Object's memory beside the grant and reaches the
+Worker as a secret binding of the final runtime upload; storage receives one
+fixed word about the choice. `GET /__ankka/install/setup` returns the step's
+word, token name and link, never a value. Custody, accepted forms and the
+restart behaviour are specified in [Management token](MANAGEMENT_TOKEN.md).
+
+Each review signs the selected configuration and permit digest with its existing
 ownership key. `POST /api/bootstrap/configure` on the fixed hosted issuer checks
 the permit, Worker signature, release, expiry, and allowed zone. It returns the
 final plan, a handoff for the same physical Worker and namespace, and a
@@ -44,11 +82,60 @@ the account, selected zone, and hostname availability, then runs the existing
 installation and revocation flow. Updates and removal retain their existing
 operation-specific scope sets.
 
+The second stage's first write is a proxied placeholder DNS record (`AAAA`
+`100::`, its comment naming the installation's ownership marker) at the
+management hostname, journaled like every other receipt-owned resource. The
+zone's authoritative nameservers serve it seconds later, so a resolver asked
+for the name while the installation runs caches a name rather than its absence
+for the zone's negative TTL. Cloudflare refuses to attach a Worker custom
+domain over an externally managed record, so the record is released as its own
+journaled step immediately before the custom domain is attached; a lost release
+is resolved by reading the record's identifier under the next consent, its
+absence is re-proven with the other terminal resources, and the record never
+enters the teardown handoff. Between that release and the moment Cloudflare
+serves its own record for the custom domain the name is absent again; the
+shell still withholds READY until the hostname resolves. A second stage
+interrupted before the release can leave the placeholder in the zone, where a
+later installation at the same hostname refuses it like any other record.
+
+If the second approval expires before its callback reaches token exchange, the
+same browser can reopen the setup page and choose **Start a fresh approval**
+for the saved configuration. Reading the page does not clear the old attempt
+or make provider calls. The new approval uses fresh PKCE and keeps configuration
+edits locked. Active approvals and attempts that reached exchange or convergence
+cannot reopen this review; they keep their existing recovery boundaries.
+
+This retry requires the original setup session and signed permit to remain
+valid. It does not extend the ten-minute handoff or adoption window. Once that
+window or the browser session is lost, this page cannot resume the shell. An
+unfinished Worker and namespace may remain in the Cloudflare account; inspect
+the retained installation evidence before starting a fresh deployment. This
+flow does not adopt or delete them automatically, and a later deployment has
+a new identity. Full-expiry renewal of a pre-install shell remains unsupported.
+
 While installation or recovery holds its temporary grant, the customer Worker
 keeps one timer bounded by the existing fifteen-minute convergence deadline.
 This prevents ordinary idle hibernation between alarm passes when the progress
 page is not being polled. Settlement releases the timer; unexpected restarts
 still lose the grant and stop the attempt. No credential is persisted.
+
+Every later consented operation follows the same shape, so the browser never
+waits on Cloudflare's authorize page for a running operation. The hosted root
+finalizer's callback exchanges the code, hands it to the removal job's Durable
+Object, which keeps the grant only in its memory, and answers at once with the
+`/teardown` page; the job runs its five steps and its settlement in alarm
+passes, each with its own call budget, and the page shows the steps live. The
+gateway's dependency removal and its update do the same on the management
+object behind `/__ankka/operation/teardown` and `/__ankka/operation/update`,
+each page polling a progress route that reports fixed labels and words only.
+Once the dependencies are gone the removal page hops to the installer with the
+signed receipt; once an update has uploaded and Cloudflare serves the new
+version where the browser asks (see [updates](UPDATES.md)), its page hands the
+browser to Settings, which follows the action through the existing handover
+alarm. An object restart between passes loses the grant and stops the attempt
+as recovery-required with an unconfirmed revocation; a fresh consent resumes
+from the durable step receipts. Workflows are not used for these paths:
+persisted step state would persist the grant.
 
 In-flight fully configured plans remain readable for recovery. Newly started
 deployments use the configuration-free bootstrap path. Hosted session evidence
@@ -69,8 +156,13 @@ expiry, browser-session/origin checks, and final installation from the initial
 Worker identity.
 
 Before promotion, verify the registered confidential client accepts the exact
-combined first-stage scopes and qualifies a complete real two-approval install.
-Exercise both an account with a Workers subdomain and a fresh account without
-one, and verify cleanup leaves the shared account subdomain intact. Existing
-live evidence for `workers-scripts.write` alone is insufficient. Source changes
-do not alter activation pins, OAuth registrations, or live deployments.
+combined first-stage scopes through real browser approvals. A fresh account
+with no Workers subdomain or active domain must complete registration, Worker
+deployment, grant revocation, and automatic handoff to the domain guide without
+a browser TLS error or manual reload. An account with an active domain must
+complete the two-approval installation, including reuse
+of its Workers subdomain and final domain configuration. Verify cleanup leaves
+the shared account subdomain intact. An isolated API-token registration test or
+live evidence for `workers-scripts.write` alone cannot replace the fresh-account
+OAuth check. Source changes do not alter activation pins, OAuth registrations,
+or live deployments.

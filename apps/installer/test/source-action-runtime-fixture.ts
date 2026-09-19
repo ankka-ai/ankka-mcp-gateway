@@ -59,7 +59,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
   const files: readonly FileInput[] = [
     { component: 'admin', path: 'payload/admin/index.html', contentType: 'text/html; charset=utf-8', bytes: encoder.encode('<!doctype html><title>Gateway</title>') },
     { component: 'installer', path: 'payload/installer/index.html', contentType: 'text/html; charset=utf-8', bytes: encoder.encode('<!doctype html><title>Installer</title>') },
-    { component: 'worker', path: 'payload/worker/index.js', contentType: 'application/javascript+module', bytes: encoder.encode("const CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() { return new Response(\"ok\") } };") },
+    { component: 'worker', path: 'payload/worker/index.js', contentType: 'application/javascript+module', bytes: encoder.encode("// ankka-control-plane-origin:https://deploy.ankka.ai\nconst CONTROL_PLANE_ORIGIN = 'https://deploy.ankka.ai';\nexport default { fetch() { return new Response(\"ok\") } };") },
     { component: 'workerBootstrap', path: 'payload/worker-bootstrap/index.js', contentType: 'application/javascript+module', bytes: encoder.encode('export class AdminState {}; export default { fetch() { return new Response("bootstrap") } };') },
     { component: 'workerCleanup', path: 'payload/worker-cleanup/index.js', contentType: 'application/javascript+module', bytes: encoder.encode('export default { fetch() { return new Response("cleanup") } };') },
     { component: 'workerRetirement', path: 'payload/worker-retirement/index.js', contentType: 'application/javascript+module', bytes: encoder.encode('export default { fetch() { return new Response("retired") } };') },
@@ -187,7 +187,7 @@ export async function sourceActionRuntimeFixture(input: Readonly<{
       bindings: Object.freeze([
         Object.freeze({ name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' }),
         Object.freeze({ name: 'ASSETS', type: 'assets' }),
-        ...Object.entries(bindings).map(([name, text]) => Object.freeze({ name, text, type: 'plain_text' })),
+        ...Object.entries(bindings).flatMap(([name, text]) => (text === undefined ? [] : [Object.freeze({ name, text, type: 'plain_text' })])),
       ]),
       compatibility_date: '2026-08-08',
       created_on: '2026-08-26T00:00:00.000Z',

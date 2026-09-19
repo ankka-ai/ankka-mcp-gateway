@@ -12,8 +12,8 @@ const COMPONENTS = Object.freeze({
   admin: null,
   installer: [
     'assets/ankka-85bfe235.svg',
-    'assets/installer-953fc6de.css',
-    'assets/installer-df19280e.js',
+    'assets/installer-903e7656.js',
+    'assets/installer-fe33c506.css',
     'index.html',
   ],
   worker: ['index.js'],
@@ -21,8 +21,8 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'af91db78d028fffc3cbef8a19b7380177c3c468ebab14d8d7a752ddf5182c4ab',
-  worker: 'f7251f7fa2fe427624ab587150cd15899e66eac1a6de3c4a8fbdb664923cd157',
+  installer: 'd4a97b9f7cf1fb46f960d0927fac1f318cb62614ae3ae5249bdbd54c2810643a',
+  worker: '6dd36dde762828a2d76c1fdd4056181aab2d2bf2c5d46bf8e1dfb6b3d0ea899d',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
@@ -150,6 +150,8 @@ test('generated admin distribution carries the project and complete production d
   const expectedPackages = [];
   for (const [relative, value] of Object.entries(lock.packages)) {
     if (!relative.startsWith('node_modules/') || value.dev === true || value.link === true) continue;
+    if (value.optional === true && (Array.isArray(value.os) || Array.isArray(value.cpu)) &&
+        /(?:^|\/)node_modules\/(?:@typescript\/typescript-[^/]+|lightningcss-[^/]+|fsevents)$/u.test(relative)) continue;
     let manifest;
     try {
       manifest = JSON.parse(await readFile(new URL(`../${relative}/package.json`, import.meta.url), 'utf8'));
@@ -217,7 +219,9 @@ test('installer assets cover the exact hosted two-stage session, plan, approval,
   assert.ok(asset, 'the installer HTML selects one hashed script');
   const script = await readFile(new URL(`installer${asset}`, ROOT), 'utf8');
   const combined = `${html}\n${script}`;
-  assert.doesNotMatch(combined, /\bcustomers?\b/iu);
+  // The public status protocol keeps its existing role discriminator; it is
+  // parsed by the browser, never used as product copy.
+  assert.doesNotMatch(combined.replaceAll("'customer-gateway-bootstrap'", ''), /\bcustomers?\b/iu);
   for (const route of ['/gateway', '/review', '/deploy', '/result', '/__ankka/install']) {
     assert.match(combined, new RegExp(route.replaceAll('/', '\\/'), 'u'));
   }
@@ -249,8 +253,8 @@ test('installer assets cover the exact hosted two-stage session, plan, approval,
   ]) assert.match(combined, new RegExp(copy, 'u'));
   assert.match(html, /Approval 1/u);
   assert.match(html, /Approval 2/u);
-  assert.match(html, /No Cloudflare token is stored anywhere/u);
-  assert.match(html, /Team membership is managed in Cloudflare Access/u);
+  assert.match(html, /Installer grants are revoked/u);
+  assert.match(html, /add an account-owned token directly to your gateway in Cloudflare/u);
   assert.match(html, /stores no Cloudflare token and sends no analytics/u);
   assert.doesNotMatch(html, /target="_blank"/u);
   assert.doesNotMatch(script, /window\.open/u);
@@ -298,7 +302,7 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
     assert.ok(script.includes(tool));
   }
   assert.equal(script.includes('save_gateway_team'), false);
-  assert.match(script, /one-time OAuth handoff/iu);
+  assert.match(script, /credential stored in this gateway/iu);
   assert.match(script, /No sources yet/u);
   assert.match(script, /release channel/u);
   assert.match(script, /untrustedContentHint/u);
@@ -328,10 +332,10 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /--color-sidebar:#131313/u);
   assert.match(adminCss, /--font-mono:var\(--font-sans\)/u);
 
-  const installerCss = await readFile(new URL('installer/assets/installer-953fc6de.css', ROOT), 'utf8');
+  const installerCss = await readFile(new URL('installer/assets/installer-fe33c506.css', ROOT), 'utf8');
   {
     const css = installerCss;
-    assert.match(css, /font-family:\s*Inter, ui-sans-serif, system-ui/u);
+    assert.match(css, /font-family:\s*"Helvetica Neue", Helvetica, Arial, sans-serif/u);
     assert.match(css, /font-synthesis:\s*none/u);
     assert.match(css, /-webkit-font-smoothing:\s*antialiased/u);
     assert.match(css, /line-height:\s*(?:1\.5[5-9]|1\.6)/u);
@@ -349,7 +353,7 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.doesNotMatch(installerCss, /--font-display|font-family:\s*var\(--font-display\)/u);
   assert.match(installerCss, /--font-size-body:\s*1rem/u);
   assert.match(installerCss, /input,\s*\nselect,\s*\ntextarea[\s\S]*?font-size:\s*var\(--font-size-body\)/u);
-  assert.match(installerCss, /\.step-pill\s*\{[^}]*border-radius:\s*999px/u);
+  assert.match(installerCss, /\.step-dot\s*\{[^}]*border-radius:\s*0/u);
   assert.match(installerCss, /\.operation-copy > p:last-child\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
   assert.match(installerCss, /\.stage-position\s*\{[^}]*font-size:\s*0\.8125rem/u);
 });
@@ -362,7 +366,7 @@ test('admin and installer carry the reviewed Ankka wordmark and navigation treat
   assert.match(admin, /M0 18\.2697V5\.97501/u);
   assert.match(installer, /M0 18\.2697V5\.97501/u);
   assert.match(admin, /Gateway management/u);
-  assert.match(installer, /class="product-label">MCP Gateway installer/u);
+  assert.match(installer, /class="product-label">Gateway setup/u);
   assert.match(installer, /class="step-indicators" aria-label="Installation progress"/u);
   assert.doesNotMatch(installer, /<aside\b/iu);
   assert.doesNotMatch(installer, /class="canary-badge"/u);

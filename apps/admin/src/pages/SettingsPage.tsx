@@ -1,26 +1,43 @@
 import { Button } from '../components/Button'
 import {
-  ArrowsClockwise,
-  CheckCircle,
-  ClockCounterClockwise,
   Trash,
   Warning,
   X,
 } from '@phosphor-icons/react'
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useGateway } from '../GatewayContext'
 import { PageHeader } from '../components/PageHeader'
-import { StatusPill } from '../components/StatusPill'
+import { LoadingIndicator } from '../components/LoadingIndicator'
+import { customerPageStyles } from '../../../installer/src/customer-page-theme'
 
 export function SettingsPage() {
   const {
     clearUpdateNotice,
+    getTeam,
     isBusy,
     prepareRuntimeAction,
     prepareTeardownAction,
+    refreshUpdate,
     update,
     updateNotice,
   } = useGateway()
+  const [pendingRuntimeOperation, setPendingRuntimeOperation] = useState<'update' | 'rollback' | null>(null)
+  const [managementStatus, setManagementStatus] = useState('Checking management credential…')
+  const checkManagement = useCallback(async () => {
+    try {
+      const team = await getTeam()
+      setManagementStatus(!team.managementCredentialConfigured
+        ? 'Add a management credential to enable source installation and Team changes.'
+        : team.observedAt ? 'Credential verified; current Team policies are readable.'
+          : 'Credential configured. Finish the recorded Team change before verifying the complete membership.')
+    } catch {
+      setManagementStatus('Could not verify management access. Check the token, permissions, and owned policies in Cloudflare.')
+    }
+  }, [getTeam])
+  useEffect(() => { void checkManagement() }, [checkManagement])
+  // Installing a source can end a rollback, so an answer loaded before this page opened is read again.
+  const updateLoadedEarlier = useRef(update !== null)
+  useEffect(() => { if (updateLoadedEarlier.current) void refreshUpdate() }, [refreshUpdate])
   const dangerZone = useRef<HTMLElement>(null)
   const teardownRequested = new URLSearchParams(window.location.search).get('teardown') === 'review'
 
@@ -33,10 +50,12 @@ export function SettingsPage() {
   if (!update) return null
 
   const authorize = async (operation: 'update' | 'rollback') => {
+    setPendingRuntimeOperation(operation)
     try {
       const prepared = await prepareRuntimeAction(operation)
       window.location.assign(prepared.handoffUrl)
     } catch { /* The provider keeps the safe error visible. */ }
+    finally { setPendingRuntimeOperation(null) }
   }
 
   const reviewTeardown = async () => {
@@ -50,79 +69,66 @@ export function SettingsPage() {
     : update.status === 'unavailable' ? 'Channel unavailable' : 'Up to date'
   const channelLabel = update.channel === 'stable' ? 'Stable' : 'Canary'
   const availableRelease = update.status === 'available' ? update.available?.release : null
+  // A recorded release the gateway can no longer restore: say why instead of offering it.
+  const rollbackEnded = !update.rollback.available && 'release' in update.rollback ? update.rollback.release : null
 
   return (
     <div>
       <PageHeader title="Settings" />
 
-      <section className="mt-8" aria-labelledby="software-updates-title">
-        <h2 id="software-updates-title" className="text-lg font-semibold tracking-[-0.02em] text-subheading">Software updates</h2>
+      <section className="mt-8" aria-labelledby="management-title">
+        <h2 id="management-title" className="text-lg font-semibold text-subheading">Cloudflare management</h2>
+        <div className="surface-card mt-5 space-y-4 p-5 text-sm leading-6 sm:p-6">
+          <p role="status">{managementStatus}</p>
+          <p>Create an account-owned API token in Cloudflare, then add it as an encrypted secret named <code>ANKKA_MANAGEMENT_TOKEN</code> in your gateway Worker's Settings → Variables and Secrets. Enter the token only in Cloudflare.</p>
+          <p>This lets your gateway install sources and save Team access without asking for Cloudflare consent each time. The token can affect Access policies across your account; it must not include Worker deployment, DNS, or token-creation permissions.</p>
+          <p>To replace it, update the secret, verify access here, then revoke the old token in Cloudflare. Deleting the secret or removing your gateway does not revoke the token.</p>
+          <a className="underline underline-offset-4" href="https://github.com/ankka-ai/ankka-mcp-gateway/blob/main/docs/MANAGEMENT_TOKEN.md" target="_blank" rel="noreferrer">Setup and permissions guide</a>
+          <div><Button variant="secondary" onClick={() => void checkManagement()}>Verify management access</Button></div>
+        </div>
+      </section>
+
+      <style>{customerPageStyles}</style>
+      <section className="ankka-setup update-panel mt-8" aria-labelledby="software-updates-title">
+        <div className="update-heading">
+          <h2 id="software-updates-title">Software updates</h2>
+          <span className="update-label">{statusLabel}</span>
+        </div>
 
         {updateNotice ? (
-          <div role="status" className={`notice-banner mt-5 notice-${updateNotice.tone}`}>
+          <div role="status" className="update-status" data-tone={updateNotice.tone}>
+            {updateNotice.tone === 'neutral' ? <LoadingIndicator /> : null}
             <p>{updateNotice.message}</p>
-            <button type="button" className="pressable" aria-label="Dismiss update notice" onClick={clearUpdateNotice}><X size={14} /></button>
+            <button type="button" className="secondary update-dismiss" aria-label="Dismiss update notice" onClick={clearUpdateNotice}><X size={14} /></button>
           </div>
         ) : null}
 
-        <div className="surface-card mt-5 overflow-hidden">
-          <div className="flex flex-wrap items-start justify-between gap-4 border-b border-kumo-line px-5 py-5 sm:px-6">
-            <h3 className="text-sm font-medium text-subheading">{channelLabel} release channel</h3>
-            <StatusPill tone={update.status === 'available' || update.status === 'unavailable' ? 'attention' : 'ready'}>
-              {statusLabel}
-            </StatusPill>
-          </div>
-
-          <dl className="grid gap-px bg-kumo-line sm:grid-cols-2">
-            <div className="bg-kumo-overlay px-5 py-5 sm:px-6">
-              <dt className="text-xs font-medium text-kumo-subtle">Installed</dt>
-              <dd className="mt-1.5 break-all text-sm text-kumo-strong">{update.current?.release ?? 'Unavailable'}</dd>
-            </div>
-            {availableRelease ? (
-              <div className="bg-brand-soft px-5 py-5 sm:px-6">
-                <dt className="text-xs font-medium text-brand-strong">Available version</dt>
-                <dd className="mt-1.5 break-all text-lg font-semibold text-brand-strong">{availableRelease}</dd>
-              </div>
-            ) : (
-              <div className="bg-kumo-overlay px-5 py-5 sm:px-6">
-                <dt className="text-xs font-medium text-kumo-subtle">Channel</dt>
-                <dd className="mt-1.5 text-sm text-kumo-strong">{update.channel}</dd>
-              </div>
-            )}
-          </dl>
-
-          <div className="px-5 py-5 sm:px-6">
-            <dl className="mb-4 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
-              <dt className="text-kumo-subtle">Classification</dt>
-              <dd className="text-kumo-strong">
-                {update.available?.classification.kind === 'normal' ? 'Normal update' : update.status === 'unavailable' ? 'Unverified' : 'No change'}
-              </dd>
-            </dl>
-            {update.status === 'unavailable' ? (
-              <p className="text-sm leading-6 text-kumo-subtle">The signed channel could not be verified. Gateway management and an already available rollback remain usable.</p>
-            ) : update.available?.notes?.length ? (
-              <ul className="space-y-2 text-sm leading-6 text-kumo-subtle">
-                {update.available.notes.map((note) => <li key={note} className="flex gap-2"><CheckCircle size={16} className="mt-1 shrink-0 text-success-strong" />{note}</li>)}
-              </ul>
-            ) : (
-              <p className="text-sm leading-6 text-kumo-subtle">The installed runtime matches the {update.channel} channel.</p>
-            )}
-
-            <div className="mt-5 flex flex-wrap gap-2 border-t border-kumo-line pt-5">
-              {update.status === 'available' ? (
-                <Button variant="primary" className="pressable" loading={isBusy} onClick={() => void authorize('update')}>
-                  <ArrowsClockwise size={16} /> Update
-                </Button>
-              ) : null}
-              {update.rollback.available ? (
-                <Button variant="secondary" className="pressable" disabled={isBusy} onClick={() => void authorize('rollback')}>
-                  <ClockCounterClockwise size={16} /> Rollback
-                </Button>
-              ) : null}
-            </div>
-          </div>
+        <dl className="release-summary">
+          <div><dt>Installed</dt><dd>{update.current?.release ?? 'Unavailable'}</dd></div>
+          <div><dt>{availableRelease ? 'Available version' : 'Release channel'}</dt><dd>{availableRelease ?? channelLabel}</dd></div>
+        </dl>
+        <p className="update-label">{channelLabel} release channel · {update.available?.classification.kind === 'normal' ? 'Normal update' : update.status === 'unavailable' ? 'Unverified' : 'No change'}</p>
+        {update.status === 'unavailable' ? (
+          <p>The signed channel could not be verified. Gateway management and an already available rollback remain usable.</p>
+        ) : update.available?.notes?.length ? (
+          <ul className="release-notes">{update.available.notes.map(note => <li key={note}>{note}</li>)}</ul>
+        ) : (
+          <p>The installed runtime matches the {update.channel} channel.</p>
+        )}
+        <div className="actions">
+          {update.status === 'available' ? (
+            <button type="button" disabled={isBusy} aria-busy={pendingRuntimeOperation === 'update'} onClick={() => void authorize('update')}>
+              {pendingRuntimeOperation === 'update' ? <LoadingIndicator inline /> : null} Update
+            </button>
+          ) : null}
+          {update.rollback.available ? (
+            <button type="button" className="secondary" disabled={isBusy} aria-busy={pendingRuntimeOperation === 'rollback'} onClick={() => void authorize('rollback')}>
+              {pendingRuntimeOperation === 'rollback' ? <LoadingIndicator inline /> : null} Rollback
+            </button>
+          ) : rollbackEnded ? (
+            <p>You can no longer roll back to {rollbackEnded}. A source was installed or Team access was changed after the update, and the older version cannot work with those changes.</p>
+          ) : null}
         </div>
-
       </section>
 
       <section
