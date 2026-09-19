@@ -255,7 +255,7 @@ describe('SourcesPage', () => {
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText('No sources yet')
-    expect(screen.getByText(/once source provisioning starts, rollback below this runtime release/)).toBeInTheDocument()
+    expect(screen.queryByText(/roll ?back|provisioning|runtime release|removing your gateway/iu)).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Add source' }))
     expect(screen.getByText(/New sources start with nobody assigned/)).toBeInTheDocument()
     await user.type(screen.getByLabelText('Source name'), 'GA4 example')
@@ -621,5 +621,77 @@ describe('Add BigQuery setup', () => {
     await user.click(await screen.findByRole('button', { name: 'Continue BigQuery setup' }))
     await waitFor(() => expect(api.resumeBigQuery).toHaveBeenCalledExactlyOnceWith(action.actionId))
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+})
+
+// The gateway reports `installEndsRollbackTo` only while installing a source really ends a rollback: the gateway was
+// updated, the earlier release can still be restored, and the first installation here would change that.
+describe('the rollback sentence beside the install control', () => {
+  afterEach(cleanup)
+  const idle: SourceActions = { schemaVersion: 1, actions: [], blockingAction: null }
+  const sentence = 'After this you can no longer roll back to gateway-v0.9.9.'
+
+  it('says so in plain words directly beside Install source, and nowhere else', async () => {
+    const api = actionApi(idle)
+    api.getSources = vi.fn(async () => ({ ...sources, installEndsRollbackTo: 'gateway-v0.9.9', sources: [draft] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const install = await screen.findByRole('button', { name: 'Install source' })
+    expect(install).toHaveAccessibleDescription(sentence)
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+    expect(install.parentElement).toContainElement(screen.getByText(sentence))
+    expect(screen.queryByText(/provisioning|runtime release|recover any source action|removing your gateway/iu)).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['a fresh install or an older gateway that does not report it', {}],
+    ['a gateway whose rollback is already decided or that has nothing to restore', { installEndsRollbackTo: null }],
+    ['a gateway that cannot install right now', { installEndsRollbackTo: 'gateway-v0.9.9', installationEnabled: false }],
+  ])('stays silent for %s', async (_state, reported) => {
+    const api = actionApi(idle)
+    api.getSources = vi.fn(async () => ({ ...sources, ...reported, sources: [draft] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const control = await screen.findByRole('button', { name: /Install source|Installation unavailable/u })
+    expect(control).not.toHaveAccessibleDescription()
+    expect(screen.queryByText(/roll ?back/iu)).not.toBeInTheDocument()
+  })
+
+  it('drops the sentence as soon as the gateway reports that the installation decided it', async () => {
+    const user = userEvent.setup()
+    const api = actionApi(idle)
+    let installed = false
+    api.getSources = vi.fn(async (): Promise<ManagedSources> => installed
+      ? { ...sources, revision: 5, installEndsRollbackTo: null, sources: [{ ...draft, status: 'installed' }] }
+      : { ...sources, installEndsRollbackTo: 'gateway-v0.9.9', sources: [draft] })
+    api.prepareSourceAction = vi.fn(async () => {
+      installed = true
+      return { schemaVersion: 1 as const, actionId: `action_${'c'.repeat(32)}`, status: 'succeeded' as const, expiresAt: new Date(Date.now() + 60_000).toISOString() }
+    })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByText(sentence)).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Install source' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Install source' })).not.toBeInTheDocument())
+    expect(screen.queryByText(/roll ?back/iu)).not.toBeInTheDocument()
+  })
+
+  it('moves to Resume installation while a recorded installation blocks a new one', async () => {
+    const action = pendingAction({ state: 'recovery_required', status: 'recovery_required', canCancel: false, canRenew: true })
+    const api = actionApi(actionSnapshot(action))
+    api.getSources = vi.fn(async () => ({ ...sources, installEndsRollbackTo: 'gateway-v0.9.9', sources: [draft] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const resume = await screen.findByRole('button', { name: 'Resume installation' })
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+    expect(resume.parentElement).toContainElement(screen.getByText(sentence))
+    expect(screen.getByRole('button', { name: 'Install source' })).not.toHaveAccessibleDescription()
+  })
+
+  it('says the same before a BigQuery setup continues to Cloudflare', async () => {
+    const user = userEvent.setup()
+    const api = actionApi(idle)
+    api.getSources = vi.fn(async () => ({ ...sources, installEndsRollbackTo: 'gateway-v0.9.9' }))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true, setups: [] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Add BigQuery' }))
+    const proceed = screen.getByRole('button', { name: 'Continue to Cloudflare' })
+    expect(proceed.parentElement).toContainElement(screen.getByText(sentence))
   })
 })

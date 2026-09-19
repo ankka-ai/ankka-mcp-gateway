@@ -70,6 +70,17 @@ review before activation, not an assertion that resources were deleted or that
 a failed installation rolled back. A later compatible teardown implementation
 is a separate follow-up.
 
+Sources mentions the rollback limit only while it is a decision. When the
+gateway was updated, its earlier release can still be restored, and starting
+an installation would end that, the control that starts or resumes the
+installation carries one sentence: "After this you can no longer roll back to
+`<release>`." A fresh install, and a gateway whose rollback is already decided,
+see no warning. The gateway reports that release as `installEndsRollbackTo` in
+the sources answer; the dashboard does not compute it. Removal explains its own
+refusal where it happens: preparing a removal while a source installation is
+unfinished answers with a request to finish or cancel it first. See
+[Gateway updates and rollback](UPDATES.md).
+
 ## Required local regression coverage
 
 - The original receipt, existing source assignments, shared allowlists, and
@@ -90,6 +101,12 @@ is a separate follow-up.
   must not replay provider creation or leave an unrecoverable partial record.
 - GET and successful PUT source responses report the same installation
   capability, so saving a draft does not hide Apply or unregister WebMCP tools.
+- The same two responses name the release a source installation would stop
+  being restorable only in that case: not on a fresh install, not once the
+  minimum runtime already equals the running release or already excludes the
+  retained release, and not while installation is unavailable. The update
+  answer stops offering a rollback the minimum runtime would refuse. The
+  dashboard's real client reads each of these answers from the real Worker.
 - Dashboard, WebMCP, authenticated API, and direct Durable Object checks agree.
   No caller field or environment variable can select an older audience policy.
 - Unknown tool arguments, stale revisions, unavailable Team editing, and

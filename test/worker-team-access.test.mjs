@@ -1830,3 +1830,174 @@ test('the dashboard client follows a removal through every status the gateway re
     assert.equal((await dashboard.getTeardownAction(next.actionId)).status, 'authorization_required');
   });
 }, await portalOnlyClaim()));
+
+// A source installation records the running release as the minimum compatible runtime. That is a decision only while
+// an older recorded release can still be restored. `/api/sources` names that release in `installEndsRollbackTo` for
+// exactly that case, and `/api/update` stops offering a rollback the unchanged rule would refuse.
+const EARLIER = Object.freeze({ release: 'gateway-v0.0.9', artifactSha256: `sha256:${'8'.repeat(64)}`,
+  versionId: '00000000-0000-4000-8000-000000000008' });
+const OFFERED = Object.freeze({ available: true, release: EARLIER.release, artifactSha256: EARLIER.artifactSha256, dataRollback: false });
+const EXCLUDED = Object.freeze({ available: false, reason: 'minimum_runtime_release', release: EARLIER.release });
+
+/** The journal of a gateway that was updated to the running release from `previous`. */
+async function recordUpdateFrom(gateway, previous = EARLIER) {
+  await gateway.view(); // the first Team read creates the Team record, without a minimum
+  await gateway.managementStorage.put(UPDATES_KEY, { schemaVersion: 1, revision: 1, actions: [], previous,
+    current: { release: gateway.env.ANKKA_GATEWAY_RELEASE, artifactSha256: gateway.env.ANKKA_GATEWAY_RELEASE_SHA256,
+      versionId: '00000000-0000-4000-8000-000000000009' } });
+}
+
+async function recordMinimumRuntime(gateway, release) {
+  await gateway.managementStorage.put(TEAM_KEY, { ...gateway.managementStorage.snapshot(TEAM_KEY),
+    minimumRuntimeRelease: release, teardownDisabled: true });
+}
+
+async function rollbackAnswers(gateway) {
+  const [update, sources] = [await gateway.api('/api/update'), await gateway.api('/api/sources')];
+  assert.equal(update.status, 200, await update.clone().text());
+  assert.equal(sources.status, 200, await sources.clone().text());
+  return { rollback: (await update.json()).rollback, installEndsRollbackTo: (await sources.json()).installEndsRollbackTo };
+}
+
+async function prepareRollback(gateway) {
+  return gateway.api('/api/update-actions', { method: 'POST', body: { schemaVersion: 1, operation: 'rollback' } });
+}
+
+test('a fresh install has no rollback to offer and nothing to decide before its first source', async () => fixture(async (gateway) => {
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: { available: false }, installEndsRollbackTo: null });
+  await gateway.view();
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: { available: false }, installEndsRollbackTo: null });
+}));
+
+test('an updated gateway without sources offers its rollback and names it as what a source installation ends', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, null);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: OFFERED, installEndsRollbackTo: EARLIER.release });
+  // Reading the answers decides nothing: the minimum stays unset and the offered rollback can be prepared.
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, null);
+  const prepared = await prepareRollback(gateway);
+  assert.equal(prepared.status, 200, await prepared.clone().text());
+}));
+
+test('a minimum already at the running release excludes the recorded rollback with a fixed reason and leaves nothing to decide', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  await recordMinimumRuntime(gateway, gateway.env.ANKKA_GATEWAY_RELEASE);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: EXCLUDED, installEndsRollbackTo: null });
+  // The unchanged rule refuses exactly what is no longer offered.
+  const refused = await prepareRollback(gateway);
+  assert.equal(refused.status, 409);
+  assert.equal((await refused.json()).error, 'runtime_action_conflict');
+}));
+
+test('a minimum below the running release keeps the rollback, and the next source installation is the decision', async () => {
+  // Recorded at the earlier release itself, and below it: both still allow the rollback that an installation here ends.
+  for (const minimum of [EARLIER.release, 'gateway-v0.0.8']) await fixture(async (gateway) => {
+    await recordUpdateFrom(gateway);
+    await recordMinimumRuntime(gateway, minimum);
+    assert.deepEqual(await rollbackAnswers(gateway), { rollback: OFFERED, installEndsRollbackTo: EARLIER.release }, minimum);
+  });
+  // A minimum between the two releases has already excluded the target: nothing is left to decide.
+  await fixture(async (gateway) => {
+    await recordUpdateFrom(gateway, { ...EARLIER, release: 'gateway-v0.0.8' });
+    await recordMinimumRuntime(gateway, 'gateway-v0.0.9');
+    assert.deepEqual(await rollbackAnswers(gateway), {
+      rollback: { ...EXCLUDED, release: 'gateway-v0.0.8' }, installEndsRollbackTo: null,
+    });
+  });
+});
+
+test('a recorded release newer than the running one stays restorable after a source installation, so nothing is named', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway, { ...EARLIER, release: 'gateway-v0.2.0' });
+  assert.deepEqual(await rollbackAnswers(gateway), {
+    rollback: { ...OFFERED, release: 'gateway-v0.2.0' }, installEndsRollbackTo: null,
+  });
+}));
+
+test('a gateway that cannot install sources names no rollback decision', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  const sources = await (await gateway.api('/api/sources')).json();
+  assert.equal(sources.installationEnabled, false);
+  assert.equal(sources.installEndsRollbackTo, null);
+}));
+
+test('a release received outside an action is named before the journal follows it', async () => fixture(async (gateway) => {
+  await gateway.view();
+  assert.deepEqual((await (await gateway.api('/api/update')).json()).rollback, { available: false });
+  const installed = gateway.env.ANKKA_GATEWAY_RELEASE;
+  gateway.env.ANKKA_GATEWAY_RELEASE = 'gateway-v0.1.1';
+  gateway.env.ANKKA_GATEWAY_RELEASE_SHA256 = `sha256:${'7'.repeat(64)}`;
+  gateway.reloadManagement();
+  const journal = canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY));
+  assert.equal((await (await gateway.api('/api/sources')).json()).installEndsRollbackTo, installed);
+  assert.equal(canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY)), journal, 'the sources read writes nothing');
+  const followed = await rollbackAnswers(gateway);
+  assert.equal(followed.rollback.available, true);
+  assert.equal(followed.rollback.release, installed);
+  assert.equal(followed.installEndsRollbackTo, installed);
+}));
+
+test('the first source installation on an updated gateway turns the named decision into the recorded answer', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  const current = await (await gateway.api('/api/sources')).json();
+  assert.equal(current.installEndsRollbackTo, EARLIER.release);
+  const saved = await gateway.api('/api/sources', { method: 'PUT', body: { schemaVersion: 1, revision: current.revision,
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const drafted = await saved.json();
+  // Saving a draft decides nothing, and the save answers like the read, so the sentence stays beside the control.
+  assert.equal(drafted.installEndsRollbackTo, EARLIER.release);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, null);
+  const source = drafted.sources.find((item) => item.url === NEW_SOURCE_URL);
+  const applied = await gateway.api('/api/source-actions', { method: 'POST', body: { schemaVersion: 1, revision: drafted.revision, sourceId: source.id } });
+  assert.equal(applied.status, 200, await applied.clone().text());
+  assert.equal((await applied.json()).status, 'succeeded');
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: EXCLUDED, installEndsRollbackTo: null });
+  assert.equal((await prepareRollback(gateway)).status, 409);
+}));
+
+test('the dashboard client accepts what the gateway says about rollback in every state, around a source installation', async () => fixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.deepEqual((await dashboard.getUpdate()).rollback, { available: false });
+    assert.equal((await dashboard.getSources()).installEndsRollbackTo, null);
+
+    await recordUpdateFrom(gateway);
+    assert.deepEqual((await dashboard.getUpdate()).rollback, OFFERED);
+    const current = await dashboard.getSources();
+    assert.equal(current.installEndsRollbackTo, EARLIER.release);
+    const drafted = await dashboard.saveSourceDraft(current.revision, {
+      label: 'Dashboard source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'],
+    });
+    assert.equal(drafted.installEndsRollbackTo, EARLIER.release);
+    const draft = drafted.sources.find((source) => source.url === NEW_SOURCE_URL);
+    assert.equal((await dashboard.prepareSourceAction(drafted.revision, draft.id)).status, 'succeeded');
+
+    assert.equal((await dashboard.getSources()).installEndsRollbackTo, null);
+    assert.deepEqual((await dashboard.getUpdate()).rollback, EXCLUDED);
+    await assert.rejects(dashboard.prepareRuntimeAction('rollback'), { code: 'runtime_action_conflict' });
+  });
+}));
+
+test('the dashboard client prepares the rollback the gateway offers', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  await dashboardClient(gateway, async (dashboard) => {
+    const offered = (await dashboard.getUpdate()).rollback;
+    assert.deepEqual(offered, OFFERED);
+    const prepared = await dashboard.prepareRuntimeAction('rollback', { release: offered.release, artifactSha256: offered.artifactSha256 });
+    assert.equal(prepared.operation, 'rollback');
+    assert.equal((await dashboard.getRuntimeAction(prepared.actionId)).to.release, EARLIER.release);
+  });
+}));
+
+test('removal refused for an unfinished source installation says so through the dashboard client', async () => fixture(async (gateway) => {
+  await prepareNewSource(gateway);
+  await dashboardClient(gateway, async (dashboard) => {
+    await assert.rejects(dashboard.prepareTeardownAction(), (error) => {
+      assert.equal(error.code, 'teardown_action_conflict');
+      assert.match(error.message, /^Finish or cancel any unfinished source installation, update or Team change, or wait for an open removal authorization to expire/u);
+      return true;
+    });
+  });
+}));

@@ -295,6 +295,7 @@ const TEARDOWN_KIND_WORDS = new Set(['mcp_server', 'mcp_portal', 'access_applica
 const INTERNAL_TEARDOWN_ROOT_PATH = '/teardown-root';
 const INTERNAL_STATUS_PATH = '/status';
 const INTERNAL_SOURCES_PATH = '/sources';
+const INTERNAL_ROLLBACK_OUTLOOK_PATH = '/rollback-outlook';
 const INTERNAL_TEAM_PATH = '/team';
 const INTERNAL_TEAM_ACTIONS_PATH = '/team-actions';
 const STORAGE_KEY = 'ankka-mcp-gateway/uninstall-state/v1';
@@ -4829,7 +4830,8 @@ export class AdminState {
     const requestUrl = new URL(request.url);
     // Status must remain available while a serialized mutation awaits the
     // provider. These reads neither authorize work nor change the journal.
-    if (request.method === 'GET' && ([INTERNAL_ACTIONS_PATH, INTERNAL_SOURCES_PATH, INTERNAL_STATUS_PATH].includes(requestUrl.pathname) ||
+    if (request.method === 'GET' && ([INTERNAL_ACTIONS_PATH, INTERNAL_SOURCES_PATH, INTERNAL_STATUS_PATH,
+      INTERNAL_ROLLBACK_OUTLOOK_PATH].includes(requestUrl.pathname) ||
         requestUrl.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`))) {
       return this.readSourceManagementState(request, requestUrl);
     }
@@ -5004,6 +5006,9 @@ export class AdminState {
           revision: updates.revision,
           current: updates.current,
           previous: updates.previous,
+          // The same rule that refuses the action decides whether it is offered.
+          previousRestorable: updates.previous !== null &&
+            await teamRuntimeReleaseAllowed(this.state.storage, updates.previous.release),
         }) : fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
       }
       if (url.pathname === INTERNAL_UPDATES_PATH && request.method === 'POST') {
@@ -5109,6 +5114,11 @@ export class AdminState {
     if (url.pathname === INTERNAL_SOURCES_PATH) {
       const sources = safeManagementSources(await this.state.storage.get(SOURCES_KEY));
       return sources ? fixedJson(200, sources) : fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+    }
+    if (url.pathname === INTERNAL_ROLLBACK_OUTLOOK_PATH) {
+      const environment = parseManagementEnvironment(this.env);
+      return fixedJson(200, { schemaVersion: 1, installEndsRollbackTo: environment
+        ? await sourceInstallEndsRollbackTo(this.state.storage, environment) : null });
     }
     if (url.pathname === INTERNAL_ACTIONS_PATH) {
       const snapshot = await sourceActionSnapshot(this.state.storage,
@@ -5421,6 +5431,7 @@ async function handleRuntimeUpdate(request, env) {
   } catch { updateState = null; }
   const previous = runtimeVersion(updateState?.previous);
   const current = runtimeVersion(updateState?.current);
+  const rollback = publicRollback(previous, updateState?.previousRestorable === true);
   const discovered = await discoverRuntimeUpdate(env);
   if (!discovered) {
     return fixedJson(200, {
@@ -5429,12 +5440,7 @@ async function handleRuntimeUpdate(request, env) {
       status: 'unavailable',
       current: current ? { release: current.release, artifactSha256: current.artifactSha256 } : null,
       available: null,
-      rollback: previous ? {
-        available: true,
-        release: previous.release,
-        artifactSha256: previous.artifactSha256,
-        dataRollback: false,
-      } : { available: false },
+      rollback,
     });
   }
   const available = discovered.comparison < 0;
@@ -5453,13 +5459,18 @@ async function handleRuntimeUpdate(request, env) {
       classification: discovered.channel.classification,
       notes: discovered.channel.notes,
     } : null,
-    rollback: previous ? {
-      available: true,
-      release: previous.release,
-      artifactSha256: previous.artifactSha256,
-      dataRollback: false,
-    } : { available: false },
+    rollback,
   });
+}
+
+// A recorded previous release is offered only while the minimum compatible
+// runtime still allows it; past that, the answer names the release and says
+// why with one fixed word instead of offering an action that is then refused.
+function publicRollback(previous, restorable) {
+  if (!previous) return { available: false };
+  return restorable
+    ? { available: true, release: previous.release, artifactSha256: previous.artifactSha256, dataRollback: false }
+    : { available: false, reason: 'minimum_runtime_release', release: previous.release };
 }
 
 function sameOriginMutation(request) {
@@ -5527,7 +5538,7 @@ async function handleSources(request, env) {
       if (!(response instanceof Response)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
       if (response.status !== 200) return response;
       const sources = safeManagementSources(await response.json());
-      return sources ? fixedJson(200, { ...sources, applyMode: 'account_token', installationEnabled: !SOURCE_ADDITION_PAUSED && managementCredential(env) !== null }) :
+      return sources ? fixedJson(200, await publicSources(sources, stub, env)) :
         fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     } catch {
       return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
@@ -5545,11 +5556,30 @@ async function handleSources(request, env) {
     if (!(response instanceof Response)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     if (response.status !== 200) return response;
     const sources = safeManagementSources(await response.json());
-    return sources ? fixedJson(200, { ...sources, applyMode: 'account_token', installationEnabled: !SOURCE_ADDITION_PAUSED && managementCredential(env) !== null }) :
+    return sources ? fixedJson(200, await publicSources(sources, stub, env)) :
       fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
   } catch {
     return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
   }
+}
+
+// What the dashboard loads for Sources, after a read and after a save alike.
+// `installEndsRollbackTo` names the release that can be restored today and no
+// longer could once a source installation starts here; it is null whenever
+// installing decides nothing about rollback, or cannot start at all.
+async function publicSources(sources, stub, env) {
+  const installationEnabled = !SOURCE_ADDITION_PAUSED && managementCredential(env) !== null;
+  let installEndsRollbackTo = null;
+  if (installationEnabled) {
+    try {
+      const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_ROLLBACK_OUTLOOK_PATH}`));
+      const outlook = response instanceof Response && response.status === 200 ? await response.json() : null;
+      if (isText(outlook?.installEndsRollbackTo) && updateSemver(outlook.installEndsRollbackTo)) {
+        installEndsRollbackTo = outlook.installEndsRollbackTo;
+      }
+    } catch { installEndsRollbackTo = null; }
+  }
+  return { ...sources, applyMode: 'account_token', installationEnabled, installEndsRollbackTo };
 }
 
 function teamSources(sources) {
@@ -5685,6 +5715,21 @@ async function teamRuntimeReleaseAllowed(storage, release) {
   if (team.minimumRuntimeRelease === null) return team.teardownDisabled === false;
   return team.teardownDisabled === true && updateSemver(team.minimumRuntimeRelease) && updateSemver(release) &&
     compareUpdateRelease(release, team.minimumRuntimeRelease) !== -1;
+}
+
+// A source installation arms the minimum compatible runtime at the running
+// release. That decides something only while an older recorded release can
+// still be restored: name that release, so the dashboard can say so beside
+// the install control. Reads only, so it stays answerable during a mutation.
+async function sourceInstallEndsRollbackTo(storage, environment) {
+  const updates = safeRuntimeUpdates(await storage.get(UPDATES_KEY));
+  if (!updates) return null;
+  // Until the journal follows a release received outside an action, the
+  // recorded current release is the one a rollback would restore.
+  const target = updates.current.release === environment.release &&
+    updates.current.artifactSha256 === environment.releaseSha256 ? updates.previous : updates.current;
+  return target && compareUpdateRelease(target.release, environment.release) === -1 &&
+    await teamRuntimeReleaseAllowed(storage, target.release) ? target.release : null;
 }
 
 async function currentTeardownLocksRuntime(storage, now) {

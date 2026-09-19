@@ -15,10 +15,12 @@ interface SourceListProps {
   authorizeDisabled?: boolean
   isBusy: boolean
   draftLabel?(sourceId: string): string
+  /** One sentence to read before installing, shown directly beside each install control; nothing when null. */
+  installNote?: string | null
   onAuthorize(sourceId: string): void
 }
 
-export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, onAuthorize }: SourceListProps) {
+export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, installNote = null, onAuthorize }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -108,10 +110,14 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                           className="pressable h-auto min-h-9 max-w-full whitespace-normal py-1.5"
                           disabled={!installationEnabled || authorizeDisabled}
                           loading={isBusy}
+                          aria-describedby={installationEnabled && installNote ? `${sourceDetailsId}-install-note` : undefined}
                           onClick={() => onAuthorize(source.id)}
                         >
                           {installationEnabled ? 'Install source' : 'Installation unavailable'}
                         </Button>
+                        {installationEnabled && installNote ? (
+                          <p id={`${sourceDetailsId}-install-note`} className="basis-full text-xs leading-5 text-kumo-subtle">{installNote}</p>
+                        ) : null}
                       </div>
                     )}
                   </td>

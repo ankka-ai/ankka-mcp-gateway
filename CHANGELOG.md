@@ -4,6 +4,18 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Show the rollback warning on Sources only when it is a real decision, in plain words. The permanent banner
+  ("once source provisioning starts, rollback below this runtime release is unavailable…") is gone. Only when the
+  gateway was updated, its earlier release can still be restored, and starting a source installation would end that,
+  the control that starts or resumes the installation says "After this you can no longer roll back to `<release>`."
+  The gateway reports that release as `installEndsRollbackTo` in the `/api/sources` answer; the dashboard never
+  computes it. `/api/update` no longer offers a rollback that preparation then refuses: once the recorded minimum
+  runtime excludes the retained release it answers
+  `rollback: { available: false, reason: "minimum_runtime_release", release }`, and Settings says why that release
+  can no longer be restored and shows no rollback button. A removal refused for unfinished work now asks to finish
+  or cancel that work, or to wait for an open removal authorization to expire, instead of naming a receipt. The
+  minimum-runtime rule itself is unchanged.
+
 - Land on the new release's dashboard after an update or a rollback, without a manual reload. Cloudflare keeps
   serving the previous version, Worker and management assets alike, at an edge location for a short while after the
   upload, so the update page handed the browser to the previous release's dashboard. The page now waits, as its own
