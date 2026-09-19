@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Say before an install starts that setup needs one account API token, who can create it, and that it is pasted into
+  your own gateway, on the hosted installer's first screen, in its review step and in "How permissions work" (which
+  still described adding the token by hand in Cloudflare). The last removal page now names the management token setup
+  pre-filled for that gateway and links to the account's API tokens, because removing a gateway cannot revoke its
+  token.
+
 - Pick the tools of a sign-in source from its real list instead of typing exact names. A source whose endpoint
   answers discovery with a sign-in challenge cannot list its tools before it is connected, so the form asked for
   typed names, and a typo surfaced only after installation and connection. The form now says why the list is empty

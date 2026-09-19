@@ -194,7 +194,12 @@ validate actual resource access before changing anything. Missing, expired,
 revoked, or rejected credentials disable management with fixed safe errors.
 Replace the secret directly in Cloudflare, verify the replacement, then revoke
 the old token. Deleting a Worker secret or uninstalling the gateway does not
-revoke the token; the administrator revokes it separately in Cloudflare.
+revoke the token; the administrator revokes it separately in Cloudflare. The
+gateway cannot do it: deleting a token needs token-management authority, which
+no part of Ankka ever holds. The last removal page therefore names the token
+setup pre-filled (`Ankka gateway <management hostname>`) and links to the
+account's API tokens, and the hosted installer says before an install starts
+that setup needs one account API token and who can create it.
 
 The signed release contract declares the optional customer-managed binding.
 Updates preserve it only as a secret binding; unsupported older contracts must

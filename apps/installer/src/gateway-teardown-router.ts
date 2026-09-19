@@ -6,6 +6,7 @@ import { PUBLIC_ORIGIN, OAUTH_CALLBACK_URL } from './constants';
 import { parseCookies } from './cookies';
 import { constantTimeEqual, deriveCsrfToken, openGatewayTeardownCookie, pkceChallenge,
   randomBase64Url, sealGatewayTeardownCookie, sha256, type GatewayTeardownCookie } from './crypto';
+import { customerManagementCredentialName } from './customer-management-credential';
 import type { ExactReleaseBundleIdentity } from './exact-release-bundle';
 import { expiredGatewayTeardownHandoffHostname, gatewayTeardownJobId, verifyGatewayTeardownHandoff, type GatewayTeardownTrust } from './gateway-teardown-handoff';
 import { authorizeGatewayTeardownJob, consumeGatewayTeardownCallback, createGatewayTeardownJob,
@@ -65,12 +66,13 @@ export function page(): Response {
   return new Response(`${customerPageStart('Remove your gateway · Ankka', 'form')}<p class="eyebrow">Gateway removal</p><h1>Finish removing your gateway</h1><p id="message" role="status" aria-live="polite">Loading removal progress…</p><small id="failure" hidden></small>
 <section id="review" hidden><p id="target"></p><p>Your sources and Portal have already been removed. A fresh Cloudflare approval lets Ankka finish removing the gateway's storage, management page, and Worker from your account.</p><ol id="steps"></ol>
 <p id="warning" class="warning" hidden>A previous temporary Cloudflare approval could not be confirmed revoked. Review Ankka MCP Gateway in Cloudflare → My Profile → Access Management → Connected Applications and revoke that approval.</p>
+<p id="token" class="warning" hidden>One thing is left in Cloudflare: removing a gateway does not delete its management token. If you created one for this gateway, delete the token named <strong id="token-name"></strong> under <a href="https://dash.cloudflare.com/?to=/:account/api-tokens" target="_blank" rel="noopener noreferrer">Manage Account → Account API Tokens</a>.</p>
 <button class="danger" id="authorize" hidden>Authorize final removal</button><p><button class="secondary" id="download">Download recovery receipt</button></p><small>Keep this receipt to resume if you lose this browser session. It contains resource references and signed removal evidence, but no credentials.</small></section>
 <section><label for="receipt">Resume from a saved recovery receipt</label><p><input id="receipt" type="file" accept="application/json,.json"></p></section>
 <script nonce="${nonce}">(()=>{const message=document.querySelector('#message'),review=document.querySelector('#review'),authorize=document.querySelector('#authorize');let current,poll;
 const reload=${JSON.stringify(GATEWAY_TEARDOWN_RELOAD_GUIDANCE)},rejected=${JSON.stringify(gatewayTeardownRefusalMessage('teardown_receipt_rejected'))};
 const api=async(path,body)=>{let response;try{response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'content-type':'application/json',...(current?{'x-csrf-token':current.csrfToken}:{})},body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',cache:'no-store'})}catch{throw new Error(reload)}if(!response.ok){const refusal=await response.json().catch(()=>null);throw new Error(refusal&&typeof refusal.message==='string'?refusal.message:reload)}return response.json()};
-const show=value=>{current=value;review.hidden=false;document.querySelector('#target').textContent='Gateway: '+value.hostname;message.textContent=value.message;const failure=document.querySelector('#failure');failure.hidden=!value.failureReason;failure.textContent=value.failureReason?'Removal reference: '+value.failureReason:'';document.querySelector('#warning').hidden=!value.revocationUnconfirmed;authorize.hidden=!value.canAuthorize;authorize.disabled=false;authorize.textContent=value.started?'Authorize and resume removal':'Authorize final removal';const steps=document.querySelector('#steps');steps.replaceChildren(...value.steps.map(step=>{const item=document.createElement('li');item.textContent=step.label+(step.done?' — Removed':step.current?' — Removing…':'');return item}));clearTimeout(poll);if(value.removing)poll=setTimeout(()=>load().catch(error=>{message.textContent=error.message}),3000)};
+const show=value=>{current=value;review.hidden=false;document.querySelector('#target').textContent='Gateway: '+value.hostname;message.textContent=value.message;const failure=document.querySelector('#failure');failure.hidden=!value.failureReason;failure.textContent=value.failureReason?'Removal reference: '+value.failureReason:'';document.querySelector('#warning').hidden=!value.revocationUnconfirmed;document.querySelector('#token').hidden=!value.managementTokenName;document.querySelector('#token-name').textContent=value.managementTokenName||'';authorize.hidden=!value.canAuthorize;authorize.disabled=false;authorize.textContent=value.started?'Authorize and resume removal':'Authorize final removal';const steps=document.querySelector('#steps');steps.replaceChildren(...value.steps.map(step=>{const item=document.createElement('li');item.textContent=step.label+(step.done?' — Removed':step.current?' — Removing…':'');return item}));clearTimeout(poll);if(value.removing)poll=setTimeout(()=>load().catch(error=>{message.textContent=error.message}),3000)};
 const load=async()=>show(await api('/api/teardown'));
 addEventListener('pagehide',()=>clearTimeout(poll));
 const accept=async(handoff)=>{await api('/api/teardown/import',{handoff});history.replaceState(null,'','/teardown');await load()};
@@ -124,6 +126,8 @@ export function createGatewayTeardownRouter(config: {
       canAuthorize: !terminal && !active, started: job.phase !== 'review', removing,
       // `complete` is the settled end of the job; five verified steps with an attempt still running are not it.
       complete: terminal, revocationUnconfirmed: job.revocation === 'unconfirmed', failureReason: job.failureReason,
+      // The gateway cannot revoke its own management token; once it is gone the page names the token setup pre-filled.
+      managementTokenName: terminal ? customerManagementCredentialName(authority.statement.management.hostname) : null,
       message: terminal ? 'Gateway removal is complete.'
         : removing ? 'Removing your gateway. This page updates itself.'
         : active ? 'Cloudflare authorization is in progress. Return here if it is interrupted.'
