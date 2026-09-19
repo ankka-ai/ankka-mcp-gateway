@@ -3,6 +3,9 @@
 This document describes the public release-integrity contract. It is not a
 deployment runbook and grants no signing, publication, or Cloudflare authority.
 
+Use [Operations](OPERATIONS.md) for the command sequence and live qualification
+checklist. `npm run release -- --help` lists the existing release tools by stage.
+
 Release support expectations are defined by the
 [support policy](../SUPPORT.md): support is best-effort, and only the newest
 release of each channel receives fixes. Canary artifacts are prereleases for

@@ -5,18 +5,14 @@ revision must be publishable.
 
 ## Product boundary
 
-Ankka MCP Gateway is the self-hosted edge for a team's MCP sources.
-The first deployment target is Cloudflare. Runtime resources, access policies,
-logs, and upstream credentials belong to the team's Cloudflare account.
+Ankka MCP Gateway is the self-hosted edge for your team's MCP sources, first
+on Cloudflare. Runtime resources, policies, logs, and upstream credentials
+belong to the team's account. Public source grants no deployment authority.
 
-This repository may contain deployment tooling, the source for Ankka's hosted
-installer, declarative configuration, gateway runtime code, public
-protocol contracts, and synthetic examples. Public source does not carry
-deployment authority: it must not contain private product code, private data,
-internal semantic content, Cloudflare account or resource IDs, credentials,
-private signing material, generated release output, or private repository
-history. Public service hostnames and OAuth client identifiers are allowed when
-they are explicitly documented as non-secret.
+Keep private code, data, semantic content, history, signing material,
+credentials, Cloudflare account/resource IDs, and generated releases out of
+this repository. Explicitly documented non-secret service hostnames and OAuth
+client identifiers are allowed. See [Contributing](CONTRIBUTING.md).
 
 ## Security invariants
 
@@ -45,14 +41,11 @@ they are explicitly documented as non-secret.
   enforce the allowed operations.
 - Do not introduce arbitrary credential forwarding or open-proxy behavior.
 
-## Stage-appropriate engineering
+## Keep the work lean
 
-- Keep implementation proportional to current users, requirements, and threat
-  model. Preserve the security invariants above, but prefer a few simple,
-  auditable boundaries over speculative enterprise machinery.
-- Do not add generalized IAM, fine-grained RBAC, policy engines, approval
-  workflows, or elaborate audit infrastructure without a current product need
-  or demonstrated risk. Record a follow-up or narrow extension point instead.
+- Preserve the security invariants with a few simple, auditable boundaries.
+- Add dependencies, IAM, policy engines, approval steps, or audit infrastructure
+  only for a current product need or demonstrated risk.
 
 ## Product language
 
@@ -72,6 +65,21 @@ they are explicitly documented as non-secret.
 
 ## Development
 
+- Keep dependencies small. Record transferred material in `ORIGINS.md` and
+  `THIRD_PARTY_NOTICES.md`.
+- Use `npm run check:code` for quick feedback and `npm run check:fast` before
+  a pull request. Run focused tests for the behavior you change. CI owns the
+  full `npm run check` gate; it must pass before merge. Do not repeat passing
+  checks without a relevant change or failure.
+- Work on a branch. `main` accepts pull requests with a passing `check` status;
+  merge with rebase or squash (`gh land` opens the PR and auto-merges).
+- Never push private refs to `origin`. The clone may contain a private remote,
+  local branches, and tags; only publish explicitly selected public refs.
+- Use `npm run release -- --help` for release stages. Signing, publication,
+  deployment, and activation remain distinct authorized actions. Production
+  signing keys and deployment credentials stay outside this repository.
+- Read [Contributing](CONTRIBUTING.md) for toolchain and public-history rules,
+  and [Operations](docs/OPERATIONS.md) when changing release or deployment tools.
 - Use `npm run lifecycle` for unattended disposable gateway runs with an
   operator-managed credential (install, manage, update, interrupt, resume,
   remove); read `docs/AGENT_LIFECYCLE.md` for the job file, credential custody
