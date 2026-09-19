@@ -160,12 +160,15 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       if (!mounted.current || read !== sourceActionRead.current) return next
       setSourceActions(next)
       const blocker = next.blockingAction
-      if (blocker?.kind !== 'teardown') setRemoval(null)
+      // The installation's own record outlives the journal: a removal that has begun deleting stays offered for
+      // continuation after its interrupted attempt was replaced, or expired, in the journal.
+      const begun: RemovalProgress | null = next.removalStarted === true ? 'interrupted' : null
+      if (blocker?.kind !== 'teardown') setRemoval(begun)
       else {
-        // The pointer says a removal is recorded; only its status says whether deletion may have begun.
+        // The pointer says a removal is recorded; its status says whether an attempt is running right now.
         try {
           const recorded = await apiRef.current.getTeardownAction(blocker.actionId)
-          if (mounted.current && read === sourceActionRead.current) setRemoval(removalProgress(recorded, Date.now()))
+          if (mounted.current && read === sourceActionRead.current) setRemoval(removalProgress(recorded, Date.now()) ?? begun)
         } catch { /* An unreadable action keeps the last known answer. */ }
       }
       const completed = next.actions.filter((action) => action.state === 'succeeded' && !reconciledSourceActions.current.has(action.actionId))

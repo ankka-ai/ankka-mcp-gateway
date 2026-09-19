@@ -27,6 +27,7 @@ const MEMBER = 'member@example.com';
 const NEW_PERSON = 'new-person@example.com';
 const TEAM_KEY = 'ankka-mcp-gateway/team-access/v1';
 const UPDATES_KEY = 'ankka-mcp-gateway/runtime-updates/v1';
+const TEARDOWNS_KEY = 'ankka-mcp-gateway/teardown-actions/v1';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
 const SOURCE_ACTIONS_KEY = 'ankka-mcp-gateway/source-actions/v1';
 const MANAGEMENT_ORIGIN = 'https://manage.example.com';
@@ -1828,6 +1829,35 @@ test('the dashboard client follows a removal through every status the gateway re
     const next = await dashboard.prepareTeardownAction();
     assert.equal(new URL(next.handoffUrl).pathname, '/__ankka/operation/teardown');
     assert.equal((await dashboard.getTeardownAction(next.actionId)).status, 'authorization_required');
+  });
+}, await portalOnlyClaim()));
+
+test('the installation record, not the removal journal, tells the dashboard that a removal has begun', async () => fixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    // Before anything is deleted the answer says so, also while a reviewed plan waits for its authorization.
+    assert.equal((await dashboard.getSourceActions()).removalStarted, false);
+    const removal = await gateway.currentTeardown();
+    assert.equal(removal.prepared.status, 200, await removal.prepared.clone().text());
+    assert.equal((await dashboard.getSourceActions()).removalStarted, false);
+    assert.equal((await removal.send('prove')).status, 200);
+    assert.equal((await removal.send('apply')).status, 200);
+    assert.equal((await removal.send('settle')).status, 200);
+    assert.equal((await dashboard.getSourceActions()).removalStarted, true);
+
+    // The interrupted attempt leaves the journal: a later authorization replaces it, is never used, and expires.
+    // The journal then names no removal at all, and the installation's own record still does.
+    const next = await dashboard.prepareTeardownAction();
+    const journal = gateway.managementStorage.snapshot(TEARDOWNS_KEY);
+    await gateway.managementStorage.put(TEARDOWNS_KEY, { ...journal,
+      actions: journal.actions.filter((action) => action.actionId === next.actionId)
+        .map((action) => ({ ...action, issuedAt: action.issuedAt - 3_600_000, expiresAt: action.expiresAt - 3_600_000 })) });
+    gateway.reloadManagement();
+    const forgotten = await dashboard.getSourceActions();
+    assert.equal(forgotten.blockingAction, null);
+    assert.equal(forgotten.removalStarted, true);
+    // The way back still works from there.
+    const again = await dashboard.prepareTeardownAction();
+    assert.equal(new URL(again.handoffUrl).pathname, '/__ankka/operation/teardown');
   });
 }, await portalOnlyClaim()));
 

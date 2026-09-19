@@ -154,6 +154,9 @@ const sourceActionsSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actions: v.array(sourceActionSummarySchema),
   blockingAction: v.nullable(sourceActionPointerSchema),
+  // From the installation's durable record: removal has begun deleting. The removal journal alone forgets an
+  // interrupted attempt once a later authorization replaces it. Absent when the gateway could not read the record.
+  removalStarted: v.optional(v.boolean()),
 })
 /**
  * The real tools of a paused sign-in installation, from Cloudflare's synced list. Cloudflare types a synced tool as an

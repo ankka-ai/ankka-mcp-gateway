@@ -412,6 +412,16 @@ describe('HttpGatewayAdminApi', () => {
     await expect(new HttpGatewayAdminApi().getTeamAction(actionId)).rejects.toMatchObject({ code: 'response_invalid' })
   })
 
+  it('reads whether removal has begun from the source-actions answer, absent or boolean and nothing else', async () => {
+    const answer = { schemaVersion: 1, actions: [], blockingAction: null }
+    for (const [reported, expected] of [[{}, undefined], [{ removalStarted: false }, false], [{ removalStarted: true }, true]] as const) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...answer, ...reported })))
+      expect((await new HttpGatewayAdminApi().getSourceActions()).removalStarted).toBe(expected)
+    }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...answer, removalStarted: 'yes' })))
+    await expect(new HttpGatewayAdminApi().getSourceActions()).rejects.toMatchObject({ code: 'response_invalid' })
+  })
+
   it('accepts only this gateway’s own operation handoff shape', () => {
     const expected = 'https://manage.example.com'
     expect(validHandoffUrl(`${expected}/__ankka/operation#${'a'.repeat(40)}`, expected)).toContain('/__ankka/operation#')

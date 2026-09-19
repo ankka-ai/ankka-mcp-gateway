@@ -428,4 +428,24 @@ describe('GatewayProvider', () => {
     expect(screen.getByText('no removal')).toBeVisible()
     expect(client.getTeardownAction).toHaveBeenCalledTimes(3)
   })
+
+  it('keeps offering the way back from the installation record once the journal has forgotten the interrupted removal', async () => {
+    // A later authorization replaced the interrupted attempt and waits, then expires: the journal first names only
+    // a reviewed plan, then nothing, while the installation's own record still says that deletion began.
+    const replaced: SourceActions = { schemaVersion: 1, actions: [], blockingAction: { kind: 'teardown', actionId: pendingAction.actionId }, removalStarted: true }
+    const waiting: TeardownAction = { schemaVersion: 1, actionId: pendingAction.actionId, status: 'authorization_required', expiresAt: '2999-01-01T00:00:00.000Z', failureCode: null }
+    const client = api({
+      getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>()
+        .mockResolvedValueOnce(replaced)
+        .mockResolvedValueOnce({ ...emptyActions, removalStarted: true })
+        .mockResolvedValue({ ...emptyActions, removalStarted: false }),
+      getTeardownAction: vi.fn<GatewayAdminApi['getTeardownAction']>().mockResolvedValue(waiting),
+    })
+    render(<GatewayProvider api={client}><RemovalProbe /></GatewayProvider>)
+    expect(await screen.findByText('interrupted')).toBeVisible()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check status' })) })
+    expect(screen.getByText('interrupted')).toBeVisible()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check status' })) })
+    expect(screen.getByText('no removal')).toBeVisible()
+  })
 })

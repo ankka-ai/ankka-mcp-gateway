@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Keep "Removal in progress" and its way back on the dashboard for as long as a removal is unfinished. The notice
+  followed the removal journal, which forgets an interrupted attempt once a later authorization replaces it or
+  expires; the gateway now also reports, from the installation's own durable record, that deletion has begun.
+
 - Let an unattended lifecycle job install the management token inside the install's final runtime upload
   (`managementCredentialAtInstall`), the path a customer's pasted token takes, so that path is proven against
   Cloudflare without a person. The manage stage's own secret write stays the default.
