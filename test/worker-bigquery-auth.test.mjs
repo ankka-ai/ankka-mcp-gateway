@@ -18,7 +18,7 @@ async function fixture(run) {
     { name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
     true, ['sign', 'verify'],
   );
-  const kid = 'synthetic-bigquery-access-key';
+  const kid = `synthetic-bigquery-access-key-${crypto.randomUUID()}`;
   const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
   const unsigned = `${encode({ alg: 'RS256', kid, typ: 'JWT' })}.${encode({

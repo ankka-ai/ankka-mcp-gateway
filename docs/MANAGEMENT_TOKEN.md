@@ -220,6 +220,11 @@ you; on an installed gateway, **Settings → Add management token** does:
 
 ### What verification proves
 
+Settings reads token presence and the setup choice from
+`GET /api/management-credential/status`. This authenticated, administrator-only
+read makes no Cloudflare management API calls and remains available during
+management operations. It reports presence only, not token validity or permissions.
+
 **Verify management access** proves both permissions on exactly the two
 resources the gateway owns, without changing them:
 
@@ -229,7 +234,11 @@ resources the gateway owns, without changing them:
 | The gateway's own MCP Portal: read, written back unchanged, read again | 2 reads, 1 write | **MCP Portals Edit** |
 | The Portal's own Access application and its one policy: read, policy written back as read | 2 reads, 1 write | **Access: Apps and Policies Edit** |
 
-That is at most **seven** Cloudflare API calls per verification. Each resource
+That is at most **seven** Cloudflare API calls per verification. After the
+token check succeeds, the two permission checks run concurrently; the Access
+application and policy are also read concurrently. At most three calls are in
+flight, reducing the successful path from seven sequential round trips to four.
+Both checks finish before the management queue is released. Each resource
 is read first and must match what the receipts and the saved Team say, judged
 the way every other check judges it: identifiers, names, markers, the exact
 server mappings and the exact audience, never a timestamp. So a write of the

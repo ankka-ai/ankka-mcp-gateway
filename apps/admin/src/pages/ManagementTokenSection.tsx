@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ManagementVerification, Team } from '../api'
+import type { ManagementCredentialStatus, ManagementVerification } from '../api'
 import { useGateway } from '../GatewayContext'
 import { Button } from '../components/Button'
 import { LoadingIndicator } from '../components/LoadingIndicator'
@@ -66,7 +66,7 @@ function flowMessage(flow: FlowReturn, arrival: 'waiting' | 'arrived' | 'late' |
       ? 'Cloudflare accepted the token, but the temporary approval could not be confirmed revoked. Review active OAuth grants in your Cloudflare profile.'
       : 'Cloudflare accepted the token.'
   if (arrival === 'arrived') return `${lead} Your gateway now runs with it. Verify management access to prove that it can do its work.`
-  if (arrival === 'unreadable') return `${lead} Your gateway now runs with a token, but it could not read your Team policies with it. Verify management access to see what is missing.`
+  if (arrival === 'unreadable') return `${lead} Your gateway could not confirm whether the token has arrived. Reload this page to check again.`
   if (arrival === 'late') return `${lead} Your gateway does not run with it yet. Cloudflare can take a few minutes; if it still has not arrived then, start again.`
   return `${lead} Waiting for your gateway to start with it; this usually takes less than a minute…`
 }
@@ -101,10 +101,10 @@ function verificationLines(result: ManagementVerification): string[] {
 
 /** Settings → Cloudflare management: the one way to add, replace and verify the gateway's own token. */
 export function ManagementTokenSection() {
-  const { getTeam, refreshSources, verifyManagementAccess } = useGateway()
+  const { getManagementCredentialStatus, refreshSources, verifyManagementAccess } = useGateway()
   const { start, starting } = useManagementTokenStart()
-  const [team, setTeam] = useState<Team | null>(null)
-  const [teamState, setTeamState] = useState<'loading' | 'read' | 'unreadable'>('loading')
+  const [tokenStatus, setTokenStatus] = useState<ManagementCredentialStatus | null>(null)
+  const [tokenState, setTokenState] = useState<'loading' | 'read' | 'unreadable'>('loading')
   const [flow] = useState<FlowReturn | null>(readFlowReturn)
   const [arrival, setArrival] = useState<'waiting' | 'arrived' | 'late' | 'unreadable' | null>(
     () => flow !== null && mayHaveArrived(flow) ? 'waiting' : null)
@@ -114,28 +114,28 @@ export function ManagementTokenSection() {
   useEffect(() => { active.current = true; return () => { active.current = false } }, [])
   useEffect(forgetFlowReturn, [])
 
-  const readTeam = useCallback(async (): Promise<Team | null> => {
+  const readTokenStatus = useCallback(async (): Promise<ManagementCredentialStatus | null> => {
     try {
-      const next = await getTeam()
+      const next = await getManagementCredentialStatus()
       if (!active.current) return null
-      setTeam(next)
-      setTeamState('read')
+      setTokenStatus(next)
+      setTokenState('read')
       return next
     } catch {
-      if (active.current) setTeamState('unreadable')
+      if (active.current) setTokenState('unreadable')
       return null
     }
-  }, [getTeam])
+  }, [getManagementCredentialStatus])
 
   const watchArrival = useRef(arrival === 'waiting')
   useEffect(() => {
-    if (!watchArrival.current) { void readTeam(); return }
+    if (!watchArrival.current) { void readTokenStatus(); return }
     // After a token change the dashboard watches for the token by itself: no reload is needed.
     let stopped = false
     let timer: number | undefined
     let attempts = 0
     const check = async () => {
-      const next = await readTeam()
+      const next = await readTokenStatus()
       if (stopped || !active.current) return
       attempts += 1
       if (next?.managementCredentialConfigured === true) {
@@ -144,14 +144,13 @@ export function ManagementTokenSection() {
         void refreshSources().catch(() => {})
         return
       }
-      // Until the token arrives this answer costs no Cloudflare call and always succeeds, so a failure means a token is there.
       if (next === null) { setArrival('unreadable'); return }
       if (attempts >= ARRIVAL_POLL_LIMIT) { setArrival('late'); return }
       timer = window.setTimeout(() => { void check() }, ARRIVAL_POLL_MS)
     }
     void check()
     return () => { stopped = true; window.clearTimeout(timer) }
-  }, [readTeam, refreshSources])
+  }, [readTokenStatus, refreshSources])
 
   const verify = async () => {
     if (verifying) return
@@ -167,14 +166,13 @@ export function ManagementTokenSection() {
     }
   }
 
-  const missing = teamState === 'read' && team?.managementCredentialConfigured === false && arrival !== 'waiting'
+  const missing = tokenState === 'read' && tokenStatus?.managementCredentialConfigured === false && arrival !== 'waiting'
   const nameInCloudflare = managementTokenName(window.location.hostname)
-  const status = teamState === 'loading' ? 'Checking your management token…'
-    : teamState === 'unreadable'
-      ? 'Your gateway could not read your Team policies. Verify management access to see what is missing.'
-      : team?.managementCredentialConfigured !== true ? 'Your gateway has no management token yet.'
-        : team.observedAt ? 'Your gateway has a management token, and it can read your current Team policies.'
-          : 'Your gateway has a management token. Finish the recorded Team change before checking the complete membership.'
+  const status = tokenState === 'loading' ? 'Checking your management token…'
+    : tokenState === 'unreadable'
+      ? 'Your gateway could not read its management token status. Reload this page or verify management access.'
+      : tokenStatus?.managementCredentialConfigured !== true ? 'Your gateway has no management token yet.'
+        : 'Your gateway has a management token. Verify management access to check its permissions.'
 
   return (
     <section className="mt-8" aria-labelledby="management-title">
@@ -184,12 +182,12 @@ export function ManagementTokenSection() {
           {arrival === 'waiting' ? <LoadingIndicator inline /> : null} {flowMessage(flow, arrival)}
         </p>
       ) : null}
-      {missing ? <ManagementTokenCard choice={team?.managementCredentialChoice} className="mt-5" /> : (
+      {missing ? <ManagementTokenCard choice={tokenStatus?.managementCredentialChoice} className="mt-5" /> : (
         <div className="surface-card mt-5 space-y-4 p-5 text-sm leading-6 sm:p-6">
           <p role="status">{status}</p>
           <p>{MANAGEMENT_ACCESS_PURPOSE}</p>
           <p>{MANAGEMENT_ACCESS_REACH}</p>
-          {arrival === 'waiting' || teamState === 'loading' ? null : (
+          {arrival === 'waiting' || tokenState === 'loading' ? null : (
             <>
               <p className="text-kumo-subtle">Replacing the token takes the same steps: create the new token first, then one approval in Cloudflare and the new token pasted into your own gateway. Your gateway cannot delete the old token. Afterwards, delete it in Cloudflare under Manage Account → Account API Tokens: both are named <strong>{nameInCloudflare}</strong>, and the old one has the earlier creation date. Removing your gateway does not delete the token either.</p>
               <ManagementTokenCreateLink />

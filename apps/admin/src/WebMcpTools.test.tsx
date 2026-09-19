@@ -48,7 +48,7 @@ function fixtureApi(): GatewayAdminApi {
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
     getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(), prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   }
 }
 
@@ -128,7 +128,7 @@ describe('WebMcpTools', () => {
       prepareRuntimeAction: vi.fn(),
       getRuntimeAction: vi.fn(),
       prepareTeardownAction,
-      prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
+      getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
       getTeardownAction: vi.fn(),
     }
     const tools: WebMcpTool[] = []

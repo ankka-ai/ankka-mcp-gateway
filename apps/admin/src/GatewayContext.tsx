@@ -16,6 +16,7 @@ import {
   HttpGatewayAdminApi,
   SOURCE_ADDITION_PAUSED_MESSAGE,
   type ManagedSources,
+  type ManagementCredentialStatus,
   type ManagementVerification,
   type PreparedAction,
   type SourceApplyResult,
@@ -70,6 +71,7 @@ interface GatewayContextValue {
   prepareTeardownAction(): Promise<PreparedAction>
   prepareManagementCredentialAction(): Promise<PreparedAction>
   verifyManagementAccess(): Promise<ManagementVerification>
+  getManagementCredentialStatus(): Promise<ManagementCredentialStatus>
   getTeam(): Promise<Team>
   prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
@@ -200,6 +202,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     }
   }), [refreshSourceActions, runBusy])
 
+  const getManagementCredentialStatus = useCallback(() => apiRef.current.getManagementCredentialStatus(), [])
   const getTeam = useCallback(() => apiRef.current.getTeam(), [])
   // Not a busy action: the page that asks shows its own progress, and a failed check is an answer, not a page error.
   const verifyManagementAccess = useCallback(() => apiRef.current.verifyManagementAccess(), [])
@@ -479,6 +482,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       return { ...prepared, handoffUrl }
     }),
     verifyManagementAccess,
+    getManagementCredentialStatus,
     getTeam,
     getTeamAction,
     prepareTeamAction: (expectedRevision, members) => runBusy(async () => {
@@ -496,7 +500,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     }),
   }), [
     busyCount, error, hasLoaded, isLoading, refreshSources, refreshUpdate, reload, runBusy,
-    sourceNotice, sources, status, update, updateNotice, getTeam, getTeamAction, verifyManagementAccess,
+    sourceNotice, sources, status, update, updateNotice, getManagementCredentialStatus, getTeam, getTeamAction, verifyManagementAccess,
     externalChangeVersion, refreshAfterExternalChange,
     sourceActions, sourceActionsError, isCheckingSourceActions, sourceActionsPollingPaused,
     refreshSourceActions, cancelSourceApply, removal,

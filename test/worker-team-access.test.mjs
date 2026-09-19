@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
+import { setImmediate as nextTurn } from 'node:timers/promises';
 import test from 'node:test';
 import * as v from 'valibot';
 
@@ -97,7 +98,7 @@ async function fixture(run, claimInput) {
     publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256',
   }, true, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
-  const kid = 'synthetic-team-regression-key';
+  const kid = `synthetic-team-regression-key-${crypto.randomUUID()}`;
   async function headers(email = ADMIN) {
     const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
     const now = Math.floor(Date.now() / 1000);
@@ -1577,6 +1578,122 @@ test('abandoning current consent expires its unstarted lifecycle lock without ch
 
 const MANAGEMENT_TOKEN = 'synthetic-account-management-token-never-store';
 
+for (const sourceCount of [0, 1, 5]) {
+  test(`Team overlaps independent reads with bounded concurrency (${sourceCount} sources)`, async () => fixture(async (gateway) => {
+    for (let index = 1; index < sourceCount; index += 1) {
+      await addHistoricalInstalledSource(gateway, { label: `Extra source ${index}`, url: `https://source-${index}.example.net/mcp` });
+    }
+    const network = globalThis.fetch;
+    let certReads = 0;
+    globalThis.fetch = async (request) => {
+      if (request.url.endsWith('/cdn-cgi/access/certs')) certReads += 1;
+      return network(request);
+    };
+    let active = 0;
+    let peak = 0;
+    gateway.provider.hook(async ({ record }) => {
+      assert.equal(record.method, 'GET');
+      active += 1;
+      peak = Math.max(peak, active);
+      await nextTurn();
+      active -= 1;
+    });
+    const baseline = gateway.provider.requests.length;
+    try {
+      const before = await gateway.view();
+      const after = await gateway.view();
+      assert.equal(before.sources.length, sourceCount);
+      assert.deepEqual(after.members, before.members);
+      assert.ok(before.observedAt && after.observedAt);
+      assert.equal(active, 0, 'all reads settle before responding');
+      assert.equal(peak, sourceCount === 0 ? 3 : 4);
+      assert.equal(certReads, 1, 'repeat requests reuse the public signing keys');
+      const calls = gateway.provider.requests.slice(baseline);
+      assert.equal(calls.length, 2 * (5 + 2 * sourceCount), 'every load still reads the complete live policy graph');
+      assert.equal(calls.filter(({ pathname }) => pathname.endsWith('/tokens/verify')).length, 2, 'management credentials are never cached');
+    } finally { globalThis.fetch = network; }
+  }, sourceCount === 0 ? await portalOnlyClaim() : undefined));
+}
+
+test('Team checks its token alongside the application list and Portal read', async () => fixture(async (gateway) => {
+  let otherInitialReads = 0;
+  gateway.provider.hook(async ({ record }) => {
+    if (record.pathname.endsWith('/tokens/verify')) {
+      await nextTurn();
+      assert.equal(otherInitialReads, 2, 'the initial reads do not wait for token verification');
+    } else if (record.pathname.endsWith('/access/apps') || record.pathname.includes('/mcp/portals/')) {
+      otherInitialReads += 1;
+    }
+  });
+  assert.ok((await gateway.view()).observedAt);
+}));
+
+test('an invalid token drains initial reads without reconciling external membership', async () => fixture(async (gateway) => {
+  await gateway.view();
+  const before = gateway.managementStorage.snapshot(TEAM_KEY);
+  policy(gateway, 'mcp_portal').include.push({ email: { email: NEW_PERSON } });
+  let active = 0;
+  const paths = [];
+  gateway.provider.hook(async ({ record }) => {
+    paths.push(record.pathname);
+    active += 1;
+    await nextTurn();
+    active -= 1;
+    if (record.pathname.endsWith('/tokens/verify')) return envelope({ status: 'disabled' });
+  });
+  const response = await gateway.api('/api/team');
+  assert.equal(response.status, 503);
+  assert.equal(active, 0);
+  assert.equal(paths.length, 3);
+  assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY), before);
+  assert.equal(gateway.provider.puts().length, 0);
+}));
+
+test('a free Team read slot starts another source while an earlier source is still pending', async () => fixture(async (gateway) => {
+  await addHistoricalInstalledSource(gateway);
+  const slowId = app(gateway, 'mcp_portal').id;
+  let releaseSlow;
+  const slow = new Promise((resolve) => { releaseSlow = resolve; });
+  let slowFinished = false;
+  let advancedWhilePending = false;
+  const applications = new Set();
+  // A broken fixed-batch implementation must eventually unblock and fail the
+  // assertion, rather than leave the test's simulated provider request hanging.
+  const deadline = setTimeout(() => releaseSlow(), 1000);
+  gateway.provider.hook(async ({ record }) => {
+    if (record.pathname.endsWith(`/access/apps/${slowId}/policies`)) {
+      await slow;
+      slowFinished = true;
+    } else if (/\/access\/apps\/[^/]+$/u.test(record.pathname)) {
+      applications.add(record.pathname);
+      if (applications.size === 3) {
+        advancedWhilePending = !slowFinished;
+        releaseSlow();
+      }
+    }
+  });
+  try {
+    assert.ok((await gateway.view()).observedAt);
+    assert.equal(advancedWhilePending, true);
+  } finally { clearTimeout(deadline); releaseSlow(); }
+}));
+
+test('a failed parallel Team read drains outstanding reads and never returns a partial roster', async () => fixture(async (gateway) => {
+  let active = 0;
+  gateway.provider.hook(async ({ record }) => {
+    if (!record.pathname.endsWith('/policies')) return;
+    active += 1;
+    await nextTurn();
+    active -= 1;
+    return envelope(null, 403);
+  });
+  const response = await gateway.api('/api/team');
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_unavailable' });
+  assert.equal(active, 0);
+  assert.equal(gateway.provider.puts().length, 0);
+}));
+
 test('account token reads live Team policies and applies a change without OAuth', async () => fixture(async (gateway) => {
   gateway.env.ANKKA_MANAGEMENT_TOKEN = MANAGEMENT_TOKEN;
   const before = await gateway.view();
@@ -2945,6 +3062,69 @@ test('Team names what setup recorded at its token step, as a fixed word and neve
   assert.deepEqual([installed.managementCredentialConfigured, installed.managementCredentialChoice], [true, 'skipped']);
 }));
 
+test('management token status reads only local presence and setup choice, with no provider calls or state changes', async () => fixture(async (gateway) => {
+  const path = '/api/management-credential/status';
+  const baseline = gateway.provider.requests.length;
+  for (const configured of [false, true]) {
+    if (configured) gateway.env.ANKKA_MANAGEMENT_TOKEN = MANAGEMENT_TOKEN;
+    else delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+    for (const choice of [null, 'provided', 'skipped']) {
+      await gateway.managementStorage.put(MANAGEMENT_CHOICE_KEY, { schemaVersion: 1, choice });
+      const before = [...await gateway.managementStorage.list()];
+      const response = await gateway.api(path);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.deepEqual(await response.json(), { schemaVersion: 1,
+        managementCredentialConfigured: configured, managementCredentialChoice: choice });
+      assert.deepEqual([...await gateway.managementStorage.list()], before);
+    }
+  }
+  assert.equal((await gateway.api(path, { email: MEMBER })).status, 401);
+  assert.equal((await gateway.api(path, { extraHeaders: { 'cf-access-jwt-assertion': 'invalid' } })).status, 401);
+  gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+  assert.equal((await gateway.serviceApi(path)).status, 403);
+  const rejected = await gateway.api(path, { method: 'POST' });
+  assert.equal(rejected.status, 405);
+  assert.equal(rejected.headers.get('allow'), 'GET');
+  assert.deepEqual(gateway.provider.requests.slice(baseline), []);
+}));
+
+test('management verification overlaps three reads, waits for both writes and leaves local status available', async () => fixture(async (gateway) => {
+  let active = 0;
+  let peak = 0;
+  let tokenChecked = false;
+  let writes = 0;
+  let peakWrites = 0;
+  let localStatus;
+  gateway.provider.hook(async ({ record }) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    try {
+      if (record.pathname.endsWith('/tokens/verify')) {
+        assert.equal(active, 1);
+        await nextTurn();
+        tokenChecked = true;
+        return;
+      }
+      assert.equal(tokenChecked, true);
+      if (record.method === 'PUT') {
+        writes += 1;
+        peakWrites = Math.max(peakWrites, writes);
+        // This read must bypass the mutation queue, including while a provider write is pending.
+        localStatus = await (await gateway.api('/api/management-credential/status')).json();
+        await nextTurn();
+        writes -= 1;
+      } else await nextTurn();
+    } finally { active -= 1; }
+  });
+  assert.equal((await verifyToken(gateway)).status, 'verified');
+  assert.equal(peak, 3);
+  assert.equal(peakWrites, 2);
+  assert.equal(active, 0);
+  assert.equal(writes, 0);
+  assert.equal(localStatus.managementCredentialConfigured, true);
+}));
+
 test('verification proves both permissions by writing the gateway’s own Portal and policy back unchanged, in seven calls', async () => fixture(async (gateway) => {
   const before = await gateway.view();
   const portalBefore = structuredClone(gateway.provider.state.portal);
@@ -2956,7 +3136,7 @@ test('verification proves both permissions by writing the gateway’s own Portal
     schemaVersion: 1, status: 'verified', token: 'active', portals: 'verified', accessPolicies: 'verified',
   });
   const calls = gateway.provider.requests.slice(baseline);
-  assert.deepEqual(calls.map(({ method, pathname, search }) => `${method} ${pathname}${search}`), [
+  assert.deepEqual(calls.map(({ method, pathname, search }) => `${method} ${pathname}${search}`).sort(), [
     `GET /client/v4/accounts/${ACCOUNT_ID}/tokens/verify`,
     `GET ${PORTAL_PATH}${portalBefore.id}`,
     `PUT ${PORTAL_PATH}${portalBefore.id}`,
@@ -2964,10 +3144,18 @@ test('verification proves both permissions by writing the gateway’s own Portal
     `GET /client/v4/accounts/${ACCOUNT_ID}/access/apps/${portalApp.id}`,
     `GET /client/v4/accounts/${ACCOUNT_ID}/access/apps/${portalApp.id}/policies?page=1&per_page=100`,
     `PUT /client/v4/accounts/${ACCOUNT_ID}/access/apps/${portalApp.id}/policies/${policy(gateway, 'mcp_portal').id}`,
-  ]);
+  ].sort());
+  assert.ok(calls[0].pathname.endsWith('/tokens/verify'));
+  assert.deepEqual(calls.filter(({ pathname }) => pathname.startsWith(PORTAL_PATH)).map(({ method }) => method),
+    ['GET', 'PUT', 'GET']);
+  assert.deepEqual(calls.filter(({ pathname }) => pathname.includes('/access/apps/')).map(({ method }) => method),
+    ['GET', 'GET', 'PUT']);
 
   // The two writes are the only ones, each to a resource this gateway's receipts name, each with what was just read.
-  const [portalWrite, policyWrite] = calls.filter(({ method }) => method === 'PUT');
+  const writes = calls.filter(({ method }) => method === 'PUT');
+  assert.equal(writes.length, 2);
+  const portalWrite = writes.find(({ pathname }) => pathname.startsWith(PORTAL_PATH));
+  const policyWrite = writes.find(({ pathname }) => pathname.includes('/policies/'));
   const { id: _portalId, servers, ...portalFields } = portalBefore;
   assert.deepEqual(portalWrite.body, { ...portalFields, servers });
   const { id: _policyId, ...policyFields } = policiesBefore.find(([id]) => id === portalApp.id)[1][0];
@@ -3090,6 +3278,8 @@ test('the dashboard client accepts every answer about the management token, in e
     delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
     for (const choice of [null, 'skipped', 'provided']) {
       if (choice !== null) await gateway.managementStorage.put(MANAGEMENT_CHOICE_KEY, { schemaVersion: 1, choice });
+      assert.deepEqual(await dashboard.getManagementCredentialStatus(), { schemaVersion: 1,
+        managementCredentialConfigured: false, managementCredentialChoice: choice });
       const team = await dashboard.getTeam();
       assert.deepEqual([team.managementCredentialConfigured, team.managementCredentialChoice, team.editingDisabledReason],
         [false, choice, 'management_credential_missing']);

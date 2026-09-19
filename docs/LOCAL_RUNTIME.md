@@ -26,6 +26,8 @@ adapter, and base64 decoder. It verifies:
 - Competing revision updates, SQLite transaction rollback, corrupted-state
   rejection, and deletion of the fixture's stored state.
 - Release-sized decoding and blocked outbound fetches.
+- Reuse of public Access signing keys across requests, with a synthetic key
+  endpoint and forged-signature rejection in the production verifier.
 - Availability of captured Worker spans through the local inspection API.
 - Atomic source-draft and empty BigQuery-record removal through the production
   source-management state machine with SQLite storage.
@@ -64,7 +66,9 @@ Additional fixed POST actions are `/race` (competing updates after seeding),
 state), and `/reset` (delete and reinitialize fixture state). Error output uses
 fixed codes. The fixture never returns stored capability or session secrets.
 
-The synthetic Worker blocks every outbound request. It loads no `.dev.vars`,
+The interactive synthetic Worker blocks every outbound request. The Access
+cache test answers only its fixed synthetic signing-key endpoint locally and
+rejects every other destination. Neither loads `.dev.vars`,
 credentials, account configuration, remote bindings, or production Wrangler
 configuration. Tracing is enabled only on this local fixture; installer and
 gateway production logging policies remain unchanged. Do not enter live secrets

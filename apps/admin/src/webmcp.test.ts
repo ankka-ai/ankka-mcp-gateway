@@ -134,7 +134,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     prepareRuntimeAction: vi.fn<GatewayAdminApi['prepareRuntimeAction']>(async (operation) => ({ ...prepared, operation })),
     getRuntimeAction: vi.fn(async (_actionId: string) => runtimeAction),
     prepareTeardownAction: vi.fn(async () => prepared),
-    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     getTeardownAction: vi.fn(async (_actionId: string) => teardownAction),
   } satisfies GatewayAdminApi
   const tools = createGatewayWebMcpTools(api, installationEnabled, onStateChange)

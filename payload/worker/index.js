@@ -303,6 +303,7 @@ const INTERNAL_TEAM_PATH = '/team';
 const INTERNAL_TEAM_ACTIONS_PATH = '/team-actions';
 const INTERNAL_MANAGEMENT_CHANGES_PATH = '/management-credential-actions';
 const INTERNAL_MANAGEMENT_VERIFY_PATH = '/management-credential/verify';
+const INTERNAL_MANAGEMENT_STATUS_PATH = '/management-credential/status';
 const STORAGE_KEY = 'ankka-mcp-gateway/uninstall-state/v1';
 const STATUS_KEY = 'ankka-mcp-gateway/public-status/v1';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
@@ -5133,7 +5134,7 @@ export class AdminState {
     // Status must remain available while a serialized mutation awaits the
     // provider. These reads neither authorize work nor change the journal.
     if (request.method === 'GET' && ([INTERNAL_ACTIONS_PATH, INTERNAL_SOURCES_PATH, INTERNAL_STATUS_PATH,
-      INTERNAL_ROLLBACK_OUTLOOK_PATH].includes(requestUrl.pathname) ||
+      INTERNAL_ROLLBACK_OUTLOOK_PATH, INTERNAL_MANAGEMENT_STATUS_PATH].includes(requestUrl.pathname) ||
         requestUrl.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`))) {
       return this.readSourceManagementState(request, requestUrl);
     }
@@ -5454,6 +5455,11 @@ export class AdminState {
   }
 
   async readSourceManagementState(request, url) {
+    if (url.pathname === INTERNAL_MANAGEMENT_STATUS_PATH) {
+      return fixedJson(200, { schemaVersion: 1,
+        managementCredentialConfigured: managementCredential(this.env) !== null,
+        managementCredentialChoice: await managementCredentialChoice(this.state.storage) });
+    }
     if (url.pathname === INTERNAL_STATUS_PATH) {
       const status = safePublicStatus(await this.state.storage.get(STATUS_KEY));
       return status ? fixedJson(200, status) : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
@@ -5566,6 +5572,53 @@ export async function verifyAccess(request, env, nowMs = Date.now()) {
   return actor?.kind === 'human' ? actor.email : false;
 }
 
+// Only imported public keys are shared across requests, never assertions,
+// identities, credentials, responses or in-flight I/O. Each issuer replaces its
+// entire key set on refresh so removed keys cannot acquire a new cache lifetime.
+const ACCESS_KEY_CACHE_TTL_MS = 5 * 60_000;
+const ACCESS_KEY_CACHE_MAX_ISSUERS = 8;
+const accessKeyCache = new Map();
+
+async function accessSigningKey(issuer, kid, nowMs) {
+  const cached = accessKeyCache.get(issuer);
+  if (cached && cached.expiresAt > nowMs && cached.keys.has(kid)) return cached.keys.get(kid);
+  // An unknown kid refreshes immediately to follow signing-key rotation.
+  // An expired entry is never a fallback when the provider cannot be read.
+  const signal = AbortSignal.timeout(10_000);
+  let response;
+  try {
+    response = await fetch(new Request(`${issuer}/cdn-cgi/access/certs`, {
+      method: 'GET', headers: { accept: 'application/json' }, redirect: 'manual', signal,
+    }));
+  } catch { return null; }
+  if (!(response instanceof Response) || response.status !== 200 || response.redirected || signal.aborted) {
+    if (response instanceof Response) await discardBody(response, signal);
+    return null;
+  }
+  let jwks;
+  try { jwks = await readBoundedProviderJson(response, signal); } catch { return null; }
+  if (!isRecord(jwks) || !Array.isArray(jwks.keys) || jwks.keys.length > 32) return null;
+  const keys = new Map();
+  for (const jwk of jwks.keys) {
+    if (!isRecord(jwk) || jwk.kty !== 'RSA' || jwk.alg !== 'RS256' || jwk.use !== 'sig') continue;
+    if (!isText(jwk.kid) || !/^[A-Za-z0-9_.:-]{1,256}$/u.test(jwk.kid) || keys.has(jwk.kid) ||
+        !isText(jwk.n) || !/^[A-Za-z0-9_-]{1,2048}$/u.test(jwk.n) ||
+        !isText(jwk.e) || !/^[A-Za-z0-9_-]{1,16}$/u.test(jwk.e)) return null;
+    try {
+      const key = await crypto.subtle.importKey(
+        'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
+      );
+      if (key.type !== 'public') return null;
+      keys.set(jwk.kid, key);
+    } catch { return null; }
+  }
+  if (keys.size === 0 || signal.aborted) return null;
+  accessKeyCache.delete(issuer);
+  if (accessKeyCache.size >= ACCESS_KEY_CACHE_MAX_ISSUERS) accessKeyCache.delete(accessKeyCache.keys().next().value);
+  accessKeyCache.set(issuer, { keys, expiresAt: nowMs + ACCESS_KEY_CACHE_TTL_MS });
+  return keys.get(kid) ?? null;
+}
+
 /**
  * The verified caller of a management request: an administrator, identified by the
  * email claim that must match the identity header and the configured administrators,
@@ -5615,26 +5668,9 @@ export async function verifyAccessActor(request, env, nowMs = Date.now()) {
         payload.common_name !== configuration.serviceClientId) return null;
     actor = Object.freeze({ kind: 'service', clientId: payload.common_name });
   }
-  let response;
   try {
-    response = await fetch(new Request(`${configuration.issuer}/cdn-cgi/access/certs`, {
-      method: 'GET', headers: { accept: 'application/json' }, redirect: 'manual',
-    }));
-  } catch { return null; }
-  if (!(response instanceof Response) || response.status !== 200 || response.redirected) {
-    if (response instanceof Response) await discardBody(response);
-    return null;
-  }
-  let jwks;
-  try { jwks = await readBoundedProviderJson(response); } catch { return null; }
-  if (!isRecord(jwks) || !Array.isArray(jwks.keys)) return null;
-  const keys = jwks.keys.filter((key) => isRecord(key) && key.kid === header.kid &&
-    key.kty === 'RSA' && key.alg === 'RS256' && key.use === 'sig');
-  if (keys.length !== 1) return null;
-  try {
-    const key = await crypto.subtle.importKey(
-      'jwk', keys[0], { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
-    );
+    const key = await accessSigningKey(configuration.issuer, header.kid, nowMs);
+    if (!key) return null;
     const verified = await crypto.subtle.verify(
       'RSASSA-PKCS1-v1_5', key, signature,
       new TextEncoder().encode(`${segments[0]}.${segments[1]}`),
@@ -6166,7 +6202,11 @@ async function verifyManagementCredential(env) {
   const token = managementCredential(env);
   const environment = parseManagementEnvironment(env);
   if (!token || !environment) return false;
-  const verified = await providerCall(`/accounts/${environment.accountId}/tokens/verify`, token,
+  return managementTokenActive(environment.accountId, token);
+}
+
+async function managementTokenActive(accountId, token) {
+  const verified = await providerCall(`/accounts/${accountId}/tokens/verify`, token,
     { signal: AbortSignal.timeout(10_000) });
   return verified.status === 'ok' && verified.result?.status === 'active';
 }
@@ -6340,14 +6380,13 @@ async function verifyManagementAccess(storage, env) {
   if (!context || !target) return answer('unconfirmed', 'active', 'not_checked', 'not_checked');
   const word = (response) => response.status === 'auth' ? 'permission_missing' : 'unconfirmed';
 
-  // MCP Portals Edit: the gateway's own Portal, read, written back unchanged, read again.
-  const portalPath = `/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`;
-  const mappings = context.authority.portalMappings;
-  let portals;
-  const portal = await providerCall(portalPath, token, { signal });
-  if (portal.status !== 'ok') portals = portal.status === 'absent' ? 'drift' : word(portal);
-  else if (!portalExact(portal.result, context.control, mappings)) portals = 'drift';
-  else {
+  const verifyPortal = async () => {
+    // MCP Portals Edit: read the owned Portal, write it back unchanged, then read it again.
+    const portalPath = `/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`;
+    const mappings = context.authority.portalMappings;
+    const portal = await providerCall(portalPath, token, { signal });
+    if (portal.status !== 'ok') return portal.status === 'absent' ? 'drift' : word(portal);
+    if (!portalExact(portal.result, context.control, mappings)) return 'drift';
     const body = {
       name: context.control.portal.name, hostname: context.control.portal.hostname, code_mode: 'default_on',
       secure_web_gateway: false, description: context.control.portal.marker,
@@ -6356,41 +6395,43 @@ async function verifyManagementAccess(storage, env) {
     // body it was created with, which carries no server list.
     if (mappings.length > 0) body.servers = mappings.map((mapping) => ({ ...mapping, id: mapping.server_id }));
     const written = await providerCall(portalPath, token, { method: 'PUT', body: canonicalJson(body), signal });
-    if (written.status !== 'ok') portals = word(written);
-    else {
-      const after = await providerCall(portalPath, token, { signal });
-      portals = after.status === 'ok' && portalExact(after.result, context.control, mappings) ? 'verified' : 'unconfirmed';
-    }
-  }
+    if (written.status !== 'ok') return word(written);
+    const after = await providerCall(portalPath, token, { signal });
+    return after.status === 'ok' && portalExact(after.result, context.control, mappings) ? 'verified' : 'unconfirmed';
+  };
 
-  // Access: Apps and Policies Edit: the Portal's own policy, below its own application, written back as read.
-  const applicationPath = `/accounts/${account}/access/apps/${encodeURIComponent(target.applicationId)}`;
-  const resourceValue = context.authority.resources.find((value) =>
-    value.kind === 'portal_access_application' && value.provider.id === target.applicationId);
-  const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
-  const saved = target.before;
-  let accessPolicies;
-  const application = entry ? await providerCall(applicationPath, token, { signal }) : null;
-  if (!application) accessPolicies = 'unconfirmed';
-  else if (application.status !== 'ok') accessPolicies = application.status === 'absent' ? 'drift' : word(application);
-  else if (application.result?.id !== target.applicationId ||
-      (Object.hasOwn(application.result, 'account_id') && application.result.account_id !== environment.accountId) ||
-      !accessApplicationIdentityMatches(application.result, 'portal_access_application', entry.state)) accessPolicies = 'drift';
-  else {
-    const policies = await providerCall(`${applicationPath}/policies?page=1&per_page=${PROVIDER_PAGE_SIZE}`, token, { signal });
+  const verifyAccessPolicy = async () => {
+    // Both fixed paths come from receipts. Validate both reads before writing the policy back as read.
+    const applicationPath = `/accounts/${account}/access/apps/${encodeURIComponent(target.applicationId)}`;
+    const resourceValue = context.authority.resources.find((value) =>
+      value.kind === 'portal_access_application' && value.provider.id === target.applicationId);
+    const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
+    if (!entry) return 'unconfirmed';
+    const saved = target.before;
+    const [application, policies] = await Promise.all([
+      providerCall(applicationPath, token, { signal }),
+      providerCall(`${applicationPath}/policies?page=1&per_page=${PROVIDER_PAGE_SIZE}`, token, { signal }),
+    ]);
+    if (application.status !== 'ok') return application.status === 'absent' ? 'drift' : word(application);
+    if (application.result?.id !== target.applicationId ||
+        (Object.hasOwn(application.result, 'account_id') && application.result.account_id !== environment.accountId) ||
+        !accessApplicationIdentityMatches(application.result, 'portal_access_application', entry.state)) return 'drift';
     const live = policies.status === 'ok' && Array.isArray(policies.result) && policies.result.length === 1
       ? policies.result[0] : null;
-    if (policies.status !== 'ok') accessPolicies = word(policies);
-    else if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== environment.accountId) ||
-        !teamPolicyMatches(live, saved, target.policyId)) accessPolicies = 'drift';
-    else {
-      const asRead = { name: live.name, decision: live.decision, include: live.include, exclude: live.exclude, require: live.require };
-      const written = await providerCall(`${applicationPath}/policies/${encodeURIComponent(target.policyId)}`,
-        token, { method: 'PUT', body: canonicalJson(asRead), signal });
-      if (written.status !== 'ok') accessPolicies = word(written);
-      else accessPolicies = teamPolicyMatches(written.result, saved, target.policyId) ? 'verified' : 'unconfirmed';
-    }
-  }
+    if (policies.status !== 'ok') return word(policies);
+    if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== environment.accountId) ||
+        !teamPolicyMatches(live, saved, target.policyId)) return 'drift';
+    const asRead = { name: live.name, decision: live.decision, include: live.include, exclude: live.exclude, require: live.require };
+    const written = await providerCall(`${applicationPath}/policies/${encodeURIComponent(target.policyId)}`,
+      token, { method: 'PUT', body: canonicalJson(asRead), signal });
+    if (written.status !== 'ok') return word(written);
+    return teamPolicyMatches(written.result, saved, target.policyId) ? 'verified' : 'unconfirmed';
+  };
+
+  // Independent permission checks overlap, with at most three calls in flight.
+  // Drain both checks before releasing the management queue, including on unexpected failures.
+  const results = await Promise.allSettled([verifyPortal(), verifyAccessPolicy()]);
+  const [portals, accessPolicies] = results.map((result) => result.status === 'fulfilled' ? result.value : 'unconfirmed');
 
   const words = [portals, accessPolicies];
   const status = words.includes('permission_missing') ? 'permission_missing' : words.includes('drift') ? 'drift'
@@ -6408,7 +6449,6 @@ async function teamSnapshot(storage, env) {
   let members = state.members;
   let observedAt = null;
   if (configured) {
-    if (!await verifyManagementCredential(env)) return null;
     const context = await teamRuntimeContext(storage, env);
     if (!context) return null;
     context.signal = AbortSignal.timeout(30_000);
@@ -6507,11 +6547,18 @@ async function prepareTeamAction(storage, env, input) {
 
 async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy = null, readAudience = false) {
   const account = context.environment.accountId;
-  const applications = await providerList(`/accounts/${account}/access/apps`, token, {}, context.signal);
+  const readApplications = () => providerList(`/accounts/${account}/access/apps`, token, {}, context.signal);
+  const readPortal = () => providerCall(`/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`, token, { signal: context.signal });
+  // A roster read checks the token alongside its first provider reads, before
+  // accepting any membership or changing its revision. Mutation verification
+  // keeps its existing order, including checking the Portal after its policies.
+  const [applications, portal, credentialValid] = readAudience
+    ? await Promise.all([readApplications(), readPortal(), managementTokenActive(account, token)])
+    : [await readApplications(), null, null];
+  if (readAudience && !credentialValid) return null;
   if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return null;
-  const observed = new Map();
-  for (const policy of plan.policies) {
-    if (onlyPolicy !== null && policy.policyId !== onlyPolicy) continue;
+  if (readAudience && (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings))) return null;
+  const readPolicy = async (policy) => {
     const kind = policy.kind === 'portal' ? 'portal_access_application' : 'source_access_application';
     const resourceValue = context.authority.resources.find((value) => value.kind === kind && value.provider.id === policy.applicationId);
     const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
@@ -6520,11 +6567,14 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
     if (candidates.length !== 1 || candidates[0].id !== policy.applicationId ||
         (Object.hasOwn(candidates[0], 'account_id') && candidates[0].account_id !== account)) return null;
     const path = `/accounts/${account}/access/apps/${encodeURIComponent(policy.applicationId)}`;
-    const app = await providerCall(path, token, { signal: context.signal });
+    const readApp = () => providerCall(path, token, { signal: context.signal });
+    const readPolicies = () => providerList(`${path}/policies`, token, {}, context.signal);
+    const [app, listedPolicies] = readAudience
+      ? await Promise.all([readApp(), readPolicies()]) : [await readApp(), null];
     if (!teamProviderOk(context, app) || app.result?.id !== policy.applicationId ||
         (Object.hasOwn(app.result, 'account_id') && app.result.account_id !== account) ||
         !accessApplicationIdentityMatches(app.result, kind, entry.state)) return null;
-    const policies = await providerList(`${path}/policies`, token, {}, context.signal);
+    const policies = readAudience ? listedPolicies : await readPolicies();
     if (!teamProviderOk(context, policies) || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
     const live = policies.result[0];
     if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return null;
@@ -6532,18 +6582,38 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
       let audience;
       try { audience = teamPolicyAudience(live); } catch { return null; }
       if (!teamPolicyMatches(live, teamPolicy(audience, policy.policyName), policy.policyId)) return null;
-      observed.set(policy.policyId, audience);
-      continue;
+      return audience;
     }
     const armed = journal.find((value) => value.policyId === policy.policyId);
     const before = teamPolicyMatches(live, policy.before, policy.policyId);
     const after = teamPolicyMatches(live, policy.after, policy.policyId);
     if ((!armed && !before) || (armed?.phase === 'verified' && !after) ||
         (armed?.phase === 'send_armed' && !before && !after)) return null;
-    observed.set(policy.policyId, after ? 'after' : 'before');
+    return after ? 'after' : 'before';
+  };
+  const observed = new Map();
+  const policies = plan.policies.filter((policy) => onlyPolicy === null || policy.policyId === onlyPolicy);
+  // Two application slots with two reads each keep at most four provider
+  // requests outstanding. A free slot starts the next application immediately;
+  // a slow application cannot hold up a whole batch. Drain both slots on failure.
+  let cursor = 0;
+  let failed = false;
+  const readNext = async () => {
+    while (!failed && cursor < policies.length) {
+      const policy = policies[cursor++];
+      try {
+        const result = await readPolicy(policy);
+        if (result === null) failed = true;
+        else observed.set(policy.policyId, result);
+      } catch { failed = true; }
+    }
+  };
+  await Promise.all(Array.from({ length: readAudience ? 2 : 1 }, readNext));
+  if (failed) return null;
+  if (!readAudience) {
+    const verifiedPortal = await readPortal();
+    if (!teamProviderOk(context, verifiedPortal) || !portalExact(verifiedPortal.result, context.control, context.authority.portalMappings)) return null;
   }
-  const portal = await providerCall(`/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`, token, { signal: context.signal });
-  if (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings)) return null;
   return observed;
 }
 
@@ -6677,6 +6747,14 @@ async function handleManagementCredential(request, env) {
     return fixedJson(503, { schemaVersion: 1, error: 'management_credential_unavailable' });
   }
   const verifying = url.pathname === '/api/management-credential/verify';
+  if (url.pathname === '/api/management-credential/status') {
+    if (request.method !== 'GET') return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET' });
+    try {
+      const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_MANAGEMENT_STATUS_PATH}`));
+      return response instanceof Response ? response :
+        fixedJson(503, { schemaVersion: 1, error: 'management_credential_unavailable' });
+    } catch { return fixedJson(503, { schemaVersion: 1, error: 'management_credential_unavailable' }); }
+  }
   if (!verifying && url.pathname !== '/api/management-credential/actions') {
     return fixedJson(404, { schemaVersion: 1, error: 'not_found' });
   }

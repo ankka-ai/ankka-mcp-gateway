@@ -675,6 +675,21 @@ describe('the management token', () => {
     })
   })
 
+  it('reads local token presence without accepting credential values or permission claims', async () => {
+    const status = { schemaVersion: 1, managementCredentialConfigured: true, managementCredentialChoice: 'provided' }
+    const fetch = vi.fn(async () => Response.json(status))
+    vi.stubGlobal('fetch', fetch)
+    expect(await new HttpGatewayAdminApi().getManagementCredentialStatus()).toEqual(status)
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/management-credential/status', expect.objectContaining({
+      credentials: 'same-origin', redirect: 'error',
+    }))
+    for (const invalid of [{ token: 'synthetic-not-a-credential' }, { verified: true },
+      { managementCredentialConfigured: 'true' }, { managementCredentialChoice: 'unknown' }]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...status, ...invalid })))
+      await expect(new HttpGatewayAdminApi().getManagementCredentialStatus()).rejects.toMatchObject({ code: 'response_invalid' })
+    }
+  })
+
   it('reads every fixed word of a verification and nothing else', async () => {
     const verified = { schemaVersion: 1, status: 'verified', token: 'active', portals: 'verified', accessPolicies: 'verified' }
     const answers = [

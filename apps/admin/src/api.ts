@@ -267,6 +267,12 @@ const teamMemberSchema = v.strictObject({
   sourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
 })
 const teamMembersSchema = v.array(teamMemberSchema)
+const managementCredentialStatusSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  managementCredentialConfigured: v.boolean(),
+  managementCredentialChoice: v.nullable(v.picklist(['provided', 'skipped'])),
+})
+
 const teamSchema = v.strictObject({
   schemaVersion: v.literal(1),
   revision: v.pipe(v.number(), v.integer(), v.minValue(0), v.maxValue(Number.MAX_SAFE_INTEGER - 1)),
@@ -346,6 +352,7 @@ export type TeamMember = v.InferOutput<typeof teamMemberSchema>
 export type Team = v.InferOutput<typeof teamSchema>
 export type TeamAction = v.InferOutput<typeof teamActionSchema>
 export type TeamActionResult = v.InferOutput<typeof teamActionResultSchema>
+export type ManagementCredentialStatus = v.InferOutput<typeof managementCredentialStatusSchema>
 export type ManagementVerification = v.InferOutput<typeof managementVerificationSchema>
 export type ManagementCredentialChoice = NonNullable<Team['managementCredentialChoice']>
 
@@ -375,6 +382,8 @@ export interface GatewayAdminApi {
   getRuntimeAction(actionId: string): Promise<RuntimeAction>
   prepareTeardownAction(): Promise<PreparedAction>
   getTeardownAction(actionId: string): Promise<TeardownAction>
+  /** Local token presence and setup choice; does not check provider permissions. */
+  getManagementCredentialStatus(): Promise<ManagementCredentialStatus>
   /** Prepares the one approval that lets the gateway save its own management token; the token is pasted into the gateway afterwards. */
   prepareManagementCredentialAction(): Promise<PreparedAction>
   /** Proves both permissions of the installed token by writing the gateway's own Portal and Access policy back unchanged. */
@@ -646,6 +655,10 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
 
   getTeardownAction(actionId: string): Promise<TeardownAction> {
     return this.#request(`/api/teardown-actions/${encodeURIComponent(actionId)}`, teardownActionSchema)
+  }
+
+  getManagementCredentialStatus(): Promise<ManagementCredentialStatus> {
+    return this.#request('/api/management-credential/status', managementCredentialStatusSchema)
   }
 
   prepareManagementCredentialAction(): Promise<PreparedAction> {
