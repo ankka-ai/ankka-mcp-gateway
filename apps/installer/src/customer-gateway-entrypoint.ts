@@ -669,6 +669,7 @@ export class AdminState extends RuntimeAdminState {
         controlPlaneOrigin: v.parse(v.string(), gatewayControlPlaneOrigin()), release: config.ANKKA_GATEWAY_RELEASE, keyId: config.ANKKA_UPDATE_KEY_ID,
         publicKey: config.ANKKA_UPDATE_PUBLIC_KEY, artifactSha256: config.ANKKA_GATEWAY_RELEASE_SHA256.slice('sha256:'.length) },
     }, { storage: this.finalState.storage, runtime: (request) => super.fetch(request),
+      removalRuntime: (request) => this.finalEnv.ADMIN_STATE.get(this.finalEnv.ADMIN_STATE.idFromName('v1:management')).fetch(request),
       fetch: (input, init) => fetch(input, init) });
 
   }
@@ -715,9 +716,16 @@ export class AdminState extends RuntimeAdminState {
       readBigQueryAction: async (actionId) => {
         if (!bigQuerySetupAvailable()) return null;
         const current = await this.bigQuerySetup(config).readSourceAction(actionId);
-        return current === null ? null : { status: current.action.status, expiresAt: Date.parse(current.action.expiresAt) };
+        return current === null || current.action.failureCode === 'source_removal_required'
+          ? null : { status: current.action.status, expiresAt: Date.parse(current.action.expiresAt) };
       },
       runBigQuerySetup: (input) => this.bigQuerySetup(config).run(input),
+      readBigQueryRemovalAction: async (actionId) => {
+        const current = await this.bigQuerySetup(config).readSourceAction(actionId);
+        return current?.action.failureCode === 'source_removal_required'
+          ? { status: current.action.status, expiresAt: Date.parse(current.action.expiresAt) } : null;
+      },
+      removeBigQuery: (input) => this.bigQuerySetup(config).remove(input),
       readRuntimeAction: (actionId) => this.readRuntimeAction(actionId),
       readManagementCredentialAction: (actionId) => this.readManagementCredentialAction(actionId),
       controlManagementCredentialAction: (input) => this.signedManagementCredentialControl(input),
@@ -804,7 +812,7 @@ export class AdminState extends RuntimeAdminState {
       try { return await (await this.teardownRouter(config, managementOrigin)).fetch(request); }
       catch { return unavailable(); }
     }
-    if (url.origin === managementOrigin && ['/api/bigquery', '/api/bigquery/resume'].includes(url.pathname) && url.search === '') {
+    if (url.origin === managementOrigin && ['/api/bigquery', '/api/bigquery/resume', '/api/bigquery/remove'].includes(url.pathname) && url.search === '') {
       const actor = v.safeParse(v.string(), await verifyAccess(request, this.finalEnv));
       if (!actor.success) return new Response(null, { status: 401, headers: secureHeaders('application/json') });
       if (!bigQuerySetupAvailable()) return new Response(JSON.stringify({ schemaVersion: 1, available: false, setups: [] }), {
@@ -817,7 +825,8 @@ export class AdminState extends RuntimeAdminState {
         if (request.method !== 'POST' || request.headers.get('origin') !== managementOrigin ||
             request.headers.get('content-type')?.split(';')[0]?.trim() !== 'application/json' ||
             ![null, 'same-origin'].includes(request.headers.get('sec-fetch-site'))) return notFound();
-        return await setup.prepare(request, actor.output, url.pathname.endsWith('/resume'));
+        return url.pathname.endsWith('/remove') ? await setup.prepareRemoval(request, actor.output)
+          : await setup.prepare(request, actor.output, url.pathname.endsWith('/resume'));
       } catch { return new Response(JSON.stringify({ error: 'bigquery_setup_invalid' }), { status: 400, headers: secureHeaders('application/json') }); }
     }
     // A later operation owns its page and start route; it also claims the
@@ -903,7 +912,7 @@ export default {
       if (url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH) return notFound();
       if (url.pathname.startsWith(CUSTOMER_INSTALL_ROOT_PATH) ||
           url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH) ||
-          ['/api/bigquery', '/api/bigquery/resume'].includes(url.pathname)) {
+          ['/api/bigquery', '/api/bigquery/resume', '/api/bigquery/remove'].includes(url.pathname)) {
         if (url.origin !== `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`) return notFound();
         // The update page waits for the version Cloudflare serves where the browser asks. That is this entrypoint's
         // release, which shares its version with the dashboard's assets here; the one management object restarts on

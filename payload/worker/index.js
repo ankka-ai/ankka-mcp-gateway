@@ -2907,7 +2907,7 @@ function sourceActionCanRenew(action, actorEmail, now) {
   // work must wait out the previous execution window before rotating its key.
   // An unacknowledged hostname-less app creation has no authoritative locator:
   // the zone listing cannot prove it absent, so it still needs manual review.
-  return action.actorEmail === normalizedActor(actorEmail) && now >= action.issuedAt &&
+  return action.failureCode !== 'source_removal_required' && action.actorEmail === normalizedActor(actorEmail) && now >= action.issuedAt &&
     (action.expiresAt <= now || sourceActionConnectionPaused(action) ||
       (action.bigquerySetupStarted === true && action.failureCode === 'bigquery_setup_required')) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
@@ -3178,10 +3178,11 @@ async function removeSourceDraft(storage, input, actorEmail, now) {
     const snapshot = await sourceActionSnapshot(transaction, actorEmail, now);
     if (!snapshot) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
     const blocker = snapshot.blockingAction;
-    if (blocker && (blocker.kind !== 'source' || blocker.sourceId !== source.id)) return sourceSnapshotConflict(snapshot);
+    if (blocker && blocker.kind !== 'source') return sourceSnapshotConflict(snapshot);
     const actions = safeSourceActions(await transaction.get(ACTIONS_KEY));
     const related = actions?.actions.filter((action) => action.sourceId === source.id) ?? [];
-    if (await otherLifecycleBlocksSource(transaction, now, related.find(sourceActionBlocks)?.actionId) ||
+    if (await credentialActionBlocksLifecycle(transaction, now) ||
+        await recordedLifecycleBlocks(transaction, now, null, false) ||
         await teamActionBlocksLifecycle(transaction)) return sourceActionConflict('lifecycle_pending');
     if (related.some((action) => sourceActionHasWriteEvidence(action) ||
         (action.status !== 'failed' && !sourceActionCanCancel(action, actorEmail, now)))) {
@@ -3194,14 +3195,93 @@ async function removeSourceDraft(storage, input, actorEmail, now) {
     }
     const updated = safeManagementSources({ ...current, revision: current.revision + 1,
       sources: current.sources.filter((candidate) => candidate.id !== source.id) });
-    const nextActions = actions ? safeSourceActions({ ...actions, revision: actions.revision + 1,
-      actions: actions.actions.filter((action) => action.sourceId !== source.id) }) : null;
+    const nextActions = actions && updated ? safeSourceActions({ ...actions, revision: actions.revision + 1,
+      // Removing an unrelated, unused draft does not change the source an
+      // existing action authorized. Keep that action bound to the collection's
+      // new revision without changing its identity, grant or resource receipts.
+      actions: actions.actions.filter((action) => action.sourceId !== source.id).map((action) =>
+        action.sourceRevision === current.revision ? { ...action, sourceRevision: updated.revision } : action) }) : null;
     if (!updated || (actions && !nextActions)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     await transaction.put(SOURCES_KEY, updated);
     if (nextActions) await transaction.put(ACTIONS_KEY, nextActions);
     if (bridge !== undefined) await transaction.delete(bridgeKey);
     return fixedJson(200, updated);
   });
+}
+
+function removableBigQueryAction(context, actorEmail, now) {
+  const action = context?.action;
+  const source = context?.sources.sources.find((candidate) => candidate.id === action?.sourceId);
+  return action && source?.status === 'draft' && action.bigquerySetupStarted === true &&
+    action.actorEmail === normalizedActor(actorEmail) && action.resources.length === 0 &&
+    action.pending === null && action.portalUpdate === null &&
+    !context.control.sourceOwnership.some((entry) => entry.sourceId === source.id) &&
+    (sourceActionCanRenew(action, actorEmail, now) ||
+      (action.failureCode === 'source_removal_required' &&
+        (action.status !== 'applying' || action.expiresAt <= now)));
+}
+
+async function prepareBigQueryRemoval(storage, input, managed, now) {
+  const parsed = parseSourceActionPrepare(input);
+  const context = parsed && await storedSourceActionContext(storage, parsed.actionId);
+  if (!parsed || !removableBigQueryAction(context, parsed.actorEmail, now) ||
+      parsed.sourceId !== context.action.sourceId || parsed.sourceRevision !== context.sources.revision ||
+      parsed.sourceHash !== context.action.sourceHash || !managed?.describeSource ||
+      await otherLifecycleBlocksSource(storage, now, parsed.actionId) || await teamActionBlocksLifecycle(storage)) {
+    return actionRecovery('source_removal_unavailable');
+  }
+  try {
+    const plan = await managed.describeSource({ actions: context.actions.actions, sources: context.sources }, parsed.sourceId);
+    if (!plan) return actionRecovery('source_removal_unavailable');
+  } catch { return actionRecovery('source_removal_unverified'); }
+  const action = await persistSourceAction(storage, { ...context.action,
+    sourceRevision: parsed.sourceRevision, status: 'authorization_required',
+    issuedAt: parsed.issuedAt, renewedAt: parsed.issuedAt, expiresAt: parsed.expiresAt,
+    actionKeyHash: parsed.actionKeyHash, failureCode: 'source_removal_required' });
+  return action ? fixedJson(200, publicSourceAction(action)) : actionRecovery('source_action_state_unavailable');
+}
+
+async function applyBigQueryRemoval(request, env, storage, managed, now = Date.now()) {
+  const parsed = await parseSourceActionRequest(request, env, storage, now);
+  if (!parsed || parsed.claim.bigqueryPhase !== undefined || parsed.action.failureCode !== 'source_removal_required' ||
+      parsed.action.resources.length !== 0 || parsed.action.pending !== null || parsed.action.portalUpdate !== null ||
+      parsed.sources.sources.find((source) => source.id === parsed.action.sourceId)?.status !== 'draft' ||
+      parsed.control.sourceOwnership.some((entry) => entry.sourceId === parsed.action.sourceId) ||
+      !managed?.describeSource || await otherLifecycleBlocksSource(storage, now, parsed.action.actionId) ||
+      await teamActionBlocksLifecycle(storage)) return actionRecovery('source_removal_unavailable');
+  let action = parsed.action;
+  try {
+    // Once cleanup begins, older runtimes must not resume installation from
+    // this journal. The consent key and grant remain request-local.
+    if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
+    action = await persistSourceAction(storage, { ...action, status: 'applying' });
+    if (!action) return actionRecovery('source_action_state_unavailable');
+    const plan = await managed.describeSource({ actions: parsed.actions.actions, sources: parsed.sources }, action.sourceId);
+    if (!plan) throw new Error('source_removal_unverified');
+    const result = await plan.step({ accessToken: parsed.claim.cloudflareAccessToken,
+      expiresAt: action.expiresAt, requestId: action.actionKeyHash.slice(7, 29) });
+    if (!result.complete) return fixedJson(200, { schemaVersion: 1, actionId: action.actionId,
+      status: 'removing', progress: result.progress });
+    await storage.transaction(async (transaction) => {
+      const current = await storedSourceActionContext(transaction, action.actionId);
+      if (!current || current.action.actionKeyHash !== action.actionKeyHash ||
+          current.action.failureCode !== 'source_removal_required') throw new Error('source_removal_unverified');
+      const sources = safeManagementSources({ ...current.sources, revision: current.sources.revision + 1,
+        sources: current.sources.sources.filter((source) => source.id !== action.sourceId) });
+      const actions = sources && safeSourceActions({ ...current.actions, revision: current.actions.revision + 1,
+        actions: current.actions.actions.filter((entry) => entry.sourceId !== action.sourceId).map((entry) =>
+          entry.sourceRevision === current.sources.revision ? { ...entry, sourceRevision: sources.revision } : entry) });
+      if (!sources || !actions) throw new Error('source_removal_unverified');
+      await transaction.put({ [SOURCES_KEY]: sources, [ACTIONS_KEY]: actions });
+      await transaction.delete(`ankka-mcp-gateway/bigquery-source/v1/${action.sourceId}`);
+      await transaction.delete(`ankka-mcp-gateway/bigquery-teardown/v1/${action.sourceId}`);
+      await transaction.delete(`ankka-mcp-gateway/bigquery-teardown-progress/v1/${action.sourceId}`);
+    });
+    return fixedJson(200, publicSourceAction({ ...action, status: 'succeeded', failureCode: null }));
+  } catch {
+    if (action) await persistSourceAction(storage, { ...action, status: 'recovery_required', failureCode: 'source_removal_required' });
+    return actionRecovery('source_removal_unverified');
+  }
 }
 
 function sameProvider(left, right) {
@@ -3478,6 +3558,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
   if (parsed.claim.bigqueryPhase !== undefined) return actionRecovery('source_action_rejected');
   let { action } = parsed;
+  if (action.failureCode === 'source_removal_required') return actionRecovery('source_removal_required');
   if (action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) {
     return fixedJson(409, { schemaVersion: 1, error: 'source_action_legacy_policy', retryable: false });
   }
@@ -5366,6 +5447,12 @@ export class AdminState {
     }
     const operation = async () => {
       const url = new URL(request.url);
+      if (url.pathname === '/source-actions/remove-prepare' && request.method === 'POST') {
+        return prepareBigQueryRemoval(this.state.storage, await readJsonInput(request, 4_096), this.managedTeardown, Date.now());
+      }
+      if (url.pathname === '/source-actions/remove-apply' && request.method === 'POST') {
+        return applyBigQueryRemoval(request, this.env, this.state.storage, this.managedTeardown);
+      }
       if (request.method === 'POST' && ['/source-oauth/start', '/source-oauth/callback'].includes(url.pathname)) {
         try {
           const input = await request.json();
@@ -5454,7 +5541,7 @@ export class AdminState {
       }
       if (url.pathname === `${INTERNAL_ACTIONS_PATH}/bigquery` && request.method === 'POST') {
         const parsed = await parseSourceActionRequest(request, this.env, this.state.storage, Date.now());
-        if (!parsed || !['start', 'failed', 'preflight_failed'].includes(parsed.claim.bigqueryPhase)) return actionRecovery('source_action_rejected');
+        if (!parsed || parsed.action.failureCode === 'source_removal_required' || !['start', 'failed', 'preflight_failed'].includes(parsed.claim.bigqueryPhase)) return actionRecovery('source_action_rejected');
         if (await otherLifecycleBlocksSource(this.state.storage, Date.now(), parsed.action.actionId)) return sourceActionConflict();
         if (parsed.claim.bigqueryPhase === 'preflight_failed') {
           if (sourceActionHasWriteEvidence(parsed.action)) return actionRecovery('source_action_rejected');
@@ -6317,8 +6404,8 @@ async function otherLifecycleBlocksSource(storage, now, currentActionId) {
 }
 
 /** An unfinished source installation, update or removal, as their own journals record it. */
-async function recordedLifecycleBlocks(storage, now, currentActionId) {
-  for (const key of [ACTIONS_KEY, UPDATES_KEY, TEARDOWNS_KEY]) {
+async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true) {
+  for (const key of [...(includeSources ? [ACTIONS_KEY] : []), UPDATES_KEY, TEARDOWNS_KEY]) {
     const raw = await storage.get(key);
     if (raw === undefined) continue;
     const state = key === ACTIONS_KEY ? safeSourceActions(raw) : key === UPDATES_KEY

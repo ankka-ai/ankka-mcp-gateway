@@ -289,6 +289,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone(this.#sources)
   }
 
+  async prepareBigQueryRemoval(): Promise<import('./api').BigQueryPrepared> { throw new GatewayApiError(409, 'preview_only') }
+
   async removeSourceDraft(revision: number, sourceId: string): Promise<ManagedSources> {
     if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
     const source = this.#sources.sources.find((item) => item.id === sourceId)

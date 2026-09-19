@@ -40,7 +40,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn(),
-    removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(async () => ({ ...sources, revision: 8 })),
+    prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(async () => ({ ...sources, revision: 8 })),
     prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => emptyActions),
     getSourceAction: vi.fn(),
@@ -116,6 +116,17 @@ function RemovalProbe() {
 
 describe('GatewayProvider', () => {
   afterEach(() => { cleanup(); vi.useRealTimers(); window.history.replaceState(null, '', '/') })
+  it.each(['applied', 'failed'])('reports a bridge removal return separately from installation (%s)', async (result) => {
+    window.history.replaceState(null, '', `/sources?sourceRemoval=${pendingAction.actionId}&sourceRemovalResult=${result}`)
+    const service = api()
+    render(<GatewayProvider api={service}><PausedSourceProbe /></GatewayProvider>)
+    await screen.findByText(result === 'applied' ? 'Source and BigQuery bridge removed.'
+      : 'BigQuery removal did not finish. Its cleanup records are saved. Use Continue removal to authorize another attempt.')
+    expect(window.location.search).toBe('')
+    expect(service.cancelSourceAction).not.toHaveBeenCalled()
+    expect(service.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
   it('hydrates the production status, source, and update contracts', async () => {
     const client = api()
     render(<GatewayProvider api={client}><Probe /></GatewayProvider>)

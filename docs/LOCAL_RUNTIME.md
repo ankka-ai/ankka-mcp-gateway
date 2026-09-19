@@ -32,7 +32,9 @@ adapter, and base64 decoder. It verifies:
   endpoint and forged-signature rejection in the production verifier.
 - Availability of captured Worker spans through the local inspection API.
 - Atomic source-draft and empty BigQuery-record removal through the production
-  source-management state machine with SQLite storage.
+  source-management state machine with SQLite storage. Signed bridge cleanup
+  also re-enters the same object for bounded passes and commits its final
+  source/action/bridge removal transaction there.
 
 This is a focused runtime integration fixture, not the deployed gateway router.
 It simulates authorization inputs and does not contact Cloudflare, exchange OAuth

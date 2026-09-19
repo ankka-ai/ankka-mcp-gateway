@@ -70,6 +70,20 @@ failed or cancelled attempts with no write evidence, and for approvals the
 actor can cancel. Installed sources and any provisioning evidence require
 resource cleanup; this operation cannot discard their receipts.
 
+An unrelated source action does not block deleting an unused draft. The
+transaction advances unchanged actions bound to the previous source-collection
+revision, preserving their source identity and receipts for recovery.
+
+For a BigQuery bridge that failed before any source resources or Portal
+attachment, `POST /api/bigquery/remove` takes the same source revision and ID.
+It rotates the existing action key and starts a gateway-local `bigquery-remove`
+approval. The retained `source_removal_required` marker disables installation
+resumption. Each signed cleanup pass re-enters the management object and checks
+the bridge against a source-specific deletion journal. Only verified completion
+removes the source, action, bridge record and cleanup journal atomically. The
+callback revokes its temporary grant and returns `sourceRemovalResult`; retries
+require fresh consent and never require a Google key upload.
+
 Expiry never clears an armed write, resource receipt, Portal update or uncertain
 execution. An absent resource in the Cloudflare dashboard does not prove that a
 request was never armed or sent. Credentials remain request-local under the existing

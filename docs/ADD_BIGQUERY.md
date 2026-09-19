@@ -116,6 +116,24 @@ an indication that no response was confirmed. Provider response bodies, request
 URLs, and exception text are not retained in these diagnostics. This detail
 does not clear an uncertain create or permit another attempt.
 
+## Remove a failed setup
+
+**Remove source** remains available on an unused failed draft even while another
+source needs recovery. Removing that draft preserves the other source's action
+and saved receipts.
+
+If a BigQuery bridge was deployed but source discovery failed before attaching
+it, **Remove source** starts one `bigquery-remove` Cloudflare approval with the
+same scopes listed above. No Google key upload is needed. The management token
+cannot delete Workers, so this cleanup needs the separate temporary grant.
+The gateway verifies the saved ownership records, removes the domain and
+secret-bearing Worker, then removes Access protection and the saved source.
+
+An interrupted deletion retains its receipts: use **Continue removal** with
+fresh consent. The old setup action cannot resume installation after cleanup
+starts. An uncertain create or an already-attached source is outside this
+failed-setup removal path and keeps its recovery records.
+
 ## Remove the gateway and its bridges
 
 In a release with managed bridge removal, **Settings → Remove gateway** includes

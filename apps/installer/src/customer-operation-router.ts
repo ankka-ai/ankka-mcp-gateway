@@ -134,6 +134,9 @@ const sourceActionClaimSchema = v.strictObject({
 const bigQueryActionClaimSchema = v.strictObject({
   ...sourceActionClaimSchema.entries, actionType: v.literal('bigquery_setup'),
 });
+const bigQueryRemovalClaimSchema = v.strictObject({
+  ...sourceActionClaimSchema.entries, actionType: v.literal('bigquery_remove'),
+});
 const bigQueryCallbackSchema = v.strictObject({
   code: v.pipe(v.string(), v.regex(AUTHORIZATION_CODE)),
   state: v.pipe(v.string(), v.regex(TOKEN)),
@@ -206,8 +209,8 @@ const targetSchema = v.strictObject({
 export const customerOperationAttemptSchema = v.strictObject({
   schemaVersion: v.literal(1),
   attemptId: v.pipe(v.string(), v.regex(ATTEMPT_ID)),
-  kind: v.picklist(['source', 'bigquery', 'runtime', 'management_credential']),
-  operation: v.picklist(['source-add', 'bigquery-add', 'upgrade', 'rollback', 'management-credential']),
+  kind: v.picklist(['source', 'bigquery', 'bigquery_remove', 'runtime', 'management_credential']),
+  operation: v.picklist(['source-add', 'bigquery-add', 'bigquery-remove', 'upgrade', 'rollback', 'management-credential']),
   actionId: v.pipe(v.string(), v.regex(ACTION_ID)),
   actorEmail: v.pipe(v.string(), v.maxLength(256), v.regex(EMAIL)),
   actionExpiresAt: v.pipe(v.number(), v.safeInteger()),
@@ -226,6 +229,7 @@ type RuntimeActionClaim = v.InferOutput<typeof runtimeActionClaimSchema>;
 type DecodedClaim =
   | { readonly kind: 'source'; readonly claim: SourceActionClaim }
   | { readonly kind: 'bigquery'; readonly claim: v.InferOutput<typeof bigQueryActionClaimSchema> }
+  | { readonly kind: 'bigquery_remove'; readonly claim: v.InferOutput<typeof bigQueryRemovalClaimSchema> }
   | { readonly kind: 'runtime'; readonly claim: RuntimeActionClaim }
   | { readonly kind: 'management_credential'; readonly claim: v.InferOutput<typeof managementCredentialActionClaimSchema> };
 type CallbackUpload =
@@ -283,6 +287,8 @@ export interface CustomerOperationRouterDependencies {
   readonly readSourceAction: (actionId: string) => Promise<CustomerOperationActionView | null>;
   readonly readBigQueryAction?: (actionId: string) => Promise<CustomerOperationActionView | null>;
   readonly runBigQuerySetup?: (input: BigQueryOperationInput) => Promise<Response>;
+  readonly readBigQueryRemovalAction?: (actionId: string) => Promise<CustomerOperationActionView | null>;
+  readonly removeBigQuery?: (input: Omit<BigQueryOperationInput, 'serviceAccountJson'>) => Promise<Response>;
   /** A prepared management token change; absent where the runtime does not offer one. */
   readonly readManagementCredentialAction?: (actionId: string) => Promise<CustomerOperationActionView | null>;
   /** True when the gateway's record accepted the command. Never receives the token. */
@@ -414,6 +420,8 @@ function decodeClaim(handoff: string): DecodedClaim | null {
   if (source.success) return { kind: 'source', claim: source.output };
   const bigquery = v.safeParse(bigQueryActionClaimSchema, decoded);
   if (bigquery.success) return { kind: 'bigquery', claim: bigquery.output };
+  const removal = v.safeParse(bigQueryRemovalClaimSchema, decoded);
+  if (removal.success) return { kind: 'bigquery_remove', claim: removal.output };
   const runtime = v.safeParse(runtimeActionClaimSchema, decoded);
   if (runtime.success) return { kind: 'runtime', claim: runtime.output };
   const management = v.safeParse(managementCredentialActionClaimSchema, decoded);
@@ -444,6 +452,7 @@ function claimMatches(
 function relayOperation(decoded: DecodedClaim): CustomerOperationAttempt['operation'] {
   if (decoded.kind === 'source') return 'source-add';
   if (decoded.kind === 'bigquery') return 'bigquery-add';
+  if (decoded.kind === 'bigquery_remove') return 'bigquery-remove';
   if (decoded.kind === 'management_credential') return 'management-credential';
   return decoded.claim.operation === 'rollback' ? 'rollback' : 'upgrade';
 }
@@ -557,7 +566,8 @@ function dashboardLocation(
     ? new URL('/settings', managementOrigin)
     : new URL('/sources', managementOrigin);
   const parameter = kind === 'runtime' ? 'runtimeAction'
-    : kind === 'management_credential' ? 'managementCredentialAction' : 'sourceAction';
+    : kind === 'management_credential' ? 'managementCredentialAction'
+      : kind === 'bigquery_remove' ? 'sourceRemoval' : 'sourceAction';
   location.searchParams.set(parameter, actionId);
   if (outcome.result !== null) location.searchParams.set(`${parameter}Result`, outcome.result);
   if (outcome.reason !== null && REASON.test(outcome.reason)) {
@@ -669,6 +679,8 @@ export function createCustomerOperationRouter(
       ? await dependencies.readSourceAction(claim.actionId)
       : decoded.kind === 'bigquery'
         ? await dependencies.readBigQueryAction?.(claim.actionId) ?? null
+        : decoded.kind === 'bigquery_remove'
+          ? await dependencies.readBigQueryRemovalAction?.(claim.actionId) ?? null
         : decoded.kind === 'management_credential'
           ? await dependencies.readManagementCredentialAction?.(claim.actionId) ?? null
           : await dependencies.readRuntimeAction(claim.actionId);
@@ -861,6 +873,12 @@ export function createCustomerOperationRouter(
           if (uploaded?.kind !== 'bigquery' || dependencies.runBigQuerySetup === undefined) return { result: 'failed', reason: 'bigquery_setup_unavailable' };
           return appliedOutcome(await dependencies.runBigQuerySetup({ actionId: attempt.actionId, actionKey: cookie.actionKey,
             actorEmail: attempt.actorEmail, accessToken, actionExpiresAt: attempt.actionExpiresAt, serviceAccountJson: uploaded.body.serviceAccountJson,
+          }), attempt.actionId);
+        }
+        if (attempt.kind === 'bigquery_remove') {
+          if (dependencies.removeBigQuery === undefined) return { result: 'failed', reason: 'source_removal_unavailable' };
+          return appliedOutcome(await dependencies.removeBigQuery({ actionId: attempt.actionId, actionKey: cookie.actionKey,
+            actorEmail: attempt.actorEmail, accessToken, actionExpiresAt: attempt.actionExpiresAt,
           }), attempt.actionId);
         }
         if (attempt.kind === 'management_credential') {

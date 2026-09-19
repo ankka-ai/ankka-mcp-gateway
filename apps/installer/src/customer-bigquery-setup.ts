@@ -14,7 +14,8 @@ const sourceSchema = v.object({ id: v.string(), label: v.string(), url: v.string
   authMode: v.picklist(['none', 'oauth']), onBehalfOfUser: v.boolean(), enabledTools: v.array(v.string()),
   status: v.picklist(['installed', 'draft']) });
 const sourcesSchema = v.object({ revision: v.number(), sources: v.array(sourceSchema) });
-const actionSchema = v.object({ actionId: v.string(), sourceId: v.string(), status: v.string(), expiresAt: v.string() });
+const actionSchema = v.object({ actionId: v.string(), sourceId: v.string(), status: v.string(), expiresAt: v.string(),
+  failureCode: v.optional(v.nullable(v.string())) });
 const snapshotSchema = v.object({ actions: v.array(v.object({ ...actionSchema.entries,
   canCancel: v.boolean(), canRenew: v.optional(v.boolean()), failureCode: v.nullable(v.string()),
 })), blockingAction: v.nullable(v.object({ actionId: v.string(), kind: v.string() })) });
@@ -30,6 +31,8 @@ export interface BigQuerySetupContext extends BigQueryDeploymentContext {
 export interface BigQuerySetupPort {
   readonly storage: Pick<DurableObjectStorage, 'get' | 'put' | 'list'>;
   readonly runtime: (request: Request) => Promise<Response>;
+  /** Re-enters the management object for one bounded cleanup pass. */
+  readonly removalRuntime?: (request: Request) => Promise<Response>;
   readonly fetch: typeof globalThis.fetch;
   readonly runtimeSource?: string;
   readonly now?: () => number;
@@ -137,7 +140,8 @@ export function createBigQuerySetup(context: BigQuerySetupContext, port: BigQuer
   }
   async function run(input: BigQueryOperationInput): Promise<Response> {
     const current = await readSourceAction(input.actionId);
-    if (!current || current.record.operatorEmail !== input.actorEmail || current.action.status !== 'authorization_required' ||
+    if (!current || current.action.failureCode === 'source_removal_required' ||
+        current.record.operatorEmail !== input.actorEmail || current.action.status !== 'authorization_required' ||
         Date.parse(current.action.expiresAt) !== input.actionExpiresAt || input.actionExpiresAt <= now()) {
       return json({ error: 'bigquery_setup_conflict' }, 409);
     }
@@ -189,5 +193,47 @@ export function createBigQuerySetup(context: BigQuerySetupContext, port: BigQuer
     }));
     return json({ schemaVersion: 1, available: true, setups });
   }
-  return { prepare, run, list, readSourceAction };
+  async function prepareRemoval(request: Request, actorEmail: string): Promise<Response> {
+    const input = v.parse(v.strictObject({ schemaVersion: v.literal(1), revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+      sourceId: v.pipe(v.string(), v.regex(/^source-[a-f0-9]{16}$/u)) }), JSON.parse(await readBigQueryText(request.body, 1024)));
+    const record = await readRecord(input.sourceId);
+    if (!record) return json({ error: 'source_removal_unavailable' }, 409);
+    const actionKey = randomBase64Url(32);
+    const issuedAt = now();
+    const expiresAt = issuedAt + 10 * 60 * 1_000;
+    const prepared = await runtime('/source-actions/remove-prepare', 'POST', {
+      schemaVersion: 1, actionId: record.actionId, sourceId: record.sourceId, sourceRevision: input.revision,
+      actorEmail, issuedAt, expiresAt, actionKeyHash: `sha256:${await bigQueryHex(actionKey)}`, sourceHash: record.sourceHash,
+    });
+    if (!prepared.ok) return prepared;
+    const claim = { schemaVersion: 1, actionType: 'bigquery_remove', actionId: record.actionId, actionKey, actorEmail,
+      accountId: context.accountId, controlPlaneOrigin: context.controlPlaneOrigin, workerName: context.workerName,
+      workersSubdomain: context.workersSubdomain, managementOrigin: context.managementOrigin,
+      releaseIdentity: context.releaseIdentity, expiresAt };
+    return json({ schemaVersion: 1, actionId: record.actionId, sourceId: record.sourceId,
+      expiresAt: new Date(expiresAt).toISOString(),
+      handoffUrl: `${context.managementOrigin}/__ankka/operation#${base64UrlEncode(new TextEncoder().encode(canonicalJson(claim)))}` });
+  }
+  async function remove(input: Omit<BigQueryOperationInput, 'serviceAccountJson'>): Promise<Response> {
+    const seen = new Set<string>();
+    // A single bridge needs one preflight, at most three DELETEs and one final
+    // verification. Each signed command receives a fresh DO invocation/budget.
+    for (let pass = 0; pass < 8; pass++) {
+      const body = canonicalJson({ schemaVersion: 1, actionId: input.actionId, actionKey: input.actionKey,
+        actorEmail: input.actorEmail, accountId: context.accountId, issuedAt: now(),
+        expiresAt: input.actionExpiresAt, cloudflareAccessToken: input.accessToken });
+      const response = await (port.removalRuntime ?? port.runtime)(new Request('https://admin-state.invalid/source-actions/remove-apply', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-ankka-source-action-signature': await operationSignature(input.actionKey, body) }, body,
+      }));
+      if (!response.ok) return response;
+      const value: unknown = await response.clone().json();
+      const progress = v.safeParse(v.strictObject({ schemaVersion: v.literal(1), actionId: v.literal(input.actionId),
+        status: v.literal('removing'), progress: v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u)) }), value);
+      if (!progress.success) return response;
+      if (seen.has(progress.output.progress)) break;
+      seen.add(progress.output.progress);
+    }
+    return json({ error: 'source_removal_unverified' }, 409);
+  }
+  return { prepare, run, list, readSourceAction, prepareRemoval, remove };
 }
