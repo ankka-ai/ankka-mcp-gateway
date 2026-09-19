@@ -34,21 +34,34 @@ It is additionally bound to the selected account and target and is used only
 for the approved provider calls or one exact authenticated gateway Worker
 action.
 
-Both grant types are held only in request-local memory, are never written to
-Durable Object state, logs, analytics, browser output, or support evidence, and
-are subject to bounded revocation attempts before their local copies are
-discarded.
+Both grant types are held only in memory: in the callback request, or, for an
+operation that runs behind a progress page, in the owning Durable Object for
+one bounded attempt window. They are never written to Durable Object state,
+logs, analytics, browser output, or support evidence, and are subject to
+bounded revocation attempts before their local copies are discarded. An object
+restart between passes loses such a grant and stops the attempt as
+recovery-required with an unconfirmed revocation; a fresh consent resumes from
+the durable step receipts.
 
 Revocation is a provider operation and may be unconfirmed. Discarding a local
 copy does not prove provider-side revocation.
 
 Routine source installation and Team policy management use the optional
-`ANKKA_MANAGEMENT_TOKEN` secret in the customer's Worker. The administrator
-creates this account-owned credential and enters it directly in Cloudflare;
-Ankka-hosted infrastructure never receives it. It is used only with fixed
-Cloudflare API operations and is never persisted in Durable Object records or
-returned to the browser. Deployment, updates, DNS, teardown and upstream
-credentials retain separate authority. See [Management token](MANAGEMENT_TOKEN.md).
+`ANKKA_MANAGEMENT_TOKEN` secret in the customer's Worker. An administrator of
+the Cloudflare account creates this account-owned credential, and it never
+passes through anything Ankka hosts. It is entered either into the customer's
+own gateway, on the setup page that Worker serves before the second approval,
+or directly in Cloudflare on an installed gateway. During setup the value is
+held like the install grant: only in the owning Durable Object's memory,
+until the final runtime upload the install already makes writes it as a
+secret binding. It is never written to Durable Object storage, the install
+journal, a receipt, a log line, an error, a URL, or any response; an object
+restart loses it, and the install then completes without it. It is used only
+with fixed Cloudflare API operations and is never returned to the browser.
+Cloudflare cannot scope it to the gateway's own resources: it can edit every
+Access policy in the account, and the setup page says so before asking for
+it. Deployment, updates, DNS, teardown and upstream credentials retain
+separate authority. See [Management token](MANAGEMENT_TOKEN.md).
 
 An operator-controlled external runner executes the same fixed lifecycle
 operations for disposable development gateways with an operator-managed
@@ -119,7 +132,9 @@ foreign and stops removal.
 
 The gateway Durable Object stores secret-free configuration, exact source
 allowlists, action journals, release state, and ownership receipts. It must not
-store Cloudflare OAuth grants or upstream tokens.
+store Cloudflare OAuth grants, the management credential, or upstream tokens.
+Of the management credential step of setup it stores one fixed word: whether
+a token was provided or the step was skipped.
 
 The Team page reads receipt-owned policies live and records an observation time.
 A changed live audience advances the local revision before a new proposal can
@@ -138,6 +153,17 @@ steps. Existing receipt audiences remain immutable; only the exact historical
 initial policy and the new empty-audience profile are recognized. Old prepared
 source actions cannot silently become new-profile authorizations.
 
+A source that needs sign-in is created with no tools: no tool override on its
+server, the same deny-Everyone policy, and no Portal mapping. Its administrator
+chooses from the list Cloudflare synced after the operator connection, as a
+revision-bound step that re-binds the paused installation's source hash and
+server receipt atomically and is refused in every state other than the exact
+connection pause. The allowlist is enforced where it is for every source: the
+Portal mapping, deny-by-default, with exactly the chosen names enabled and
+proven by read-back. Nothing is attached while nothing is chosen. The synced
+list is an untrusted review aid like any source-authored text, bounded and
+never a provider body.
+
 Legacy Team authorization and callbacks are refused by the installer before
 OAuth code exchange. The relay and new Worker also reject the old Team grant
 submission. Team management does not enable a temporary `workers.dev` route.
@@ -153,6 +179,50 @@ and expected ownership markers.
 The receipt and journal preserve recovery authority after interruptions. A
 missing, corrupt, conflicting, or ambiguous record stops automatic mutation.
 Only receipt-owned resources are removed, in reverse dependency order.
+
+### Recovery of an interrupted dependency removal
+
+Dependency removal journals a prefix of removed resources in removal order and
+at most one pending deletion boundary (`send_armed`, `submitted`, or
+`not_applied`). The compiled gateway performs one provider step per callback
+pass and records its progress under the callback's request identity. The
+synthetic-provider regression `test/worker-teardown-recovery.test.mjs` proves
+these guarantees for an interruption at every pass boundary, an unknown
+provider answer at a read or a DELETE, an Access deletion accepted with HTTP
+202 that still reads present, a rejected DELETE, an ownership conflict, and a
+foreign Portal mapping the gateway's server:
+
+- Settling the interrupted attempt closes its action and leaves the receipt
+  and the journal unchanged; a fresh consent can start at once, or after the
+  unsettled action expires.
+- A fresh consent rechecks Portal sharing and reads every resource before any
+  mutation: removed resources must read absent, live resources must read
+  exactly, and only the pending boundary may read either way.
+- A resource that reads absent is recorded as removed and is never sent a
+  DELETE. A pending boundary is re-read before any DELETE, so a lost or
+  accepted-but-unfinished deletion is confirmed by reading, not repeated. A
+  boundary that still reads present is deleted again only under the fresh
+  grant; the grant that armed or submitted it never resends it.
+- An unknown answer is never absence. A conflicting read or a shared server
+  stops every consent without deleting anything until the resource reads
+  exactly again or the server is unmapped. This is recovery-required by design.
+- The journal is bound to the exact dependency graph: the ordered
+  receipt-owned resources, the policy mode, and any partial bridge actions. It
+  is not bound to the mutable management records, so a source draft saved
+  between consents does not strand the recorded removal, while a journal
+  recorded for another graph is never resumed.
+- Completion records exactly one applied deletion per resource and leaves the
+  installation receipt unchanged.
+The hosted root finalizer bounds what one attempt reads without weakening
+these checks: the complete ownership preflight and the scan of other Workers
+in the account run once per attempt, and only Workers modified at or after
+the gateway's creation are read (a missing timestamp means read it); each
+deletion is preceded by an identity re-read of its own resource; a settling
+write is re-read on the owner-side resources it touched. Every provider and
+journal call counts against a fixed budget of fifty, and an attempt that would
+exceed it stops before the platform's cap with the resumable reason
+`budget_exhausted`, so its grant is still revoked and its pending step stays
+armed for the next consent.
 
 ## Software supply chain
 

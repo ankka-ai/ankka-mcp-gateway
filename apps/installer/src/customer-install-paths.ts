@@ -10,4 +10,7 @@ export const CUSTOMER_INSTALL_STATUS_PATH = '/__ankka/install/status' as const;
  */
 export const CUSTOMER_OPERATION_ROOT_PATH = '/__ankka/operation' as const;
 export const CUSTOMER_OPERATION_OAUTH_START_PATH = '/__ankka/operation/oauth/start' as const;
+/** Where an update's consent lands: the page that follows the upload the gateway runs behind it. */
+export const CUSTOMER_OPERATION_UPDATE_PATH = '/__ankka/operation/update' as const;
+export const CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH = '/__ankka/operation/update/progress' as const;
 

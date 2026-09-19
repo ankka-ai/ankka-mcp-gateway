@@ -34,7 +34,7 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
     getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-    discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+    discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
   }
 }
@@ -210,7 +210,7 @@ describe('SourcesPage', () => {
       getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -250,12 +250,12 @@ describe('SourcesPage', () => {
           { name: 'execute_sql', description: 'Synthetic write query.', destructiveHint: true, defaultSelected: false },
         ],
       })),
-      saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText('No sources yet')
-    expect(screen.getByText(/once source provisioning starts, rollback below this runtime release/)).toBeInTheDocument()
+    expect(screen.queryByText(/roll ?back|provisioning|runtime release|removing your gateway/iu)).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Add source' }))
     expect(screen.getByText(/New sources start with nobody assigned/)).toBeInTheDocument()
     await user.type(screen.getByLabelText('Source name'), 'GA4 example')
@@ -297,7 +297,7 @@ describe('SourcesPage', () => {
       })),
       saveSourceDraft,
       prepareSourceAction,
-      getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -318,16 +318,21 @@ describe('SourcesPage', () => {
     expect(screen.getByLabelText('Catalog-recommended tools')).toHaveTextContent('properties.list')
     expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument()
 
+    expect(screen.getByText(/recommendations are preselected when you choose its tools, after you have connected it/u)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Inspect source' }))
     expect(api.discoverSource).toHaveBeenCalledWith(preset.implementation.deployment.url)
-    expect(await screen.findByLabelText('Exact tool names')).toHaveValue('properties.list\nreports.read')
+    // A sign-in preset takes the same flow as a custom one: no names are typed or prefilled, and the draft has none.
+    expect(await screen.findByText('This source needs sign-in, so its tools can only be listed after you connect it.')).toBeInTheDocument()
+    expect(screen.getByText(/The catalog recommends 2 tools for this source\. Those that exist in its real list are preselected when you choose\./u)).toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Exact tool names' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
     expect(saveSourceDraft).toHaveBeenCalledWith(4, {
       label: preset.displayName,
       url: preset.implementation.deployment.url,
       authMode: 'oauth',
-      enabledTools: ['properties.list', 'reports.read'],
+      enabledTools: [],
     })
     expect(prepareSourceAction).not.toHaveBeenCalled()
   })
@@ -351,7 +356,7 @@ describe('SourcesPage', () => {
         tools: [{ name: 'reports.read', defaultSelected: true }],
       })),
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -381,7 +386,7 @@ describe('SourcesPage', () => {
         tools: [{ name: 'search', title: 'Search', description: 'Search documents.', readOnlyHint: true, defaultSelected: true }],
       })),
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -427,7 +432,7 @@ describe('SourcesPage', () => {
       getUpdate: vi.fn(async () => update),
       discoverSource,
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -491,7 +496,7 @@ describe('SourcesPage', () => {
         })),
       })),
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -533,7 +538,7 @@ describe('SourcesPage', () => {
     expect(screen.getByText(`${toolCount} exact tools`)).toBeInTheDocument()
   }, 15_000)
 
-  it('presents an OAuth-protected source as one operator connection', async () => {
+  it('says why a sign-in source lists no tools and what happens next, and saves it without any', async () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const api: GatewayAdminApi = {
@@ -551,7 +556,7 @@ describe('SourcesPage', () => {
         tools: [],
       })),
       saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     }
@@ -562,16 +567,29 @@ describe('SourcesPage', () => {
     await user.type(screen.getByLabelText('Source name'), 'Protected read API')
     await user.type(screen.getByLabelText('MCP URL'), 'https://protected.example.com/mcp')
     await user.click(screen.getByRole('button', { name: 'Inspect source' }))
-    expect(await screen.findByText(/Connect this source as a gateway operator/u)).toBeInTheDocument()
+    expect(await screen.findByText('This source needs sign-in, so its tools can only be listed after you connect it.')).toBeInTheDocument()
+    expect(screen.getByText('OAuth protected')).toBeInTheDocument()
+    const next = within(screen.getByLabelText('What happens next')).getAllByRole('listitem').map((item) => item.textContent)
+    expect(next).toEqual([
+      'Save this draft and install it. The gateway creates the source with nothing enabled and nobody assigned, and does not attach it to your Portal.',
+      'Connect the source once in Cloudflare, as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.',
+      'Come back to this page. It lists the source’s real tools and you choose which to allow. Only those are attached.',
+    ])
+    // This gateway has nothing a rollback could restore, so saving decides nothing and says nothing about it.
+    expect(screen.queryByText(/no longer roll back/u)).not.toBeInTheDocument()
+    expect(screen.queryByText(/catalog recommends/u)).not.toBeInTheDocument()
+    // One way, no fallback: no name is ever typed.
+    expect(screen.queryByRole('textbox', { name: 'Exact tool names' })).not.toBeInTheDocument()
+    expect(screen.queryByText(/One exact tool per line/u)).not.toBeInTheDocument()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
-    await user.type(screen.getByLabelText('Exact tool names'), 'company_read')
+    expect(screen.getByText('This draft is saved with no tools. You choose them after connecting the source.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
 
     expect(saveSourceDraft).toHaveBeenCalledWith(4, {
       label: 'Protected read API',
       url: 'https://protected.example.com/mcp',
       authMode: 'oauth',
-      enabledTools: ['company_read'],
+      enabledTools: [],
     })
   })
 })
@@ -621,5 +639,77 @@ describe('Add BigQuery setup', () => {
     await user.click(await screen.findByRole('button', { name: 'Continue BigQuery setup' }))
     await waitFor(() => expect(api.resumeBigQuery).toHaveBeenCalledExactlyOnceWith(action.actionId))
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
+  })
+})
+
+// The gateway reports `installEndsRollbackTo` only while installing a source really ends a rollback: the gateway was
+// updated, the earlier release can still be restored, and the first installation here would change that.
+describe('the rollback sentence beside the install control', () => {
+  afterEach(cleanup)
+  const idle: SourceActions = { schemaVersion: 1, actions: [], blockingAction: null }
+  const sentence = 'After this you can no longer roll back to gateway-v0.9.9.'
+
+  it('says so in plain words directly beside Install source, and nowhere else', async () => {
+    const api = actionApi(idle)
+    api.getSources = vi.fn(async () => ({ ...sources, installEndsRollbackTo: 'gateway-v0.9.9', sources: [draft] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const install = await screen.findByRole('button', { name: 'Install source' })
+    expect(install).toHaveAccessibleDescription(sentence)
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+    expect(install.parentElement).toContainElement(screen.getByText(sentence))
+    expect(screen.queryByText(/provisioning|runtime release|recover any source action|removing your gateway/iu)).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['a fresh install or an older gateway that does not report it', {}],
+    ['a gateway whose rollback is already decided or that has nothing to restore', { installEndsRollbackTo: null }],
+    ['a gateway that cannot install right now', { installEndsRollbackTo: 'gateway-v0.9.9', installationEnabled: false }],
+  ])('stays silent for %s', async (_state, reported) => {
+    const api = actionApi(idle)
+    api.getSources = vi.fn(async () => ({ ...sources, ...reported, sources: [draft] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const control = await screen.findByRole('button', { name: /Install source|Installation unavailable/u })
+    expect(control).not.toHaveAccessibleDescription()
+    expect(screen.queryByText(/roll ?back/iu)).not.toBeInTheDocument()
+  })
+
+  it('drops the sentence as soon as the gateway reports that the installation decided it', async () => {
+    const user = userEvent.setup()
+    const api = actionApi(idle)
+    let installed = false
+    api.getSources = vi.fn(async (): Promise<ManagedSources> => installed
+      ? { ...sources, revision: 5, installEndsRollbackTo: null, sources: [{ ...draft, status: 'installed' }] }
+      : { ...sources, installEndsRollbackTo: 'gateway-v0.9.9', sources: [draft] })
+    api.prepareSourceAction = vi.fn(async () => {
+      installed = true
+      return { schemaVersion: 1 as const, actionId: `action_${'c'.repeat(32)}`, status: 'succeeded' as const, expiresAt: new Date(Date.now() + 60_000).toISOString() }
+    })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    expect(await screen.findByText(sentence)).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Install source' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Install source' })).not.toBeInTheDocument())
+    expect(screen.queryByText(/roll ?back/iu)).not.toBeInTheDocument()
+  })
+
+  it('moves to Resume installation while a recorded installation blocks a new one', async () => {
+    const action = pendingAction({ state: 'recovery_required', status: 'recovery_required', canCancel: false, canRenew: true })
+    const api = actionApi(actionSnapshot(action))
+    api.getSources = vi.fn(async () => ({ ...sources, installEndsRollbackTo: 'gateway-v0.9.9', sources: [draft] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const resume = await screen.findByRole('button', { name: 'Resume installation' })
+    expect(screen.getAllByText(sentence)).toHaveLength(1)
+    expect(resume.parentElement).toContainElement(screen.getByText(sentence))
+    expect(screen.getByRole('button', { name: 'Install source' })).not.toHaveAccessibleDescription()
+  })
+
+  it('says the same before a BigQuery setup continues to Cloudflare', async () => {
+    const user = userEvent.setup()
+    const api = actionApi(idle)
+    api.getSources = vi.fn(async () => ({ ...sources, installEndsRollbackTo: 'gateway-v0.9.9' }))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true, setups: [] }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Add BigQuery' }))
+    const proceed = screen.getByRole('button', { name: 'Continue to Cloudflare' })
+    expect(proceed.parentElement).toContainElement(screen.getByText(sentence))
   })
 })

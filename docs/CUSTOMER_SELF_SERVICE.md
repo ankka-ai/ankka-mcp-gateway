@@ -27,11 +27,17 @@ Installation requires:
   policies, and MCP Portal resources;
 - one hostname for the team's MCP Portal;
 - a different hostname for the management dashboard; and
-- the initial administrators, who also form the initial Portal audience.
+- the initial administrators, who also form the initial Portal audience; and
+- a Super Administrator or Administrator of the Cloudflare account, to create
+  the gateway's one management token during setup (you can also add it later).
 
-The installer browser flow uses Cloudflare OAuth. Do not create an API token for Ankka,
-paste a provider credential into the installer, or put credentials in a URL or
-configuration file.
+The installer browser flow uses Cloudflare OAuth. Never paste a Cloudflare
+token or a provider credential into `deploy.ankka.ai`, and never put
+credentials in a URL or configuration file. The one token this product asks
+for is the [management token](MANAGEMENT_TOKEN.md): you create it in
+Cloudflare and paste it only into the setup page of your own gateway, which is
+served by the Worker in your account. It never passes through anything Ankka
+hosts.
 
 ## Cloudflare permissions
 
@@ -74,11 +80,16 @@ source. Their exact combined scope set and first-time account subdomain
 registration still require a fresh live canary before production promotion;
 older canary results do not qualify these changes.
 
-V1 Team membership is managed directly in Cloudflare. Do not create or add a
-Team-management API token to the gateway. Cloudflare does not support scoping
-an API token to one reusable Access policy, so an account token would widen the
-credential boundary instead of completing this flow. See
-[Team access](TEAM_ACCESS.md).
+Those approvals are temporary; your gateway keeps no Cloudflare authority from
+them. Adding a source and giving a teammate access are writes into your
+account, so the gateway needs one standing credential of its own: the
+account-owned [management token](MANAGEMENT_TOKEN.md) with exactly **Access:
+Apps and Policies Edit** and **MCP Portals Edit**. Cloudflare does not support
+scoping an API token to one Access policy: this token can edit every Access
+policy in the account, and the setup page says so before asking for it. It
+stays inside your account as an encrypted secret of your Worker. Do not add
+any other API token to the gateway, and revoke the retired preview Team token
+if you created one. See [Team access](TEAM_ACCESS.md).
 
 ## Installation flow
 
@@ -89,8 +100,10 @@ The public installer is designed to:
 3. revoke that grant and open the setup page in your own Worker;
 4. choose a domain from the dropdown, gateway name, two hostnames, and administrators;
 5. review the complete deployment plan and edit it if needed;
-6. approve a fresh grant so your Worker can install and verify the remaining resources; and
-7. open the MCP URL and management URL.
+6. create the management token from the link on that page and paste it into
+   your own gateway, or continue without it;
+7. approve a fresh grant so your Worker can install and verify the remaining resources; and
+8. open the MCP URL and management URL.
 
 Each review sends the chosen configuration, signed by your Worker's ownership
 key, to the hosted issuer to certify the exact final callback address. This
@@ -98,6 +111,17 @@ request contains no Cloudflare grant. The draft and signed response live in
 your Worker; the initial domain list and deployment evidence remain in the
 hosted session for its one-hour lifetime. The setup capability expires after
 ten minutes. MCP source credentials never enter this flow.
+
+The management token step opens Cloudflare's token page with both permissions
+and a name that contains your management hostname already filled in. You
+create the token there and paste it into the one field on your gateway's
+page. Your Worker keeps it only in memory, beside the approval that follows,
+and the install's last step saves it as the encrypted secret
+`ANKKA_MANAGEMENT_TOKEN`. It is never stored, logged, or shown again. If you
+continue without it, or if Cloudflare restarts your Worker's state before the
+install finishes and the value is lost, setup still completes: adding sources
+and managing team access stay disabled until you add the token as described
+in [Management token](MANAGEMENT_TOKEN.md).
 
 Installation does not add an upstream MCP source. The default-deny onboarding
 candidate restores a separate Sources workflow: discover and review the exact
@@ -160,6 +184,19 @@ gateway operator connects the source once, the credential stays in your
 Cloudflare account, and team members authenticate only to the
 Gateway Portal. The current dashboard does not offer per-user upstream
 authentication. Ankka does not receive the upstream token.
+
+A source that needs sign-in cannot list its tools until it is connected, so you
+never type tool names for it. Save it and install it: the gateway creates it
+with nothing enabled, nobody assigned and no Portal attachment. Connect it in
+Cloudflare, then return to **Sources**: the paused installation lists the tools
+Cloudflare synced from the source, you choose which to allow, and the gateway
+attaches it with exactly those. Descriptions and read-only hints appear only
+when Cloudflare's synced list carries them, and the page says when it carries
+none; check such tools in the source's own documentation. Saving a source
+without tools makes rollback below the installed release unavailable, as
+installing any source does, because older releases cannot read that draft;
+while an earlier release can still be restored, **Save draft** says so. See
+[pending source installations](SOURCE_ACTION_RECOVERY.md#choosing-the-tools-of-a-sign-in-source).
 
 ## Add BigQuery
 
@@ -310,6 +347,33 @@ If you created the retired preview Team token, revoke it separately in
 Cloudflare and remove its Worker binding. Removing the binding does not revoke
 the token or erase historical versions. Neither step clears restrictions caused
 by a possibly applied legacy Team policy write.
+
+### If removal was interrupted
+
+Removal takes two Cloudflare approvals. The first, on your gateway, removes its
+Portal, MCP servers, their Access applications and policies, the DNS record,
+and any managed BigQuery bridge. Your gateway then sends your browser to the
+installer with a signed receipt that is valid for ten minutes. The second
+approval, on the installer, removes the management page, stored configuration,
+and Worker.
+
+If you lose the page between the two, for example through a closed tab, a
+network failure, or a receipt that expired, open your gateway's management URL
+again. The dashboard shows **Removal in progress**. Choose **Continue removing
+this gateway** and authorize the removal in Cloudflare once more. Your gateway
+resumes from its saved progress, deletes nothing twice, and sends you to the
+installer with a fresh receipt. Until removal finishes, **Team** may fail to
+load because its access policies are already gone.
+
+Do the same when the installer reports that a removal receipt has expired or
+could not be verified; reloading that page cannot help. If the final removal
+had already started there and you saved its recovery receipt, choose that
+receipt on the installer's removal page instead.
+
+If your gateway answers that another teardown action is active, the previous
+authorization is still open. It lapses after ten minutes; then continue again.
+If the dashboard shows no removal notice, **Settings → Review teardown plan**
+continues the same removal.
 
 ## Experimental browser tools
 

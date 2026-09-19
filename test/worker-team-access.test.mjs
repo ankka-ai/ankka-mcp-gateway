@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import test from 'node:test';
+import * as v from 'valibot';
 
+import { HttpGatewayAdminApi } from '../apps/admin/src/api.ts';
 import worker, { AdminState, planTeamAccessChange, prepareCurrentGatewayTeardown } from '../payload/worker/index.js';
 import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
 import {
@@ -1736,3 +1738,949 @@ test('service tokens are refused for an unapproved identity, a wrong audience, a
     assert.equal((await gateway.api('/api/status')).status, 401);
   });
 });
+
+// The dashboard ships in the same release as this Worker and checks every answer against strict schemas of its own.
+// Its real client runs here against the real Worker, so a field added on one side only fails in this suite and not in
+// a customer's browser: gateway-v0.1.64 shipped a dashboard that refused `/api/status` for its new `serviceIdentity`.
+async function dashboardClient(gateway, run) {
+  const network = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => {
+    if (!v.is(v.string(), input) || !input.startsWith('/')) return network(input, init);
+    // The compiled gateway answers this one route with the current-policy preparation.
+    const options = { method: init.method ?? 'GET', currentTeardown: init.method === 'POST' && input === '/api/teardown-actions' };
+    if (init.body !== undefined) options.body = JSON.parse(init.body);
+    return gateway.api(input, options);
+  };
+  try { return await run(new HttpGatewayAdminApi()); } finally { globalThis.fetch = network; }
+}
+
+test('the dashboard client accepts every answer the gateway gives an administrator', async () => fixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.equal((await dashboard.getStatus()).serviceIdentity, null);
+    assert.equal((await dashboard.getUpdate()).schemaVersion, 1);
+    assert.deepEqual((await dashboard.getSourceActions()).actions, []);
+
+    const discovered = await dashboard.discoverSource(NEW_SOURCE_URL);
+    assert.ok(discovered.tools.some((tool) => tool.name === 'company_lookup'));
+    const current = await dashboard.getSources();
+    const drafted = await dashboard.saveSourceDraft(current.revision, {
+      label: 'Dashboard source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'],
+    });
+    const draft = drafted.sources.find((source) => source.url === NEW_SOURCE_URL);
+    const applied = await dashboard.prepareSourceAction(drafted.revision, draft.id);
+    assert.equal(applied.status, 'succeeded');
+    assert.equal((await dashboard.getSourceAction(applied.actionId)).actorKind, 'human');
+    assert.equal((await dashboard.getSourceActions()).actions.find((entry) => entry.actionId === applied.actionId).actorKind, 'human');
+
+    const team = await dashboard.getTeam();
+    const granted = await dashboard.prepareTeamAction(team.revision, [...team.members, { email: NEW_PERSON, sourceIds: [draft.id] }]);
+    assert.equal(granted.action.status, 'succeeded');
+    assert.equal(granted.action.actorKind, 'human');
+    assert.equal((await dashboard.getTeamAction(granted.action.actionId)).actorKind, 'human');
+    assert.equal((await dashboard.getTeam()).pendingAction.actorKind, 'human'); // the team view carries the last action too
+
+    const teardown = await dashboard.prepareTeardownAction();
+    assert.equal((await dashboard.getTeardownAction(teardown.actionId)).status, 'authorization_required');
+  });
+}));
+
+test('the dashboard client accepts a gateway that admits a service identity and the actions that identity prepared', async () => fixture(async (gateway) => {
+  gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+  const team = await (await gateway.serviceApi('/api/team')).json();
+  const granted = await gateway.serviceApi('/api/team-actions', { method: 'POST', body: changedRequest(team) });
+  assert.equal(granted.status, 200, await granted.clone().text());
+  const { action } = await granted.json();
+  assert.equal(action.actorKind, 'service');
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.deepEqual((await dashboard.getStatus()).serviceIdentity, { clientId: SERVICE_CLIENT });
+    assert.equal((await dashboard.getTeamAction(action.actionId)).actorKind, 'service');
+  });
+}));
+
+// The way back into an interrupted removal rests on these answers: everything the dashboard loads at startup still
+// answers once the connected resources are gone, the pointer names the recorded removal, and its status says where it
+// stands. Only Team, which reads the deleted policies, answers 503.
+test('the dashboard client follows a removal through every status the gateway records and can prepare the next authorization', async () => fixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.equal((await dashboard.getSourceActions()).blockingAction, null);
+    const removal = await gateway.currentTeardown();
+    assert.equal(removal.prepared.status, 200, await removal.prepared.clone().text());
+    const { actionId } = await removal.prepared.json();
+    const recorded = async () => {
+      assert.deepEqual((await dashboard.getSourceActions()).blockingAction, { kind: 'teardown', actionId });
+      return dashboard.getTeardownAction(actionId);
+    };
+    assert.equal((await recorded()).status, 'authorization_required');
+    assert.equal((await dashboard.getTeam()).schemaVersion, 1);
+
+    assert.equal((await removal.send('prove')).status, 200);
+    const applied = await removal.send('apply');
+    assert.equal(applied.status, 200, await applied.clone().text());
+    assert.equal(gateway.provider.liveResourceCount(), 0);
+    assert.equal((await recorded()).status, 'gateway_removed');
+    assert.equal((await dashboard.getStatus()).status, 'ready');
+    assert.equal((await dashboard.getSources()).schemaVersion, 1);
+    assert.equal((await dashboard.getUpdate()).schemaVersion, 1);
+    await assert.rejects(dashboard.getTeam(), { status: 503 });
+
+    assert.equal((await removal.send('settle')).status, 200);
+    assert.deepEqual([(await recorded()).status, (await recorded()).failureCode], ['recovery_required', 'fresh_authorization_required']);
+    const next = await dashboard.prepareTeardownAction();
+    assert.equal(new URL(next.handoffUrl).pathname, '/__ankka/operation/teardown');
+    assert.equal((await dashboard.getTeardownAction(next.actionId)).status, 'authorization_required');
+  });
+}, await portalOnlyClaim()));
+
+// A source installation records the running release as the minimum compatible runtime. That is a decision only while
+// an older recorded release can still be restored. `/api/sources` names that release in `installEndsRollbackTo` for
+// exactly that case, and `/api/update` stops offering a rollback the unchanged rule would refuse.
+const EARLIER = Object.freeze({ release: 'gateway-v0.0.9', artifactSha256: `sha256:${'8'.repeat(64)}`,
+  versionId: '00000000-0000-4000-8000-000000000008' });
+const OFFERED = Object.freeze({ available: true, release: EARLIER.release, artifactSha256: EARLIER.artifactSha256, dataRollback: false });
+const EXCLUDED = Object.freeze({ available: false, reason: 'minimum_runtime_release', release: EARLIER.release });
+
+/** The journal of a gateway that was updated to the running release from `previous`. */
+async function recordUpdateFrom(gateway, previous = EARLIER) {
+  await gateway.view(); // the first Team read creates the Team record, without a minimum
+  await gateway.managementStorage.put(UPDATES_KEY, { schemaVersion: 1, revision: 1, actions: [], previous,
+    current: { release: gateway.env.ANKKA_GATEWAY_RELEASE, artifactSha256: gateway.env.ANKKA_GATEWAY_RELEASE_SHA256,
+      versionId: '00000000-0000-4000-8000-000000000009' } });
+}
+
+async function recordMinimumRuntime(gateway, release) {
+  await gateway.managementStorage.put(TEAM_KEY, { ...gateway.managementStorage.snapshot(TEAM_KEY),
+    minimumRuntimeRelease: release, teardownDisabled: true });
+}
+
+async function rollbackAnswers(gateway) {
+  const [update, sources] = [await gateway.api('/api/update'), await gateway.api('/api/sources')];
+  assert.equal(update.status, 200, await update.clone().text());
+  assert.equal(sources.status, 200, await sources.clone().text());
+  return { rollback: (await update.json()).rollback, installEndsRollbackTo: (await sources.json()).installEndsRollbackTo };
+}
+
+async function prepareRollback(gateway) {
+  return gateway.api('/api/update-actions', { method: 'POST', body: { schemaVersion: 1, operation: 'rollback' } });
+}
+
+test('a fresh install has no rollback to offer and nothing to decide before its first source', async () => fixture(async (gateway) => {
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: { available: false }, installEndsRollbackTo: null });
+  await gateway.view();
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: { available: false }, installEndsRollbackTo: null });
+}));
+
+test('an updated gateway without sources offers its rollback and names it as what a source installation ends', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, null);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: OFFERED, installEndsRollbackTo: EARLIER.release });
+  // Reading the answers decides nothing: the minimum stays unset and the offered rollback can be prepared.
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, null);
+  const prepared = await prepareRollback(gateway);
+  assert.equal(prepared.status, 200, await prepared.clone().text());
+}));
+
+test('a minimum already at the running release excludes the recorded rollback with a fixed reason and leaves nothing to decide', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  await recordMinimumRuntime(gateway, gateway.env.ANKKA_GATEWAY_RELEASE);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: EXCLUDED, installEndsRollbackTo: null });
+  // The unchanged rule refuses exactly what is no longer offered.
+  const refused = await prepareRollback(gateway);
+  assert.equal(refused.status, 409);
+  assert.equal((await refused.json()).error, 'runtime_action_conflict');
+}));
+
+test('a minimum below the running release keeps the rollback, and the next source installation is the decision', async () => {
+  // Recorded at the earlier release itself, and below it: both still allow the rollback that an installation here ends.
+  for (const minimum of [EARLIER.release, 'gateway-v0.0.8']) await fixture(async (gateway) => {
+    await recordUpdateFrom(gateway);
+    await recordMinimumRuntime(gateway, minimum);
+    assert.deepEqual(await rollbackAnswers(gateway), { rollback: OFFERED, installEndsRollbackTo: EARLIER.release }, minimum);
+  });
+  // A minimum between the two releases has already excluded the target: nothing is left to decide.
+  await fixture(async (gateway) => {
+    await recordUpdateFrom(gateway, { ...EARLIER, release: 'gateway-v0.0.8' });
+    await recordMinimumRuntime(gateway, 'gateway-v0.0.9');
+    assert.deepEqual(await rollbackAnswers(gateway), {
+      rollback: { ...EXCLUDED, release: 'gateway-v0.0.8' }, installEndsRollbackTo: null,
+    });
+  });
+});
+
+test('a recorded release newer than the running one stays restorable after a source installation, so nothing is named', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway, { ...EARLIER, release: 'gateway-v0.2.0' });
+  assert.deepEqual(await rollbackAnswers(gateway), {
+    rollback: { ...OFFERED, release: 'gateway-v0.2.0' }, installEndsRollbackTo: null,
+  });
+}));
+
+test('a gateway that cannot install sources names no rollback decision', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  const sources = await (await gateway.api('/api/sources')).json();
+  assert.equal(sources.installationEnabled, false);
+  assert.equal(sources.installEndsRollbackTo, null);
+}));
+
+test('a release received outside an action is named before the journal follows it', async () => fixture(async (gateway) => {
+  await gateway.view();
+  assert.deepEqual((await (await gateway.api('/api/update')).json()).rollback, { available: false });
+  const installed = gateway.env.ANKKA_GATEWAY_RELEASE;
+  gateway.env.ANKKA_GATEWAY_RELEASE = 'gateway-v0.1.1';
+  gateway.env.ANKKA_GATEWAY_RELEASE_SHA256 = `sha256:${'7'.repeat(64)}`;
+  gateway.reloadManagement();
+  const journal = canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY));
+  assert.equal((await (await gateway.api('/api/sources')).json()).installEndsRollbackTo, installed);
+  assert.equal(canonicalJson(gateway.managementStorage.snapshot(UPDATES_KEY)), journal, 'the sources read writes nothing');
+  const followed = await rollbackAnswers(gateway);
+  assert.equal(followed.rollback.available, true);
+  assert.equal(followed.rollback.release, installed);
+  assert.equal(followed.installEndsRollbackTo, installed);
+}));
+
+test('the first source installation on an updated gateway turns the named decision into the recorded answer', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  const current = await (await gateway.api('/api/sources')).json();
+  assert.equal(current.installEndsRollbackTo, EARLIER.release);
+  const saved = await gateway.api('/api/sources', { method: 'PUT', body: { schemaVersion: 1, revision: current.revision,
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const drafted = await saved.json();
+  // Saving a draft decides nothing, and the save answers like the read, so the sentence stays beside the control.
+  assert.equal(drafted.installEndsRollbackTo, EARLIER.release);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, null);
+  const source = drafted.sources.find((item) => item.url === NEW_SOURCE_URL);
+  const applied = await gateway.api('/api/source-actions', { method: 'POST', body: { schemaVersion: 1, revision: drafted.revision, sourceId: source.id } });
+  assert.equal(applied.status, 200, await applied.clone().text());
+  assert.equal((await applied.json()).status, 'succeeded');
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: EXCLUDED, installEndsRollbackTo: null });
+  assert.equal((await prepareRollback(gateway)).status, 409);
+}));
+
+test('the dashboard client accepts what the gateway says about rollback in every state, around a source installation', async () => fixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.deepEqual((await dashboard.getUpdate()).rollback, { available: false });
+    assert.equal((await dashboard.getSources()).installEndsRollbackTo, null);
+
+    await recordUpdateFrom(gateway);
+    assert.deepEqual((await dashboard.getUpdate()).rollback, OFFERED);
+    const current = await dashboard.getSources();
+    assert.equal(current.installEndsRollbackTo, EARLIER.release);
+    const drafted = await dashboard.saveSourceDraft(current.revision, {
+      label: 'Dashboard source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'],
+    });
+    assert.equal(drafted.installEndsRollbackTo, EARLIER.release);
+    const draft = drafted.sources.find((source) => source.url === NEW_SOURCE_URL);
+    assert.equal((await dashboard.prepareSourceAction(drafted.revision, draft.id)).status, 'succeeded');
+
+    assert.equal((await dashboard.getSources()).installEndsRollbackTo, null);
+    assert.deepEqual((await dashboard.getUpdate()).rollback, EXCLUDED);
+    await assert.rejects(dashboard.prepareRuntimeAction('rollback'), { code: 'runtime_action_conflict' });
+  });
+}));
+
+test('the dashboard client prepares the rollback the gateway offers', async () => fixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  await dashboardClient(gateway, async (dashboard) => {
+    const offered = (await dashboard.getUpdate()).rollback;
+    assert.deepEqual(offered, OFFERED);
+    const prepared = await dashboard.prepareRuntimeAction('rollback', { release: offered.release, artifactSha256: offered.artifactSha256 });
+    assert.equal(prepared.operation, 'rollback');
+    assert.equal((await dashboard.getRuntimeAction(prepared.actionId)).to.release, EARLIER.release);
+  });
+}));
+
+test('removal refused for an unfinished source installation says so through the dashboard client', async () => fixture(async (gateway) => {
+  await prepareNewSource(gateway);
+  await dashboardClient(gateway, async (dashboard) => {
+    await assert.rejects(dashboard.prepareTeardownAction(), (error) => {
+      assert.equal(error.code, 'teardown_action_conflict');
+      assert.match(error.message, /^Finish or cancel any unfinished source installation, update or Team change, or wait for an open removal authorization to expire/u);
+      return true;
+    });
+  });
+}));
+
+// A sign-in source is saved and installed with nothing enabled. Its tools are chosen from the list Cloudflare synced
+// after the operator connected it, as a revision-bound step of its own, and the recorded installation then attaches
+// exactly that allowlist. The cases below hold every state, refusal and boundary of that design.
+const SIGN_IN_URL = 'https://signin.example.net/mcp';
+const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
+const SERVERS_PATH = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/servers`;
+const REAL_TOOLS = Object.freeze([
+  { name: 'records_search', title: 'Search records', description: 'Search synthetic records.', inputSchema: { type: 'object' },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false } },
+  { name: 'records_delete', description: 'Delete one synthetic record.', annotations: { destructiveHint: true } },
+  { name: 'records_export' },
+]);
+const NO_HINTS = { title: null, description: null, readOnlyHint: null, destructiveHint: null, openWorldHint: null };
+
+/** The shared fixture with one more endpoint on its network: a source that answers discovery with the standard sign-in challenge. */
+function signInFixture(run, claimInput) {
+  return fixture(async (gateway) => {
+    const network = globalThis.fetch;
+    globalThis.fetch = async (input, init) => {
+      if (input instanceof Request && input.url === SIGN_IN_URL) {
+        return new Response(null, { status: 401, headers: {
+          'www-authenticate': 'Bearer resource_metadata="https://signin.example.net/.well-known/oauth-protected-resource"',
+        } });
+      }
+      return network(input, init);
+    };
+    try { return await run(gateway); } finally { globalThis.fetch = network; }
+  }, claimInput);
+}
+
+async function saveSignInDraft(gateway, enabledTools = []) {
+  const current = await (await gateway.api('/api/sources')).json();
+  const response = await gateway.api('/api/sources', { method: 'PUT', body: { schemaVersion: 1, revision: current.revision,
+    source: { label: 'Sign-in source', url: SIGN_IN_URL, authMode: 'oauth', enabledTools } } });
+  assert.equal(response.status, 200, await response.clone().text());
+  const sources = await response.json();
+  return { sources, source: sources.sources.find((candidate) => candidate.url === SIGN_IN_URL) };
+}
+
+function pausedAction(gateway) {
+  return gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
+}
+
+/** Cloudflare creates the server of a sign-in source unconnected: the installation pauses before the Portal. */
+function createServersUnconnected(gateway) {
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'POST' || record.pathname !== SERVERS_PATH) return undefined;
+    const server = { ...record.body, authentication_status: 'required', status: 'waiting', tools: [],
+      error: 'synthetic-private-provider-detail' };
+    state.servers.set(server.id, server);
+    return envelope(server);
+  });
+}
+
+async function installSignInSource(gateway, { enabledTools = [], draft } = {}) {
+  const saved = draft ?? await saveSignInDraft(gateway, enabledTools);
+  createServersUnconnected(gateway);
+  const response = await gateway.api('/api/source-actions', { method: 'POST',
+    body: { schemaVersion: 1, revision: saved.sources.revision, sourceId: saved.source.id } });
+  gateway.provider.hook(undefined);
+  assert.equal(response.status, 409, await response.clone().text());
+  assert.equal((await response.json()).error, 'source_connection_required');
+  const action = pausedAction(gateway);
+  return { ...saved, action, serverId: action.resources[0].provider.id,
+    toolsPath: `/api/source-actions/${action.actionId}/tools` };
+}
+
+/** The operator has connected the source in Cloudflare and Cloudflare has synced its catalogue. */
+function connectSignInSource(gateway, serverId, tools = REAL_TOOLS, overrides = {}) {
+  Object.assign(gateway.provider.state.servers.get(serverId),
+    { authentication_status: 'connected', status: 'ready', tools: structuredClone(tools), ...overrides });
+}
+
+function chooseTools(gateway, installed, enabledTools, { revision, sourceId, ...request } = {}) {
+  return gateway.api(installed.toolsPath, { method: 'POST', ...request, body: { schemaVersion: 1,
+    revision: revision ?? gateway.managementStorage.snapshot(SOURCES_KEY).revision,
+    sourceId: sourceId ?? installed.source.id, enabledTools } });
+}
+
+function resumeInstallation(gateway, installed) {
+  return gateway.api(`/api/source-actions/${installed.action.actionId}/renew`, { method: 'POST', body: {
+    schemaVersion: 1, revision: gateway.managementStorage.snapshot(SOURCES_KEY).revision, sourceId: installed.source.id } });
+}
+
+function portalMapping(gateway, serverId) {
+  return gateway.provider.state.portal.servers?.find((mapping) => mapping.server_id === serverId);
+}
+
+function manyTools(count, prefix = 'tool_') {
+  return Array.from({ length: count }, (_, index) => ({ name: `${prefix}${String(index).padStart(3, '0')}` }));
+}
+
+async function refused(response, status, error, reason) {
+  assert.equal(response.status, status, await response.clone().text());
+  const body = await response.json();
+  assert.equal(body.error, error);
+  assert.equal(body.reason, reason);
+  assert.doesNotMatch(JSON.stringify(body), /synthetic-private/u);
+}
+
+test('a sign-in source is saved and installed with no tools: nothing is enabled, nothing is attached, everyone is denied', async () => signInFixture(async (gateway) => {
+  const current = await (await gateway.api('/api/sources')).json();
+  const save = (source) => gateway.api('/api/sources', { method: 'PUT', body: { schemaVersion: 1, revision: current.revision, source } });
+  await refused(await save({ label: 'Public source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: [] }), 400, 'source_invalid');
+  await refused(await save({ label: 'Public source', url: NEW_SOURCE_URL, authMode: 'oauth', enabledTools: [] }), 409, 'source_authentication_changed');
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY), undefined, 'a refused save arms nothing');
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.some((source) => source.url === NEW_SOURCE_URL), false);
+
+  const beforePortal = structuredClone(gateway.provider.state.portal);
+  const baseline = gateway.provider.requests.length;
+  const originalPut = gateway.managementStorage.put;
+  gateway.managementStorage.put = async (key, value) => {
+    if (key === SOURCES_KEY) {
+      // Older runtimes cannot read a source without tools: the floor is durable before that record exists.
+      const floor = gateway.managementStorage.snapshot(TEAM_KEY);
+      assert.equal(floor?.teardownDisabled, true);
+      assert.equal(floor.minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
+    }
+    return originalPut(key, value);
+  };
+  const draft = await saveSignInDraft(gateway);
+  gateway.managementStorage.put = originalPut;
+  assert.deepEqual([draft.source.enabledTools, draft.source.status, draft.source.authMode, draft.source.onBehalfOfUser], [[], 'draft', 'oauth', false]);
+  assertNoMutation(gateway.provider, baseline);
+
+  const installed = await installSignInSource(gateway, { draft });
+  const creation = gateway.provider.requests.find((request) => request.method === 'POST' &&
+    request.pathname === SERVERS_PATH && request.body.hostname === SIGN_IN_URL);
+  assert.deepEqual(Object.keys(creation.body).sort(), ['auth_type', 'description', 'hostname', 'id',
+    'is_shared_oauth_callback_enabled', 'name', 'secure_web_gateway'], 'no tool override is sent for a source without tools');
+  assert.equal(Object.hasOwn(gateway.provider.state.servers.get(installed.serverId), 'updated_tools'), false);
+  assert.deepEqual(gateway.provider.state.portal, beforePortal, 'the source is attached to nothing');
+  assert.equal(portalMapping(gateway, installed.serverId), undefined);
+  const policies = gateway.provider.state.policies.get(installed.action.resources[2].provider.parentId);
+  assert.equal(policies.length, 1);
+  assert.deepEqual([policies[0].decision, policies[0].include], ['deny', [{ everyone: {} }]]);
+  assert.deepEqual([installed.action.status, installed.action.failureCode, installed.action.resources.length,
+    installed.action.pending, installed.action.portalUpdate], ['recovery_required', 'source_connection_required', 3, null, null]);
+  assert.equal(JSON.stringify(installed.action).includes('synthetic-private'), false);
+  const stored = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === draft.source.id);
+  assert.deepEqual([stored.status, stored.enabledTools], ['draft', []]);
+  const summary = (await (await gateway.api('/api/source-actions')).json()).actions.at(-1);
+  assert.deepEqual([summary.state, summary.canRenew, summary.canCancel], ['recovery_required', true, false]);
+  assert.equal(summary.connectionUrl,
+    `https://dash.cloudflare.com/${ACCOUNT_ID}/one/access-controls/ai-controls/mcp-server/edit/${installed.serverId}`);
+  const team = await gateway.api('/api/team');
+  assert.equal(team.status, 200, await team.clone().text());
+  const view = await team.json();
+  assert.deepEqual(view.sources.find((source) => source.id === draft.source.id).enabledTools, []);
+  assert.equal(view.members.some((member) => member.sourceIds.includes(draft.source.id)), false);
+}));
+
+// Older releases cannot read a source without tools, so for that one draft the save, not the installation, is what
+// ends a rollback. The gateway names the release beforehand and reports nothing left to decide in the save's own answer.
+test('saving a sign-in source without tools is the rollback decision; a draft an older release can read decides nothing', async () => signInFixture(async (gateway) => {
+  await recordUpdateFrom(gateway);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: OFFERED, installEndsRollbackTo: EARLIER.release });
+  const typed = await saveSignInDraft(gateway, ['records_search']);
+  assert.equal(typed.sources.installEndsRollbackTo, EARLIER.release);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, null);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: OFFERED, installEndsRollbackTo: EARLIER.release });
+
+  const bare = await saveSignInDraft(gateway);
+  assert.deepEqual(bare.source.enabledTools, []);
+  assert.equal(bare.sources.installEndsRollbackTo, null);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
+  assert.deepEqual(await rollbackAnswers(gateway), { rollback: EXCLUDED, installEndsRollbackTo: null });
+  await refused(await prepareRollback(gateway), 409, 'runtime_action_conflict');
+}));
+
+test('the real tool list is offered in fixed states, with one provider read and only what the record carries', async () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  const offered = async (state) => {
+    const baseline = gateway.provider.requests.length;
+    const writes = gateway.managementStorage.writes.length;
+    const response = await gateway.api(installed.toolsPath);
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.deepEqual(gateway.provider.requests.slice(baseline).map(({ method, pathname }) => `${method} ${pathname}`),
+      [`GET ${SERVERS_PATH}/${installed.serverId}`], 'one provider read per request');
+    assert.equal(gateway.managementStorage.writes.length, writes, 'a read writes nothing');
+    const body = await response.json();
+    assert.deepEqual(Object.keys(body).sort(), ['actionId', 'schemaVersion', 'sourceId', 'state', 'tools']);
+    assert.deepEqual([body.schemaVersion, body.actionId, body.sourceId, body.state],
+      [1, installed.action.actionId, installed.source.id, state]);
+    if (state !== 'ready') assert.deepEqual(body.tools, []);
+    assert.doesNotMatch(JSON.stringify(body), /synthetic-private/u);
+    return body.tools;
+  };
+  await offered('connection_required');
+  server.authentication_status = 'stale';
+  await offered('connection_required');
+  Object.assign(server, { authentication_status: 'connected', status: 'waiting' });
+  await offered('sync_required');
+  server.status = 'error';
+  await offered('sync_required');
+  Object.assign(server, { status: 'ready', tools: 'not-a-list' });
+  await offered('sync_required');
+
+  connectSignInSource(gateway, installed.serverId, [
+    ...REAL_TOOLS,
+    { name: 'long_text', title: 't'.repeat(161), description: 'd'.repeat(2_001) },
+    { name: 'control_text', description: 'line one\nline two', annotations: { readOnlyHint: 'yes', destructiveHint: 1 } },
+    { name: 'provider_fields', enabled: true, alias: 'synthetic-private-alias',
+      inputSchema: { type: 'object', properties: { token: { type: 'string', description: 'synthetic-private-schema' } } } },
+  ]);
+  const tools = await offered('ready');
+  assert.deepEqual(tools, [
+    { name: 'control_text', ...NO_HINTS },
+    { name: 'long_text', ...NO_HINTS },
+    { name: 'provider_fields', ...NO_HINTS },
+    { name: 'records_delete', ...NO_HINTS, description: 'Delete one synthetic record.', destructiveHint: true },
+    { name: 'records_export', ...NO_HINTS },
+    { name: 'records_search', title: 'Search records', description: 'Search synthetic records.',
+      readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  ], 'sorted by name; an absent or oversized text and an absent hint are null, nothing is derived');
+  assert.equal(tools.some((tool) => Object.hasOwn(tool, 'defaultSelected')), false);
+
+  connectSignInSource(gateway, installed.serverId, manyTools(500));
+  assert.equal((await offered('ready')).length, 500);
+  for (const unsupported of [manyTools(501), [...REAL_TOOLS, { name: 'records_export' }], [{ name: 'has space' }],
+    [{ name: 'n'.repeat(129) }], ['records_search'], [{ title: 'No name' }], [null]]) {
+    connectSignInSource(gateway, installed.serverId, unsupported);
+    await offered('unsupported');
+  }
+
+  connectSignInSource(gateway, installed.serverId);
+  const failing = async (answer, status, error, reads = 1) => {
+    gateway.provider.hook(({ record }) => record.method === 'GET' && record.pathname === `${SERVERS_PATH}/${installed.serverId}`
+      ? answer() : undefined);
+    const baseline = gateway.provider.requests.length;
+    await refused(await gateway.api(installed.toolsPath), status, error);
+    assert.equal(gateway.provider.requests.length - baseline, reads);
+    gateway.provider.hook(undefined);
+  };
+  const providerError = (status) => () => Response.json({ success: false, result: null,
+    errors: [{ code: 10000, message: 'synthetic-private-provider-detail' }] }, { status });
+  await failing(providerError(503), 502, 'source_catalogue_unavailable');
+  await failing(providerError(404), 502, 'source_catalogue_unavailable');
+  await failing(() => envelope({ ...server, id: 'another-server' }), 502, 'source_catalogue_unavailable');
+  await failing(() => { throw new Error('synthetic-private-network-detail'); }, 502, 'source_catalogue_unavailable');
+  await failing(providerError(403), 409, 'management_credential_required');
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  await failing(() => envelope(server), 409, 'management_credential_required', 0);
+}));
+
+test('only the initiating administrator of an exactly paused sign-in installation may read or choose its tools', async () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  connectSignInSource(gateway, installed.serverId);
+  const choice = { method: 'POST', body: { schemaVersion: 1, revision: installed.sources.revision,
+    sourceId: installed.source.id, enabledTools: ['records_search'] } };
+  const stored = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const storedSources = gateway.managementStorage.snapshot(SOURCES_KEY);
+  // Neither route spends a provider read or a write on a caller or an installation it refuses.
+  const untouched = async (run) => {
+    const baseline = gateway.provider.requests.length;
+    const writes = gateway.managementStorage.writes.length;
+    await run();
+    assert.equal(gateway.provider.requests.length, baseline);
+    assert.equal(gateway.managementStorage.writes.length, writes);
+  };
+  await untouched(async () => {
+    const unknown = `/api/source-actions/action_${'U'.repeat(32)}/tools`;
+    await refused(await gateway.api(unknown), 404, 'source_action_not_found');
+    await refused(await gateway.api(unknown, choice), 404, 'source_action_not_found');
+    await refused(await gateway.api(`${installed.toolsPath}/more`), 404, 'source_action_not_found');
+    await refused(await gateway.api(installed.toolsPath, { email: OWNER }), 409, 'source_tools_unavailable');
+    await refused(await gateway.api(installed.toolsPath, { ...choice, email: OWNER }), 409, 'source_tools_unavailable');
+    await refused(await gateway.api(installed.toolsPath, { email: MEMBER }), 401, 'access_required');
+    await refused(await gateway.api(installed.toolsPath, { ...choice, email: MEMBER }), 401, 'access_required');
+    await refused(await gateway.api(installed.toolsPath, { ...choice, extraHeaders: { origin: 'https://other.example.com' } }), 403, 'origin_required');
+    gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+    await refused(await gateway.serviceApi(installed.toolsPath), 403, 'service_operation_denied');
+    await refused(await gateway.serviceApi(installed.toolsPath, choice), 403, 'service_operation_denied');
+    delete gateway.env.ANKKA_SERVICE_CLIENT_ID;
+  });
+
+  const { initialPolicyVersion, ...legacyProfile } = installed.action;
+  assert.equal(initialPolicyVersion, 2);
+  for (const [label, action] of [
+    ['waiting for authorization', { ...installed.action, status: 'authorization_required', failureCode: null }],
+    ['applying', { ...installed.action, status: 'applying', failureCode: null }],
+    ['completed', { ...installed.action, status: 'succeeded', failureCode: null }],
+    ['closed', { ...installed.action, status: 'failed' }],
+    ['another recovery reason', { ...installed.action, failureCode: 'source_action_recovery_required' }],
+    ['a receipt missing behind a pending write', { ...installed.action, resources: installed.action.resources.slice(0, 2),
+      pending: { kind: 'source_access_policy', phase: 'send_armed', provider: null } }],
+    ['a recorded Portal write', { ...installed.action, portalUpdate: { phase: 'send_armed', desiredHash: installed.action.sourceHash } }],
+    ['the legacy policy profile', legacyProfile],
+    ['a BigQuery setup', { ...installed.action, bigquerySetupStarted: true }],
+  ]) {
+    await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { ...stored, actions: [action] });
+    await untouched(async () => {
+      await refused(await gateway.api(installed.toolsPath), 409, 'source_tools_unavailable');
+      const response = await gateway.api(installed.toolsPath, choice);
+      assert.equal(response.status, 409, label);
+      assert.equal((await response.json()).error, 'source_tools_unavailable', label);
+    });
+  }
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, stored);
+
+  // The draft the action was approved for is the only one a choice may re-bind.
+  await gateway.managementStorage.put(SOURCES_KEY, { ...storedSources, sources: storedSources.sources.map((source) =>
+    source.id === installed.source.id ? { ...source, label: 'Relabelled source' } : source) });
+  await untouched(async () => {
+    await refused(await gateway.api(installed.toolsPath), 409, 'source_action_conflict', 'draft_changed');
+    await refused(await gateway.api(installed.toolsPath, choice), 409, 'source_action_conflict', 'draft_changed');
+  });
+  await gateway.managementStorage.put(SOURCES_KEY, { ...storedSources, sources: storedSources.sources.map((source) =>
+    source.id === installed.source.id ? { ...source, status: 'installed', enabledTools: ['records_search'] } : source) });
+  await untouched(async () => refused(await gateway.api(installed.toolsPath, choice), 409, 'source_tools_unavailable'));
+  await gateway.managementStorage.put(SOURCES_KEY, storedSources);
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { schemaVersion: 1, revision: 'corrupt', actions: [] });
+  await untouched(async () => refused(await gateway.api(installed.toolsPath), 409, 'source_action_state_unavailable'));
+}));
+
+test('a tool choice re-binds the paused installation in one write, and the resume attaches exactly those tools', async () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  connectSignInSource(gateway, installed.serverId);
+  const before = pausedAction(gateway);
+  const beforeSources = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const beforePortal = structuredClone(gateway.provider.state.portal);
+  const puts = [];
+  const originalPut = gateway.managementStorage.put;
+  gateway.managementStorage.put = async (key, value) => {
+    puts.push(v.is(v.string(), key) ? [key] : Object.keys(key).sort());
+    return originalPut(key, value);
+  };
+  let baseline = gateway.provider.requests.length;
+  const response = await chooseTools(gateway, installed, ['records_export', 'records_search']);
+  gateway.managementStorage.put = originalPut;
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual(await response.json(), { schemaVersion: 1, actionId: before.actionId, sourceId: installed.source.id,
+    revision: beforeSources.revision + 1, enabledTools: ['records_export', 'records_search'] });
+  assert.deepEqual(gateway.provider.requests.slice(baseline).map(({ method, pathname }) => `${method} ${pathname}`),
+    [`GET ${SERVERS_PATH}/${installed.serverId}`], 'one provider read, no provider write');
+  assert.deepEqual(puts, [[SOURCE_ACTIONS_KEY, SOURCES_KEY].sort()], 'the draft and its action change in one atomic write');
+
+  const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const source = sources.sources.find((candidate) => candidate.id === installed.source.id);
+  const after = pausedAction(gateway);
+  assert.deepEqual([sources.revision, source.status, source.enabledTools],
+    [beforeSources.revision + 1, 'draft', ['records_export', 'records_search']]);
+  assert.equal(after.sourceRevision, sources.revision);
+  assert.equal(after.sourceHash, await prefixedSha256({ id: source.id, label: source.label, url: source.url,
+    authMode: source.authMode, onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools }));
+  assert.notEqual(after.sourceHash, before.sourceHash);
+  assert.notEqual(after.resources[0].desiredHash, before.resources[0].desiredHash, 'the server receipt covers the tool policy');
+  assert.deepEqual({ ...after.resources[0], desiredHash: null }, { ...before.resources[0], desiredHash: null });
+  assert.deepEqual(after.resources.slice(1), before.resources.slice(1), 'the application and policy receipts cover no tool');
+  for (const field of ['actionId', 'actionKeyHash', 'actorEmail', 'issuedAt', 'expiresAt', 'status', 'pending',
+    'portalUpdate', 'initialPolicyVersion', 'sourceId']) assert.deepEqual(after[field], before[field], field);
+  assert.equal(after.failureCode, 'source_tools_chosen');
+  assert.deepEqual(gateway.provider.state.portal, beforePortal, 'a choice attaches nothing');
+  const summary = (await (await gateway.api('/api/source-actions')).json()).actions.at(-1);
+  assert.deepEqual([summary.state, summary.failureCode, summary.canRenew, summary.canCancel],
+    ['recovery_required', 'source_tools_chosen', true, false]);
+  assert.ok(summary.connectionUrl);
+
+  gateway.reloadManagement(); // an object restart between the choice and the resume loses nothing
+  baseline = gateway.provider.requests.length;
+  const resumed = await resumeInstallation(gateway, installed);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.json()).status, 'succeeded');
+  const mutations = gateway.provider.requests.slice(baseline).filter(({ method }) => method !== 'GET');
+  assert.deepEqual(mutations.map(({ method, pathname }) => `${method} ${pathname.includes('/mcp/portals/')}`), ['PUT true']);
+  const mapping = portalMapping(gateway, installed.serverId);
+  assert.deepEqual([mapping.default_disabled, mapping.on_behalf, mapping.updated_tools], [true, false,
+    [{ name: 'records_export', enabled: true }, { name: 'records_search', enabled: true }]], 'exactly the chosen tools, nothing else');
+  assert.equal(Object.hasOwn(gateway.provider.state.servers.get(installed.serverId), 'updated_tools'), false,
+    'the server record is never updated: the Portal mapping is where the allowlist is enforced');
+  const installedSource = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((candidate) => candidate.id === source.id);
+  assert.deepEqual([installedSource.status, installedSource.enabledTools], ['installed', source.enabledTools]);
+  const policies = gateway.provider.state.policies.get(after.resources[2].provider.parentId);
+  assert.deepEqual([policies.length, policies[0].decision, policies[0].include], [1, 'deny', [{ everyone: {} }]]);
+  assert.equal((await gateway.view()).members.some((member) => member.sourceIds.includes(source.id)), false);
+  assert.deepEqual(gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+    .find((entry) => entry.sourceId === source.id).resources, after.resources);
+  await refused(await gateway.api(installed.toolsPath), 409, 'source_tools_unavailable');
+
+  // Removal re-derives every receipt hash from the installed source: it accepts the re-bound server receipt.
+  const teardown = await gateway.currentTeardown();
+  assert.equal(teardown.prepared.status, 200, await teardown.prepared.clone().text());
+  assert.equal((await teardown.send('prove')).status, 200);
+  const removed = await teardown.send('apply');
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.equal(gateway.provider.liveResourceCount(), 0);
+}, await portalOnlyClaim()));
+
+test('a tool choice is refused for any body, revision, list or lifecycle state the design does not allow', async () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  connectSignInSource(gateway, installed.serverId);
+  const storedActions = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  const storedSources = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const beforePortal = structuredClone(gateway.provider.state.portal);
+  const unchanged = async (run, reads) => {
+    const baseline = gateway.provider.requests.length;
+    await run();
+    const requests = gateway.provider.requests.slice(baseline);
+    assert.equal(requests.length, reads);
+    assert.equal(requests.every(({ method }) => method === 'GET'), true);
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), storedActions);
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), storedSources);
+    assert.deepEqual(gateway.provider.state.portal, beforePortal);
+  };
+  const body = { schemaVersion: 1, revision: storedSources.revision, sourceId: installed.source.id, enabledTools: ['records_search'] };
+  for (const invalid of [
+    { ...body, enabledTools: [] }, { ...body, enabledTools: ['records_search', 'records_export'] },
+    { ...body, enabledTools: ['records_search', 'records_search'] }, { ...body, enabledTools: ['has space'] },
+    { ...body, enabledTools: ['*'] }, { ...body, enabledTools: manyTools(501).map(({ name }) => name) },
+    { ...body, enabledTools: 'records_search' }, { ...body, schemaVersion: 2 }, { ...body, revision: 0 },
+    { ...body, revision: '1' }, { ...body, sourceId: 'source-1' }, { ...body, actionId: installed.action.actionId },
+    { schemaVersion: 1, revision: body.revision, sourceId: body.sourceId },
+    { ...body, enabledTools: manyTools(500, 'n'.repeat(250)).map(({ name }) => name) },
+  ]) await unchanged(async () => refused(await gateway.api(installed.toolsPath, { method: 'POST', body: invalid }), 400, 'source_tools_invalid'), 0);
+
+  await unchanged(async () => refused(await chooseTools(gateway, installed, body.enabledTools, { revision: body.revision + 1 }),
+    409, 'source_action_conflict', 'draft_changed'), 0);
+  await unchanged(async () => refused(await chooseTools(gateway, installed, body.enabledTools, { sourceId: 'source-0000000000000000' }),
+    409, 'source_action_conflict', 'draft_changed'), 0);
+  await unchanged(async () => refused(await chooseTools(gateway, installed, ['records_purge', 'records_search']),
+    409, 'source_tools_mismatch'), 1);
+
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  for (const [change, error] of [
+    [{ authentication_status: 'required' }, 'source_connection_required'],
+    [{ authentication_status: 'connected', status: 'waiting' }, 'source_sync_required'],
+    [{ status: 'ready', tools: manyTools(501) }, 'source_tools_unsupported'],
+  ]) {
+    Object.assign(server, change);
+    await unchanged(async () => refused(await chooseTools(gateway, installed, ['tool_000']), 409, error), 1);
+  }
+  connectSignInSource(gateway, installed.serverId);
+  gateway.provider.hook(({ record }) => record.method === 'GET' && record.pathname === `${SERVERS_PATH}/${installed.serverId}`
+    ? Response.json({ success: false, errors: [{ code: 10000, message: 'synthetic-private-provider-detail' }] }, { status: 403 }) : undefined);
+  await unchanged(async () => refused(await chooseTools(gateway, installed, body.enabledTools), 409, 'management_credential_required'), 1);
+  gateway.provider.hook(({ record }) => record.method === 'GET' && record.pathname === `${SERVERS_PATH}/${installed.serverId}`
+    ? envelope(null, 503) : undefined);
+  await unchanged(async () => refused(await chooseTools(gateway, installed, body.enabledTools), 502, 'source_catalogue_unavailable'), 1);
+  gateway.provider.hook(undefined);
+
+  // Another lifecycle action blocks the choice as it blocks a renewal; no provider read is spent.
+  const update = await runtimeAction(gateway, { operation: 'update', release: 'gateway-v9.9.9' });
+  assert.equal((await update.prepare()).status, 200);
+  await unchanged(async () => refused(await chooseTools(gateway, installed, body.enabledTools),
+    409, 'source_action_conflict', 'lifecycle_pending'), 0);
+}));
+
+for (const committed of [false, true]) {
+  test(`an interrupted tool choice is all-or-nothing, and its lost response is safe to repeat (committed: ${committed})`, async () => signInFixture(async (gateway) => {
+    const installed = await installSignInSource(gateway);
+    connectSignInSource(gateway, installed.serverId);
+    const before = { actions: gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), sources: gateway.managementStorage.snapshot(SOURCES_KEY) };
+    const originalPut = gateway.managementStorage.put;
+    gateway.managementStorage.put = async (key, value) => {
+      if (!Object.hasOwn(key, SOURCES_KEY)) return originalPut(key, value);
+      assert.deepEqual(Object.keys(key).sort(), [SOURCE_ACTIONS_KEY, SOURCES_KEY].sort());
+      const action = key[SOURCE_ACTIONS_KEY].actions.at(-1);
+      assert.equal(action.sourceRevision, key[SOURCES_KEY].revision, 'the action and the draft it is bound to travel together');
+      if (committed) await originalPut(key);
+      throw new Error('synthetic local commit interruption');
+    };
+    const interrupted = await chooseTools(gateway, installed, ['records_search'], { revision: before.sources.revision });
+    gateway.managementStorage.put = originalPut;
+    assert.equal(interrupted.status, 503);
+    gateway.reloadManagement();
+    if (!committed) {
+      assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), before.actions);
+      assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), before.sources);
+      const repeated = await chooseTools(gateway, installed, ['records_search'], { revision: before.sources.revision });
+      assert.equal(repeated.status, 200, await repeated.clone().text());
+    } else {
+      // The repeat carries the revision the client last saw: refused, and nothing is applied twice.
+      const writes = gateway.managementStorage.writes.length;
+      await refused(await chooseTools(gateway, installed, ['records_search'], { revision: before.sources.revision }),
+        409, 'source_action_conflict', 'draft_changed');
+      assert.equal(gateway.managementStorage.writes.length, writes);
+    }
+    const bound = pausedAction(gateway);
+    const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
+    assert.deepEqual([sources.revision, bound.sourceRevision, bound.failureCode],
+      [before.sources.revision + 1, before.sources.revision + 1, 'source_tools_chosen']);
+
+    // The same choice on the bound revision writes nothing; a different one re-binds again while still paused.
+    const writes = gateway.managementStorage.writes.length;
+    const same = await chooseTools(gateway, installed, ['records_search']);
+    assert.equal(same.status, 200);
+    assert.equal((await same.json()).revision, sources.revision);
+    assert.equal(gateway.managementStorage.writes.length, writes);
+    const changed = await chooseTools(gateway, installed, ['records_export']);
+    assert.equal(changed.status, 200);
+    assert.equal((await changed.json()).revision, sources.revision + 1);
+    assert.equal(pausedAction(gateway).sourceRevision, sources.revision + 1);
+
+    // Once a resume has recorded a Portal write, the installation is no longer exactly paused.
+    gateway.provider.hook(({ record }) => record.method === 'PUT' && record.pathname.includes('/mcp/portals/')
+      ? envelope(null, 503) : undefined);
+    assert.equal((await resumeInstallation(gateway, installed)).status, 409);
+    gateway.provider.hook(undefined);
+    assert.equal(pausedAction(gateway).portalUpdate.phase, 'send_armed');
+    await refused(await chooseTools(gateway, installed, ['records_search']), 409, 'source_tools_unavailable');
+    await refused(await gateway.api(installed.toolsPath), 409, 'source_tools_unavailable');
+  }));
+}
+
+test('with nothing chosen the installation stays paused with a fixed reason and the Portal is never written', async () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  const beforePortal = structuredClone(gateway.provider.state.portal);
+  connectSignInSource(gateway, installed.serverId);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const baseline = gateway.provider.requests.length;
+    await refused(await resumeInstallation(gateway, installed), 409, 'source_tools_required');
+    assertNoMutation(gateway.provider, baseline);
+    const action = pausedAction(gateway);
+    assert.deepEqual([action.status, action.failureCode, action.pending, action.portalUpdate, action.resources.length],
+      ['recovery_required', 'source_tools_required', null, null, 3]);
+    assert.deepEqual(gateway.provider.state.portal, beforePortal);
+    const summary = (await (await gateway.api('/api/source-actions')).json()).actions.at(-1);
+    assert.deepEqual([summary.canRenew, summary.failureCode], [true, 'source_tools_required']);
+  }
+  const source = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((candidate) => candidate.id === installed.source.id);
+  assert.deepEqual([source.status, source.enabledTools], ['draft', []]);
+
+  // A Portal that already maps this server with nothing enabled was changed elsewhere: drift, never completion.
+  gateway.provider.state.portal.servers = [...(gateway.provider.state.portal.servers ?? []),
+    { id: installed.serverId, server_id: installed.serverId, default_disabled: true, on_behalf: false, updated_tools: [] }];
+  const baseline = gateway.provider.requests.length;
+  await refused(await resumeInstallation(gateway, installed), 409, 'portal_drift');
+  assertNoMutation(gateway.provider, baseline);
+  const drifted = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((candidate) => candidate.id === installed.source.id);
+  assert.equal(drifted.status, 'draft', 'a source without tools is never recorded as installed');
+  assert.equal(gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership.some((entry) => entry.sourceId === installed.source.id), false);
+}));
+
+for (const typo of [false, true]) {
+  test(`an installation paused with typed names keeps working${typo ? ', and a typed name can be corrected from the real list' : ''}`, async () => signInFixture(async (gateway) => {
+    const typed = typo ? ['records_serch'] : ['records_export', 'records_search'];
+    const draft = await saveSignInDraft(gateway, typed);
+    assert.equal(gateway.managementStorage.snapshot(TEAM_KEY), undefined, 'a draft that names tools arms nothing, as before');
+    const installed = await installSignInSource(gateway, { draft });
+    const creation = gateway.provider.requests.find((request) => request.method === 'POST' &&
+      request.pathname === SERVERS_PATH && request.body.hostname === SIGN_IN_URL);
+    assert.deepEqual(creation.body.updated_tools, typed.map((name) => ({ name, enabled: true })), 'the creation body is the one it always was');
+    connectSignInSource(gateway, installed.serverId);
+    if (typo) {
+      await refused(await resumeInstallation(gateway, installed), 409, 'source_tools_mismatch');
+      assert.equal(portalMapping(gateway, installed.serverId), undefined);
+      const corrected = await chooseTools(gateway, installed, ['records_search']);
+      assert.equal(corrected.status, 200, await corrected.clone().text());
+    }
+    const resumed = await resumeInstallation(gateway, installed);
+    assert.equal(resumed.status, 200, await resumed.clone().text());
+    assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools,
+      (typo ? ['records_search'] : typed).map((name) => ({ name, enabled: true })));
+  }));
+}
+
+test('a public source keeps its flow byte for byte and is refused by the tool choice routes', async () => signInFixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY), undefined, 'saving and preparing a public draft arms nothing');
+  createServersUnconnected(gateway);
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 409);
+  gateway.provider.hook(undefined);
+  const action = pausedAction(gateway);
+  assert.equal(action.failureCode, 'source_connection_required');
+  const creation = gateway.provider.requests.find((request) => request.method === 'POST' && request.pathname === SERVERS_PATH &&
+    request.body.hostname === NEW_SOURCE_URL);
+  assert.deepEqual(creation.body, { id: action.resources[0].key, name: 'Additional source', hostname: NEW_SOURCE_URL,
+    auth_type: 'unauthenticated', secure_web_gateway: false, description: action.resources[0].marker,
+    updated_tools: [{ name: 'company_lookup', enabled: true }] });
+  assert.equal(action.sourceHash, await prefixedSha256({ id: prepared.source.id, label: 'Additional source', url: NEW_SOURCE_URL,
+    authMode: 'none', onBehalfOfUser: false, enabledTools: ['company_lookup'] }));
+  const summary = (await (await gateway.api('/api/source-actions')).json()).actions.at(-1);
+  assert.deepEqual(Object.keys(summary).sort(), ['actionId', 'actorKind', 'canCancel', 'canRenew', 'connectionUrl', 'expiresAt',
+    'failureCode', 'issuedAt', 'schemaVersion', 'sourceId', 'state', 'status'], 'no answer gained a field');
+  const baseline = gateway.provider.requests.length;
+  const path = `/api/source-actions/${action.actionId}/tools`;
+  await refused(await gateway.api(path), 409, 'source_tools_unavailable');
+  await refused(await gateway.api(path, { method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision,
+    sourceId: prepared.source.id, enabledTools: ['company_lookup'] } }), 409, 'source_tools_unavailable');
+  assert.equal(gateway.provider.requests.length, baseline);
+  // Connected and synced, it resumes exactly as it always did.
+  connectSignInSource(gateway, action.resources[0].provider.id, [{ name: 'company_lookup' }], { authentication_status: 'not_required' });
+  const resumed = await gateway.api(`/api/source-actions/${action.actionId}/renew`, { method: 'POST',
+    body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id } });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.deepEqual(portalMapping(gateway, action.resources[0].provider.id).updated_tools, [{ name: 'company_lookup', enabled: true }]);
+}));
+
+test('a choice holds the 500-tool bound and the bound of the source record', async () => signInFixture(async (gateway) => {
+  // Fill the record with drafts until only a small choice still fits under its 1 MiB bound.
+  const filler = (index) => ({ id: `source-${String(index).padStart(16, '0')}`, label: `Filler source ${index}`,
+    url: `https://filler-${index}.example.net/mcp`, authMode: 'none', onBehalfOfUser: false,
+    enabledTools: manyTools(500, `${'f'.repeat(120)}_`).map(({ name }) => name), status: 'draft' });
+  const record = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const size = (value) => Buffer.byteLength(canonicalJson(value));
+  const room = 1024 * 1024 - 20_000; // what stays free: enough for 499 short names, not for 500 long ones
+  let index = 1;
+  for (; size(record) + size(filler(index)) < room; index += 1) record.sources.push(filler(index));
+  const partial = filler(index);
+  while (size(record) + size(partial) >= room) partial.enabledTools.pop();
+  record.sources.push(partial);
+  assert.ok(record.sources.length <= 32 && partial.enabledTools.length > 0);
+  await gateway.managementStorage.put(SOURCES_KEY, { ...record, revision: record.revision + 1 });
+
+  const installed = await installSignInSource(gateway);
+  const long = manyTools(500, `${'t'.repeat(124)}_`);
+  assert.equal(long[0].name.length, 128);
+  connectSignInSource(gateway, installed.serverId, long);
+  const stored = { actions: gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), sources: gateway.managementStorage.snapshot(SOURCES_KEY) };
+  await refused(await chooseTools(gateway, installed, long.map(({ name }) => name)), 413, 'source_capacity_exceeded');
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), stored.actions);
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), stored.sources);
+
+  // A list of five hundred tools is offered whole; what is chosen from it is attached, and only that.
+  const names = manyTools(500).map(({ name }) => name);
+  connectSignInSource(gateway, installed.serverId, manyTools(500));
+  const chosen = await chooseTools(gateway, installed, names.slice(0, 499));
+  assert.equal(chosen.status, 200, await chosen.clone().text());
+  const resumed = await resumeInstallation(gateway, installed);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  const mapping = portalMapping(gateway, installed.serverId);
+  assert.deepEqual(mapping.updated_tools.map(({ name }) => name).sort(), names.slice(0, 499));
+  assert.equal(mapping.updated_tools.some(({ name }) => name === names[499]), false, 'a tool that was not chosen is not enabled');
+}));
+
+test('the dashboard client accepts every answer of the sign-in source flow', async () => signInFixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    const discovered = await dashboard.discoverSource(SIGN_IN_URL);
+    assert.deepEqual([discovered.status, discovered.authentication, discovered.tools], ['authorization_required', 'oauth', []]);
+    const current = await dashboard.getSources();
+    const drafted = await dashboard.saveSourceDraft(current.revision, { label: 'Sign-in source', url: SIGN_IN_URL, authMode: 'oauth', enabledTools: [] });
+    const draft = drafted.sources.find((source) => source.url === SIGN_IN_URL);
+    assert.deepEqual(draft.enabledTools, []);
+    await assert.rejects(dashboard.saveSourceDraft(drafted.revision, { label: 'Public source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: [] }),
+      { status: 400, code: 'source_invalid' });
+
+    createServersUnconnected(gateway);
+    await assert.rejects(dashboard.prepareSourceAction(drafted.revision, draft.id), { status: 409, code: 'source_connection_required' });
+    gateway.provider.hook(undefined);
+    const paused = (await dashboard.getSourceActions()).actions.at(-1);
+    assert.deepEqual([paused.state, paused.failureCode, paused.canRenew], ['recovery_required', 'source_connection_required', true]);
+    assert.ok(paused.connectionUrl);
+    assert.deepEqual((await dashboard.getSources()).sources.find((source) => source.id === draft.id).enabledTools, []);
+    assert.deepEqual((await dashboard.getTeam()).sources.find((source) => source.id === draft.id).enabledTools, []);
+
+    const serverId = pausedAction(gateway).resources[0].provider.id;
+    const server = gateway.provider.state.servers.get(serverId);
+    assert.deepEqual(await dashboard.getSourceActionTools(paused.actionId),
+      { schemaVersion: 1, actionId: paused.actionId, sourceId: draft.id, state: 'connection_required', tools: [] });
+    Object.assign(server, { authentication_status: 'connected', status: 'waiting' });
+    assert.equal((await dashboard.getSourceActionTools(paused.actionId)).state, 'sync_required');
+    connectSignInSource(gateway, serverId, manyTools(501));
+    assert.equal((await dashboard.getSourceActionTools(paused.actionId)).state, 'unsupported');
+    connectSignInSource(gateway, serverId);
+    const offered = await dashboard.getSourceActionTools(paused.actionId);
+    assert.equal(offered.state, 'ready');
+    assert.deepEqual(offered.tools.map((tool) => [tool.name, tool.description, tool.readOnlyHint]), [
+      ['records_delete', 'Delete one synthetic record.', null], ['records_export', null, null],
+      ['records_search', 'Search synthetic records.', true]]);
+
+    // Connected, synced and nothing chosen: the recorded installation waits with its own fixed reason.
+    await assert.rejects(dashboard.prepareSourceAction(drafted.revision, draft.id, paused.actionId), { status: 409, code: 'source_tools_required' });
+    assert.equal((await dashboard.getSourceActions()).actions.at(-1).failureCode, 'source_tools_required');
+
+    await assert.rejects(dashboard.chooseSourceActionTools(paused.actionId, drafted.revision, draft.id, []), { status: 400, code: 'source_tools_invalid' });
+    await assert.rejects(dashboard.chooseSourceActionTools(paused.actionId, drafted.revision, draft.id, ['records_purge']), { status: 409, code: 'source_tools_mismatch' });
+    await assert.rejects(dashboard.chooseSourceActionTools(paused.actionId, drafted.revision + 5, draft.id, ['records_search']),
+      { status: 409, code: 'source_action_conflict', reason: 'draft_changed' });
+    await assert.rejects(dashboard.getSourceActionTools(`action_${'U'.repeat(32)}`), { status: 404, code: 'source_action_not_found' });
+    const chosen = await dashboard.chooseSourceActionTools(paused.actionId, drafted.revision, draft.id, ['records_search', 'records_export', 'records_search']);
+    assert.deepEqual(chosen, { schemaVersion: 1, actionId: paused.actionId, sourceId: draft.id, revision: drafted.revision + 1,
+      enabledTools: ['records_export', 'records_search'] });
+    assert.equal((await dashboard.getSourceActions()).actions.at(-1).failureCode, 'source_tools_chosen');
+
+    const applied = await dashboard.prepareSourceAction(chosen.revision, draft.id, paused.actionId);
+    assert.equal(applied.status, 'succeeded');
+    const installed = (await dashboard.getSources()).sources.find((source) => source.id === draft.id);
+    assert.deepEqual([installed.status, installed.enabledTools], ['installed', ['records_export', 'records_search']]);
+    await assert.rejects(dashboard.getSourceActionTools(paused.actionId), { status: 409, code: 'source_tools_unavailable' });
+  });
+}));

@@ -21,6 +21,8 @@ export interface LiveGatewayProvider {
   capture(provision: LiveGatewayProvision): Promise<LiveGatewayInventory>;
   assertDependenciesAbsent(inventory: LiveGatewayInventory): Promise<void>;
   assertAllAbsent(inventory: LiveGatewayInventory): Promise<void>;
+  /** The one provider write, on the operator's opt-in only: the management token as the recorded Worker's encrypted secret. */
+  installManagementSecret(provision: LiveGatewayProvision, value: string): Promise<void>;
 }
 export function createLiveGatewayProvider(input: {
   readonly config: LiveGatewayProviderConfig; readonly token: string;

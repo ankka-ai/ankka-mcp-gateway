@@ -25,9 +25,10 @@ This check uses HTTP and the cached Access identity; it opens no browser, needs 
 operator token, and creates no journal or cloud resources. It verifies the email
 returned by Cloudflare's same-origin `/cdn-cgi/access/get-identity` endpoint.
 It does not qualify the lifecycle or verify dashboard login. Use `--preflight`
-to additionally validate the signed release pair and read the target provider
-inventory with the operator token. These checks cannot prove that all future
-write permissions or consent steps will succeed.
+to additionally validate the signed release pair, read the target provider
+inventory with the operator token and, when the config opts into the automatic
+management-token step, check that its reference resolves. These checks cannot
+prove that all future write permissions or consent steps will succeed.
 
 After the Stage 1 consent the installer page hops to the new shell as soon as the
 installer's own readiness probe passes, spending the one-time handoff on that
@@ -152,6 +153,12 @@ The private config has these fields:
   `adminEmail`, and an empty `additionalAdminEmails` array.
 - `source`: `url` and `tool` for a synthetic, public HTTPS MCP endpoint with no
   authentication and one read-only tool. The command adds only that tool.
+- Optional `managementToken`: your opt-in to the automatic management-token
+  step described below. It names the token by reference only, in the form
+  `serviceAccess.secret` uses: `{ "keychain": { "service": "…", "account": "…" } }`
+  for a macOS keychain item, or `{ "env": "ANKKA_…" }` for an environment
+  variable. The config never holds the value. Without this field you install
+  the secret in Cloudflare when prompted, as before.
 - Optional `browserProfile`: an absolute, dedicated Chrome profile directory outside
   the checkout, mode `0700`. Its `.ankka-lifecycle-profile` marker contains
   `Dedicated Ankka lifecycle test browser` followed by a newline. Never select your
@@ -161,14 +168,22 @@ The private config has these fields:
 - Optional `browserConnection`: `"chrome"` attaches to already running Chrome
   through its built-in remote debugging setting. This is mutually exclusive with
   `browserProfile`. Enable it explicitly at `chrome://inspect/#remote-debugging`
-  and approve Chrome's connection prompt. The runner waits up to two minutes for this approval. It grants browser-session access, so use
+  and approve Chrome's connection prompt. The runner waits up to two minutes for this approval. An attach Chrome
+  refuses, with remote debugging switched off or the prompt not allowed within
+  that wait, stops the run as `browser_attach_failed`: the stop output adds the
+  remedy (enable remote debugging there and allow the attach), and the journal
+  holds the code only, never the browser's error text. It grants browser-session access, so use
   it only for a trusted local runner. The runner opens and closes only its new test
   tab, preserves existing tabs and the context, and disconnects on exit. Disable
   debugging after the test if you enabled it only for this run. It does not copy
   your profile or export stored cookies. After each approval leave the runner's
   tab alone: the installer page in it consumes the one-time handoff to the new
   shell, and a closed or navigated tab leaves the shell refusing the runner
-  until its window expires. A machine whose first resolver is a caching
+  until its window expires. Turn Chrome's Memory Saver off
+  (`chrome://settings/performance`) for an attended run, or keep the runner's
+  tab active: a tab Chrome discards after minutes in the background is gone for
+  the runner, which replaces it as described below but cannot recover what the
+  discarded tab had in flight. A machine whose first resolver is a caching
   forwarder (Tailscale MagicDNS, for example) can cache the new management
   hostname's absence for the zone's negative TTL; take it out of the path for
   the run. A previous installation's installer session
@@ -176,10 +191,33 @@ The private config has these fields:
   before the run starts; a session still provisioning stops the run.
 
 Provide the already-authorized operator token through `CLOUDFLARE_API_TOKEN`.
-It is used for isolated installer deployment and direct Cloudflare read-back.
-The command never sends it to the installer or gateway. The distinct management
-token is entered directly as the installed gateway's encrypted
-`ANKKA_MANAGEMENT_TOKEN` secret in Cloudflare. The command never receives it.
+It is used for isolated installer deployment and direct Cloudflare read-back,
+and with the opt-in below for one secret write. The command never sends it to
+the installer or gateway.
+
+Without `managementToken` in the config, the distinct management token is
+entered directly as the installed gateway's encrypted `ANKKA_MANAGEMENT_TOKEN`
+secret in Cloudflare, and the command never receives that token. With
+`managementToken`, the command installs the secret itself: once the
+installation has passed it reads the token from your credential store into
+memory and writes it as that secret of the installed Worker through
+Cloudflare's API (`PUT /accounts/{account}/workers/scripts/{worker}/secrets`)
+with the operator token, which needs Workers Scripts Write (Edit in the
+dashboard) on the account for it. The value goes to Cloudflare's API and
+nowhere else: never to the installer, the gateway's routes or the browser, and
+never into command arguments, output, error messages or the journal. The
+journal records `management_token: started` before the write and
+`management_token: installed_by_runner` after it; `--status` shows the outcome
+as `managementToken`. The gateway's own view is read first, and a gateway that
+already reports the credential (a resumed run, or a token you installed by hand
+meanwhile) is recorded as `already_configured` and not written again. A write
+Cloudflare refuses stops the run as `management_token_write_rejected`, and one
+whose answer never arrives as `management_token_write_unknown`; neither is
+retried, and `--resume-installed` continues from the gateway's view. A
+reference that does not resolve stops a fresh run, and `--preflight`, as
+`credential_unavailable` before anything is deployed. Either way the run then
+waits until the gateway itself reports the credential and token-managed mode.
+Removing the gateway does not revoke the token.
 
 The command opens its own Chrome window, temporary unless a dedicated profile is
 configured. Review the real Cloudflare consent pages there. Access login through
@@ -191,7 +229,8 @@ disable browser security or count that check as a successful live lifecycle.
 By default, the command uses a separate test browser. Only the explicit
 `browserConnection` option attaches to your existing Chrome session. Neither
 mode exports cookies or saves browser traces. A configured profile retains login
-sessions locally; protect it and remove it when qualification is finished. When prompted, install and
+sessions locally; protect it and remove it when qualification is finished. When prompted (the
+command prompts only without the `managementToken` opt-in), install and
 activate the management secret directly in Cloudflare. No consent is expected
 for the synthetic source installation or the grant and removal of
 `qualification@example.com`. An OAuth handoff for those operations fails validation.
@@ -201,9 +240,10 @@ above runs over the updated runtime after the update passes and before the
 first removal write, so the journal holds the updated release's service binding
 and the refusals of a gateway that is still whole beside the removal evidence.
 
-After the signed A → B update, the command discards the browser response from a
-successful dependency-removal callback. It verifies that dependencies are absent,
-then uses fresh consent to recover the saved completion. It saves the signed
+After the signed A → B update, the command drops the gateway removal page's
+hop to the installer's receipt page once the gateway has removed the
+dependencies behind that page. It verifies that dependencies are absent, then
+uses fresh consent to recover the saved completion. It saves the signed
 removal receipt privately, clears only its hosted removal-session cookie, imports
 that receipt, and finishes root removal. A passing result requires direct provider
 checks for the captured resources, Worker, namespace, and exact hostnames.
@@ -215,6 +255,60 @@ config and `--recover-removal`. Recovery does not turn an incomplete lifecycle r
 into a passing lifecycle result. Before a receipt exists, use the product's existing
 setup/removal recovery flow and the recorded action references.
 
+The gateway's removal page names `removed` in its own address just before it
+hops to the installer with the receipt. For the runner that word means the
+receipt is on its way: the round keeps waiting for the installer to hold it, and
+only a recovery result ends the wait early. Each settled round also records what
+answered the browser's navigation to the installer's receipt page in that
+round, in fixed fields (HTTP status, `server` label, Cloudflare's mitigation
+label), so an edge refusal can be told from the application's.
+
+In the isolated fixture that hop can be refused by the edge, for a reason the
+product's hop never meets. The gateway's hostname and the installer's hostname
+are in the same zone under one certificate, so a browser that holds a live
+connection to the gateway reuses it for its request to the installer (HTTP/2
+connection reuse across the hostnames a certificate covers), and the edge
+refuses a request whose TLS name differs from its Host: an empty `403` that
+never reaches the installer, for which Chrome commits its own error page, so
+the receipt page never imports the receipt (a run that had only the hop stopped
+as `removal_receipt_unavailable`). A browser that still holds a connection of
+the installer's own uses that one, and the hop succeeds. A customer's gateway never shares a zone with the hosted
+installer, so its hop is not refused this way; an installation on the
+installer's own zone would be. The runner handles the fixture's case in two
+ways, and neither replaces the hop, which every round still exercises:
+
+- Before each removal round's consent it loads the installer in its test tab,
+  which opens a connection of the installer's own unless that load is itself
+  reused onto the gateway's connection and refused. A load that fails never
+  stops the run; the journal records it as `browser: installer_connection`
+  with `loaded` and the answer's fixed fields. It loads the installer's root,
+  never the receipt page, which an armed interception would spend itself on.
+- When a settled round's landing is Chrome's error page, the hop was answered
+  `403`, and the installer holds no receipt after the landing grace, the receipt
+  travels without the browser. The runner reads the gateway's own record of the
+  attempt through the removal page's progress route (the only lifecycle request
+  that carries a query; the attempt comes from the removal page's address, is
+  kept in memory for that one read, and is never journaled or printed), takes
+  the signed receipt from the settled attempt's link to the receipt page, and
+  imports it through the installer's API as that page would have. The round's
+  checkpoint says so before the import is written, with
+  `receiptImport: runner_after_edge_refusal`: the browser's hop was refused by
+  the edge and the receipt travelled by API. When the gateway's record holds no
+  receipt for the attempt, or keeps refusing the read, the checkpoint carries
+  `unavailable_after_edge_refusal` and the next round opens as before. A
+  recovery result, the installer's own page, or a hop that was not refused
+  never takes this path. `--status` and the failure report show the last
+  round's label as `lastReceiptImport`.
+
+A browser can lose an installed Access session cookie while the cached token
+is still valid (observed live: the cookie vanished from an attached Chrome
+minutes after the runner had installed it). The Access edge then redirects the
+runner's request to its login, which means the application never saw it; the
+runner puts the cookie back from the cached token and sends the same request
+once more, for a read and a write alike, and says so in its output. A second
+refusal is handled as before. It never starts a login for the installer's
+session.
+
 Right after an installation the gateway's management Access application is
 minutes old, and some edges still refuse a freshly installed session while its
 policy propagates. For ten minutes after the runner installs that session, such
@@ -222,19 +316,39 @@ a refusal is retried like any other rejected read; a refusal after that window,
 or any refusal of the installer's session, stops the run as
 `access_session_rejected`.
 
-A hosted OAuth callback runs its whole operation inside one response, and a tab
-closed while that response is pending cuts the operation's revoke and
-settlement. On a stop the runner therefore leaves an attached Chrome's tab open
-while a hosted callback is in flight (it tells the operator to close it once the
-page has loaded), and an owned browser waits for the callback to end, at most
-for the hosted attempt's ten-minute window, before it closes.
+A hosted OAuth callback exchanges the consent and answers at once with the
+page that follows the operation; the operation itself runs behind that page in
+the owning Durable Object, by alarm, so a closed tab no longer cuts its revoke
+or settlement. Only the exchange is in flight during the callback. On a stop
+the runner still leaves an attached Chrome's tab open while a callback is in
+flight (it tells the operator to close it once the page has loaded), and an
+owned browser waits for the callback to end before it closes.
+
+A tab the browser discarded after minutes in the background (Chrome's Memory
+Saver) or whose renderer crashed reads to the runner as a closed page: its next
+navigation fails within a second. The runner classifies every failed navigation
+in fixed labels, `closed` (the page or its target is gone), `crashed`, `timeout`
+or `other`, never the browser's error text. For a closed or crashed tab it
+opens a new tab in the same context, whether attached or owned, attaches to it
+everything it attaches to a tab (the held-origin and handoff-hold routes, the
+callback tracking, and the receipt-hop interception while it is armed and not
+yet spent), records `browser: tab_reopened` with the label in the journal,
+and retries the navigation once. A navigation that still fails, or a
+replacement the browser refuses to open, stops the run as `navigation_failed`
+with the label. What the lost tab still had in flight, such as a hosted
+callback the browser cut with it, is not waited for on a stop. In an attached
+Chrome the discarded tab's placeholder stays in the tab strip; leave it alone.
 
 Before the removal phase the runner clears any hosted removal session its
 browser still holds, so an earlier gateway's job is never read as this one's
 receipt. A root removal passes only once the installer's job has settled
 (`complete`): five verified steps whose attempt was cut before its revoke and
 settlement, for example by a browser that gave up on a long callback, are
-recorded as not verified and finish on the next authorization.
+recorded as not verified and finish on the next authorization. The hosted job
+counts every provider and journal call of an attempt against a fixed budget
+and stops before the platform's cap with the reason word `budget_exhausted`,
+its grant revoked and its pending step armed; the runner records that stop and
+authorizes again, up to six consents, each resuming from the verified steps.
 
 The gateway settles each consent attempt before the browser has followed the
 callback's redirect, so a dependency-removal action reads `recovery_required`
@@ -243,8 +357,41 @@ names its reason. A round therefore ends only once the tab has landed: the
 runner waits up to a minute for the installer to hold the receipt or for that
 page to show its `result` and `reason`, records the landing in the journal in
 fixed labels (site, page, result word, reason word; never the fragment or any
-other query value), and only then opens the next round. `--status` and the
-failure report summarize the rounds and the last landing.
+other query value; Chrome's own error page, which it commits for an empty error
+response, reads `page: error`), and only then opens the next round. `--status`
+and the failure report summarize the rounds and the last landing.
+
+Once the interrupted round is observed, the runner replaces its test tab before
+the first recovery round. The gateway settles the cut action moments before the
+lost callback's answer reaches the browser, where the interception spends itself
+on that answer; the runner therefore waits up to a minute for the browser's
+observation (stopping as `interruption_not_observed` otherwise, since a tab
+replaced earlier would carry the armed interception into recovery), then opens
+a new tab in the same context, attached like any other except for the spent
+interception route, and closes the previous one, only ever its own tab. The
+recovery rounds then run in a tab that never carried the interception, as they
+do in a fresh `--resume-installed` process. The replacement was introduced when
+the empty `403` that the receipt hop met in every recovery round was attributed
+to the tab that had carried the interception. That attribution was wrong: the
+refusal is the edge's answer to the reused connection described above, and a
+fresh process escaped it only because it had loaded the installer moments
+earlier and still held a connection of the installer's own. The replacement is
+harmless and stays, so that a spent interception never rides into the recovery
+rounds; it is not the remedy for that refusal. It is recorded as
+`browser: tab_replaced` with the fixed reason `interruption_spent`; like a
+reopen it is the runner's event, never the last stage, and `tabsReopened` does
+not count it.
+
+The gateway settles each consent attempt by alarm behind its removal page,
+which then records the result word in its own address: `removed` before it hops
+to the installer with the signed receipt, or `recovery_required` with the
+reason word. A round therefore ends only once the tab has landed: the runner
+waits up to a minute for the installer to hold the receipt or for that page to
+show its `result` and `reason`, records the landing in the journal in fixed
+labels (site, page, result word, reason word; never the fragment, the attempt
+the page follows, or any other query value), and only then opens the next
+round. `--status` and the failure report summarize the rounds and the last
+landing.
 
 A receipt the gateway hands over with its unconfirmed-revocation warning is
 saved with that warning recorded; the root removal still runs and is verified,
@@ -270,6 +417,9 @@ distinct: `root_removal_failed` when the job reports a reason word,
 `root_removal_revocation_unconfirmed` when all five steps finished under an
 unconfirmed grant revocation (independent absence is still checked first, and
 the run is not a pass), and `root_removal_not_verified` for anything else.
+A `navigation_failed` stop carries why under `navigation` (`closed`, `crashed`,
+`timeout` or `other`), and `tabsReopened` counts the test tabs the runner
+replaced, in the report and in `--status`.
 When a shell was recorded and the operator credential can query Workers
 analytics, it includes numeric request/error counts and CPU/memory quantiles
 from the preceding 30 minutes. Missing permissions, unavailable metrics, or a

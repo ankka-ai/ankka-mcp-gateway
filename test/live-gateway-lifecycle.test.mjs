@@ -25,6 +25,24 @@ test('live config refuses production hosts, overlapping targets and identical re
   ]) assert.throws(() => validateLiveLifecycleConfig({ ...config, ...changed }));
 });
 
+test('the management token enters the live config by reference only, in the form the service secret already uses', () => {
+  const keychain = { keychain: { service: 'ankka-lifecycle-runner', account: 'management-token' } };
+  for (const managementToken of [keychain, { env: 'ANKKA_MANAGEMENT_TOKEN_VALUE' }]) {
+    assert.deepEqual(validateLiveLifecycleConfig({ ...config, managementToken }), { ...config, managementToken });
+  }
+  // Without the field the config is what it always was.
+  assert.equal(Object.hasOwn(validateLiveLifecycleConfig(config), 'managementToken'), false);
+  for (const managementToken of [
+    'literal-token-value-is-never-allowed-0123456789', null, {}, [], true,
+    { keychain: { service: 'ankka-lifecycle-runner' } }, { keychain: { account: 'management-token' } },
+    { keychain: { service: 'a name with spaces', account: 'management-token' } }, { keychain: { service: 'ankka', account: '' } },
+    { keychain: { ...keychain.keychain, value: 'literal-token-value-is-never-allowed-0123456789' } },
+    { ...keychain, value: 'literal-token-value-is-never-allowed-0123456789' }, { ...keychain, env: 'ANKKA_MANAGEMENT_TOKEN_VALUE' },
+    // Only the runner's own variables are named, never another tool's credential.
+    { env: 'CLOUDFLARE_API_TOKEN' }, { env: 'ankka_lowercase' }, { env: '' }, { file: '/private/token' },
+  ]) assert.throws(() => validateLiveLifecycleConfig({ ...config, managementToken }), { code: 'live_config_invalid' });
+});
+
 test('an uncertain bootstrap mutation is checkpointed once and never retried', async () => {
   const checkpoints = [], writes = [];
   const browser = {
@@ -57,6 +75,36 @@ test('a failed final removal records the hosted job\'s reason word and steps don
     { stage: 'root_removal', status: 'failed', stepsDone: 1, stepCount: 5, failureReason: 'worker_bindings_provider_unknown', canAuthorize: true, complete: false, revocationUnconfirmed: true }]);
   // A reason word outside the fixed vocabulary is not copied into the journal.
   assert.equal(rootRemovalOutcome({ failureReason: 'Internal error: token abc' }).failureReason, null);
+});
+
+test('an attempt the hosted job stopped at its call budget is authorized again, up to a bounded number of consents', async () => {
+  const { ROOT_REMOVAL_MAX_CONSENTS } = await import('../tools/live-gateway-lifecycle.mjs');
+  assert.ok(ROOT_REMOVAL_MAX_CONSENTS >= 2);
+  const steps = (done) => Array.from({ length: 5 }, (_, index) => ({ done: index < done }));
+  const paused = (done) => ({ canAuthorize: true, complete: false, steps: steps(done), failureReason: 'budget_exhausted', revocationUnconfirmed: false, csrfToken: 'synthetic' });
+  const removed = { canAuthorize: false, complete: true, steps: steps(5), failureReason: null, revocationUnconfirmed: false, csrfToken: 'synthetic' };
+  const checkpoints = [], authorizations = [];
+  let consents = 0, view = paused(0);
+  await finishLiveGatewayRemoval({
+    browser: { consent: async () => { consents += 1; view = consents === 1 ? paused(2) : consents === 2 ? paused(4) : removed; return view; } },
+    installer: async (path, options) => { if (path === '/api/teardown/authorize') { authorizations.push(options.csrfToken); return { authorizationUrl: 'synthetic-consent' }; } return view; },
+    provider: { assertAllAbsent: async () => {} }, inventory: { synthetic: true },
+    checkpoint: async (event) => checkpoints.push(event),
+  });
+  assert.equal(consents, 3);
+  assert.deepEqual(authorizations, ['synthetic', 'synthetic', 'synthetic']);
+  assert.deepEqual(checkpoints.map((event) => `${event.status}:${event.stepsDone ?? ''}`),
+    ['started:', 'budget_exhausted:2', 'started:', 'budget_exhausted:4', 'started:', 'passed:']);
+  // A job that keeps stopping at its budget is still a failed removal once the consents are spent.
+  const endless = [];
+  await assert.rejects(finishLiveGatewayRemoval({
+    browser: { consent: async () => paused(1) },
+    installer: async (path) => path === '/api/teardown/authorize' ? { authorizationUrl: 'synthetic-consent' } : paused(1),
+    provider: { assertAllAbsent: async () => assert.fail('absence must not be read') },
+    checkpoint: async (event) => endless.push(event.status),
+  }), { code: 'root_removal_failed' });
+  assert.equal(endless.filter((status) => status === 'started').length, ROOT_REMOVAL_MAX_CONSENTS);
+  assert.equal(endless.at(-1), 'failed');
 });
 
 test('five finished steps under an unconfirmed revocation are verified absent and still stopped as such, never passed', async () => {
@@ -150,8 +198,10 @@ test('complete orchestration proves token management, distinct update, lost call
       throw new Error('unexpected_request');
     },
     continueHandoff: async (_url, kind) => { if (kind === 'update') current = runtimeIdentity(config.releaseB); else interrupted = true; },
-    loseNextTeardownCallbackResponse: async () => evidence.push('interruption_armed'),
+    openInstallerConnection: async () => evidence.push('installer_connection_opened'),
+    loseNextTeardownReceiptHop: async () => evidence.push('interruption_armed'),
     interruptionObserved: () => interrupted,
+    replaceTab: async (reason) => evidence.push(`tab_replaced:${reason}`),
     clearRemovalSession: async () => evidence.push('removal_cookie_cleared'),
   };
   await qualifyLiveGatewayLifecycle({ config, browser, notify: () => {}, resolves: async () => true,
@@ -162,7 +212,9 @@ test('complete orchestration proves token management, distinct update, lost call
     provider: { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true, capture: async () => ({ synthetic: true }),
       assertDependenciesAbsent: async () => evidence.push('dependencies_absent'), assertAllAbsent: async () => evidence.push('all_absent') },
   });
-  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'dependencies_absent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
+  // The installer's own connection is opened ahead of the removal round, and the test tab is replaced once the
+  // interrupted round is observed, before the recovery rounds.
+  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'installer_connection_opened', 'dependencies_absent', 'tab_replaced:interruption_spent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
   assert.equal(events.find((event) => event.status === 'receipt_saved').revocationUnconfirmed, false);
@@ -249,9 +301,82 @@ test('the continuation waits for the team and sources views before the managemen
       throw new Error('stop_here');
     },
   };
-  await assert.rejects(continueLiveGatewayLifecycle({ config, browser, provider: {}, provision, publishB: async () => {}, checkpoint: async () => {}, notify: () => {} }), /stop_here/u);
+  const notices = [], events = [];
+  await assert.rejects(continueLiveGatewayLifecycle({ config, browser, provider: {}, provision, publishB: async () => {}, checkpoint: async (event) => events.push(event), notify: (notice) => notices.push(notice) }), /stop_here/u);
   assert.deepEqual(reads.slice(0, 4), ['/api/team', '/api/team', '/api/sources', '/api/sources']);
   assert.equal(reads.at(-1), '/api/sources/discover');
+  // Without the opt-in the operator is told to install the token in Cloudflare, exactly as before, and nothing is journaled for it.
+  assert.deepEqual(notices, ['Install the approved management token directly as the gateway secret in Cloudflare. This command never receives that token.']);
+  assert.equal(events.some((event) => event.stage === 'management_token'), false);
+});
+
+test('with the opt-in the runner writes the management secret once, behind a checkpoint, and still waits for the gateway to report it; the value reaches no event, notice or error', async () => {
+  const { continueLiveGatewayLifecycle } = await import('../tools/live-gateway-lifecycle.mjs');
+  const { managementTokenStep } = await import('../tools/live-gateway-command.mjs');
+  const { createLiveGatewayProvider } = await import('../tools/live-gateway-provider.mjs');
+  const installId = `acg-${'5'.repeat(24)}`;
+  const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.synthetic.workers.dev` };
+  const value = 'synthetic-management-token-value-0123456789';
+  const reference = { keychain: { service: 'ankka-lifecycle-runner', account: 'management-token' } };
+  const optedIn = { ...config, managementToken: reference };
+  // No opt-in, no step: the command hands the lifecycle nothing, and neither the store nor the provider is touched.
+  assert.equal(managementTokenStep({ config, provider: { installManagementSecret: async () => assert.fail('no write without the opt-in') }, credential: async () => assert.fail('no read without the opt-in') }), null);
+  const written = (status) => status === 'written' ? Response.json({ success: true }) : status === 'refused' ? new Response(`denied for ${value}`, { status: 403 }) : null;
+  for (const scenario of [
+    { configuredBefore: false, write: 'written', statuses: ['started', 'installed_by_runner'], writes: 1, ends: /stop_here/u },
+    // A gateway that already reports the credential (a resumed run, or a token installed by hand meanwhile) is left alone.
+    { configuredBefore: true, write: 'written', statuses: ['already_configured'], writes: 0, ends: /stop_here/u },
+    // A refused or unanswered write stops the run behind its checkpoint and is never sent again.
+    { configuredBefore: false, write: 'refused', statuses: ['started'], writes: 1, ends: { code: 'management_token_write_rejected', status: 403 } },
+    { configuredBefore: false, write: 'lost', statuses: ['started'], writes: 1, ends: { code: 'management_token_write_unknown' } },
+  ]) {
+    const order = [], notices = [], events = [], credentialReads = [], sent = [];
+    let configured = scenario.configuredBefore, teamReads = 0;
+    const provider = createLiveGatewayProvider({ config: optedIn, token: 'synthetic-operator-token', sleep: async () => assert.fail('a write is never retried'),
+      transport: async (url, options) => {
+        sent.push({ url, method: options.method, body: JSON.parse(options.body) }); order.push('secret_write');
+        if (scenario.write === 'lost') throw new Error(`socket hang up while sending ${value}`);
+        return written(scenario.write);
+      } });
+    const installManagementToken = managementTokenStep({ config: optedIn, provider, credential: async (asked) => { credentialReads.push(asked); return value; } });
+    const browser = {
+      waitFor: async (read, accepts) => { for (;;) { const result = await read(); if (accepts(result)) return result; } },
+      request: async (origin, path) => {
+        assert.equal(origin, config.managementOrigin);
+        order.push(path);
+        if (path === '/api/team') {
+          teamReads += 1;
+          // The secret reaches the edge gradually: the gateway reports it two reads after the write.
+          if (sent.length === 1 && scenario.write === 'written' && teamReads >= 3) configured = true;
+          return { schemaVersion: 1, managementCredentialConfigured: configured, editingEnabled: configured, revision: 0, members: [] };
+        }
+        throw new Error('stop_here');
+      },
+    };
+    let failure = null;
+    await assert.rejects(continueLiveGatewayLifecycle({ config: optedIn, browser, provider, provision, publishB: async () => {}, installManagementToken,
+      checkpoint: async (event) => { events.push(event); order.push(`${event.stage}:${event.status}`); }, notify: (notice) => notices.push(notice) }),
+    (error) => { failure = error; return true; });
+    if (scenario.ends instanceof RegExp) assert.match(failure.message, scenario.ends);
+    else for (const [key, expected] of Object.entries(scenario.ends)) assert.equal(failure[key], expected);
+    assert.deepEqual(events.filter((event) => event.stage === 'management_token'), scenario.statuses.map((status) => ({ stage: 'management_token', status })));
+    assert.equal(sent.length, scenario.writes);
+    assert.deepEqual(credentialReads, scenario.writes === 1 ? [reference] : []);
+    if (scenario.writes === 1) {
+      assert.deepEqual(sent[0], { url: `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/workers/scripts/${provision.workerName}/secrets`,
+        method: 'PUT', body: { name: 'ANKKA_MANAGEMENT_TOKEN', text: value, type: 'secret_text' } });
+      // The gateway's view is read first, the checkpoint precedes the write, and nothing else comes between them.
+      assert.deepEqual(order.slice(0, 3), ['/api/team', 'management_token:started', 'secret_write']);
+    }
+    if (scenario.write === 'written') {
+      // The wait for the gateway's own report still follows, and only then the sources view and the exercise.
+      const after = order.slice(order.indexOf(scenario.writes === 1 ? 'management_token:installed_by_runner' : 'management_token:already_configured') + 1);
+      assert.deepEqual(after, scenario.writes === 1 ? ['/api/team', '/api/team', '/api/sources'] : ['/api/team', '/api/sources']);
+    } else assert.equal(order.at(-1), 'secret_write');
+    // The operator is never told to install the token by hand, and the value is nowhere but the request body.
+    assert.equal(notices.some((notice) => notice.startsWith('Install the approved management token')), false);
+    for (const text of [JSON.stringify(events), JSON.stringify(notices), String(failure), failure.stack, JSON.stringify(failure)]) assert.equal(text.includes('synthetic-management'), false);
+  }
 });
 
 test('the finishing half publishes release B before it waits for the gateway to offer it', async () => {
@@ -272,7 +397,7 @@ test('the removal half starts with the interrupted sequence, or with the root re
     const calls = [];
     const browser = {
       clearRemovalSession: async () => { calls.push('clear'); },
-      loseNextTeardownCallbackResponse: async () => { calls.push('arm'); },
+      loseNextTeardownReceiptHop: async () => { calls.push('arm'); },
       request: async (_origin, path) => { calls.push(path); throw new Error('stop_here'); },
     };
     await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => { calls.push(`${event.stage}:${event.status}`); }, phase }), /stop_here/u);
@@ -280,6 +405,52 @@ test('the removal half starts with the interrupted sequence, or with the root re
     assert.deepEqual(calls, phase === 'interrupted'
       ? ['clear', 'interrupted_removal:started', 'arm', 'dependency_removal:started', '/api/teardown-actions']
       : ['clear', '/api/teardown']);
+  }
+});
+
+test('the test tab is replaced exactly once, after the browser has observed the interrupted round and before the first recovery round, never in the root phase', async () => {
+  const { removeLiveGateway, INTERRUPTION_OBSERVATION_SECONDS } = await import('../tools/live-gateway-lifecycle.mjs');
+  const { LiveGatewayBrowserError } = await import('../tools/live-gateway-origin.mjs');
+  assert.ok(INTERRUPTION_OBSERVATION_SECONDS >= 30);
+  const actionId = `action_${'A'.repeat(32)}`;
+  // Every round opens the installer's own connection once its action is recorded, right before the consent.
+  const round = ['dependency_removal:started', 'dependency_removal:recorded', 'installer_connection', 'consent'];
+  const settled = 'dependency_removal:recovery_required';
+  // The browser observes the lost callback before the gateway's settle is read, moments after it, or never.
+  for (const [phase, observedAfter, expected] of [
+    ['interrupted', 0, ['clear', 'interrupted_removal:started', 'arm', ...round, 'observed:true', 'interrupted_removal:recovery_required',
+      'observed:true', 'replace:interruption_spent', ...round, settled, 'dependency_removal:started']],
+    ['interrupted', 2, ['clear', 'interrupted_removal:started', 'arm', ...round, 'observed:false', 'interrupted_removal:recovery_required',
+      'observed:false', 'observed:true', 'replace:interruption_spent', ...round, settled, 'dependency_removal:started']],
+    ['interrupted', null, ['clear', 'interrupted_removal:started', 'arm', ...round, 'observed:false', 'interrupted_removal:recovery_required',
+      'observed:false', 'observed:false', 'observed:false', 'observed:false']],
+    ['root', null, ['clear', ...round, settled, ...round, settled, 'dependency_removal:started']],
+  ]) {
+    const calls = []; let reads = 0, posts = 0;
+    const browser = {
+      clearRemovalSession: async () => { calls.push('clear'); },
+      loseNextTeardownReceiptHop: async () => { calls.push('arm'); },
+      openInstallerConnection: async () => { calls.push('installer_connection'); },
+      continueHandoff: async () => { calls.push('consent'); },
+      interruptionObserved: () => { reads += 1; const observed = observedAfter !== null && reads > observedAfter; calls.push(`observed:${observed}`); return observed; },
+      replaceTab: async (reason) => { calls.push(`replace:${reason}`); },
+      landing: () => ({ site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' }),
+      waitFor: async (read, accepts, { seconds } = {}) => {
+        for (let attempt = 0; attempt < (seconds === undefined ? 1 : 4); attempt += 1) { const value = await read(); if (accepts(value)) return value; }
+        throw new LiveGatewayBrowserError('interactive_step_timed_out');
+      },
+      request: async (origin, path, options = {}) => {
+        if (origin === config.installerOrigin && path === '/api/teardown') return { canAuthorize: false };
+        if (path === '/api/teardown-actions' && options.method === 'POST') { posts += 1; if (posts > 2) throw new Error('stop_at_third_round'); return { actionId, handoffUrl: 'synthetic' }; }
+        if (path === `/api/teardown-actions/${actionId}`) return { status: 'recovery_required', failureCode: 'fresh_authorization_required' };
+        throw new Error('unexpected_request');
+      },
+    };
+    const run = removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => { calls.push(`${event.stage}:${event.status}`); }, phase });
+    // An interruption the browser never observes cannot be left armed on a new tab: the run stops instead.
+    await assert.rejects(run, phase === 'interrupted' && observedAfter === null ? { code: 'interruption_not_observed' } : /stop_at_third_round/u);
+    assert.deepEqual(calls, expected);
+    assert.equal(calls.filter((call) => call.startsWith('replace:')).length, phase === 'interrupted' && observedAfter !== null ? 1 : 0);
   }
 });
 
@@ -382,6 +553,7 @@ test('a settled round ends only once the tab has landed: a receipt arriving duri
   const receiptPage = { site: 'installer', page: 'receipt', result: null, reason: null };
   const recoveryPage = { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' };
   const deniedPage = { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'denied' };
+  const removedPage = { site: 'gateway', page: 'removal', result: 'removed', reason: null };
   const cases = [
     // The action settles first; the installer holds the receipt two polls later. No second round is opened.
     { status: 'recovery_required', landings: [callback, receiptPage, receiptPage], receiptAfterPoll: 2, ends: /stop_at_import/u, landing: receiptPage, rounds: 1 },
@@ -389,13 +561,16 @@ test('a settled round ends only once the tab has landed: a receipt arriving duri
     { status: 'recovery_required', landings: [callback, recoveryPage], receiptAfterPoll: null, ends: /stop_at_next_round/u, landing: recoveryPage, rounds: 2 },
     // The grace runs out while the tab sits on the installer page without a receipt: that landing is recorded as is.
     { status: 'recovery_required', landings: [callback, receiptPage, receiptPage, receiptPage, receiptPage], receiptAfterPoll: null, ends: /stop_at_next_round/u, landing: receiptPage, rounds: 2 },
+    // The removal page names `removed` just before it hops to the installer: the receipt is on its way, so the round
+    // keeps waiting and takes it; opening the next consent on that word would cut the hop.
+    { status: 'recovery_required', landings: [removedPage, removedPage, receiptPage], receiptAfterPoll: 2, ends: /stop_at_import/u, landing: receiptPage, rounds: 1 },
     // A failed action still records its landing before the run stops.
     { status: 'failed', landings: [deniedPage], receiptAfterPoll: null, ends: { code: 'dependency_removal_failed' }, landing: deniedPage, rounds: 1 },
   ];
   for (const scenario of cases) {
     const events = []; let polls = 0, posts = 0, held = null, landings = 0;
     const browser = {
-      clearRemovalSession: async () => {}, continueHandoff: async () => {},
+      clearRemovalSession: async () => {}, continueHandoff: async () => {}, openInstallerConnection: async () => {},
       landing: () => scenario.landings[Math.min(landings++, scenario.landings.length - 1)],
       waitFor: async (read, accepts, { seconds } = {}) => {
         for (let attempt = 0; attempt < (seconds === undefined ? 1 : 4); attempt += 1) {
@@ -416,8 +591,87 @@ test('a settled round ends only once the tab has landed: a receipt arriving duri
     };
     await assert.rejects(removeLiveGateway({ config, browser, provider: {}, inventory: {}, checkpoint: async (event) => events.push(event), phase: 'root' }), scenario.ends);
     const settled = events.find((event) => event.stage === 'dependency_removal' && event.status === scenario.status);
-    assert.deepEqual(settled, { stage: 'dependency_removal', status: scenario.status, actionId, failureCode: 'fresh_authorization_required', landing: scenario.landing });
+    assert.deepEqual(settled, { stage: 'dependency_removal', status: scenario.status, actionId, failureCode: 'fresh_authorization_required', landing: scenario.landing, receiptHop: null });
     assert.equal(posts, scenario.rounds);
     assert.equal(events.some((event) => event.status === 'receipt_saved'), scenario.receiptAfterPoll !== null);
+  }
+});
+
+test('a receipt travels by API only after the edge\'s refusal of the hop was observed: Chrome\'s error page, a 403 on the hop, and no receipt after the grace; the round says so before the import', async () => {
+  const { removeLiveGateway, RECORDED_RECEIPT_SECONDS } = await import('../tools/live-gateway-lifecycle.mjs');
+  const { LiveGatewayBrowserError } = await import('../tools/live-gateway-origin.mjs');
+  assert.ok(RECORDED_RECEIPT_SECONDS >= 10);
+  const actionId = `action_${'A'.repeat(32)}`;
+  const errorPage = { site: 'other', page: 'error', result: null, reason: null };
+  const recoveryPage = { site: 'gateway', page: 'removal', result: 'recovery_required', reason: 'removal' };
+  const receiptPage = { site: 'installer', page: 'receipt', result: null, reason: null };
+  const refusal = { status: 403, server: 'cloudflare', mitigated: null };
+  const rejected = () => { throw new LiveGatewayBrowserError('gateway_http_rejected', 404); };
+  const cases = [
+    // The refusal was observed and the gateway recorded the receipt: it is imported by API and the run goes on to the root removal.
+    { status: 'recovery_required', landing: errorPage, hop: refusal, recorded: () => 'signed-receipt', reads: 1, label: 'runner_after_edge_refusal', imports: 2, ends: /stop_at_root_consent/u },
+    { status: 'succeeded', landing: errorPage, hop: refusal, recorded: () => 'signed-receipt', reads: 1, label: 'runner_after_edge_refusal', imports: 2, ends: /stop_at_root_consent/u },
+    // A recovery result, the installer's own page, or a hop that was not refused: the browser's path is the only one.
+    { status: 'recovery_required', landing: recoveryPage, hop: refusal, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: receiptPage, hop: refusal, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: { status: 200, server: 'cloudflare', mitigated: null }, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: { status: 503, server: 'cloudflare', mitigated: null }, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: { status: null, server: null, mitigated: null }, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: null, reads: 0, imports: 0, ends: /stop_at_next_round/u },
+    // A receipt the page still imported during the grace is taken from the installer as always.
+    { status: 'recovery_required', landing: errorPage, hop: refusal, heldDuringGrace: true, reads: 0, imports: 1, ends: /stop_at_root_consent/u },
+    // A failed action has no receipt to recover.
+    { status: 'failed', landing: errorPage, hop: refusal, reads: 0, imports: 0, ends: { code: 'dependency_removal_failed' } },
+    // The gateway holds no receipt for the attempt, or its record keeps being refused: the round says so and the next one opens.
+    { status: 'recovery_required', landing: errorPage, hop: refusal, recorded: () => null, reads: 1, label: 'unavailable_after_edge_refusal', imports: 0, ends: /stop_at_next_round/u },
+    { status: 'recovery_required', landing: errorPage, hop: refusal, recorded: rejected, reads: 4, label: 'unavailable_after_edge_refusal', imports: 0, ends: /stop_at_next_round/u },
+    // Any other failure of that read stops the run like every other read.
+    { status: 'recovery_required', landing: errorPage, hop: refusal, recorded: () => { throw new Error('unexpected_read_failure'); }, reads: 1, imports: 0, ends: /unexpected_read_failure/u, unsettled: true },
+  ];
+  for (const scenario of cases) {
+    const order = [], imports = []; let held = null, posts = 0, reads = 0, polls = 0;
+    const browser = {
+      clearRemovalSession: async () => {}, continueHandoff: async () => {}, openInstallerConnection: async () => {},
+      landing: () => scenario.landing, receiptHop: () => scenario.hop,
+      recordedReceipt: async () => { reads += 1; return scenario.recorded(); },
+      // Like the runner's own wait: a rejected read is retried until the deadline, anything else is thrown.
+      waitFor: async (read, accepts, { seconds } = {}) => {
+        for (let attempt = 0; attempt < (seconds === undefined ? 1 : 4); attempt += 1) {
+          try { const value = await read(); if (accepts(value)) return value; }
+          catch (error) { if (error.code !== 'gateway_http_rejected') throw error; }
+          polls += 1;
+          if (scenario.heldDuringGrace === true && polls === 2) held = { canAuthorize: true, hostname: config.basics.managementHostname, handoff: 'page-imported-receipt', revocationUnconfirmed: false };
+        }
+        throw new LiveGatewayBrowserError('interactive_step_timed_out');
+      },
+      request: async (origin, path, options = {}) => {
+        if (origin === config.installerOrigin && path === '/api/teardown') return held ?? { canAuthorize: false };
+        if (path === '/api/teardown/import') {
+          order.push('import'); imports.push(options.body.handoff);
+          held = { canAuthorize: true, hostname: config.basics.managementHostname, handoff: options.body.handoff, revocationUnconfirmed: false };
+          return { imported: true };
+        }
+        if (path === '/api/teardown/authorize') throw new Error('stop_at_root_consent');
+        if (path === '/api/teardown-actions' && options.method === 'POST') { posts += 1; if (posts > 1) throw new Error('stop_at_next_round'); return { actionId, handoffUrl: 'synthetic' }; }
+        if (path === `/api/teardown-actions/${actionId}`) return { status: scenario.status, failureCode: 'fresh_authorization_required' };
+        throw new Error('unexpected_request');
+      },
+    };
+    const events = [];
+    const provider = { assertDependenciesAbsent: async () => {} };
+    await assert.rejects(removeLiveGateway({ config, browser, provider, inventory: {}, phase: 'root',
+      checkpoint: async (event) => { events.push(event); order.push(`${event.stage}:${event.status}`); } }), scenario.ends);
+    assert.equal(reads, scenario.reads);
+    const settled = events.find((event) => event.stage === 'dependency_removal' && event.status === scenario.status);
+    const expected = { stage: 'dependency_removal', status: scenario.status, actionId, failureCode: 'fresh_authorization_required', landing: scenario.landing, receiptHop: scenario.hop };
+    if (scenario.label !== undefined) expected.receiptImport = scenario.label;
+    assert.deepEqual(settled, scenario.unsettled === true ? undefined : expected);
+    assert.equal(imports.length, scenario.imports);
+    if (scenario.label === 'runner_after_edge_refusal') {
+      // The round's checkpoint precedes the import, and the receipt is then saved and imported as always.
+      assert.deepEqual(imports, ['signed-receipt', 'signed-receipt']);
+      assert.deepEqual(order.slice(2), [`dependency_removal:${scenario.status}`, 'import', 'root_removal:receipt_saved', 'import', 'root_removal:started']);
+      assert.deepEqual(events.find((event) => event.status === 'receipt_saved'), { stage: 'root_removal', status: 'receipt_saved', handoff: 'signed-receipt', revocationUnconfirmed: false });
+    }
   }
 });

@@ -2,7 +2,7 @@ import { expect } from 'vitest';
 import type { BoundaryObject } from '../src/boundary';
 import { authorizeGatewayTeardownJob, consumeGatewayTeardownCallback, settleGatewayTeardownAttempt,
   type GatewayTeardownJob, type GatewayRootRemovalStep } from '../src/gateway-teardown-job';
-import { executeGatewayRootRemoval } from '../src/gateway-teardown-provider';
+import { executeGatewayRootRemoval, type GatewayRootRemovalAttemptMemory, type GatewayTeardownCallBudget } from '../src/gateway-teardown-provider';
 import type { FetchTransport } from '../src/oauth';
 import { gatewayTeardownFixture, ROOT_TEST } from './gateway-teardown-fixture';
 
@@ -44,6 +44,11 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
   let settingsFlaky = 0;
   let flakyReads = 0;
   let foreignVersionBinding = false;
+  /** Every provider read's path, so a test can count what an attempt looked at. */
+  const reads: string[] = [];
+  /** Other scripts in the account, with the listing's modification time and what they bind. */
+  const foreignScripts: { id: string; modifiedOn: string | undefined; binding: 'none' | 'namespace' | 'service' }[] = [];
+  let ownerCreatedOn: string | undefined;
   const ok = <Value>(result: Value): Response => Response.json({ success: true, errors: [], messages: [], result });
   const absent = (): Response => Response.json({ success: false }, { status: 404 });
   const failure = (): Response => Response.json({ success: false, errors: [{ message: TOKEN }] }, { status: 503 });
@@ -68,6 +73,7 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
     const base = `/client/v4/accounts/${root.accountId}`;
     const app = `/client/v4/zones/${root.zoneId}/access/apps/${root.applicationId}`;
     if (request.method === 'GET') {
+      reads.push(path);
       if (flakyReads > 0) { flakyReads -= 1; return failure(); }
       if (path === `${base}/workers/workers/${root.workerName}` || path === `${base}/workers/workers/${root.workerId}`) {
         return live.worker ? ok({ id: root.workerId, name: root.workerName, tail_consumers: [] }) : absent();
@@ -78,13 +84,24 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
         return ok([...(found ? [{ id: root.namespaceId, script: root.workerName, class: 'AdminState', use_sqlite: true }] : []),
           ...(additionalNamespace ? [{ id: 'e'.repeat(32), script: root.workerName, class: 'ForeignState', use_sqlite: true }] : [])]);
       }
-      if (path === `${base}/workers/scripts`) return ok([...(live.worker ? [{ id: root.workerName }] : []), ...((sharedNamespace || sharedService) ? [{ id: 'foreign-worker' }] : [])]);
+      if (path === `${base}/workers/scripts`) {
+        // JSON drops an undefined timestamp, which is how the listing omits one.
+        return ok([...(live.worker ? [{ id: root.workerName, created_on: ownerCreatedOn, modified_on: ownerCreatedOn }] : []),
+          ...((sharedNamespace || sharedService) ? [{ id: 'foreign-worker' }] : []),
+          ...foreignScripts.map((script) => ({ id: script.id, modified_on: script.modifiedOn }))]);
+      }
       if (path === `${base}/workers/scripts/${root.workerName}/settings`) {
         // The owner Worker's settings endpoint can 5xx transiently right after its retirement upload.
         if (live.retired && settingsFlaky > 0) { settingsFlaky -= 1; return failure(); }
         return ok({ bindings: live.retired ? [] : [{ type: 'durable_object_namespace', name: 'ADMIN_STATE', class_name: 'AdminState', namespace_id: root.namespaceId }] });
       }
       if (path === `${base}/workers/scripts/foreign-worker/settings`) return ok({ bindings: sharedService ? [{ type: 'service', name: 'FOREIGN', service: root.workerName }] : [{ type: 'durable_object_namespace', name: 'FOREIGN', namespace_id: root.namespaceId }] });
+      const foreign = foreignScripts.find((script) => path === `${base}/workers/scripts/${script.id}/settings`);
+      if (foreign !== undefined) {
+        return ok({ bindings: foreign.binding === 'service' ? [{ type: 'service', name: 'FOREIGN', service: root.workerName }]
+          : foreign.binding === 'namespace' ? [{ type: 'durable_object_namespace', name: 'FOREIGN', namespace_id: root.namespaceId }]
+          : [{ type: 'plain_text', name: 'UNRELATED' }] });
+      }
       if (path === `${base}/workers/domains`) return ok([...(live.domain ? [domain] : []), ...(extraDomain ? [{ ...domain, id: 'other-domain', hostname: 'other.example.com' }] : [])]);
       if (path === `${base}/workers/domains/${root.domainId}`) return live.domain ? ok(domain) : absent();
       if (path === app) return live.application ? ok(application) : absent();
@@ -140,11 +157,25 @@ export async function gatewayRootProviderFixture({ servicePolicy = false } = {})
     return ok({});
   };
   return {
-    ...data, live, mutations, writes, application, policy, domain, transport,
+    ...data, live, mutations, writes, reads, application, policy, domain, transport,
     readJobFrom: (read: () => Promise<GatewayTeardownJob | null>) => { readExternalJob = read; },
-    run: (attemptId = ATTEMPT, accountId = root.accountId, bundle = data.bundle) => executeGatewayRootRemoval({
-      port, trust: data.trust, bundle, attemptId, accessToken: TOKEN, authorizedAccountId: accountId, transport,
-      now: () => clock++, wait: async () => undefined,
+    /** The owner Worker's creation time as the script listing reports it; undefined omits it. */
+    createdOwner: (createdOn: string | undefined) => { ownerCreatedOn = createdOn; },
+    /** Another script in the account: its listing modification time (undefined omits it) and what it binds. */
+    addForeignScript: (id: string, modifiedOn: string | undefined, binding: 'none' | 'namespace' | 'service' = 'none') => {
+      foreignScripts.push({ id, modifiedOn, binding });
+    },
+    /** How many times one provider path was read. */
+    readCount: (suffix: string) => reads.filter((path) => path.endsWith(suffix)).length,
+    run: (attemptId = ATTEMPT, accountId = root.accountId, bundle = data.bundle, budget?: GatewayTeardownCallBudget) => {
+      const input = { port, trust: data.trust, bundle, attemptId, accessToken: TOKEN, authorizedAccountId: accountId, transport,
+        now: () => clock++, wait: async () => undefined };
+      return budget === undefined ? executeGatewayRootRemoval(input) : executeGatewayRootRemoval({ ...input, budget });
+    },
+    /** One pass of a multi-pass attempt: its own provider budget, the attempt's memory carried across passes. */
+    pass: (memory: GatewayRootRemovalAttemptMemory, budget: GatewayTeardownCallBudget, attemptId = ATTEMPT) => executeGatewayRootRemoval({
+      port, trust: data.trust, bundle: data.bundle, attemptId, accessToken: TOKEN, authorizedAccountId: root.accountId,
+      transport, now: () => clock++, wait: async () => undefined, memory, budget,
     }),
     current: () => job,
     failAfter: (step: GatewayRootRemovalStep | null) => { failAfter = step; },

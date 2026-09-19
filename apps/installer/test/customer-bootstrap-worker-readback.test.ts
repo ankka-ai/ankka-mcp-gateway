@@ -7,6 +7,7 @@ import { issueCloudflareBootstrapOwnershipHandoff } from
 import {
   CUSTOMER_BOOTSTRAP_PLAIN_BINDINGS,
   exactCustomerBootstrapModule,
+  exactCustomerBootstrapVersionBindings,
   readCustomerBootstrapWorkerOwnership,
 } from '../src/customer-bootstrap-worker-readback';
 import { base64UrlEncode, sha256Hex } from '../src/crypto';
@@ -212,6 +213,39 @@ describe('customer Stage 1 Worker ownership readback', () => {
       transport: provider(badBindings),
       now: () => NOW + 1,
     })).rejects.toMatchObject({ code: 'identity_mismatch' });
+  });
+
+  it('never accepts the management secret on the setup shell: only the final upload may add it', async () => {
+    // The shell is deployed by the hosted installer, which never holds the
+    // customer's management credential; the value waits in the shell's memory
+    // and reaches the Worker with the final runtime. A shell version that
+    // already carries the binding is therefore not the one that was deployed.
+    const exact = [
+      { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState', namespace_id: NAMESPACE_ID },
+      { name: 'ASSETS', type: 'assets' },
+      { name: 'ANKKA_BOOTSTRAP_NONCE', type: 'secret_text' },
+      { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'secret_text' },
+      ...CUSTOMER_BOOTSTRAP_PLAIN_BINDINGS.map((name) => ({ name, type: 'plain_text', text: EXPECTED_BINDINGS[name] })),
+    ];
+    expect(exactCustomerBootstrapVersionBindings(exact, EXPECTED_BINDINGS, NAMESPACE_ID)).toBe(true);
+    for (const management of [
+      { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' },
+      { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'plain_text', text: 'readable' },
+    ]) {
+      expect(exactCustomerBootstrapVersionBindings([...exact, management], EXPECTED_BINDINGS, NAMESPACE_ID)).toBe(false);
+      const signing = await signingFixture();
+      await expect(readCustomerBootstrapWorkerOwnership({
+        accessToken: ACCESS_TOKEN,
+        accountId: ACCOUNT_ID,
+        workerName: WORKER_NAME,
+        serializedHandoff: signing.serializedHandoff,
+        pinnedIssuerPublicKey: signing.publicKey,
+        expectedBootstrapSourceSha256: await sourceSha256(),
+        expectedBindings: EXPECTED_BINDINGS,
+        transport: provider([...exact, management]),
+        now: () => NOW + 1,
+      })).rejects.toMatchObject({ code: 'identity_mismatch' });
+    }
   });
 });
 

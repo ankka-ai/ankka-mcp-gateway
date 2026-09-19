@@ -12,7 +12,7 @@ async function openPage(outcome: CustomerBootstrapCallbackOutcome, fetch: typeof
   const html = await response.text();
   const script = /<script nonce="[^"]+">([\s\S]*?)<\/script>/u.exec(html)?.[1];
   if (!script) throw new Error('progress script missing');
-  const nodes = new Map(['#title', '#message', '#detail'].map((selector) => [selector, element()]));
+  const nodes = new Map(['#title', '#message', '#detail', '#credential'].map((selector) => [selector, element()]));
   const navigate = vi.fn();
   const listeners = new Map<string, () => void>();
   runInNewContext(script, {
@@ -87,6 +87,38 @@ describe('customer install final navigation', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(page.nodes.get('#title')?.textContent).toBe('Setup did not complete');
     expect(page.nodes.get('#detail')?.textContent).toBe('Reason: convergence_failed');
+  });
+
+  it('says in one fixed sentence what happens to the management token while the install runs', async () => {
+    const answers = [
+      { status: 'CONVERGING' },
+      { status: 'CONVERGING', managementCredential: 'held' },
+      { status: 'CONVERGING', managementCredential: 'skipped' },
+      { status: 'CONVERGING', managementCredential: 'dropped' },
+      { status: 'CONVERGING', managementCredential: 'installed' },
+      { status: 'CONVERGING', managementCredential: 'constructor' },
+      { status: 'CONVERGING', managementCredential: '<b>held</b>' },
+      { status: 'INCOMPLETE', managementCredential: 'held', failure: { code: 'provider_recovery_required', reason: null } },
+    ];
+    const fetch = vi.fn<typeof globalThis.fetch>();
+    for (const answer of answers) fetch.mockResolvedValueOnce(Response.json(answer));
+    const page = await openPage(converging, fetch);
+    const shown: (string | undefined)[] = [];
+    for (let poll = 0; poll < answers.length; poll += 1) {
+      await vi.advanceTimersByTimeAsync(3_000);
+      shown.push(page.nodes.get('#credential')?.textContent);
+    }
+    expect(shown).toEqual([
+      '',
+      'Your management token is saved as an encrypted secret on your gateway in the last step of setup.',
+      'You continued without a management token. Adding sources and managing team access stay disabled until you add it in Settings.',
+      'Your gateway no longer held the management token you pasted, so setup is finishing without it. Adding sources and managing team access stay disabled until you add it in Settings.',
+      'Your management token is saved as an encrypted secret on your gateway.',
+      // Only the four fixed words select a sentence; anything else shows nothing.
+      '', '', '',
+    ]);
+    expect(page.nodes.get('#title')?.textContent).toBe('Setup did not complete');
+    expect(page.navigate).not.toHaveBeenCalled();
   });
 
   it('does not navigate or poll after leaving the page', async () => {

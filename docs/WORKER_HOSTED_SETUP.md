@@ -52,6 +52,20 @@ domain from the signed list. Domain choices are a snapshot from the first
 approval: after adding and activating a domain, start a new deployment to
 discover it with a fresh grant. No grant is retained to refresh that list.
 
+The review page also holds the management token step: the link that opens
+Cloudflare's account-token page with both permissions and a name containing
+the management hostname filled in, one paste field, and an explicit control to
+continue without a token. The second approval is offered once the customer
+has chosen. `POST /__ankka/install/management-token` takes either the pasted
+value or the choice to skip, once, by same-origin JSON POST under the setup
+session; it accepts only Cloudflare's two account-token forms, answers with a
+fixed word, and is locked while an approval or an install runs. The value is
+kept only in the Durable Object's memory beside the grant and reaches the
+Worker as a secret binding of the final runtime upload; storage receives one
+fixed word about the choice. `GET /__ankka/install/setup` returns the step's
+word, token name and link, never a value. Custody, accepted forms and the
+restart behaviour are specified in [Management token](MANAGEMENT_TOKEN.md).
+
 Each review signs the selected configuration and permit digest with its existing
 ownership key. `POST /api/bootstrap/configure` on the fixed hosted issuer checks
 the permit, Worker signature, release, expiry, and allowed zone. It returns the
@@ -104,6 +118,24 @@ keeps one timer bounded by the existing fifteen-minute convergence deadline.
 This prevents ordinary idle hibernation between alarm passes when the progress
 page is not being polled. Settlement releases the timer; unexpected restarts
 still lose the grant and stop the attempt. No credential is persisted.
+
+Every later consented operation follows the same shape, so the browser never
+waits on Cloudflare's authorize page for a running operation. The hosted root
+finalizer's callback exchanges the code, hands it to the removal job's Durable
+Object, which keeps the grant only in its memory, and answers at once with the
+`/teardown` page; the job runs its five steps and its settlement in alarm
+passes, each with its own call budget, and the page shows the steps live. The
+gateway's dependency removal and its update do the same on the management
+object behind `/__ankka/operation/teardown` and `/__ankka/operation/update`,
+each page polling a progress route that reports fixed labels and words only.
+Once the dependencies are gone the removal page hops to the installer with the
+signed receipt; once an update has uploaded and Cloudflare serves the new
+version where the browser asks (see [updates](UPDATES.md)), its page hands the
+browser to Settings, which follows the action through the existing handover
+alarm. An object restart between passes loses the grant and stops the attempt
+as recovery-required with an unconfirmed revocation; a fresh consent resumes
+from the durable step receipts. Workflows are not used for these paths:
+persisted step state would persist the grant.
 
 In-flight fully configured plans remain readable for recovery. Newly started
 deployments use the configuration-free bootstrap path. Hosted session evidence

@@ -153,6 +153,21 @@ describe('Team preview', () => {
     expect(await api.getTeam()).toEqual(saved)
   })
 
+  it('previews an interrupted removal as the gateway records it: a settled action, a lost Team read, and a preparable next authorization', async () => {
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', '/settings?preview=removal-interrupted')
+    const api = previewApi()
+    const pointer = (await api.getSourceActions()).blockingAction
+    expect(pointer).toEqual(expect.objectContaining({ kind: 'teardown' }))
+    if (!pointer) throw new Error('Expected a recorded synthetic removal')
+    expect(await api.getTeardownAction(pointer.actionId)).toEqual(expect.objectContaining({
+      status: 'recovery_required', failureCode: 'fresh_authorization_required',
+    }))
+    await expect(api.getTeam()).rejects.toEqual(expect.objectContaining({ status: 503 }))
+    expect((await api.getStatus()).status).toBe('ready')
+    expect((await api.prepareTeardownAction()).status).toBe('authorization_required')
+  })
+
   it('rejects attempts to write through release-gated and lifecycle-paused preview contracts', async () => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
     for (const scenario of ['team-readonly', 'team-lifecycle']) {
@@ -163,5 +178,50 @@ describe('Team preview', () => {
       await expect(api.prepareTeamAction(saved.revision, saved.members)).rejects.toThrow()
       expect((await api.getTeam()).pendingAction).toBeNull()
     }
+  })
+})
+
+describe('sign-in source preview', () => {
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllEnvs()
+    window.history.replaceState(null, '', '/')
+    window.sessionStorage.removeItem('ankka-gateway-ui-preview-scenario')
+  })
+
+  it('walks the same order as the gateway: nothing enabled, connected, chosen, attached', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2030-01-01T00:00:00.000Z'))
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', '/sources?preview=source-sign-in')
+    const api = previewApi()
+    const draft = (await api.getSources()).sources.find((source) => source.authMode === 'oauth' && source.status === 'draft')
+    const paused = (await api.getSourceActions()).actions[0]
+    if (!draft || !paused) throw new Error('Expected a paused synthetic sign-in installation')
+    expect([draft.enabledTools, paused.failureCode, paused.canRenew]).toEqual([[], 'source_connection_required', true])
+    expect(paused.connectionUrl).toMatch(/^https:\/\/dash\.cloudflare\.com\//u)
+
+    // Not connected at first, however often it is read; the operator connects it two seconds on.
+    for (let read = 0; read < 2; read += 1) {
+      expect(await api.getSourceActionTools(paused.actionId)).toEqual(expect.objectContaining({ state: 'connection_required', tools: [] }))
+    }
+    vi.setSystemTime(new Date('2030-01-01T00:00:02.000Z'))
+    const offered = await api.getSourceActionTools(paused.actionId)
+    expect(offered.state).toBe('ready')
+    expect(offered.tools.some((tool) => tool.readOnlyHint === null && tool.description === null)).toBe(true)
+
+    // Nothing chosen: the resume keeps waiting. A name outside the list, or a stale revision, is refused.
+    const revision = (await api.getSources()).revision
+    await expect(api.prepareSourceAction(revision, draft.id, paused.actionId)).rejects.toEqual(expect.objectContaining({ code: 'source_tools_required' }))
+    await expect(api.chooseSourceActionTools(paused.actionId, revision, draft.id, ['contacts_purge'])).rejects.toEqual(expect.objectContaining({ code: 'source_tools_mismatch' }))
+    await expect(api.chooseSourceActionTools(paused.actionId, revision + 1, draft.id, ['contacts_get'])).rejects.toEqual(expect.objectContaining({ code: 'source_action_conflict' }))
+
+    const chosen = await api.chooseSourceActionTools(paused.actionId, revision, draft.id, ['contacts_search', 'contacts_get'])
+    expect(chosen).toEqual({ schemaVersion: 1, actionId: paused.actionId, sourceId: draft.id, revision: revision + 1, enabledTools: ['contacts_get', 'contacts_search'] })
+    expect((await api.getSourceActions()).actions[0]?.failureCode).toBe('source_tools_chosen')
+    expect((await api.prepareSourceAction(chosen.revision, draft.id, paused.actionId)).status).toBe('succeeded')
+    const installed = (await api.getSources()).sources.find((source) => source.id === draft.id)
+    expect([installed?.status, installed?.enabledTools]).toEqual(['installed', ['contacts_get', 'contacts_search']])
+    await expect(api.getSourceActionTools(paused.actionId)).rejects.toEqual(expect.objectContaining({ code: 'source_tools_unavailable' }))
   })
 })
