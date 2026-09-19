@@ -284,6 +284,11 @@ const INTERNAL_ACTIONS_PATH = '/source-actions';
 // The real tool list of a paused sign-in installation (GET), and its choice (POST).
 const INTERNAL_ACTION_TOOLS_ROUTE = /^\/source-actions\/(action_[A-Za-z0-9_-]{32})\/tools$/u;
 const SOURCE_ACTION_TOOLS_ROUTE = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/tools$/u;
+const SOURCE_OAUTH_ROUTE = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/authorize$/u;
+const SOURCE_OAUTH_CALLBACK = '/__ankka/source-oauth/callback';
+const SOURCE_OAUTH_KEY = 'ankka-mcp-gateway/source-oauth/v1';
+const SOURCE_OAUTH_COOKIE = '__Host-ankka-source-oauth';
+const SOURCE_OAUTH_TTL_MS = 5 * 60_000;
 const INTERNAL_UPDATES_PATH = '/runtime-updates';
 const INTERNAL_TEARDOWNS_PATH = '/teardown-actions';
 /** The receipt resource kind of each dependency the root journal tracks: the fixed words the installer and the removal page see. */
@@ -3809,6 +3814,227 @@ async function chooseSourceActionTools(storage, env, input) {
   return chosen(nextSources.revision);
 }
 
+// Source OAuth runs entirely in the customer's Worker. Only the short-lived
+// PKCE attempt is retained here; provider tokens go straight to Cloudflare.
+function sourceOauthFailure(code = 'source_oauth_unavailable') {
+  throw new SourceDiscoveryError(409, code);
+}
+
+function oauthText(value, limit = 2048) {
+  return isText(value) && value.length > 0 && value.length <= limit && !hasControlCharacter(value);
+}
+
+function oauthEndpoint(value) {
+  if (!oauthText(value)) return null;
+  try {
+    const url = new URL(value);
+    // Reuse the source URL's public-host rules, including rejection of IPs,
+    // local names, credentials, query parameters and non-HTTPS destinations.
+    return publicMcpUrl(`${url.origin}/oauth`) && !url.username && !url.password && !url.search && !url.hash
+      ? url : null;
+  } catch { return null; }
+}
+
+async function oauthJson(url, init = {}) {
+  const response = await fetch(new Request(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(10_000) }));
+  if (!response.ok) {
+    try { await response.body?.cancel(); } catch { /* Fixed failure only. */ }
+    sourceOauthFailure();
+  }
+  const value = await readJsonInput(response, 65_536);
+  if (!isRecord(value)) sourceOauthFailure();
+  return value;
+}
+
+async function discoverSourceOauth(sourceUrl) {
+  const source = new URL(sourceUrl);
+  const challenge = await fetch(new Request(source, { redirect: 'manual', signal: AbortSignal.timeout(10_000) }));
+  const header = challenge.headers.get('www-authenticate') ?? '';
+  try { await challenge.body?.cancel(); } catch { /* Only the header is needed. */ }
+  if (challenge.status >= 300 && challenge.status < 400) sourceOauthFailure();
+  const advertised = /\bBearer\b/iu.test(header) ? /\bresource_metadata="([^"]+)"/iu.exec(header)?.[1] : null;
+  const candidates = advertised ? [advertised] : [
+    `${source.origin}/.well-known/oauth-protected-resource${source.pathname}`,
+    `${source.origin}/.well-known/oauth-protected-resource`,
+  ];
+  let resourceMetadata;
+  for (const candidate of candidates) {
+    const endpoint = oauthEndpoint(candidate);
+    if (!endpoint || endpoint.origin !== source.origin) sourceOauthFailure();
+    try { resourceMetadata = await oauthJson(endpoint); break; } catch { /* Try the standard root fallback. */ }
+  }
+  if (!resourceMetadata || resourceMetadata.resource !== sourceUrl || !Array.isArray(resourceMetadata.authorization_servers) ||
+      resourceMetadata.authorization_servers.length < 1 || resourceMetadata.authorization_servers.length > 10) sourceOauthFailure();
+  const issuer = oauthEndpoint(resourceMetadata.authorization_servers[0]);
+  if (!issuer) sourceOauthFailure();
+  const metadata = await oauthJson(`${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`);
+  if (metadata.issuer !== resourceMetadata.authorization_servers[0] ||
+      !Array.isArray(metadata.code_challenge_methods_supported) || !metadata.code_challenge_methods_supported.includes('S256') ||
+      (metadata.response_types_supported !== undefined && !metadata.response_types_supported?.includes('code')) ||
+      (metadata.grant_types_supported !== undefined && !metadata.grant_types_supported?.includes('authorization_code')) ||
+      (metadata.token_endpoint_auth_methods_supported !== undefined && !metadata.token_endpoint_auth_methods_supported?.includes('none'))) {
+    sourceOauthFailure();
+  }
+  const endpoints = {};
+  for (const name of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) {
+    const endpoint = oauthEndpoint(metadata[name]);
+    if (!endpoint || endpoint.origin !== issuer.origin) sourceOauthFailure();
+    endpoints[name] = endpoint.href;
+  }
+  const scopes = resourceMetadata.scopes_supported ?? metadata.scopes_supported ?? [];
+  if (!Array.isArray(scopes) || scopes.length > 100 || !scopes.every((scope) =>
+    oauthText(scope, 256) && /^[\x21\x23-\x5B\x5D-\x7E]+$/u.test(scope)) || scopes.join(' ').length > 4096) sourceOauthFailure();
+  return {
+    config: { issuer: metadata.issuer, ...endpoints, resource: sourceUrl, scopes_supported: scopes },
+    requireIssuer: metadata.authorization_response_iss_parameter_supported === true,
+    scope: scopes.join(' '),
+  };
+}
+
+async function ownedSourceOauthContext(storage, env, input) {
+  const recorded = await recordedSourceToolAction(storage, input.actionId);
+  if (recorded instanceof Response) return recorded;
+  if (await otherLifecycleBlocksSource(storage, Date.now(), input.actionId) || await teamActionBlocksLifecycle(storage)) {
+    return sourceActionConflict('lifecycle_pending');
+  }
+  const context = await sourceToolChoiceContext(recorded, env, input.actorEmail);
+  if (context instanceof Response) return context;
+  if (input.revision !== context.sources.revision || input.sourceId !== context.source.id || context.source.onBehalfOfUser !== false) {
+    return sourceActionConflict('draft_changed');
+  }
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const desiredState = await actionDesiredState(context.control, context.sources, context.action);
+  const desired = desiredState && resource(desiredState, 'mcp_server');
+  const receipt = context.action.resources[0];
+  if (!desired || canonicalJson(receiptResource(desiredState, desired, receipt.provider)) !== canonicalJson(receipt)) {
+    sourceOauthFailure();
+  }
+  const path = `/accounts/${encodeURIComponent(context.control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(receipt.provider.id)}`;
+  const server = await providerCall(path, token, { signal: AbortSignal.timeout(10_000) });
+  if (server.status !== 'ok' || !mcpMatches(server.result, desired)) sourceOauthFailure();
+  return { ...context, path };
+}
+
+function sourceOauthCookie(value, maxAge) {
+  return `${SOURCE_OAUTH_COOKIE}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
+}
+
+async function startSourceOauth(storage, env, input) {
+  if (!exactKeys(input, ['schemaVersion', 'actionId', 'sourceId', 'revision', 'actorEmail']) || input.schemaVersion !== 1 ||
+      !ACTION_ID.test(input.actionId) || !SOURCE_ID.test(input.sourceId) || !normalizedEmail(input.actorEmail) ||
+      !Number.isSafeInteger(input.revision) || input.revision < 1) return sourceToolsRefusal(400, 'source_oauth_invalid');
+  const context = await ownedSourceOauthContext(storage, env, input);
+  if (context instanceof Response) return context;
+  // Starting over invalidates the previous attempt, including after discovery fails.
+  await storage.delete(SOURCE_OAUTH_KEY);
+  const { config, scope, requireIssuer } = await discoverSourceOauth(context.source.url);
+  const origin = `https://${parseManagementEnvironment(env).managementHostname}`;
+  const redirectUri = `${origin}${SOURCE_OAUTH_CALLBACK}`;
+  const registration = {
+    client_name: 'Ankka MCP Gateway', redirect_uris: [redirectUri], token_endpoint_auth_method: 'none',
+    grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
+  };
+  if (scope) registration.scope = scope;
+  const registered = await oauthJson(config.registration_endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson(registration),
+  });
+  // Secret-bearing or manually registered clients remain a Cloudflare setup flow.
+  if (!oauthText(registered.client_id) || registered.client_secret !== undefined ||
+      registered.token_endpoint_auth_method !== 'none' || !Array.isArray(registered.redirect_uris) ||
+      registered.redirect_uris.length !== 1 || registered.redirect_uris[0] !== redirectUri) sourceOauthFailure();
+  const registrationInfo = { ...registration, client_id: registered.client_id };
+  const state = randomBase64Url(32), browser = randomBase64Url(32), verifier = randomBase64Url(32);
+  const challenge = base64UrlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
+  const expiresAt = Date.now() + SOURCE_OAUTH_TTL_MS;
+  await storage.put(SOURCE_OAUTH_KEY, {
+    ...input, expiresAt, stateHash: await sha256(state), browserHash: await sha256(browser), verifier,
+    actionHash: await sha256(context.action), config, registrationInfo, requireIssuer, redirectUri,
+  });
+  const authorize = new URL(config.authorization_endpoint);
+  const params = new URLSearchParams({ response_type: 'code', client_id: registered.client_id, redirect_uri: redirectUri,
+    state, code_challenge: challenge, code_challenge_method: 'S256', resource: context.source.url });
+  if (scope) params.set('scope', scope);
+  authorize.search = params.toString();
+  return fixedJson(200, { schemaVersion: 1, authorizationUrl: authorize.href, expiresAt: new Date(expiresAt).toISOString() }, {
+    'set-cookie': sourceOauthCookie(browser, SOURCE_OAUTH_TTL_MS / 1000),
+  });
+}
+
+async function finishSourceOauth(storage, env, input) {
+  const attempt = await storage.get(SOURCE_OAUTH_KEY);
+  if (!attempt || !NONCE.test(input.state) || !NONCE.test(input.browser) ||
+      attempt.actorEmail !== input.actorEmail || attempt.stateHash !== await sha256(input.state) ||
+      attempt.browserHash !== await sha256(input.browser)) sourceOauthFailure('source_oauth_invalid');
+  // All callbacks use the mutation queue. Consume before any network call so a
+  // replay, restart or lost response can never exchange or import twice.
+  await storage.delete(SOURCE_OAUTH_KEY);
+  if (Date.now() >= attempt.expiresAt ||
+      (input.issuer !== null && input.issuer !== attempt.config.issuer) || (attempt.requireIssuer && input.issuer === null)) {
+    sourceOauthFailure('source_oauth_invalid');
+  }
+  if (input.denied) return fixedJson(200, { result: 'cancelled' });
+  if (!oauthText(input.code, 4096)) sourceOauthFailure('source_oauth_invalid');
+  const context = await ownedSourceOauthContext(storage, env, attempt);
+  if (context instanceof Response) return context;
+  if (await sha256(context.action) !== attempt.actionHash) sourceOauthFailure('source_oauth_invalid');
+  const response = await oauthJson(attempt.config.token_endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ grant_type: 'authorization_code', code: input.code, code_verifier: attempt.verifier,
+      client_id: attempt.registrationInfo.client_id, redirect_uri: attempt.redirectUri, resource: context.source.url }).toString(),
+  });
+  if (!oauthText(response.access_token, 16384) || !isText(response.token_type) || response.token_type.toLowerCase() !== 'bearer' ||
+      (response.refresh_token !== undefined && !oauthText(response.refresh_token, 16384)) ||
+      (response.expires_in !== undefined && (!Number.isSafeInteger(response.expires_in) || response.expires_in <= 0)) ||
+      (response.scope !== undefined && !oauthText(response.scope, 4096))) sourceOauthFailure();
+  const tokens = { access_token: response.access_token, token_type: 'Bearer' };
+  for (const key of ['refresh_token', 'expires_in', 'scope']) if (response[key] !== undefined) tokens[key] = response[key];
+  // Consent and the token endpoint are external work. Recheck the provider
+  // record immediately before writing so drift during exchange is refused too.
+  const current = await ownedSourceOauthContext(storage, env, attempt);
+  if (current instanceof Response) return current;
+  if (await sha256(current.action) !== attempt.actionHash || current.path !== context.path) sourceOauthFailure('source_oauth_invalid');
+  // Observed Cloudflare dashboard import contract, exercised by the disposable
+  // OAuth proof. Keep this undocumented format confined to this one write.
+  const imported = await providerCall(context.path, managementCredential(env), {
+    method: 'PUT', signal: AbortSignal.timeout(10_000),
+    body: canonicalJson({ auth_credentials: JSON.stringify({ tokens, config: attempt.config, registration_info: attempt.registrationInfo }) }),
+  });
+  if (imported.status !== 'ok') sourceOauthFailure();
+  const synced = await providerCall(`${context.path}/sync`, managementCredential(env), {
+    method: 'POST', signal: AbortSignal.timeout(10_000),
+  });
+  return fixedJson(200, { result: synced.status === 'ok' ? 'connected' : 'sync_pending' });
+}
+
+async function handleSourceOauthCallback(request, env) {
+  const url = new URL(request.url);
+  const environment = parseManagementEnvironment(env);
+  if (request.method !== 'GET' || !environment || url.origin !== `https://${environment.managementHostname}`) {
+    return sourceToolsRefusal(404, 'not_found');
+  }
+  const actorEmail = await verifyAccess(request, env);
+  if (!actorEmail) return sourceToolsRefusal(401, 'access_required');
+  let result = 'failed';
+  const query = url.searchParams;
+  const cookies = (request.headers.get('cookie') ?? '').split(';').map((part) => part.trim()).filter((part) => part.startsWith(`${SOURCE_OAUTH_COOKIE}=`));
+  if (url.search.length <= 8192 && cookies.length === 1 &&
+      [...query.keys()].every((key) => ['code', 'state', 'error', 'error_description', 'error_uri', 'iss'].includes(key) && query.getAll(key).length === 1) &&
+      query.has('state') && query.has('code') !== query.has('error')) {
+    try {
+      const response = await adminStateStub(env, 'v1:management').fetch(new Request('https://admin-state.invalid/source-oauth/callback', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: canonicalJson({ actorEmail, state: query.get('state'), browser: cookies[0].slice(SOURCE_OAUTH_COOKIE.length + 1),
+          code: query.get('code'), denied: query.has('error'), issuer: query.get('iss') }),
+      }));
+      const body = await response.json();
+      if (response.ok && ['connected', 'sync_pending', 'cancelled'].includes(body.result)) result = body.result;
+    } catch { /* Never echo a code, token or provider error. */ }
+  }
+  return new Response(null, { status: 303, headers: { ...PUBLIC_HEADERS,
+    location: `${url.origin}/sources?source_oauth=${result}`, 'set-cookie': sourceOauthCookie('', 0) } });
+}
+
 const RUNTIME_ACTION_STAGES = Object.freeze([
   'authorized', 'current_verified', 'assets_uploaded', 'candidate_created',
   'candidate_staged', 'candidate_verified', 'activated', 'health_verified', 'rolled_back',
@@ -5140,6 +5366,17 @@ export class AdminState {
     }
     const operation = async () => {
       const url = new URL(request.url);
+      if (request.method === 'POST' && ['/source-oauth/start', '/source-oauth/callback'].includes(url.pathname)) {
+        try {
+          const input = await request.json();
+          return await (url.pathname.endsWith('/start')
+            ? startSourceOauth(this.state.storage, this.env, input)
+            : finishSourceOauth(this.state.storage, this.env, input));
+        } catch (error) {
+          return sourceToolsRefusal(error instanceof SourceDiscoveryError ? error.status : 502,
+            error instanceof SourceDiscoveryError ? error.code : 'source_oauth_unavailable');
+        }
+      }
       if (url.pathname === INTERNAL_BOOTSTRAP_PATH) {
         return processBootstrap(
           request,
@@ -6862,11 +7099,24 @@ async function handleSourceActions(request, env) {
   const renewal = /^\/api\/source-actions\/(action_[A-Za-z0-9_-]{32})\/renew$/u.exec(url.pathname);
   const renewActionId = renewal?.[1] ?? null;
   const toolChoice = SOURCE_ACTION_TOOLS_ROUTE.exec(url.pathname);
-  if (url.pathname !== '/api/source-actions' && renewActionId === null && !toolChoice) {
+  const oauth = SOURCE_OAUTH_ROUTE.exec(url.pathname);
+  if (url.pathname !== '/api/source-actions' && renewActionId === null && !toolChoice && !oauth) {
     return fixedJson(404, { schemaVersion: 1, error: 'source_action_not_found' });
   }
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  if (oauth) {
+    if (access.actor.kind !== 'human' || (request.headers.has('sec-fetch-site') && request.headers.get('sec-fetch-site') !== 'same-origin') ||
+        request.headers.get('content-type')?.split(';')[0] !== 'application/json') return sourceToolsRefusal(403, 'origin_required');
+    const input = await readJsonInput(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES);
+    if (!exactKeys(input, ['schemaVersion', 'revision', 'sourceId'])) return sourceToolsRefusal(400, 'source_oauth_invalid');
+    try {
+      return await stub.fetch(new Request('https://admin-state.invalid/source-oauth/start', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: canonicalJson({ ...input, actionId: oauth[1], actorEmail }),
+      }));
+    } catch { return sourceToolsRefusal(503, 'source_oauth_unavailable'); }
+  }
   if (toolChoice) {
     // The tool choice of a connected sign-in source. The management object
     // checks everything else inside its queue, with its one provider read.
@@ -7269,6 +7519,7 @@ async function handleTeardownActionProof(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (url.pathname === SOURCE_OAUTH_CALLBACK) return handleSourceOauthCallback(request, env);
     if (url.pathname === BOOTSTRAP_PATH) return handleBootstrap(request, env);
     if (url.pathname === SOURCE_ACTION_PATH) return handleSourceActionApply(request, env);
     if (url.pathname === RUNTIME_ACTION_PATH) return handleRuntimeActionApply(request, env);

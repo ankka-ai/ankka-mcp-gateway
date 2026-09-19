@@ -175,6 +175,17 @@ const sourceActionToolsSchema = v.strictObject({
   state: v.picklist(['connection_required', 'sync_required', 'unsupported', 'ready']),
   tools: v.pipe(v.array(discoveredToolSchema), v.maxLength(500)),
 })
+const sourceAuthorizationSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  authorizationUrl: v.pipe(v.string(), v.maxLength(16384), v.url(), v.check((value) => {
+    try {
+      const url = new URL(value)
+      return url.protocol === 'https:' && !url.username && !url.password && !url.hash
+    } catch { return false }
+  })),
+  expiresAt: v.string(),
+})
+export type SourceAuthorization = v.InferOutput<typeof sourceAuthorizationSchema>
 /** A saved tool choice: the draft revision the paused installation is now bound to, and its exact allowlist. */
 const sourceToolChoiceSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -376,6 +387,7 @@ export interface GatewayAdminApi {
   cancelSourceAction(actionId: string): Promise<SourceAction>
   /** The real tools of a paused sign-in installation, once Cloudflare has synced them. */
   getSourceActionTools(actionId: string): Promise<SourceActionTools>
+  authorizeSource(actionId: string, revision: number, sourceId: string): Promise<SourceAuthorization>
   /** Saves the tool choice as its own revision-bound step; the recorded installation is resumed separately. */
   chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
@@ -400,6 +412,8 @@ export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually r
 const ERROR_MESSAGES = new Map([
   ['source_not_found', 'This source has already been removed. Refresh Sources.'],
   ['source_removal_requires_cleanup', 'This source has started provisioning. Check its installation status; its resources must be cleaned up before it can be removed.'],
+  ['source_oauth_invalid', 'This authorization attempt is no longer valid. Start again from your source.'],
+  ['source_oauth_unavailable', 'This source could not be authorized here. Try again, or open it in Cloudflare for manual OAuth setup.'],
   ['bigquery_setup_invalid', 'Review the query project and dataset names before continuing.'],
   ['preview_only', 'This is a local preview. Open your deployed gateway to connect BigQuery.'],
   ['bigquery_setup_conflict', 'Check the existing BigQuery setup before starting another attempt.'],
@@ -627,6 +641,12 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
 
   getSourceActionTools(actionId: string): Promise<SourceActionTools> {
     return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/tools`, sourceActionToolsSchema)
+  }
+
+  authorizeSource(actionId: string, revision: number, sourceId: string): Promise<SourceAuthorization> {
+    return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/authorize`, sourceAuthorizationSchema, {
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, sourceId }),
+    })
   }
 
   chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {

@@ -17,7 +17,7 @@ of a later source installation.
 | Authorization expired before work began | The retained journal proves execution did not start. Its initiating administrator can cancel, then start a fresh authorization from the saved draft. |
 | Authorization closed | The attempt has ended without retained write evidence. Review the saved draft before a new authorization. |
 | Recovery required | The journal is retained. After the previous approval expires, its initiating administrator can renew consent when the gateway can safely reconcile the recorded resources. Otherwise review ownership in Cloudflare. |
-| Connect your source | Authenticate the recorded server in Cloudflare. Keep Require user auth off, then renew consent after its status becomes Ready. A sign-in source installed without tools is not resumed yet: its tools are chosen first. |
+| Connect your source | Use **Authorize source** to approve your provider's consent. Use Cloudflare for manual setup, keeping Require user auth off. A sign-in source installed without tools is not resumed yet: its tools are chosen first. |
 | Sync source tools | Sync capabilities in Cloudflare and resolve any connection error before renewing consent. |
 | Review source tools | The synced catalogue lacks a selected tool. Restore the reviewed tools upstream before resuming, or, for a sign-in source, choose again from its real list; the saved selection is never broadened. |
 | Choose tools | The sign-in source is connected and synced, and nothing is enabled. Its initiating administrator chooses from the real list below the status. |
@@ -157,6 +157,51 @@ and refused (`source_tools_unavailable`) once a resume has recorded a Portal
 write. An installation paused under the earlier flow, whose draft names typed
 tools, resumes unchanged; its administrator may also correct a name from the
 real list with this step.
+
+## Provider authorization from Sources
+
+The initiating administrator can use **Authorize source** on a connection-paused
+OAuth draft. `POST /api/source-actions/<actionId>/authorize` takes
+`{ schemaVersion: 1, revision, sourceId }` and returns a provider authorization
+URL and expiry. It requires a human Access identity, a same-origin JSON request,
+the current draft and installation, the gateway's management token, and an owned
+Cloudflare source. Service identities cannot start or finish this flow.
+
+The gateway discovers RFC 9728 resource metadata on the source's origin and
+RFC 8414 authorization metadata for its advertised issuer. This first path
+requires HTTPS public hostnames, same-issuer-origin authorization/token/registration
+endpoints, dynamic registration of a public client (`none`) and PKCE S256.
+Redirects, secret-bearing clients and unsupported metadata are refused; the
+Cloudflare link remains available. Manual OAuth and BigQuery restrictions are
+unchanged. This does not establish compatibility for an untested provider.
+
+The callback is `https://<management-hostname>/__ankka/source-oauth/callback`.
+One five-minute attempt binds a state hash and a Secure, HttpOnly, SameSite=Lax
+browser-cookie hash to the initiating administrator, action hash and source
+revision. The Durable Object retains the PKCE verifier and public OAuth
+metadata, never a provider token or management token. An expired attempt is
+unusable; its single retained record is deleted on a matching callback or
+replaced by another start. No cleanup alarm competes with lifecycle alarms.
+The callback checks the issuer when supplied (and requires it if advertised),
+consumes the attempt in the mutation queue before exchange, rechecks ownership
+and lifecycle state, exchanges the code, then imports the resulting grant
+directly into the exact Cloudflare source. Cloudflare owns storage and refresh.
+
+The import writes `auth_credentials` as a JSON string containing `tokens`,
+`config` and `registration_info`. This is an **undocumented dashboard contract**,
+separate from the documented manual-client configuration. The
+[disposable OAuth proof](../fixtures/mcp-oauth-proof/README.md) verified import,
+refresh and two identities sharing one administrator grant; production route
+tests additionally cover Access/browser binding, drift, failures and SQLite
+restart/replay behavior. They do not prove arbitrary provider compatibility.
+
+After import the gateway requests a capability sync and returns a fixed result
+to `/sources?source_oauth=connected|sync_pending|cancelled|failed`; codes and
+provider error text are not reflected. The page clears that query and reloads
+the actual tool catalogue. If sync is delayed, use **Check again**, then the
+Cloudflare link if necessary. A lost callback response cannot exchange twice;
+check the source before starting again. Connection alone does not select tools,
+attach the source to the Portal, or grant Team access.
 
 ## Authorization on the gateway
 

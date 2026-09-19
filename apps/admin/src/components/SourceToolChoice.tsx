@@ -34,7 +34,7 @@ export function syncedHintSummary(tools: DiscoveredTool[]): string {
 }
 
 const WAITING = {
-  connection_required: 'Cloudflare is not connected to this source yet. Open it in Cloudflare and authenticate, keeping Require user auth off, then check again. Nothing is enabled until you choose.',
+  connection_required: 'This source needs authorization before its tools can be listed. After authorizing, check again. Nothing is enabled until you choose.',
   sync_required: 'Cloudflare has not finished syncing the tools of this source. In Cloudflare, use Sync capabilities and resolve any connection error, then check again.',
   unsupported: 'Cloudflare’s synced list for this source cannot be offered here: it has more than 500 tools, a repeated name, or a name the gateway does not accept. Nothing is enabled.',
 } satisfies Record<Exclude<SourceActionTools['state'], 'ready'>, string>

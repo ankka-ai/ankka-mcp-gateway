@@ -187,8 +187,9 @@ authentication. Ankka does not receive the upstream token.
 
 A source that needs sign-in cannot list its tools until it is connected, so you
 never type tool names for it. Save it and install it: the gateway creates it
-with nothing enabled, nobody assigned and no Portal attachment. Connect it in
-Cloudflare, then return to **Sources**: the paused installation lists the tools
+with nothing enabled, nobody assigned and no Portal attachment. Choose
+**Authorize source**, approve your provider's consent, then return to
+**Sources**: the paused installation lists the tools
 Cloudflare synced from the source, you choose which to allow, and the gateway
 attaches it with exactly those. Descriptions and read-only hints appear only
 when Cloudflare's synced list carries them, and the page says when it carries
@@ -197,6 +198,15 @@ without tools makes rollback below the installed release unavailable, as
 installing any source does, because older releases cannot read that draft;
 while an earlier release can still be restored, **Save draft** says so. See
 [pending source installations](SOURCE_ACTION_RECOVERY.md#choosing-the-tools-of-a-sign-in-source).
+
+Dashboard authorization supports public OAuth clients registered dynamically
+with PKCE. The callback, code exchange and credential import run in your
+gateway Worker; Cloudflare stores and refreshes the provider grant. Providers
+requiring a client secret, manual registration, or unsupported discovery can
+use **Open source in Cloudflare** instead. Keep **Require user auth** off.
+The integration uses a tested but undocumented Cloudflare token-import format;
+see [source authorization](SOURCE_ACTION_RECOVERY.md#provider-authorization-from-sources)
+for its boundaries and recovery behavior.
 
 ## Add BigQuery
 

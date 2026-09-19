@@ -3321,3 +3321,209 @@ test('the dashboard client accepts every answer about the management token, in e
       { schemaVersion: 1, status: 'drift', token: 'active', portals: 'drift', accessPolicies: 'verified' });
   });
 }));
+
+const OAUTH_KEY = 'ankka-mcp-gateway/source-oauth/v1';
+const OAUTH_ISSUER = 'https://identity.example.net';
+const OAUTH_CALLBACK = '/__ankka/source-oauth/callback';
+
+async function sourceOauthFixture(run) {
+  return signInFixture(async (gateway) => {
+    const installed = await installSignInSource(gateway);
+    const network = globalThis.fetch;
+    const exchanges = [], imports = [], registrations = [];
+    const accessToken = crypto.randomUUID(), refreshToken = crypto.randomUUID();
+    let hook;
+    globalThis.fetch = async (input, init) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      const intercepted = await hook?.(request);
+      if (intercepted) return intercepted;
+      const path = new URL(request.url);
+      if (request.url === 'https://signin.example.net/.well-known/oauth-protected-resource') {
+        return Response.json({ resource: SIGN_IN_URL, authorization_servers: [OAUTH_ISSUER], scopes_supported: ['records:read'] });
+      }
+      if (request.url === `${OAUTH_ISSUER}/.well-known/oauth-authorization-server`) {
+        return Response.json({ issuer: OAUTH_ISSUER, authorization_endpoint: `${OAUTH_ISSUER}/authorize`,
+          token_endpoint: `${OAUTH_ISSUER}/token`, registration_endpoint: `${OAUTH_ISSUER}/register`,
+          code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'],
+          authorization_response_iss_parameter_supported: true });
+      }
+      if (request.url === `${OAUTH_ISSUER}/register`) {
+        const registration = await request.json();
+        registrations.push(registration);
+        return Response.json({ ...registration, client_id: 'synthetic-public-client' });
+      }
+      if (request.url === `${OAUTH_ISSUER}/token`) {
+        exchanges.push(new URLSearchParams(await request.text()));
+        return Response.json({ access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 300, scope: 'records:read' });
+      }
+      if (path.origin === 'https://api.cloudflare.com' && path.pathname === `${SERVERS_PATH}/${installed.serverId}` && request.method === 'PUT') {
+        imports.push(await request.json());
+        connectSignInSource(gateway, installed.serverId);
+        return envelope(gateway.provider.state.servers.get(installed.serverId));
+      }
+      if (path.origin === 'https://api.cloudflare.com' && path.pathname === `${SERVERS_PATH}/${installed.serverId}/sync`) return envelope({});
+      return network(input, init);
+    };
+    const start = (overrides = {}) => gateway.api(`/api/source-actions/${installed.action.actionId}/authorize`, {
+      method: 'POST', body: { schemaVersion: 1, revision: installed.sources.revision, sourceId: installed.source.id }, ...overrides,
+    });
+    async function begin() {
+      const response = await start();
+      assert.equal(response.status, 200, await response.clone().text());
+      const body = await response.json();
+      const cookie = response.headers.get('set-cookie').split(';')[0];
+      assert.match(response.headers.get('set-cookie'), /HttpOnly; Secure; SameSite=Lax; Path=\/; Max-Age=300/u);
+      return { body, url: new URL(body.authorizationUrl), cookie };
+    }
+    function finish(attempt, query = {}, options = {}) {
+      const params = new URLSearchParams({ state: attempt.url.searchParams.get('state'), code: 'synthetic-authorization-code', iss: OAUTH_ISSUER, ...query });
+      return gateway.api(`${OAUTH_CALLBACK}?${params}`, { extraHeaders: { cookie: attempt.cookie }, ...options });
+    }
+    try {
+      await run({ ...gateway, installed, start, begin, finish, exchanges, imports, registrations, accessToken, refreshToken,
+        oauthHook(next) { hook = next; } });
+    } finally { globalThis.fetch = network; }
+  }, await portalOnlyClaim());
+}
+
+test('source OAuth connects through the customer callback with PKCE; tokens never enter storage or browser responses', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    const attempt = await gateway.begin();
+    assert.equal(attempt.url.origin, OAUTH_ISSUER);
+    assert.equal(attempt.url.searchParams.get('redirect_uri'), `${MANAGEMENT_ORIGIN}${OAUTH_CALLBACK}`);
+    assert.equal(attempt.url.searchParams.get('resource'), SIGN_IN_URL);
+    assert.equal(attempt.url.searchParams.get('code_challenge_method'), 'S256');
+    assert.equal(gateway.registrations[0].token_endpoint_auth_method, 'none');
+    const [completed, replay] = await Promise.all([gateway.finish(attempt), gateway.finish(attempt)]);
+    assert.equal(completed.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=connected`);
+    assert.equal(replay.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+    assert.equal(gateway.exchanges.length, 1);
+    assert.equal(gateway.imports.length, 1);
+    assert.equal(gateway.exchanges[0].get('redirect_uri'), `${MANAGEMENT_ORIGIN}${OAUTH_CALLBACK}`);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(gateway.exchanges[0].get('code_verifier')));
+    assert.equal(Buffer.from(digest).toString('base64url'), attempt.url.searchParams.get('code_challenge'));
+    const imported = JSON.parse(gateway.imports[0].auth_credentials);
+    assert.equal(imported.tokens.access_token, gateway.accessToken);
+    assert.equal(imported.tokens.refresh_token, gateway.refreshToken);
+    assert.equal(imported.registration_info.redirect_uris[0], `${MANAGEMENT_ORIGIN}${OAUTH_CALLBACK}`);
+    assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
+    const evidence = JSON.stringify([attempt.body, [...completed.headers], gateway.managementStorage.writes]);
+    assert.ok(!evidence.includes(gateway.accessToken));
+    assert.ok(!evidence.includes(gateway.refreshToken));
+    assert.equal(portalMapping(gateway, gateway.installed.serverId), undefined);
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === gateway.installed.source.id).enabledTools, []);
+  });
+});
+
+test('source OAuth refuses wrong actors, cross-origin starts, missing management authority and stale revisions before registration', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    assert.equal((await gateway.start({ email: OWNER })).status, 409);
+    assert.equal((await gateway.start({ extraHeaders: { origin: 'https://elsewhere.example.net' } })).status, 403);
+    assert.equal((await gateway.start({ extraHeaders: { 'sec-fetch-site': 'cross-site' } })).status, 403);
+    assert.equal((await gateway.start({ body: { schemaVersion: 1, revision: 999, sourceId: gateway.installed.source.id } })).status, 409);
+    delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+    assert.equal((await gateway.start()).status, 409);
+    assert.equal(gateway.registrations.length, 0);
+  });
+});
+
+test('source OAuth browser and administrator binding reject copied callbacks without consuming the valid attempt', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    const attempt = await gateway.begin();
+    for (const options of [{ email: OWNER }, { extraHeaders: {} }, { extraHeaders: { cookie: '__Host-ankka-source-oauth=' + 'A'.repeat(43) } }]) {
+      const response = await gateway.finish(attempt, {}, options);
+      assert.equal(response.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+      assert.equal(gateway.exchanges.length, 0);
+    }
+    assert.equal((await gateway.finish(attempt)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=connected`);
+  });
+});
+
+test('source OAuth expires, binds the issuer and rejects action or ownership drift before exchanging a code', async () => {
+  for (const change of ['expiry', 'issuer', 'renewed', 'ownership', 'draft', 'lifecycle']) {
+    await sourceOauthFixture(async (gateway) => {
+      const attempt = await gateway.begin();
+      if (change === 'expiry') await gateway.managementStorage.put(OAUTH_KEY, { ...gateway.managementStorage.snapshot(OAUTH_KEY), expiresAt: Date.now() - 1 });
+      if (change === 'renewed') {
+        const actions = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+        actions.actions.at(-1).actionKeyHash = await prefixedSha256('replacement');
+        await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, actions);
+      }
+      if (change === 'ownership') gateway.provider.state.servers.get(gateway.installed.serverId).description = 'different-owner';
+      if (change === 'draft') {
+        const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
+        sources.revision++;
+        await gateway.managementStorage.put(SOURCES_KEY, sources);
+      }
+      if (change === 'lifecycle') {
+        const update = await runtimeAction(gateway, { operation: 'update', release: 'gateway-v9.9.9' });
+        assert.equal((await update.prepare()).status, 200);
+      }
+      const response = await gateway.finish(attempt, change === 'issuer' ? { iss: 'https://different.example.net' } : {});
+      assert.equal(response.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`, change);
+      assert.equal(gateway.exchanges.length, 0, change);
+      assert.equal(gateway.imports.length, 0, change);
+      assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined, change);
+    });
+  }
+});
+
+test('source OAuth rejects manual clients and unsafe discovery endpoints without importing credentials', async () => {
+  for (const change of ['manual', 'redirect', 'private', 'cross_origin', 'no_pkce']) {
+    await sourceOauthFixture(async (gateway) => {
+      gateway.oauthHook(async (request) => {
+        if (change === 'manual' && request.url.endsWith('/register')) return Response.json({ ...await request.json(), client_id: 'manual-client', client_secret: 'synthetic-rejected-secret' });
+        if (!request.url.endsWith('/.well-known/oauth-authorization-server')) return undefined;
+        if (change === 'redirect') return new Response(null, { status: 302, headers: { location: 'https://elsewhere.example.net/metadata' } });
+        if (change === 'manual') return undefined;
+        return Response.json({ issuer: OAUTH_ISSUER, authorization_endpoint: `${OAUTH_ISSUER}/authorize`,
+          token_endpoint: change === 'private' ? 'https://127.0.0.1/token' : change === 'cross_origin' ? 'https://elsewhere.example.net/token' : `${OAUTH_ISSUER}/token`,
+          registration_endpoint: `${OAUTH_ISSUER}/register`, code_challenge_methods_supported: change === 'no_pkce' ? ['plain'] : ['S256'] });
+      });
+      const response = await gateway.start();
+      assert.equal(response.status, 409, change);
+      assert.equal((await response.json()).error, 'source_oauth_unavailable');
+      assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
+      assert.equal(gateway.imports.length, 0);
+    });
+  }
+});
+
+test('source OAuth restart invalidates the previous callback and provider denial is fixed text', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    const old = await gateway.begin();
+    const attempt = await gateway.begin();
+    assert.equal((await gateway.finish(old)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+    const query = new URLSearchParams({ state: attempt.url.searchParams.get('state'), error: 'access_denied', iss: OAUTH_ISSUER, error_description: 'synthetic-private-error' });
+    const response = await gateway.api(`${OAUTH_CALLBACK}?${query}`, { extraHeaders: { cookie: attempt.cookie } });
+    assert.equal(response.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=cancelled`);
+    assert.equal(await response.text(), '');
+    assert.equal(gateway.exchanges.length, 0);
+    assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
+  });
+});
+
+test('source OAuth never imports after ownership changes during exchange and gives fixed results for import or sync failure', async () => {
+  for (const failure of ['ownership', 'import', 'sync']) {
+    await sourceOauthFixture(async (gateway) => {
+      const attempt = await gateway.begin();
+      gateway.oauthHook((request) => {
+        if (failure === 'ownership' && request.url === `${OAUTH_ISSUER}/token`) {
+          gateway.provider.state.servers.get(gateway.installed.serverId).description = 'another-owner';
+        }
+        if ((failure === 'import' && request.method === 'PUT') || (failure === 'sync' && request.url.endsWith('/sync'))) {
+          return Response.json({ error: gateway.accessToken }, { status: 503 });
+        }
+        return undefined;
+      });
+      const response = await gateway.finish(attempt);
+      assert.equal(response.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=${failure === 'sync' ? 'sync_pending' : 'failed'}`);
+      assert.equal(gateway.exchanges.length, 1);
+      assert.equal(gateway.imports.length, failure === 'sync' ? 1 : 0);
+      assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
+      assert.ok(!JSON.stringify([...response.headers]).includes(gateway.accessToken));
+      await gateway.finish(attempt);
+      assert.equal(gateway.exchanges.length, 1);
+    });
+  }
+});
