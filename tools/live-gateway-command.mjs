@@ -1,4 +1,4 @@
-import { lifecycleFailureReport, checkSignedConfigurationEndpoint, dependencyRemovalSummary, navigationFailureLabel, rootRemovalSummary, tabReopenings } from './live-gateway-diagnostics.mjs';
+import { lifecycleFailureReport, checkSignedConfigurationEndpoint, dependencyRemovalSummary, managementTokenFallback, managementTokenPath, navigationFailureLabel, rootRemovalSummary, tabReopenings } from './live-gateway-diagnostics.mjs';
 import { awaitSystemResolution } from './live-gateway-dns.mjs';
 import { readFile, realpath, lstat, open, rename, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import * as v from 'valibot';
 import { validateGeneratedReviewedIsolatedCanaryDirectory } from '../apps/installer/scripts/generate-reviewed-canary.mjs';
-import { openLiveGatewayBrowser, validateLiveBrowserOrigin, LiveGatewayBrowserError } from './live-gateway-browser.mjs';
+import { browserDebugOutputEnabled, openLiveGatewayBrowser, validateLiveBrowserOrigin, LiveGatewayBrowserError } from './live-gateway-browser.mjs';
 import { createLiveGatewayApi, createLiveGatewayServiceApi, LiveGatewayApiError } from './live-gateway-api.mjs';
 import { OperatorCredentialError, resolveOperatorCredential } from './operator-credential.mjs';
 import { LiveGatewayAccessError } from './live-gateway-access.mjs';
@@ -50,13 +50,26 @@ function requireCondition(value, code) { if (!value) throw new LiveLifecycleErro
 
 /**
  * The automatic management-token step, or null without the operator's opt-in (`managementToken` in the config). The
- * config names the token by reference only. The value is read from the operator's store into memory when the step
- * runs and handed to the provider port for its one secret write; it never reaches command arguments, output, the
- * journal or an error.
+ * config names the token by reference only. The value is read from the operator's store into memory when a part of
+ * the step runs and handed straight to the one port that sends it: `paste` to the browser port, which enters it at
+ * the setup step of the customer's own shell as a customer pastes it and returns the shell's fixed word, and
+ * `install`, the fallback, to the provider port for its one secret write. The lifecycle calls both and never holds
+ * the value; it never reaches command arguments, output, the journal or an error.
  */
 export function managementTokenStep({ config, provider, credential = resolveOperatorCredential }) {
   if (config.managementToken === undefined) return null;
-  return async (provision) => provider.installManagementSecret(provision, await credential(config.managementToken));
+  return Object.freeze({
+    paste: async (browser, provision) => browser.answerManagementStep(provision, await credential(config.managementToken)),
+    install: async (provision) => provider.installManagementSecret(provision, await credential(config.managementToken)),
+  });
+}
+
+/**
+ * A fresh run with the opt-in pastes the token through the test browser, and Playwright's debug output would print
+ * that request's body. Such a run is refused before anything is deployed; the browser port refuses the paste again.
+ */
+export function requireUntracedPaste(config, env = process.env) {
+  requireCondition(config.managementToken === undefined || !browserDebugOutputEnabled(env), 'browser_debug_output_enabled');
 }
 
 /**
@@ -124,12 +137,14 @@ export function supersededUpdateAction(action, now = Date.now()) {
 }
 
 /** The fixed operator remedies, by stop code. Chrome refuses the runner's attach with remote debugging switched off or
- * the connection prompt not allowed; the automatic management-token step depends on the operator's credential store
- * and on the operator token's permission to write a Worker secret. */
+ * the connection prompt not allowed; the automatic management-token step depends on the operator's credential store,
+ * on a test browser whose debug output is off, and, for its fallback only, on the operator token's permission to
+ * write a Worker secret. */
 const OPERATOR_HINTS = Object.freeze({
   browser_attach_failed: 'Chrome refused the attach: enable remote debugging at chrome://inspect/#remote-debugging ("Allow remote debugging for this browser instance") and allow the attach when Chrome asks, then rerun.',
   credential_unavailable: 'A credential the config names by reference did not resolve: check the keychain item or the environment variable it names, then rerun.',
-  management_token_write_rejected: 'Cloudflare refused the management secret write: the operator token needs Workers Scripts Write (Edit in the dashboard) on the account. Correct the token, or install the management token directly in Cloudflare, then rerun with --resume-installed.',
+  browser_debug_output_enabled: 'Playwright\'s debug output is switched on in this environment (DEBUG or PWDEBUG) and would print the setup request that carries the management token. Unset both for this run, then rerun.',
+  management_token_write_rejected: 'Cloudflare refused the management secret write. This command makes that write only when the token it entered at the setup step did not reach the gateway, or when there was no setup step to enter it at; for it the operator token needs Workers Scripts Write (Edit in the dashboard) on the account. Correct the token, or install the management token directly in Cloudflare, then rerun with --resume-installed.',
   management_token_write_unknown: 'The management secret write was sent and its answer never arrived. Rerun with --resume-installed: the secret is written again only if the gateway does not report it.',
 });
 
@@ -153,8 +168,9 @@ export function summarizeLiveJournal(state) {
     navigation: navigationFailureLabel(stopped?.navigation),
     removalReceiptAvailable: state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved'),
     resumed: state.events.some((event) => event.stage === 'resume'),
-    // The automatic management-token step's outcome; null when the operator installed the secret in Cloudflare.
-    managementToken: state.events.findLast((event) => event.stage === 'management_token' && ['installed_by_runner', 'already_configured'].includes(event.status))?.status ?? null,
+    // Which path set the management token, and why the customer's path did not when it did not; fixed words only.
+    managementToken: managementTokenPath(state.events),
+    managementTokenFallback: managementTokenFallback(state.events),
     tabsReopened: tabReopenings(state.events),
     dependencyRemoval: dependencyRemovalSummary(state.events),
     rootRemoval: rootRemovalSummary(state.events),
@@ -221,7 +237,7 @@ async function validateReleasePair(config) {
 }
 
 export async function runLiveLifecycleCommand(args) {
-  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --resume-installed | --check-access | --preflight | --management-api | --status]\nFull browser lifecycle requires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access checks cached installer Access over HTTP without Chrome, deployment, or a journal.\n--preflight also validates the release pair and provider inventory without deployment.\n--management-api uses a minimal management config and cached gateway Access; no Chrome or infrastructure token. It installs one synthetic source and grants/removes synthetic membership. The source remains for lifecycle teardown.\n--status reports private journal progress without network access. Neither API checks nor removal recovery qualify the full browser lifecycle.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted, or name it by reference as managementToken in the config and this command installs it as the gateway secret itself.\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.\n--resume-installed continues a journal from anywhere between a consented installation and the saved removal receipt: unfinished management, a terminally failed update action, or an unfinished removal; a saved receipt belongs to --recover-removal.';
+  const help = 'Usage: npm run validate:lifecycle:live -- --config /private/path/config.json [--recover-removal | --resume-installed | --check-access | --preflight | --management-api | --status]\nFull browser lifecycle requires a prepared, published isolated signed A/B pair, Chrome, cloudflared, and CLOUDFLARE_API_TOKEN.\nFirst run cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser.\n--check-access checks cached installer Access over HTTP without Chrome, deployment, or a journal.\n--preflight also validates the release pair and provider inventory without deployment.\n--management-api uses a minimal management config and cached gateway Access; no Chrome or infrastructure token. It installs one synthetic source and grants/removes synthetic membership. The source remains for lifecycle teardown.\n--status reports private journal progress without network access. Neither API checks nor removal recovery qualify the full browser lifecycle.\nCreates a fresh gateway, exercises account-token management and signed update, interrupts removal, and verifies recovery and absence.\nCloudflare infrastructure OAuth consent is separate from Access login. Add the management token directly in Cloudflare when prompted, or name it by reference as managementToken in the config and this command enters it at the setup step of the new gateway as a customer pastes it (writing it as the gateway secret itself is the fallback).\nRecovery imports the saved removal receipt; it does not restart installation or unknown writes.\n--resume-installed continues a journal from anywhere between a consented installation and the saved removal receipt: unfinished management, a terminally failed update action, or an unfinished removal; a saved receipt belongs to --recover-removal.';
   if (args.length === 1 && args[0] === '--help') { console.log(help); return 0; }
   requireCondition((args.length === 2 || args.length === 3 && ['--recover-removal', '--resume-installed', '--check-access', '--preflight', '--management-api', '--status'].includes(args[2])) && args[0] === '--config', 'usage_invalid');
   const recover = args[2] === '--recover-removal';
@@ -241,7 +257,8 @@ export async function runLiveLifecycleCommand(args) {
       const endpointFailure = await checkSignedConfigurationEndpoint(config.installerOrigin);
       requireCondition(endpointFailure === null, endpointFailure);
       await createLiveGatewayProvider({ config, token: process.env.CLOUDFLARE_API_TOKEN }).assertFresh();
-      // The opt-in's reference must resolve; the value is read and dropped.
+      // The opt-in's reference must resolve, in an environment that would not print its paste; the value is read and dropped.
+      requireUntracedPaste(config);
       if (config.managementToken !== undefined) await resolveOperatorCredential(config.managementToken);
     }
     console.log('Read-only preflight passed. No browser, deployment, or lifecycle qualification. Cloudflare dashboard consent was not checked.');
@@ -320,8 +337,10 @@ export async function runLiveLifecycleCommand(args) {
     } else if (!recover) {
       await validateReleasePair(config);
       await provider.assertFresh();
-      // A reference that does not resolve stops a fresh run here, before Chrome opens or anything is deployed, rather
-      // than at the management-token step half an hour in. The value is read and dropped; the step reads it again.
+      // A reference that does not resolve, or an environment that would print the paste, stops a fresh run here, before
+      // Chrome opens or anything is deployed, rather than at the setup step minutes in. The value is read and dropped;
+      // the step reads it again.
+      requireUntracedPaste(config);
       if (config.managementToken !== undefined) await resolveOperatorCredential(config.managementToken);
     } else {
       requireCondition(state.events.some((event) => event.stage === 'root_removal' && event.status === 'receipt_saved' && event.handoff) &&
@@ -331,8 +350,9 @@ export async function runLiveLifecycleCommand(args) {
     await checkpoint({ stage: 'preflight', status: 'passed' });
     // In the full lifecycle the service identity is proven over the updated runtime, before any removal begins.
     const proveService = config.serviceAccess === undefined ? null : () => proveServiceIdentity({ config, checkpoint, signal: cancellation.signal });
-    // Null without the operator's opt-in: the printed instruction and the wait then stay exactly as they were.
-    const installManagementToken = managementTokenStep({ config, provider });
+    // Null without the operator's opt-in: the runner then continues setup without a token, and the printed instruction
+    // and the wait stay as they were.
+    const managementToken = managementTokenStep({ config, provider });
     browser = await openLiveGatewayBrowser({ ...config, notify: console.log, checkpoint });
     await browser.login(config.installerOrigin);
     await checkpoint({ stage: 'access', status: 'passed' });
@@ -400,7 +420,7 @@ export async function runLiveLifecycleCommand(args) {
         await removeLiveGateway({ config, browser, provider, inventory, checkpoint, phase });
       } else if (recorded === undefined) {
         await checkpoint({ stage: 'resume', status: 'installed' });
-        await continueLiveGatewayLifecycle({ config, browser, provider, provision, checkpoint, notify: console.log, publishB, proveService, installManagementToken });
+        await continueLiveGatewayLifecycle({ config, browser, provider, provision, checkpoint, notify: console.log, publishB, proveService, managementToken });
       } else {
         // An update action that failed terminally on the gateway may be followed by a new one; the journal keeps both, and
         // the inventory comes from the journal while the installed source and roster are read back from the gateway.
@@ -417,7 +437,7 @@ export async function runLiveLifecycleCommand(args) {
         await finishLiveGatewayLifecycle({ config, browser, provider, inventory, source: { sourceId: installed.id, baselineMembers: team.members }, publishB, checkpoint, proveService });
       }
     } else await qualifyLiveGatewayLifecycle({ config, browser, provider, checkpoint, notify: console.log,
-      publishB: () => deployInstaller(config, config.installerB, config.releaseB), proveService, installManagementToken });
+      publishB: () => deployInstaller(config, config.installerB, config.releaseB), proveService, managementToken });
     return 0;
   } catch (error) {
     // A credential error carries its reference's label as detail; only its fixed code leaves this command.
@@ -444,7 +464,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try { process.exitCode = await runLiveLifecycleCommand(process.argv.slice(2)); }
   catch (error) {
     if (error instanceof LiveGatewayAccessError) console.error(`Access check stopped: ${error.code}. Use cloudflared access login --quiet --app <isolated-installer-origin> in your normal browser, then rerun --check-access.`);
-    else if (error instanceof LiveLifecycleError) console.error(`Live validation could not start: ${error.code}.`);
+    else if (error instanceof LiveLifecycleError) console.error(`Live validation could not start: ${error.code}.${operatorHint(error.code) === null ? '' : ` ${operatorHint(error.code)}`}`);
     else if (error instanceof OperatorCredentialError) console.error(`Live validation could not start: ${error.code}. ${operatorHint(error.code)}`);
     else console.error('Live validation could not start. Check the config, private paths, credentials, and exclusive journal.');
     process.exitCode = 1;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { lifecycleFailureReport, checkSignedConfigurationEndpoint, dependencyRemovalSummary, navigationFailureLabel, rootRemovalSummary, tabReopenings } from '../tools/live-gateway-diagnostics.mjs';
+import { lifecycleFailureReport, checkSignedConfigurationEndpoint, dependencyRemovalSummary, managementTokenFallback, managementTokenPath, navigationFailureLabel, rootRemovalSummary, tabReopenings } from '../tools/live-gateway-diagnostics.mjs';
 
 test('failed stage and safe recovery evidence survive unavailable metrics', async () => {
   const result = await lifecycleFailureReport({ failureCode: 'update_not_verified', httpStatus: 503, events: [
@@ -20,6 +20,23 @@ test('a refused management secret write is reported at its own stage with the pr
   assert.equal(result.failedStage, 'management_token');
   assert.equal(result.lastMutationStage, 'management_token');
   assert.equal(result.httpStatus, 403);
+});
+test('a stop during the approval that follows the setup step is the installation\'s, and the report names the path that set the token in fixed words', async () => {
+  const setup = [{ stage: 'installation', status: 'started' }, { stage: 'installation', status: 'configured' },
+    { stage: 'management_token', status: 'started' }, { stage: 'management_token', status: 'pasted_at_setup', word: 'held' }];
+  // The approval's own checkpoint follows the step, so the consent that timed out is not read as the step's failure.
+  const approving = await lifecycleFailureReport({ failureCode: 'interactive_step_timed_out', events: [...setup, { stage: 'installation', status: 'approval_started' }] });
+  assert.deepEqual([approving.failedStage, approving.lastMutationStage, approving.managementToken, approving.managementTokenFallback], ['installation', 'installation', 'pasted_at_setup', null]);
+  // A paste that stopped the run is the step's own failure.
+  const pasting = await lifecycleFailureReport({ failureCode: 'gateway_request_failed', events: setup.slice(0, 3) });
+  assert.deepEqual([pasting.failedStage, pasting.lastMutationStage, pasting.managementToken], ['management_token', 'management_token', null]);
+  // The fallback's refused write: nothing set the token, and the report says why the customer's path did not.
+  const refused = await lifecycleFailureReport({ failureCode: 'management_token_write_rejected', httpStatus: 403, events: [...setup,
+    { stage: 'installation', status: 'approval_started' }, { stage: 'installation', status: 'passed' },
+    { stage: 'management_token', status: 'dropped_at_setup' }, { stage: 'management_token', status: 'started' }] });
+  assert.deepEqual([refused.failedStage, refused.lastMutationStage, refused.managementToken, refused.managementTokenFallback], ['management_token', 'management_token', null, 'dropped_at_setup']);
+  assert.equal(managementTokenPath([{ stage: 'management_token', status: 'skipped_at_setup' }, { stage: 'management_token', status: 'operator' }]), 'operator');
+  assert.equal(managementTokenFallback([{ stage: 'management_token', status: 'https://x/?secret' }]), null);
 });
 test('metrics admit numeric aggregates only, never provider dimensions or errors', async () => {
   const result = await lifecycleFailureReport({ failureCode: 'bootstrap_not_completed', events: [

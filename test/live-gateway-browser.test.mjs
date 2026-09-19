@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, receiptHopOf, refusedAtAccessEdge, TAB_REPLACEMENT_REASONS, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
+import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, receiptHopOf, refusedAtAccessEdge, TAB_REPLACEMENT_REASONS, browserDebugOutputEnabled, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, managementStepWordOf, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
 import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
 import { INSTALLER_CONNECTION_TIMEOUT_MS, LiveGatewayBrowserError, landingOf, recordedReceiptOf, removalAttemptOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 import { removeLiveGateway } from '../tools/live-gateway-lifecycle.mjs';
@@ -25,6 +25,36 @@ test('live browser API requests are confined to exact configured origins and lif
   for (const value of ['http://manage.example.com', 'https://user:secret@manage.example.com', `${origin}/path`, `${origin}?secret`]) {
     assert.throws(() => validateLiveBrowserOrigin(value), { code: 'origin_invalid' });
   }
+});
+
+test('the management step of setup is one route and one method, on a customer shell\'s workers.dev origin only', () => {
+  const shell = `https://ankka-gateway-acg-${'7'.repeat(24)}.synthetic.workers.dev`;
+  const origins = [installerOrigin, managementOrigin, shell];
+  const step = '/__ankka/install/management-token';
+  assert.doesNotThrow(() => validateLiveBrowserRequest(origins, shell, step, 'POST'));
+  for (const [origin, path, method] of [
+    // Never a read or another write, and nothing near the route.
+    [shell, step, 'GET'], [shell, step, 'PUT'], [shell, step, 'DELETE'], [shell, step, 'PATCH'],
+    [shell, `${step}/`, 'POST'], [shell, `${step}?skip=true`, 'POST'], [shell, `${step}#value`, 'POST'], [shell, '/__ankka/install/management-tokens', 'POST'],
+    // Never the installer, which is hosted, never the installed gateway, and never a shell this run did not adopt.
+    [installerOrigin, step, 'POST'], [managementOrigin, step, 'POST'], ['https://other.synthetic.workers.dev', step, 'POST'],
+  ]) assert.throws(() => validateLiveBrowserRequest(origins, origin, path, method), { code: 'request_outside_lifecycle' });
+  // An installer or gateway that were itself on workers.dev would still not be a shell this port adopted by identity;
+  // the port's own method checks that, and the other setup routes stay what they were.
+  assert.doesNotThrow(() => validateLiveBrowserRequest(origins, shell, '/__ankka/install/oauth/start', 'POST'));
+});
+
+test('Playwright\'s debug output counts as switched on for any DEBUG and for a PWDEBUG it does not read as off; the shell\'s word is read in its fixed vocabulary only', () => {
+  for (const env of [{ DEBUG: 'pw:channel' }, { DEBUG: 'pw:*' }, { DEBUG: '*' }, { DEBUG: 'pw:api' }, { DEBUG: 'other-tool' }, { PWDEBUG: '1' }, { PWDEBUG: 'console' }, { DEBUG: '', PWDEBUG: 'true' }]) {
+    assert.equal(browserDebugOutputEnabled(env), true, JSON.stringify(env));
+  }
+  for (const env of [{}, { DEBUG: '' }, { PWDEBUG: '' }, { PWDEBUG: '0' }, { PWDEBUG: 'false' }, { DEBUG: undefined, PWDEBUG: undefined }, { DEBUG_FILE: '/private/log' }]) {
+    assert.equal(browserDebugOutputEnabled(env), false, JSON.stringify(env));
+  }
+  for (const word of ['held', 'installed', 'skipped', 'dropped']) assert.equal(managementStepWordOf({ schemaVersion: 1, managementCredential: word }), word);
+  // The setup view's object, an absent key (the final runtime's status), and anything a shell might echo read as nothing.
+  for (const answer of [null, undefined, {}, { managementCredential: null }, { managementCredential: { state: 'held' } }, { managementCredential: 'synthetic-management-token-value-0123456789' },
+    { managementCredential: 'HELD' }, { managementCredential: ['held'] }, { status: 'held' }]) assert.equal(managementStepWordOf(answer), null);
 });
 
 test('the one lifecycle path with a query is the removal page\'s own progress read for one well-formed attempt, and nothing near it', () => {
@@ -251,18 +281,20 @@ function fakeTab(outcomes) {
   return tab;
 }
 
-/** A browser type whose one context hands out fake tabs, each with the navigation outcomes listed for it. */
+/** A browser type whose one context hands out fake tabs, each with the navigation outcomes listed for it. `opened`
+ * keeps the options an owned browser and its context were opened with, and any tracing the port started fails. */
 function fakeBrowserType(outcomesPerTab) {
-  const tabs = [];
+  const tabs = [], opened = [];
   const context = {
     pages: () => [],
     newPage: async () => { const tab = fakeTab(outcomesPerTab.shift() ?? []); tabs.push(tab); return tab; },
     request: { fetch: async () => assert.fail('no request is expected') },
+    tracing: { start: async () => assert.fail('the port never records a trace'), startChunk: async () => assert.fail('the port never records a trace') },
     addCookies: async () => {}, clearCookies: async () => {},
     closed: false, close: async () => { context.closed = true; },
   };
-  const browser = { contexts: () => [context], newContext: async () => context, close: async () => {} };
-  return { tabs, context, browserType: { connectOverCDP: async () => browser, launch: async () => browser, launchPersistentContext: async () => assert.fail('no profile is expected') } };
+  const browser = { contexts: () => [context], newContext: async (options) => { opened.push(options); return context; }, close: async () => {} };
+  return { tabs, context, opened, browserType: { connectOverCDP: async () => browser, launch: async (options) => { opened.push(options); return browser; }, launchPersistentContext: async () => assert.fail('no profile is expected') } };
 }
 
 test('a tab the browser discarded or crashed is replaced in the same context with everything the runner attaches, and the navigation is retried once', async () => {
@@ -450,6 +482,113 @@ test('an installed session the Access edge refuses is put back from the cached t
     await assert.rejects(runner.request(installerOrigin, '/api/session'), { code: 'access_session_rejected' });
     await runner.close();
   }
+});
+
+test('the management step is answered with the setup page\'s own request, once, to the adopted shell only: the value stays in that body, no trace or recording exists to hold it, and only the shell\'s fixed word leaves', async () => {
+  const installId = `acg-${'7'.repeat(24)}`;
+  const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.synthetic.workers.dev` };
+  const value = 'synthetic-management-token-value-0123456789';
+  const answer = (status, body, headers = { 'content-type': 'application/json' }) => ({ status: () => status, headers: () => headers, body: async () => Buffer.from(JSON.stringify(body)), dispose: async () => {} });
+  const { context, opened, browserType } = fakeBrowserType([[null]]);
+  const notices = [], events = [], sent = [], answers = [];
+  context.request.fetch = async (url, options) => { sent.push({ url, ...options }); const next = answers.shift(); if (next instanceof Error) throw next; return next; };
+  const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, headless: true, env: {},
+    notify: (notice) => notices.push(notice), checkpoint: async (event) => events.push(event), browserType, accessFactory: () => async () => {} });
+  // An owned browser and its context are opened with no recording of any kind, and no trace is ever started.
+  assert.deepEqual(opened, [{ channel: 'chrome', headless: true, chromiumSandbox: true }, { acceptDownloads: false, serviceWorkers: 'block' }]);
+  // A shell this run has not adopted is never sent anything, and neither is a provision that is not a shell's.
+  await assert.rejects(runner.answerManagementStep(provision, value), { code: 'bootstrap_identity_invalid' });
+  await assert.rejects(runner.answerManagementStep({ ...provision, bootstrapOrigin: installerOrigin }, value), { code: 'bootstrap_identity_invalid' });
+  assert.equal(runner.adoptBootstrap(provision), provision.bootstrapOrigin);
+  assert.equal(runner.managementStepWord(), null);
+  // "Use this token": the page's request, with the value in its body and nowhere else.
+  answers.push(answer(200, { schemaVersion: 1, managementCredential: 'held' }));
+  assert.equal(await runner.answerManagementStep(provision, value), 'held');
+  assert.equal(runner.managementStepWord(), 'held');
+  // "Continue without a token".
+  answers.push(answer(200, { schemaVersion: 1, managementCredential: 'skipped' }));
+  assert.equal(await runner.answerManagementStep(provision), 'skipped');
+  assert.deepEqual(sent.map((item) => ({ url: item.url, method: item.method, data: JSON.parse(item.data), type: item.headers['content-type'], origin: item.headers.origin, maxRedirects: item.maxRedirects })), [
+    { url: `${provision.bootstrapOrigin}/__ankka/install/management-token`, method: 'POST', data: { managementToken: value }, type: 'application/json', origin: provision.bootstrapOrigin, maxRedirects: 0 },
+    { url: `${provision.bootstrapOrigin}/__ankka/install/management-token`, method: 'POST', data: { skip: true }, type: 'application/json', origin: provision.bootstrapOrigin, maxRedirects: 0 },
+  ]);
+  // Like the page, the port trims the value and never sends an empty one; the shell alone judges its form.
+  await assert.rejects(runner.answerManagementStep(provision, ' \n'), { code: 'management_token_unavailable' });
+  await assert.rejects(runner.answerManagementStep(provision, 42), { code: 'management_token_unavailable' });
+  assert.equal(sent.length, 2);
+  answers.push(answer(200, { schemaVersion: 1, managementCredential: 'held' }));
+  assert.equal(await runner.answerManagementStep(provision, ` ${value}\n`), 'held');
+  assert.deepEqual(JSON.parse(sent.at(-1).data), { managementToken: value });
+  // The value is in no URL and no header.
+  assert.equal(JSON.stringify(sent.map((item) => [item.url, item.headers])).includes('synthetic-management'), false);
+  // A refusal, a lost answer and an Access redirect leave as fixed codes; the request is never sent again, and a
+  // shell that echoed the value where its word belongs gives it no way out.
+  const failures = [];
+  for (const [next, expected] of [
+    [answer(400, { schemaVersion: 1, error: 'management_token_invalid', echoed: value }), { code: 'gateway_http_rejected', status: 400 }],
+    [new Error(`apiRequestContext.fetch: socket hang up while sending ${value}`), { code: 'gateway_request_failed', status: null }],
+    [answer(302, {}, { location: 'https://team.cloudflareaccess.com/cdn-cgi/access/login' }), { code: 'gateway_http_rejected', status: 302 }],
+  ]) {
+    answers.push(next);
+    const before = sent.length;
+    await assert.rejects(runner.answerManagementStep(provision, value), (error) => { failures.push(error); assert.equal(error.code, expected.code); assert.equal(error.status, expected.status); return true; });
+    assert.equal(sent.length, before + 1);
+  }
+  answers.push(answer(200, { schemaVersion: 1, managementCredential: value }));
+  assert.equal(await runner.answerManagementStep(provision, value), null);
+  assert.equal(runner.managementStepWord(), 'held');
+  for (const text of [JSON.stringify(notices), JSON.stringify(events), ...failures.flatMap((error) => [String(error), error.stack, JSON.stringify(error)])]) assert.equal(text.includes('synthetic-management'), false);
+  await runner.close();
+
+  // With Playwright's debug output switched on, which prints each message's body, the token is not sent at all; the
+  // choice to continue without one carries no value and still goes.
+  for (const env of [{ DEBUG: 'pw:channel' }, { PWDEBUG: '1' }]) {
+    const traced = fakeBrowserType([[null]]);
+    const requests = [];
+    traced.context.request.fetch = async (url, options) => { requests.push(options.data); return answer(200, { schemaVersion: 1, managementCredential: 'skipped' }); };
+    const refusing = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection: 'chrome', headless: true, env,
+      notify: () => {}, browserType: traced.browserType, accessFactory: () => async () => {} });
+    refusing.adoptBootstrap(provision);
+    await assert.rejects(refusing.answerManagementStep(provision, value), { code: 'browser_debug_output_enabled' });
+    assert.deepEqual(requests, []);
+    assert.equal(await refusing.answerManagementStep(provision), 'skipped');
+    assert.deepEqual(requests, ['{"skip":true}']);
+    await refusing.close();
+  }
+});
+
+test('the shell\'s word about the management step is kept from the progress page\'s own status polls on the adopted shell, never from a poll of the runner\'s', async () => {
+  const installId = `acg-${'8'.repeat(24)}`;
+  const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.synthetic.workers.dev` };
+  const status = `${provision.bootstrapOrigin}/__ankka/install/status`;
+  const { tabs, context, browserType } = fakeBrowserType([[null]]);
+  context.request.fetch = async () => assert.fail('the runner adds no status poll of its own');
+  const runner = await openLiveGatewayBrowser({ installerOrigin, managementOrigin, basics, browserConnection: 'chrome', headless: true, env: {},
+    notify: () => {}, browserType, accessFactory: () => async () => {} });
+  /** A status poll of the page as the tab's response listener sees it. */
+  const poll = (url, read) => ({ url: () => url, status: () => 200, headers: () => ({}), request: () => ({ resourceType: () => 'fetch' }), json: read });
+  const heard = async (url, read) => { tabs[0].listeners.response(poll(url, read)); await new Promise((resolve) => setImmediate(resolve)); return runner.managementStepWord(); };
+  const shell = (word) => async () => ({ schemaVersion: 1, role: 'customer-gateway-bootstrap', status: 'CONVERGING', managementCredential: word });
+  // Before the shell is adopted its polls are nobody's.
+  assert.equal(await heard(status, shell('held')), null);
+  runner.adoptBootstrap(provision);
+  assert.equal(await heard(status, shell('held')), 'held');
+  assert.equal(await heard(status, shell('dropped')), 'dropped');
+  // The final runtime's status carries no word, a cut poll reads nothing, and neither do an unknown word, another
+  // path, or another origin: the last word stays.
+  assert.equal(await heard(status, async () => ({ schemaVersion: 1, status: 'READY' })), 'dropped');
+  assert.equal(await heard(status, async () => { throw new Error('Response body is unavailable'); }), 'dropped');
+  assert.equal(await heard(status, shell('synthetic-management-token-value-0123456789')), 'dropped');
+  assert.equal(await heard(`${provision.bootstrapOrigin}/__ankka/install/setup`, shell('held')), 'dropped');
+  assert.equal(await heard(`${installerOrigin}/__ankka/install/status`, shell('held')), 'dropped');
+  assert.equal(await heard(`${status}x`, shell('installed')), 'dropped');
+  assert.equal(await heard(status, shell('installed')), 'installed');
+  // A replaced tab is listened to like the first one.
+  await runner.replaceTab('interruption_spent');
+  tabs[1].listeners.response(poll(status, shell('dropped')));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(runner.managementStepWord(), 'dropped');
+  await runner.close();
 });
 
 test('the answer to the receipt page navigation is kept in fixed fields only, for the installer document and nothing else', async () => {

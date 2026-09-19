@@ -122,8 +122,14 @@ For disposable development gateways, the [lifecycle runner](AGENT_LIFECYCLE.md)
 is a further, operator-controlled provisioning path: it reads the operator's
 token from the operator's credential store and writes it as the Worker
 secret with the operator's own deployment authority. The attended
-[browser runner](LIVE_LIFECYCLE.md) does the same only when its private config
-opts in with `managementToken`; without that field its operator installs the
+[browser runner](LIVE_LIFECYCLE.md) takes the customer's path instead when its
+private config opts in with `managementToken`: it enters the token at this
+setup step, with the request the setup page sends, so the install's final
+upload writes the secret and the operator token needs no Workers Scripts
+permission for it. Writing the Worker secret itself is only its fallback, made
+at most once: for a value the setup step refused or dropped, a gateway that
+never reports it, a release without the step, or a resumed run. Without that
+field the runner continues setup without a token and its operator installs the
 secret in Cloudflare. The value still never passes through Ankka-hosted
 services, and removing the gateway does not revoke it.
 

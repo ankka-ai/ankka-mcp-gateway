@@ -5,8 +5,9 @@ import { LiveLifecycleError } from './live-gateway-lifecycle.mjs';
 function requireCondition(value, code) { if (!value) throw new LiveLifecycleError(code); }
 const id = (value) => v.is(v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/u)), value);
 
-/** Provider evidence is read-only: no arbitrary URL, grant forwarding, or deletion. The one write is the operator's
- * opt-in, the management token as the encrypted secret of the exact recorded Worker. */
+/** Provider evidence is read-only: no arbitrary URL, grant forwarding, or deletion. The one write belongs to the
+ * operator's opt-in, as its fallback: the management token as the encrypted secret of the exact recorded Worker, for
+ * a gateway the token pasted at setup did not reach or whose setup had no step to paste it into. */
 // A read mutates nothing, so a transient transport failure (a timeout or a dropped connection) is retried this many
 // times before it is judged; a rejection by status is never retried.
 const READ_RETRY_DELAYS_MS = Object.freeze([1_000, 3_000]);
@@ -179,7 +180,8 @@ export function createLiveGatewayProvider({ config, token, transport = fetch, sl
     assertDependenciesAbsent: (inventory) => absent(inventory, true),
     assertAllAbsent: (inventory) => absent(inventory, false),
     /**
-     * The one provider write, and only on the operator's opt-in: the management token as the encrypted secret of the
+     * The one provider write, only on the operator's opt-in and only as the fallback of the paste at setup (or for a
+     * gateway whose setup had no step, a resumed one included): the management token as the encrypted secret of the
      * exact recorded Worker, with the operator token this port already holds. It is sent once and never retried; an
      * answer that never arrives leaves the write unknown and stops the run. The value rides in the request body and
      * nowhere else: no URL, error, notice or journal event carries it, and the answer's body is never read.

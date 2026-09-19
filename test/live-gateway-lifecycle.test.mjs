@@ -159,6 +159,8 @@ test('complete orchestration proves token management, distinct update, lost call
     adoptBootstrap: () => provision.bootstrapOrigin,
     release: () => evidence.push('hold_released'),
     holdHandoff: () => evidence.push('handoff_held'), releaseHandoff: () => evidence.push('handoff_released'),
+    // Without the opt-in the setup page's management step is answered with "Continue without a token".
+    answerManagementStep: async (target, value = null) => { assert.deepEqual(target, provision); assert.equal(value, null); evidence.push('setup_continued_without_token'); return 'skipped'; },
     waitFor: async (read, accepts) => { const result = await read(); assert.ok(accepts(result)); return result; },
     consent: async (_url, read, accepts) => {
       consentCount += 1;
@@ -176,8 +178,9 @@ test('complete orchestration proves token management, distinct update, lost call
       }
       if (origin === provision.bootstrapOrigin) {
         if (path.endsWith('/setup')) return { availableZones: [{}] };
-        if (path.endsWith('/configuration')) return { plan: { releaseId: config.releaseA.release, releaseArtifactSha256: config.releaseA.artifactSha256 } };
-        if (path.endsWith('/oauth/start')) return { authorizationUrl: 'synthetic-consent' };
+        if (path.endsWith('/configuration')) return { plan: { releaseId: config.releaseA.release, releaseArtifactSha256: config.releaseA.artifactSha256 },
+          managementCredential: { state: null, name: `Ankka gateway ${config.basics.managementHostname}`, createUrl: 'https://dash.cloudflare.com/?synthetic' } };
+        if (path.endsWith('/oauth/start')) { assert.ok(evidence.includes('setup_continued_without_token')); return { authorizationUrl: 'synthetic-consent' }; }
       }
       if (path === '/api/status') return { schemaVersion: 1 };
       if (path === '/api/update') return { current, available };
@@ -214,7 +217,7 @@ test('complete orchestration proves token management, distinct update, lost call
   });
   // The installer's own connection is opened ahead of the removal round, and the test tab is replaced once the
   // interrupted round is observed, before the recovery rounds.
-  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'installer_connection_opened', 'dependencies_absent', 'tab_replaced:interruption_spent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
+  assert.deepEqual(evidence, ['handoff_held', 'handoff_released', 'setup_continued_without_token', 'hold_released', 'release_b_activated', 'service_identity_proven', 'removal_cookie_cleared', 'interruption_armed', 'installer_connection_opened', 'dependencies_absent', 'tab_replaced:interruption_spent', 'removal_cookie_cleared', 'receipt_imported', 'all_absent']);
   assert.deepEqual(events.at(-1), { stage: 'lifecycle', status: 'passed' });
   assert.ok(events.findIndex((event) => event.status === 'receipt_saved') < events.findIndex((event) => event.stage === 'root_removal' && event.status === 'started'));
   assert.equal(events.find((event) => event.status === 'receipt_saved').revocationUnconfirmed, false);
@@ -305,12 +308,14 @@ test('the continuation waits for the team and sources views before the managemen
   await assert.rejects(continueLiveGatewayLifecycle({ config, browser, provider: {}, provision, publishB: async () => {}, checkpoint: async (event) => events.push(event), notify: (notice) => notices.push(notice) }), /stop_here/u);
   assert.deepEqual(reads.slice(0, 4), ['/api/team', '/api/team', '/api/sources', '/api/sources']);
   assert.equal(reads.at(-1), '/api/sources/discover');
-  // Without the opt-in the operator is told to install the token in Cloudflare, exactly as before, and nothing is journaled for it.
+  // Without the opt-in the operator is told to install the token in Cloudflare, exactly as before; once the gateway
+  // reports it, the journal names the operator as the path that set it.
   assert.deepEqual(notices, ['Install the approved management token directly as the gateway secret in Cloudflare. This command never receives that token.']);
-  assert.equal(events.some((event) => event.stage === 'management_token'), false);
+  assert.deepEqual(events.filter((event) => event.stage === 'management_token'), [{ stage: 'management_token', status: 'operator' }]);
+  assert.deepEqual(events[0], { stage: 'management_token', status: 'operator' });
 });
 
-test('with the opt-in the runner writes the management secret once, behind a checkpoint, and still waits for the gateway to report it; the value reaches no event, notice or error', async () => {
+test('with the opt-in and no setup step to paste into (a resumed run) the runner writes the management secret once, behind a checkpoint, and still waits for the gateway to report it; the value reaches no event, notice or error', async () => {
   const { continueLiveGatewayLifecycle } = await import('../tools/live-gateway-lifecycle.mjs');
   const { managementTokenStep } = await import('../tools/live-gateway-command.mjs');
   const { createLiveGatewayProvider } = await import('../tools/live-gateway-provider.mjs');
@@ -338,8 +343,11 @@ test('with the opt-in the runner writes the management secret once, behind a che
         if (scenario.write === 'lost') throw new Error(`socket hang up while sending ${value}`);
         return written(scenario.write);
       } });
-    const installManagementToken = managementTokenStep({ config: optedIn, provider, credential: async (asked) => { credentialReads.push(asked); return value; } });
+    const managementToken = managementTokenStep({ config: optedIn, provider, credential: async (asked) => { credentialReads.push(asked); return value; } });
     const browser = {
+      // A resumed process pasted nothing and observed no shell: the setup step's port is never asked.
+      answerManagementStep: async () => assert.fail('nothing is pasted after the installation'),
+      managementStepWord: () => assert.fail('no shell word is consulted without a paste in this run'),
       waitFor: async (read, accepts) => { for (;;) { const result = await read(); if (accepts(result)) return result; } },
       request: async (origin, path) => {
         assert.equal(origin, config.managementOrigin);
@@ -354,7 +362,7 @@ test('with the opt-in the runner writes the management secret once, behind a che
       },
     };
     let failure = null;
-    await assert.rejects(continueLiveGatewayLifecycle({ config: optedIn, browser, provider, provision, publishB: async () => {}, installManagementToken,
+    await assert.rejects(continueLiveGatewayLifecycle({ config: optedIn, browser, provider, provision, publishB: async () => {}, managementToken,
       checkpoint: async (event) => { events.push(event); order.push(`${event.stage}:${event.status}`); }, notify: (notice) => notices.push(notice) }),
     (error) => { failure = error; return true; });
     if (scenario.ends instanceof RegExp) assert.match(failure.message, scenario.ends);
@@ -376,6 +384,137 @@ test('with the opt-in the runner writes the management secret once, behind a che
     // The operator is never told to install the token by hand, and the value is nowhere but the request body.
     assert.equal(notices.some((notice) => notice.startsWith('Install the approved management token')), false);
     for (const text of [JSON.stringify(events), JSON.stringify(notices), String(failure), failure.stack, JSON.stringify(failure)]) assert.equal(text.includes('synthetic-management'), false);
+  }
+});
+
+test('the management step of setup is answered before the approval starts: pasted with the opt-in as a customer pastes it, continued without a token otherwise, and the provider write is only the fallback', async () => {
+  const { managementTokenStep, summarizeLiveJournal } = await import('../tools/live-gateway-command.mjs');
+  const { lifecycleFailureReport } = await import('../tools/live-gateway-diagnostics.mjs');
+  const { LiveGatewayBrowserError } = await import('../tools/live-gateway-origin.mjs');
+  const { LiveLifecycleError } = await import('../tools/live-gateway-lifecycle.mjs');
+  const installId = `acg-${'6'.repeat(24)}`;
+  const provision = { installId, workerName: `ankka-gateway-${installId}`, bootstrapOrigin: `https://ankka-gateway-${installId}.synthetic.workers.dev` };
+  const value = 'synthetic-management-token-value-0123456789';
+  const reference = { keychain: { service: 'ankka-lifecycle-runner', account: 'management-token' } };
+  const plan = { releaseId: config.releaseA.release, releaseArtifactSha256: config.releaseA.artifactSha256 };
+  // The setup view of a shell that offers the step carries its state, the token's name and Cloudflare's template link.
+  const offered = { managementCredential: { state: null, name: 'Ankka gateway manage.example.com', createUrl: 'https://dash.cloudflare.com/?synthetic' } };
+  const stop = /stop_here/u;
+  for (const scenario of [
+    // The customer's path: the shell holds the pasted value, the install's final upload carries it, and the gateway
+    // reports it. No provider write, and the gateway's view is not recorded as found already configured.
+    { name: 'pasted', optIn: true, offers: true, shell: 'held', word: 'held', gateway: 'reports', statuses: ['started', 'pasted_at_setup'], step: ['paste'], writes: 0, ends: stop, path: 'pasted_at_setup', fallback: null },
+    // Without the opt-in the runner chooses "Continue without a token" and the operator is prompted as before.
+    { name: 'skipped', optIn: false, offers: true, shell: 'held', word: 'skipped', gateway: 'reports', statuses: ['skipped_at_setup', 'operator'], step: ['skip'], writes: 0, ends: stop, path: 'operator', fallback: null },
+    // A release whose setup page predates the step is asked nothing; what follows is what it always was.
+    { name: 'not offered, opt-in', optIn: true, offers: false, shell: 'held', word: null, gateway: 'after_write', statuses: ['step_not_offered', 'started', 'installed_by_runner'], step: [], writes: 1, ends: stop, path: 'installed_by_runner', fallback: 'step_not_offered' },
+    { name: 'not offered, operator', optIn: false, offers: false, shell: 'held', word: null, gateway: 'reports', statuses: ['step_not_offered', 'operator'], step: [], writes: 0, ends: stop, path: 'operator', fallback: 'step_not_offered' },
+    // The shell refuses the value's form and keeps nothing: setup goes on without it, as it does for a customer.
+    { name: 'refused', optIn: true, offers: true, shell: 'refused', word: 'skipped', gateway: 'after_write', statuses: ['started', 'refused_at_setup', 'skipped_at_setup', 'started', 'installed_by_runner'], step: ['paste', 'skip'], writes: 1, ends: stop, path: 'installed_by_runner', fallback: 'refused_at_setup' },
+    // The shell's object restarted before the install: its word is `dropped`, and the fallback follows without the wait.
+    { name: 'dropped', optIn: true, offers: true, shell: 'held', word: 'dropped', gateway: 'after_write', statuses: ['started', 'pasted_at_setup', 'dropped_at_setup', 'started', 'installed_by_runner'], step: ['paste'], writes: 1, ends: stop, path: 'installed_by_runner', fallback: 'dropped_at_setup' },
+    // The gateway never reports the pasted token within the wait: the fallback follows, once.
+    { name: 'not reported', optIn: true, offers: true, shell: 'held', word: 'held', gateway: 'after_write', statuses: ['started', 'pasted_at_setup', 'not_reported', 'started', 'installed_by_runner'], step: ['paste'], writes: 1, ends: stop, path: 'installed_by_runner', fallback: 'not_reported' },
+    { name: 'never reported', optIn: true, offers: true, shell: 'held', word: 'held', gateway: 'never', statuses: ['started', 'pasted_at_setup', 'not_reported', 'started', 'installed_by_runner'], step: ['paste'], writes: 1, ends: { code: 'interactive_step_timed_out' }, path: 'installed_by_runner', fallback: 'not_reported' },
+    // An operator token that may not write the secret stops the fallback with the write's fixed code; nothing is set.
+    { name: 'fallback refused', optIn: true, offers: true, shell: 'held', word: 'held', gateway: 'never', write: 'refused', statuses: ['started', 'pasted_at_setup', 'not_reported', 'started'], step: ['paste'], writes: 1, ends: { code: 'management_token_write_rejected', status: 403 }, path: null, fallback: 'not_reported' },
+    // A paste whose answer never arrives is an unknown write: the run stops, and neither a retry nor the approval follows.
+    { name: 'paste lost', optIn: true, offers: true, shell: 'lost', word: null, gateway: 'never', statuses: ['started'], step: ['paste'], writes: 0, ends: { code: 'gateway_request_failed' }, path: null, fallback: null },
+    // Any other refusal of the paste stops the run like the setup writes around it.
+    { name: 'paste locked', optIn: true, offers: true, shell: 'locked', word: null, gateway: 'never', statuses: ['started'], step: ['paste'], writes: 0, ends: { code: 'gateway_http_rejected', status: 409 }, path: null, fallback: null },
+  ]) {
+    const order = [], events = [], notices = [], step = [], credentialReads = [], writes = [];
+    const provider = { assertFresh: async () => {}, assertWorker: async () => {}, managementDomainReady: async () => true,
+      installManagementSecret: async (target, secret) => {
+        assert.deepEqual(target, provision); writes.push(secret); order.push('secret_write');
+        if (scenario.write === 'refused') throw new LiveLifecycleError('management_token_write_rejected', 403);
+      } };
+    const running = scenario.optIn ? { ...config, managementToken: reference } : config;
+    const managementToken = managementTokenStep({ config: running, provider, credential: async (asked) => { credentialReads.push(asked); return value; } });
+    assert.equal(managementToken === null, !scenario.optIn);
+    const reports = () => scenario.gateway === 'reports' || (scenario.gateway === 'after_write' && writes.length === 1);
+    const browser = {
+      login: async () => ({ session: { phase: 'draft', provision: null }, csrfToken: 'synthetic' }),
+      adoptBootstrap: () => provision.bootstrapOrigin, release: () => {}, holdHandoff: () => {}, releaseHandoff: () => {},
+      consent: async (_url, read) => read(),
+      // A wait that is never satisfied ends as the real one does.
+      waitFor: async (read, accepts) => {
+        for (let attempt = 0; attempt < 3; attempt += 1) { const result = await read(); if (accepts(result)) return result; }
+        throw new LiveGatewayBrowserError('interactive_step_timed_out');
+      },
+      // The browser port's step: the token with a value, "Continue without a token" without one.
+      answerManagementStep: async (target, secret = null) => {
+        assert.deepEqual(target, provision);
+        step.push(secret === null ? 'skip' : 'paste'); order.push(`step:${step.at(-1)}`);
+        if (secret === null) return 'skipped';
+        assert.equal(secret, value);
+        if (scenario.shell === 'refused') throw new LiveGatewayBrowserError('gateway_http_rejected', 400);
+        if (scenario.shell === 'locked') throw new LiveGatewayBrowserError('gateway_http_rejected', 409);
+        if (scenario.shell === 'lost') throw new LiveGatewayBrowserError('gateway_request_failed');
+        return 'held';
+      },
+      managementStepWord: () => scenario.word,
+      request: async (origin, path) => {
+        if (origin === config.installerOrigin) {
+          if (path === '/api/plan') return { session: { plan: { releaseId: config.releaseA.release } } };
+          if (path === '/api/bootstrap') return { authorizationUrl: 'synthetic-consent' };
+          if (path === '/api/session') return { session: { phase: 'handed_off', provision } };
+        }
+        if (origin === provision.bootstrapOrigin) {
+          if (path === '/__ankka/install/setup') return { availableZones: [] };
+          order.push(path);
+          if (path === '/__ankka/install/configuration') return scenario.offers ? { plan, ...offered } : { plan };
+          if (path === '/__ankka/install/oauth/start') return { authorizationUrl: 'synthetic-consent' };
+        }
+        if (origin === config.managementOrigin) {
+          if (path === '/api/status') return { schemaVersion: 1 };
+          if (path === '/api/update') return { current: { ...config.releaseA, artifactSha256: `sha256:${config.releaseA.artifactSha256}` } };
+          order.push(path);
+          if (path === '/api/team') return { schemaVersion: 1, managementCredentialConfigured: reports(), editingEnabled: reports(), revision: 0, members: [] };
+          throw new Error('stop_here');
+        }
+        throw new Error(`unexpected ${origin}${path}`);
+      },
+    };
+    let failure = null;
+    await assert.rejects(qualifyLiveGatewayLifecycle({ config: running, browser, provider, managementToken, publishB: async () => {}, resolves: async () => true,
+      checkpoint: async (event) => { events.push(event); order.push(`${event.stage}:${event.status}`); }, notify: (notice) => notices.push(notice) }),
+    (error) => { failure = error; return true; });
+    if (scenario.ends instanceof RegExp) assert.match(failure.message, scenario.ends, scenario.name);
+    else for (const [key, expected] of Object.entries(scenario.ends)) assert.equal(failure[key], expected, scenario.name);
+    assert.deepEqual(events.filter((event) => event.stage === 'management_token').map((event) => event.status), scenario.statuses, scenario.name);
+    assert.deepEqual(step, scenario.step, scenario.name);
+    assert.equal(writes.length, scenario.writes, scenario.name);
+    // The store is read when a part of the step runs: once for the paste, and again only for the fallback's write.
+    assert.equal(credentialReads.length, (scenario.step.includes('paste') ? 1 : 0) + scenario.writes, scenario.name);
+    // The step comes after the configuration and before the approval, whose checkpoint makes a later stop the
+    // installation's again; a paste that stopped the run never reaches the approval.
+    const approval = order.indexOf('/__ankka/install/oauth/start');
+    const between = order.slice(order.indexOf('installation:configured') + 1, approval === -1 ? undefined : approval);
+    if (['paste lost', 'paste locked'].includes(scenario.name)) assert.deepEqual(between, ['management_token:started', 'step:paste'], scenario.name);
+    else assert.equal(between.at(-1), 'installation:approval_started', scenario.name);
+    if (scenario.name === 'pasted') {
+      assert.deepEqual(between, ['management_token:started', 'step:paste', 'management_token:pasted_at_setup', 'installation:approval_started']);
+      assert.deepEqual(events.find((event) => event.status === 'pasted_at_setup'), { stage: 'management_token', status: 'pasted_at_setup', word: 'held' });
+      // After the installation only the gateway's own view is awaited.
+      assert.deepEqual(order.slice(order.indexOf('installation:passed') + 1), ['/api/team', '/api/team', '/api/sources']);
+    }
+    if (scenario.name === 'dropped') {
+      // No wait for a report that cannot come: the gateway's view is read, the checkpoint precedes the write.
+      assert.deepEqual(order.slice(order.indexOf('management_token:dropped_at_setup') + 1).slice(0, 3), ['/api/team', 'management_token:started', 'secret_write']);
+    }
+    // The operator is told to install the token by hand only without the opt-in.
+    assert.equal(notices.some((notice) => notice.startsWith('Install the approved management token')), !scenario.optIn, scenario.name);
+    // --status and the failure report name the path that set the token, and why the customer's path did not.
+    const summary = summarizeLiveJournal({ schemaVersion: 1, events });
+    assert.deepEqual([summary.managementToken, summary.managementTokenFallback], [scenario.path, scenario.fallback], scenario.name);
+    const report = await lifecycleFailureReport({ events, failureCode: failure.code ?? 'unexpected_failure', httpStatus: failure.status });
+    assert.deepEqual([report.managementToken, report.managementTokenFallback], [scenario.path, scenario.fallback], scenario.name);
+    if (['paste lost', 'paste locked'].includes(scenario.name)) assert.deepEqual([report.failedStage, report.lastMutationStage], ['management_token', 'management_token']);
+    // The value is in the step's request and the fallback's write, and nowhere else.
+    for (const text of [JSON.stringify(events), JSON.stringify(notices), String(failure), failure.stack, JSON.stringify(failure), JSON.stringify(summary), JSON.stringify(report)]) {
+      assert.equal(text.includes('synthetic-management'), false, scenario.name);
+    }
   }
 });
 

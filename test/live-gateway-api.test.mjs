@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createLiveGatewayApi, createLiveGatewayServiceApi } from '../tools/live-gateway-api.mjs';
-import { operatorHint, proveServiceIdentity, summarizeLiveJournal, supersededUpdateAction, validateLiveManagementConfig } from '../tools/live-gateway-command.mjs';
+import { operatorHint, proveServiceIdentity, requireUntracedPaste, summarizeLiveJournal, supersededUpdateAction, validateLiveManagementConfig } from '../tools/live-gateway-command.mjs';
 
 const origin = 'https://manage.example.com';
 const email = 'operator@example.com';
@@ -94,11 +94,31 @@ test('API passes and recovery receipts never imply full lifecycle qualification'
   assert.equal(result.serviceIdentity, null);
   assert.equal(result.rootRemoval, null);
   assert.equal(result.dependencyRemoval, null);
-  // The automatic management-token step is summarized by its fixed outcome; a write that only started is not one.
+  // The management token is summarized by the path that set it, in fixed words; a write that only started set nothing.
   assert.equal(result.managementToken, null);
-  assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'management_token', status: 'started' }] }).managementToken, null);
-  assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'management_token', status: 'started' }, { stage: 'management_token', status: 'installed_by_runner' }] }).managementToken, 'installed_by_runner');
-  assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'management_token', status: 'already_configured' }] }).managementToken, 'already_configured');
+  assert.equal(result.managementTokenFallback, null);
+  const tokenPath = (...statuses) => {
+    const summary = summarizeLiveJournal({ ...state, events: statuses.map((status) => ({ stage: 'management_token', status, word: 'private-word', httpStatus: 400 })) });
+    assert.equal(JSON.stringify(summary).includes('private-word'), false);
+    return [summary.managementToken, summary.managementTokenFallback];
+  };
+  assert.deepEqual(tokenPath('started'), [null, null]);
+  assert.deepEqual(tokenPath('started', 'installed_by_runner'), ['installed_by_runner', null]);
+  assert.deepEqual(tokenPath('already_configured'), ['already_configured', null]);
+  assert.deepEqual(tokenPath('started', 'pasted_at_setup'), ['pasted_at_setup', null]);
+  assert.deepEqual(tokenPath('skipped_at_setup'), [null, null]);
+  assert.deepEqual(tokenPath('skipped_at_setup', 'operator'), ['operator', null]);
+  // A resumed run finds the pasted token already reported: the path that set it stays the paste.
+  assert.deepEqual(tokenPath('started', 'pasted_at_setup', 'already_configured'), ['pasted_at_setup', null]);
+  // A pasted value the shell dropped, or the gateway never reported, set nothing; the fallback names why it ran.
+  assert.deepEqual(tokenPath('started', 'pasted_at_setup', 'dropped_at_setup', 'started'), [null, 'dropped_at_setup']);
+  assert.deepEqual(tokenPath('started', 'pasted_at_setup', 'dropped_at_setup', 'started', 'installed_by_runner'), ['installed_by_runner', 'dropped_at_setup']);
+  assert.deepEqual(tokenPath('started', 'pasted_at_setup', 'not_reported', 'already_configured'), ['already_configured', 'not_reported']);
+  assert.deepEqual(tokenPath('started', 'refused_at_setup', 'skipped_at_setup', 'started', 'installed_by_runner'), ['installed_by_runner', 'refused_at_setup']);
+  assert.deepEqual(tokenPath('step_not_offered', 'operator'), ['operator', 'step_not_offered']);
+  // Words outside the vocabulary, and other stages' events, say nothing.
+  assert.deepEqual(tokenPath('pasted', 'https://x/?secret'), [null, null]);
+  assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'installation', status: 'pasted_at_setup' }] }).managementToken, null);
   // A stop on a failed navigation carries why in the fixed vocabulary, and a replaced test tab is counted but is
   // never the last stage; a tab replaced on purpose after the interruption is the runner's event too, not a reopen.
   const lost = summarizeLiveJournal({ ...state, scope: 'browser_lifecycle', events: [
@@ -115,8 +135,16 @@ test('API passes and recovery receipts never imply full lifecycle qualification'
   assert.match(operatorHint('browser_attach_failed'), /chrome:\/\/inspect\/#remote-debugging/u);
   // The automatic management-token step's stops name the operator's remedy too: the store, the permission, the resume.
   assert.match(operatorHint('credential_unavailable'), /keychain item or the environment variable/u);
-  assert.match(operatorHint('management_token_write_rejected'), /Workers Scripts Write.*--resume-installed/u);
+  assert.match(operatorHint('management_token_write_rejected'), /only when the token it entered at the setup step did not reach the gateway.*Workers Scripts Write.*--resume-installed/u);
   assert.match(operatorHint('management_token_write_unknown'), /--resume-installed/u);
+  // A fresh run with the opt-in is refused before anything is deployed when the test browser's debug output, which
+  // prints request bodies, is switched on; without the opt-in nothing is pasted and nothing is refused.
+  assert.match(operatorHint('browser_debug_output_enabled'), /DEBUG or PWDEBUG.*Unset both/u);
+  const optedIn = { managementToken: { env: 'ANKKA_MANAGEMENT_TOKEN_VALUE' } };
+  assert.throws(() => requireUntracedPaste(optedIn, { DEBUG: 'pw:channel' }), { code: 'browser_debug_output_enabled' });
+  assert.throws(() => requireUntracedPaste(optedIn, { PWDEBUG: '1' }), { code: 'browser_debug_output_enabled' });
+  assert.doesNotThrow(() => requireUntracedPaste(optedIn, {}));
+  assert.doesNotThrow(() => requireUntracedPaste({}, { DEBUG: 'pw:channel', PWDEBUG: '1' }));
   for (const code of ['navigation_failed', 'unexpected_failure', 'update_not_verified', 'toString', undefined, null]) assert.equal(operatorHint(code), null);
   assert.equal(summarizeLiveJournal({ ...state, events: [{ stage: 'command', status: 'stopped', failureCode: 'navigation_failed', navigation: 'https://x/?secret' }] }).navigation, null);
   assert.deepEqual(summarizeLiveJournal({ ...state, events: [...state.events,

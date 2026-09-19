@@ -1,6 +1,6 @@
 import * as v from 'valibot';
 import { qualifyLiveGatewayManagement } from './live-gateway-management.mjs';
-import { LiveGatewayBrowserError } from './live-gateway-origin.mjs';
+import { LiveGatewayBrowserError, managementStepWord } from './live-gateway-origin.mjs';
 import { hostnameResolvesDirectly } from './live-gateway-dns.mjs';
 
 export class LiveLifecycleError extends Error {
@@ -13,13 +13,47 @@ function requireCondition(value, code) {
 const terminalAction = (value) => ['succeeded', 'failed', 'recovery_required'].includes(value?.status);
 const exactRelease = (value, expected) => value?.release === expected.release && value.artifactSha256 === `sha256:${expected.artifactSha256}`;
 
+const timedOut = (error) => error instanceof LiveGatewayBrowserError && error.code === 'interactive_step_timed_out';
+
+/**
+ * The management step of the customer's own setup page, answered before the approval starts: the page shows its
+ * Approve button only after an answer, and the shell locks the step once an approval runs. With the operator's opt-in
+ * (`managementToken`) the token is entered there as a customer pastes it, by the browser port, which alone handles
+ * the value; without it the runner chooses to continue without a token, as the page's other control does. True only
+ * when the shell took the value. A value whose form the shell refuses is kept nowhere, and setup goes on without it,
+ * as it does for a customer; a shell whose release predates the step offers none in its setup view and is asked
+ * nothing. Any other refusal, and an answer that never arrives, stops the run like the setup writes around it.
+ */
+async function answerManagementStep({ browser, provision, configured, managementToken, checkpoint, notify }) {
+  if (!v.is(v.object({ managementCredential: v.object({}) }), configured)) {
+    await checkpoint({ stage: 'management_token', status: 'step_not_offered' });
+    return false;
+  }
+  if (managementToken !== null) {
+    await checkpoint({ stage: 'management_token', status: 'started' });
+    try {
+      const word = await managementToken.paste(browser, provision);
+      await checkpoint({ stage: 'management_token', status: 'pasted_at_setup', word: managementStepWord(word) });
+      notify?.('Management token entered at the new gateway\'s setup step, from your credential store, as a customer pastes it.');
+      return true;
+    } catch (error) {
+      if (!(error instanceof LiveGatewayBrowserError) || error.code !== 'gateway_http_rejected' || error.status !== 400) throw error;
+      await checkpoint({ stage: 'management_token', status: 'refused_at_setup', httpStatus: 400 });
+      notify?.('The setup step refused the management token\'s form and kept nothing. Setup continues without it; this command installs it as the gateway secret after the installation.');
+    }
+  }
+  const word = await browser.answerManagementStep(provision);
+  await checkpoint({ stage: 'management_token', status: 'skipped_at_setup', word: managementStepWord(word) });
+  return false;
+}
+
 /** Each write is preceded by a private checkpoint. Never retry an unknown write.
  * OAuth is reviewed in the runner's own browser; routine management uses the
  * gateway's account token. The operator token belongs only to the provider port.
- * `installManagementToken` is the operator's opt-in to the automatic management-token
+ * `managementToken` is the operator's opt-in to the automatic management-token
  * step; without it the operator installs that secret in Cloudflare when prompted.
  */
-export async function qualifyLiveGatewayLifecycle({ config, browser, provider, publishB, checkpoint, notify, resolves = hostnameResolvesDirectly, proveService = null, installManagementToken = null }) {
+export async function qualifyLiveGatewayLifecycle({ config, browser, provider, publishB, checkpoint, notify, resolves = hostnameResolvesDirectly, proveService = null, managementToken = null }) {
   const installer = (path, options) => browser.request(config.installerOrigin, path, options);
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
   await provider.assertFresh();
@@ -63,6 +97,9 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   requireCondition(configured?.plan?.releaseId === config.releaseA.release &&
     configured.plan.releaseArtifactSha256 === config.releaseA.artifactSha256, 'setup_release_mismatch');
   await checkpoint({ stage: 'installation', status: 'configured', plan: configured.plan });
+  const pastedAtSetup = await answerManagementStep({ browser, provision, configured, managementToken, checkpoint, notify });
+  // The approval is the installation's write again: a stop from here on reads as the installation's, not the step's.
+  await checkpoint({ stage: 'installation', status: 'approval_started' });
   const setup = await browser.request(bootstrapOrigin, '/__ankka/install/oauth/start', { method: 'POST', body: {} });
   // The consent callback sends the browser to the management hostname before its record exists, and a negative
   // answer is cached for the zone's negative TTL. The browser is therefore held off that origin, and the consent
@@ -87,33 +124,62 @@ export async function qualifyLiveGatewayLifecycle({ config, browser, provider, p
   const updateA = await browser.waitFor(() => management('/api/update'), (value) => value?.current !== undefined);
   requireCondition(exactRelease(updateA.current, config.releaseA), 'installed_release_mismatch');
   await checkpoint({ stage: 'installation', status: 'passed' });
-  await continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify, proveService, installManagementToken });
+  await continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify, proveService, managementToken, pastedAtSetup });
+}
+
+/** The gateway's own view of its management token: the credential is there and the dashboard edits with it. */
+const reportsManagementToken = (team) => team?.managementCredentialConfigured === true && team.editingEnabled === true;
+
+/**
+ * Whether the gateway reports the token this run pasted at setup: the customer's path, which needs no provider
+ * write. False sends the run to that write, once, and the journal says why first: the shell's last word was `dropped`
+ * (its object restarted or the hold ran out, so the install finished without the value), or the gateway never
+ * reported the credential within the wait.
+ */
+async function pastedTokenReported({ browser, management, checkpoint, notify }) {
+  if (browser.managementStepWord?.() === 'dropped') {
+    await checkpoint({ stage: 'management_token', status: 'dropped_at_setup' });
+    notify('The new gateway no longer held the pasted management token when it installed. This command installs it as the gateway secret instead.');
+    return false;
+  }
+  try {
+    await browser.waitFor(() => management('/api/team'), reportsManagementToken);
+    return true;
+  } catch (error) {
+    if (!timedOut(error)) throw error;
+    await checkpoint({ stage: 'management_token', status: 'not_reported' });
+    notify('The gateway did not report the pasted management token. This command installs it as the gateway secret instead.');
+    return false;
+  }
 }
 
 /**
  * Everything after a passed installation, also entered by `--resume-installed` with the provision recovered from
  * the journal: management token wait, management exercise, inventory, signed update, interrupted and completed removal.
- * Without `installManagementToken` the operator installs the management token in Cloudflare and this command never
- * receives it. With it (the operator's opt-in) the runner writes the secret itself through the provider port: once,
- * behind a checkpoint, and only on a gateway that does not report the credential yet, so a resumed run or a token
- * installed by hand meanwhile is never written over. Either way the gateway's own view decides when the run goes on.
+ * Without `managementToken` the operator installs the management token in Cloudflare and this command never receives
+ * it. With it (the operator's opt-in) a token pasted at setup (`pastedAtSetup`) only has to be reported by the
+ * gateway. The provider port's secret write is the fallback, and what a gateway whose setup had no step to paste
+ * into gets, a resumed one included: once, behind a checkpoint, and only on a gateway that does not report the
+ * credential yet, so a resumed run or a token installed by hand meanwhile is never written over. Either way the
+ * gateway's own view decides when the run goes on.
  */
-export async function continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify, proveService = null, installManagementToken = null }) {
+export async function continueLiveGatewayLifecycle({ config, browser, provider, provision, publishB, checkpoint, notify, proveService = null, managementToken = null, pastedAtSetup = false }) {
   const management = (path, options) => browser.request(config.managementOrigin, path, options);
-  if (installManagementToken === null) {
+  if (managementToken === null) {
     notify('Install the approved management token directly as the gateway secret in Cloudflare. This command never receives that token.');
-  } else {
+  } else if (!pastedAtSetup || !await pastedTokenReported({ browser, management, checkpoint, notify })) {
     const team = await browser.waitFor(() => management('/api/team'), (value) => value?.schemaVersion === 1);
     if (team.managementCredentialConfigured === true) await checkpoint({ stage: 'management_token', status: 'already_configured' });
     else {
       await checkpoint({ stage: 'management_token', status: 'started' });
-      await installManagementToken(provision);
+      await managementToken.install(provision);
       await checkpoint({ stage: 'management_token', status: 'installed_by_runner' });
       notify('Management token installed as the gateway secret by this command, from your credential store. Waiting for the gateway to report it.');
     }
   }
-  await browser.waitFor(() => management('/api/team'), (value) =>
-    value?.managementCredentialConfigured === true && value.editingEnabled === true);
+  await browser.waitFor(() => management('/api/team'), reportsManagementToken);
+  // Without the opt-in the token the gateway now reports is the operator's own work.
+  if (managementToken === null) await checkpoint({ stage: 'management_token', status: 'operator' });
   // A dashboard deployment reaches the edge gradually; the sources view must show the token-managed mode too before
   // the exercise starts, or consecutive reads can straddle two Worker versions.
   await browser.waitFor(() => management('/api/sources'), (value) =>
