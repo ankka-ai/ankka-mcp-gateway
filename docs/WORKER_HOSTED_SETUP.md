@@ -52,6 +52,20 @@ domain from the signed list. Domain choices are a snapshot from the first
 approval: after adding and activating a domain, start a new deployment to
 discover it with a fresh grant. No grant is retained to refresh that list.
 
+The review page also holds the management token step: the link that opens
+Cloudflare's account-token page with both permissions and a name containing
+the management hostname filled in, one paste field, and an explicit control to
+continue without a token. The second approval is offered once the customer
+has chosen. `POST /__ankka/install/management-token` takes either the pasted
+value or the choice to skip, once, by same-origin JSON POST under the setup
+session; it accepts only Cloudflare's two account-token forms, answers with a
+fixed word, and is locked while an approval or an install runs. The value is
+kept only in the Durable Object's memory beside the grant and reaches the
+Worker as a secret binding of the final runtime upload; storage receives one
+fixed word about the choice. `GET /__ankka/install/setup` returns the step's
+word, token name and link, never a value. Custody, accepted forms and the
+restart behaviour are specified in [Management token](MANAGEMENT_TOKEN.md).
+
 Each review signs the selected configuration and permit digest with its existing
 ownership key. `POST /api/bootstrap/configure` on the fixed hosted issuer checks
 the permit, Worker signature, release, expiry, and allowed zone. It returns the

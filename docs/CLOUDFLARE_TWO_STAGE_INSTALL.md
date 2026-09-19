@@ -1,5 +1,17 @@
 # Cloudflare two-stage installation candidate
 
+> **Source change: management token step of setup (2026-09-19).** The setup
+> page the customer's Worker serves before the second approval now also takes
+> the gateway's standing management credential: an account-owned API token the
+> customer creates from a Cloudflare template link and pastes into their own
+> gateway. It is distinct from the temporary Stage 2 OAuth grant that this
+> document calls a management token. It never passes through anything Ankka
+> hosts, is held only in the owning Durable Object's memory beside the grant,
+> and is written as the `ANKKA_MANAGEMENT_TOKEN` secret binding by the final
+> runtime upload, which adds no provider call. See
+> [Management token](MANAGEMENT_TOKEN.md). The statements below that V1
+> provisions no permanent management credential record the earlier boundary.
+
 > **Source change: Worker-hosted configuration (2026-09-04).** The initial
 > `bootstrap` operation now requests `workers-scripts.write zone.read`, discovers
 > up to 100 active domains in the selected account, and registers an account
@@ -327,6 +339,13 @@ negative live canary before release.
 
 ### Team management is outside V1
 
+> **Superseded.** Routine source and Team operations now use the opt-in,
+> account-wide token this section describes as the second path, with its
+> account-wide reach disclosed where it is asked for: see
+> [Management token](MANAGEMENT_TOKEN.md). Since 2026-09-19 the setup page
+> offers it as a step the customer may skip. The record below is kept for
+> Cloudflare's scoping answers, which still hold.
+
 The default V1 installer does not provision a permanent Cloudflare management
 credential, and the Team policy editor remains disabled. Administrators manage
 team policy directly in Cloudflare for V1. The retired optional
@@ -442,6 +461,15 @@ must explain the policy block without asking for broader permissions.
    key signs a token-free request to the hosted issuer, which certifies the
    exact final callback and plan for the already-deployed Worker. Stage 2
    starts only after review. See [the setup contract](WORKER_HOSTED_SETUP.md).
+9. On the same review page the Worker offers the management token step: a
+   Cloudflare template link that fills in **Access: Apps and Policies Edit**,
+   **MCP Portals Edit** and a name containing the management hostname, one
+   paste field, and an explicit control to continue without a token. The page
+   offers the second approval only once the customer has chosen. The pasted
+   value is sent once by same-origin POST under the setup session, checked
+   against Cloudflare's two account-token forms, and kept only in the
+   Durable Object's memory. Storage receives one fixed word about the
+   choice. The step is locked while an approval or an install runs.
 
 The restricted runtime exposes only:
 
@@ -452,6 +480,7 @@ GET  /__ankka/install/status
 POST /__ankka/install/continue
 GET  /__ankka/install/setup
 POST /__ankka/install/configuration
+POST /__ankka/install/management-token
 POST /__ankka/install/oauth/start
 GET  /__ankka/install/oauth/callback
 ```
@@ -506,7 +535,16 @@ to start or take over an installation.
 7. The last pass disables `workers.dev`, records the terminal verification
    of everything but the runtime, marks the attempt finalizing, arms an
    alarm, and only then publishes the clean recovery-capable final runtime,
-   drops the bootstrap nonce and revokes the grant. Cloudflare restarts the
+   drops the bootstrap nonce and revokes the grant. When the object's memory
+   still holds a management credential from the setup page, that same upload
+   carries it as the `secret_text` binding `ANKKA_MANAGEMENT_TOKEN`: no
+   further provider call, and nothing durable names it (the journal records
+   the plain-text bindings only). An object restart before this pass loses the
+   value like the grant; the install then completes without the secret and
+   the status route says `dropped`. The exact read-back of the final version
+   expects the secret binding exactly when the install supplied it, and
+   recovery in the final runtime expects it exactly when its own environment
+   carries it. Cloudflare restarts the
    Durable Object on the new code as soon as the Worker has a new version
    and refuses storage to the pass that uploaded it, so that pass writes
    nothing after the upload: the journal keeps `final_runtime` armed, and

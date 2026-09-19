@@ -57,6 +57,17 @@ export class CustomerBootstrapConvergenceDriver {
 
   constructor(private readonly ports: CustomerBootstrapConvergenceDriverPorts) {}
 
+  /**
+   * True from the moment a callback handed its grant over until the attempt
+   * settles. A host that wakes itself for another reason asks this before it
+   * runs a pass: while a callback is still exchanging its code the state
+   * already says CONVERGING, and a pass would settle that attempt as one
+   * whose grant was lost.
+   */
+  get holdsGrant(): boolean {
+    return this.#pending !== null;
+  }
+
   /** Takes the grant from a successful callback and schedules the first pass. */
   async start(input: {
     readonly attemptId: string;

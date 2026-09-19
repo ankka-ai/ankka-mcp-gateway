@@ -22,6 +22,12 @@ function scriptLiteral<Value>(value: Value): string {
  * temporary workers.dev address can close before the final runtime upload.
  * Losing that address is not proof of readiness. The fixed management page
  * continues checking same-origin status behind Access before opening the dashboard.
+ *
+ * While the install runs, the shell's status also carries one fixed word
+ * about the management token step, and the page says in a sentence what it
+ * means: the token is written in the last step, was skipped, or was dropped
+ * and can be added later in Settings. A status without the word (the final
+ * runtime's recovery status) shows nothing.
  */
 export function customerInstallProgressPage(
   managementHostname: string,
@@ -43,12 +49,20 @@ export function customerInstallProgressPage(
     status: outcome.status,
     failure: outcome.failureCode === null ? null : { code: outcome.failureCode, reason: outcome.failureReason },
   });
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Install Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}code{font:.9375em ui-monospace,monospace}a{color:#1d4ed8}</style><h1 id="title">Finishing your Ankka Gateway</h1><p id="message">Cloudflare approved the install. Setting up the Gateway takes a few minutes; this page updates itself.</p><p id="detail"></p><script nonce="${nonce}">
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta name="referrer" content="no-referrer"><title>Install Ankka Gateway</title><style>body{font:16px/1.5 system-ui,sans-serif;max-width:42rem;margin:5rem auto;padding:0 1.25rem;color:#171713}code{font:.9375em ui-monospace,monospace}a{color:#1d4ed8}</style><h1 id="title">Finishing your Ankka Gateway</h1><p id="message">Cloudflare approved the install. Setting up the Gateway takes a few minutes; this page updates itself.</p><p id="detail"></p><p id="credential"></p><script nonce="${nonce}">
 (()=>{
   const management=${scriptLiteral(`https://${managementHostname}/?setup=finishing`)};
   const title=document.querySelector('#title');
   const message=document.querySelector('#message');
   const detail=document.querySelector('#detail');
+  const credential=document.querySelector('#credential');
+  // One fixed word from the status route about the management token step; never a value.
+  const notes={
+    held:'Your management token is saved as an encrypted secret on your gateway in the last step of setup.',
+    installed:'Your management token is saved as an encrypted secret on your gateway.',
+    skipped:'You continued without a management token. Adding sources and managing team access stay disabled until you add it in Settings.',
+    dropped:'Your gateway no longer held the management token you pasted, so setup is finishing without it. Adding sources and managing team access stay disabled until you add it in Settings.',
+  };
   let misses=0;
   let active=true;
   let timer;
@@ -68,6 +82,7 @@ export function customerInstallProgressPage(
     location.replace(management);
   };
   const show=(state)=>{
+    credential.textContent=state.status==='CONVERGING'&&Object.hasOwn(notes,String(state.managementCredential))?notes[state.managementCredential]:'';
     if(state.status==='READY'){openManagement();return true}
     if(state.status==='INCOMPLETE'){
       title.textContent='Setup did not complete';

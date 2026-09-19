@@ -9,6 +9,7 @@ import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceipt
 import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover';
 import { customerInstallProgressPage } from './customer-install-progress-page';
+import { CUSTOMER_MANAGEMENT_BINDING } from './customer-management-credential';
 import {
   customerInstallationObjectName,
   handleCustomerInstallationObjectRequest,
@@ -315,6 +316,10 @@ export class AdminState extends RuntimeAdminState {
       handover,
       storage: this.finalState.storage,
       journal: new CustomerStage2DurableStatePort(this.finalState.storage),
+      // This runtime is the version the read-back inspects: it carries the
+      // customer's management secret exactly when the install supplied one.
+      // Only the binding's presence is read here, never its value.
+      managementCredentialBound: v.is(v.string(), this.finalEnv[CUSTOMER_MANAGEMENT_BINDING]),
       runtime: {
         controlPlaneOrigin: PUBLIC_ORIGIN,
         updateChannel: config.ANKKA_UPDATE_CHANNEL,
