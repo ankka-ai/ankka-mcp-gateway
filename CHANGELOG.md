@@ -4,6 +4,23 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Set up the gateway's management token inside setup. A freshly installed gateway could not add a source or manage
+  team access until an administrator had created an account API token by hand and added it as a Worker secret in
+  Cloudflare, and nothing in the installer said so. The setup page your own Worker serves before the second approval
+  now has a **Management token** step: a link that opens Cloudflare's token page with **Access: Apps and Policies
+  Edit**, **MCP Portals Edit** and a name containing your management hostname filled in (verified against the
+  dashboard on 2026-09-19), one paste field, and an explicit control to continue without a token. The page says why
+  the token is needed, that creating it takes a Super Administrator or Administrator, and that it can edit every
+  Access policy in the account. The token never passes through anything Ankka hosts: it goes from your browser to
+  your own Worker, which accepts only Cloudflare's two account-token forms, keeps it only in the owning Durable
+  Object's memory beside the install approval, and saves it as the `ANKKA_MANAGEMENT_TOKEN` secret binding with the
+  final runtime upload the install already makes, so no Cloudflare API call is added to any pass. It is never written
+  to Durable Object storage, the journal, a receipt, a log line, an error, a URL or a response. If Cloudflare
+  restarts the object first, the value is lost and the install still completes without it; the install status route
+  and the page that follows the install say so with one fixed word (`held`, `installed`, `skipped` or `dropped`).
+  The exact read-back of the final version accepts the secret binding exactly when the install supplied it. Adding
+  or rotating the token on an installed gateway is unchanged for now: directly in Cloudflare.
+
 - Show the rollback warning on Sources only when it is a real decision, in plain words. The permanent banner
   ("once source provisioning starts, rollback below this runtime release is unavailable…") is gone. Only when the
   gateway was updated, its earlier release can still be restored, and starting a source installation would end that,

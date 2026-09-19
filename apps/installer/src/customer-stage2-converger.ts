@@ -237,6 +237,22 @@ export interface CustomerStage2ConvergerInput {
   readonly bootstrap?: CustomerStage2BootstrapRuntime;
   /** Present in the restricted runtime; absent after the strict final self-update. */
   readonly finalRuntimeSource?: string;
+  /**
+   * The customer's management credential, present only where the setup page
+   * received one and the owning object still holds it in memory. The final
+   * runtime upload writes it once as the `ANKKA_MANAGEMENT_TOKEN` secret
+   * binding, and the exact read-backs of this run then expect that binding.
+   * Like the grant it is request-local: it never enters the journal, a
+   * receipt, an error, or any durable transition. Absent, the install
+   * completes without it.
+   */
+  readonly managementCredential?: string | undefined;
+  /**
+   * Recovery in the final runtime uploads nothing. It states whether its own
+   * environment carries the management secret, so the exact read-back of the
+   * active version expects the binding set that runtime was installed with.
+   */
+  readonly managementCredentialBound?: boolean | undefined;
   readonly payload: CustomerStage2PayloadAdapter;
   readonly transport: CustomerCloudflareTransport;
   readonly now: () => number;
@@ -647,6 +663,8 @@ function runtimeInspection(context: Context, application: ManagementAccessApplic
     expectedWorkerId: context.journal.identity.workerId,
     finalRuntimeSha256: context.journal.identity.finalRuntimeSha256,
     bindings: finalBindings(context, application),
+    managementCredentialBound: context.input.managementCredential !== undefined ||
+      context.input.managementCredentialBound === true,
     transport: context.input.transport,
   };
 }
@@ -979,6 +997,9 @@ async function convergeFinalRuntime(
     action = customerStage2Action(context.journal, name);
   }
   const inspection = runtimeInspection(context, application);
+  // The journal record above names the plain-text bindings only. The
+  // management credential reaches nothing but the upload's own metadata.
+  const managementCredential = context.input.managementCredential;
   if (action?.phase === 'send_armed') {
     const source = context.input.finalRuntimeSource;
     const handover = context.input.handover;
@@ -989,6 +1010,7 @@ async function convergeFinalRuntime(
       await uploadCustomerWorkerFinalRuntime({
         ...inspection,
         finalRuntimeSource: source,
+        managementCredential,
         previousVersionId: context.journal.identity.bootstrapVersionId,
       });
       return true;
@@ -998,6 +1020,7 @@ async function convergeFinalRuntime(
       : await publishCustomerWorkerFinalRuntime({
         ...inspection,
         finalRuntimeSource: source,
+        managementCredential,
         previousVersionId: context.journal.identity.bootstrapVersionId,
       });
     if (locator === null) fail('runtime_source_unavailable');

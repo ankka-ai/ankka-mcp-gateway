@@ -30,6 +30,11 @@ import {
   type CustomerStage2ConvergerResult,
 } from '../src/customer-stage2-converger';
 import type { CustomerCloudflareTransport } from '../src/customer-cloudflare-grant';
+import {
+  CustomerManagementCredentialHolder,
+  createCustomerManagementCredentialStep,
+  runConvergerPassWithManagementCredential,
+} from '../src/customer-management-credential';
 import type { CustomerStage2JournalPort } from '../src/customer-stage2-durable-state';
 import {
   customerStage2Action,
@@ -205,11 +210,18 @@ function provider(plan: StaticDeployPlan) {
     nonceDeletes: 0,
   };
   const calls: string[] = [];
+  /** What every request exposes (address, headers, body), except the final upload's metadata part, kept apart below. */
+  const exposed: string[] = [];
+  const uploadedMetadata: string[] = [];
 
   const transport = async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
     calls.push(`${request.method} ${url.pathname}${url.search}`);
+    exposed.push(request.url, JSON.stringify([...request.headers]));
+    if (request.method !== 'GET' && !request.headers.get('content-type')?.startsWith('multipart/form-data')) {
+      exposed.push(await request.clone().text());
+    }
     expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
 
     if (url.pathname === '/client/v4/zones' && request.method === 'GET') {
@@ -340,8 +352,11 @@ function provider(plan: StaticDeployPlan) {
       if (!(metadataPart instanceof File) || !(sourcePart instanceof File)) {
         throw new TypeError('invalid final runtime upload');
       }
+      expect([...form.keys()].sort()).toEqual(['index.js', 'metadata']);
       expect(await sourcePart.text()).toBe(FINAL_SOURCE);
-      const metadata = object(JSON.parse(await metadataPart.text()), 'upload metadata');
+      const metadataText = await metadataPart.text();
+      uploadedMetadata.push(metadataText);
+      const metadata = object(JSON.parse(metadataText), 'upload metadata');
       const bindings = metadata.bindings;
       if (!Array.isArray(bindings)) throw new TypeError('invalid upload bindings');
       state.finalBindings = bindings.map((value) => {
@@ -349,6 +364,8 @@ function provider(plan: StaticDeployPlan) {
         const named = v.safeParse(namedBindingSchema, binding);
         if (!named.success) throw new TypeError('invalid upload binding fields');
         if (named.output.type === 'inherit') return inheritedBinding(named.output.name);
+        // The provider lists a secret by name and type; it never reads the value back.
+        if (named.output.type === 'secret_text') return { name: named.output.name, type: 'secret_text' };
         return binding;
       });
       state.finalActive = true;
@@ -372,7 +389,7 @@ function provider(plan: StaticDeployPlan) {
     throw new Error(`unexpected Cloudflare request ${request.method} ${url}`);
   };
 
-  return { calls, state, transport };
+  return { calls, exposed, uploadedMetadata, state, transport };
 }
 
 function bootstrapBindings(input: {
@@ -556,6 +573,8 @@ async function fixture(fault: CustomerStage2ActionName | null = null, workerSetu
   let clock = NOW + 10;
   let payloadBootstrapCalls = 0;
   let payloadVerifyCalls = 0;
+  /** What the co-resident payload was handed: its one signed request and every verification input. */
+  const payloadInputs: string[] = [];
   const baseInput: Omit<CustomerStage2ConvergerInput, 'attemptId'> = {
     accessToken: ACCESS_TOKEN,
     storage,
@@ -581,6 +600,7 @@ async function fixture(fault: CustomerStage2ActionName | null = null, workerSetu
     payload: {
       bootstrap: async (request, context) => {
         payloadBootstrapCalls += 1;
+        payloadInputs.push(request.url, JSON.stringify([...request.headers]), await request.clone().text(), JSON.stringify(context));
         expect(request.url).toBe(
           `https://${workerName}.${WORKERS_SUBDOMAIN}.workers.dev/__ankka/bootstrap`,
         );
@@ -591,8 +611,9 @@ async function fixture(fault: CustomerStage2ActionName | null = null, workerSetu
         Object.defineProperty(response, 'url', { configurable: true, value: request.url });
         return response;
       },
-      verifyReady: async () => {
+      verifyReady: async (input) => {
         payloadVerifyCalls += 1;
+        payloadInputs.push(JSON.stringify(input));
         return { verified: true, reason: null };
       },
     },
@@ -603,8 +624,20 @@ async function fixture(fault: CustomerStage2ActionName | null = null, workerSetu
     baseInput,
     cloudflare,
     journal,
+    storage,
     payloadBootstrapCalls: () => payloadBootstrapCalls,
     payloadVerifyCalls: () => payloadVerifyCalls,
+    /**
+     * Everything durable or sent anywhere except the final upload's metadata
+     * part: every journal write, the ownership storage, every provider
+     * request outside that part, and everything handed to the payload.
+     */
+    observable: () => [
+      ...journal.serializedWrites,
+      JSON.stringify([...storage.values]),
+      ...cloudflare.exposed,
+      ...payloadInputs,
+    ].join('\n'),
   };
 }
 
@@ -836,11 +869,229 @@ describe('customer Stage 2 convergence', () => {
   });
 });
 
+describe('management credential in Stage 2 convergence', () => {
+  // A synthetic value in Cloudflare's account token form, assembled at run time.
+  const MANAGEMENT_VALUE = `cfat_${'Wn5k'.repeat(10)}${'3c'.repeat(4)}`;
+  const MANAGEMENT_SECRET = { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' };
+
+  function managementBindings(test: Awaited<ReturnType<typeof fixture>>): readonly BoundaryObject[] {
+    return (test.cloudflare.state.finalBindings ?? []).filter((binding) =>
+      String(binding.name).includes('MANAGEMENT_TOKEN'));
+  }
+
+  /** Runs the alarm-driven passes the way the shell does and returns the provider calls each pass made. */
+  async function chunkedPasses(
+    test: Awaited<ReturnType<typeof fixture>>,
+    attemptId: string,
+    pass: (input: CustomerStage2ConvergerInput) => Promise<CustomerStage2ConvergerResult>,
+  ): Promise<{ readonly calls: number[]; readonly result: CustomerStage2ConvergerResult }> {
+    const counted = {
+      calls: 0,
+      transport: ((input, init) => {
+        counted.calls += 1;
+        return test.cloudflare.transport(input, init);
+      }) satisfies CustomerCloudflareTransport,
+    };
+    const calls: number[] = [];
+    for (;;) {
+      counted.calls = 0;
+      const result = await pass({
+        ...test.baseInput, attemptId, transport: counted.transport, checkpoints: CUSTOMER_STAGE2_CHUNK_CHECKPOINTS,
+      });
+      calls.push(counted.calls);
+      if (result.verified || 'handedOver' in result) return { calls, result };
+      if (calls.length >= 8) throw new Error('convergence made no progress');
+    }
+  }
+
+  it('writes the value once, as a secret binding of the final upload, and nowhere else', async () => {
+    const test = await fixture();
+    const result = await convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'j'.repeat(24)}`,
+      managementCredential: MANAGEMENT_VALUE,
+    });
+    expect(result).toMatchObject({ verified: true, finalRuntime: 'active-recovery-capable' });
+    expect(test.cloudflare.state.finalUploads).toBe(1);
+    // The upload's metadata part carries it exactly once, as the declared secret binding.
+    expect(test.cloudflare.uploadedMetadata).toHaveLength(1);
+    const metadata = object(JSON.parse(test.cloudflare.uploadedMetadata[0] ?? ''), 'upload metadata');
+    expect(metadata.bindings).toContainEqual({ ...MANAGEMENT_SECRET, text: MANAGEMENT_VALUE });
+    expect(test.cloudflare.uploadedMetadata[0]?.split(MANAGEMENT_VALUE)).toHaveLength(2);
+    // The provider lists the secret without a value, and the exact read-back of this run accepted it.
+    expect(managementBindings(test)).toEqual([MANAGEMENT_SECRET]);
+    expect(test.journal.value?.completedAt).not.toBeNull();
+    // Journal, ownership storage, every other provider request, the payload's inputs and the result are free of it.
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+    expect(JSON.stringify(result)).not.toContain(MANAGEMENT_VALUE);
+    expect(test.observable()).not.toContain('ANKKA_MANAGEMENT_TOKEN');
+    // The journal names the plain-text bindings only, exactly as it does without a credential.
+    const plain = await fixture();
+    await convergeCustomerStage2({ ...plain.baseInput, attemptId: `attempt_${'j'.repeat(24)}` });
+    const recorded = (journal: CustomerStage2Journal | null) =>
+      customerStage2Action(required(journal ?? undefined, 'journal'), 'final_runtime')?.record;
+    expect(Object.keys(object(recorded(test.journal.value)?.bindings ?? null, 'recorded bindings')))
+      .toEqual(Object.keys(object(recorded(plain.journal.value)?.bindings ?? null, 'recorded bindings')));
+    expect(managementBindings(plain)).toEqual([]);
+  });
+
+  it('re-proves an install that carries the secret only from a runtime bound to it', async () => {
+    const test = await fixture();
+    await convergeCustomerStage2({
+      ...test.baseInput, attemptId: `attempt_${'k'.repeat(24)}`, managementCredential: MANAGEMENT_VALUE,
+    });
+    // The final runtime is the version it inspects: it states that its own environment carries the secret.
+    await expect(convergeCustomerStage2({
+      ...withoutBootstrapRuntime(test.baseInput), attemptId: `attempt_${'l'.repeat(24)}`, managementCredentialBound: true,
+    })).resolves.toMatchObject({ verified: true });
+    // A runtime that does not carry it refuses the version, exactly as before this binding existed.
+    await expect(convergeCustomerStage2({
+      ...withoutBootstrapRuntime(test.baseInput), attemptId: `attempt_${'m'.repeat(24)}`,
+    })).rejects.toMatchObject({ code: 'provider_mismatch' });
+    // And an install made without the credential refuses a runtime that claims the binding.
+    const plain = await fixture();
+    await convergeCustomerStage2({ ...plain.baseInput, attemptId: `attempt_${'k'.repeat(24)}` });
+    await expect(convergeCustomerStage2({
+      ...withoutBootstrapRuntime(plain.baseInput), attemptId: `attempt_${'l'.repeat(24)}`, managementCredentialBound: true,
+    })).rejects.toMatchObject({ code: 'provider_mismatch' });
+    expect(test.cloudflare.state.finalUploads).toBe(1);
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+  });
+
+  it('recovers an active final runtime that carries the secret without uploading again', async () => {
+    const test = await fixture('final_runtime');
+    await expect(convergeCustomerStage2({
+      ...test.baseInput, attemptId: `attempt_${'n'.repeat(24)}`, managementCredential: MANAGEMENT_VALUE,
+    })).rejects.toMatchObject({ code: 'journal_conflict' });
+    expect(test.cloudflare.state.finalUploads).toBe(1);
+    expect(managementBindings(test)).toEqual([MANAGEMENT_SECRET]);
+    await expect(convergeCustomerStage2({
+      ...withoutBootstrapRuntime(test.baseInput), attemptId: `attempt_${'o'.repeat(24)}`, managementCredentialBound: true,
+    })).resolves.toMatchObject({ verified: true, finalRuntime: 'active-recovery-capable' });
+    expect(test.cloudflare.state.finalUploads).toBe(1);
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+  });
+
+  it('adds no provider call to any pass', async () => {
+    const plain = await fixture();
+    const without = await chunkedPasses(plain, `attempt_${'p'.repeat(24)}`, convergeCustomerStage2);
+    const test = await fixture();
+    const withValue = await chunkedPasses(test, `attempt_${'p'.repeat(24)}`, (input) =>
+      convergeCustomerStage2({ ...input, managementCredential: MANAGEMENT_VALUE }));
+    expect(without.calls).toEqual([22, 8, 17, 23]);
+    expect(withValue.calls).toEqual(without.calls);
+    expect(test.cloudflare.calls).toEqual(plain.cloudflare.calls);
+    expect(managementBindings(test)).toEqual([MANAGEMENT_SECRET]);
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+    // The shell hands the upload over instead of reading it back: the same holds there.
+    const handed = await fixture();
+    const handedPlain = await fixture();
+    const handover = async () => undefined;
+    const handedWith = await chunkedPasses(handed, `attempt_${'r'.repeat(24)}`, (input) =>
+      convergeCustomerStage2({ ...input, handover, managementCredential: MANAGEMENT_VALUE }));
+    const handedWithout = await chunkedPasses(handedPlain, `attempt_${'r'.repeat(24)}`, (input) =>
+      convergeCustomerStage2({ ...input, handover }));
+    expect(handedWith.result).toEqual({ verified: false, handedOver: true });
+    expect(handedWith.calls).toEqual(handedWithout.calls);
+    for (const calls of [handedWith.calls, without.calls]) for (const count of calls) expect(count).toBeLessThanOrEqual(30);
+    expect(managementBindings(handed)).toEqual([MANAGEMENT_SECRET]);
+    expect(handed.observable()).not.toContain(MANAGEMENT_VALUE);
+  });
+
+  it('holds the value in memory across the passes, uploads it in the last one, and keeps nothing afterwards', async () => {
+    const test = await fixture();
+    const holder = new CustomerManagementCredentialHolder(() => NOW);
+    const step = createCustomerManagementCredentialStep(holder, test.storage);
+    await step.accept(MANAGEMENT_VALUE);
+    expect(await step.word()).toBe('held');
+    const words: (string | undefined)[] = [];
+    const passes = await chunkedPasses(test, `attempt_${'u'.repeat(24)}`, async (input) => {
+      const result = await runConvergerPassWithManagementCredential(holder, (managementCredential) =>
+        convergeCustomerStage2({ ...input, handover: async () => undefined, managementCredential }));
+      words.push(await step.word());
+      return result;
+    });
+    expect(passes.result).toEqual({ verified: false, handedOver: true });
+    expect(words).toEqual(['held', 'held', 'held', 'installed']);
+    expect(holder.value()).toBeUndefined();
+    expect(managementBindings(test)).toEqual([MANAGEMENT_SECRET]);
+    // Storage holds the fixed choice word beside the ownership state, and never the value.
+    expect(test.storage.values.get('ankka-mcp-gateway/management-credential-choice/v1'))
+      .toEqual({ schemaVersion: 1, choice: 'provided' });
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+  });
+
+  it('completes the install without the value when a restart lost it, and says so with one fixed word', async () => {
+    const test = await fixture();
+    const before = new CustomerManagementCredentialHolder(() => NOW);
+    await createCustomerManagementCredentialStep(before, test.storage).accept(MANAGEMENT_VALUE);
+    before.release();
+    // The platform constructs the object again: memory starts empty over the same storage.
+    const holder = new CustomerManagementCredentialHolder(() => NOW);
+    const step = createCustomerManagementCredentialStep(holder, test.storage);
+    expect(await step.word()).toBe('dropped');
+    const passes = await chunkedPasses(test, `attempt_${'x'.repeat(24)}`, (input) =>
+      runConvergerPassWithManagementCredential(holder, (managementCredential) =>
+        convergeCustomerStage2({ ...input, managementCredential })));
+    expect(passes.result).toMatchObject({ verified: true, finalRuntime: 'active-recovery-capable' });
+    expect(passes.calls).toEqual([22, 8, 17, 23]);
+    expect(test.journal.value?.completedAt).not.toBeNull();
+    expect(managementBindings(test)).toEqual([]);
+    expect(test.cloudflare.uploadedMetadata).toHaveLength(1);
+    expect(test.cloudflare.uploadedMetadata[0]).not.toContain('ANKKA_MANAGEMENT_TOKEN');
+    expect(test.cloudflare.uploadedMetadata[0]).not.toContain('secret_text');
+    expect(await step.word()).toBe('dropped');
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+  });
+
+  it('completes the install without a secret when the customer continued without one', async () => {
+    const test = await fixture();
+    const holder = new CustomerManagementCredentialHolder(() => NOW);
+    const step = createCustomerManagementCredentialStep(holder, test.storage);
+    await step.accept(MANAGEMENT_VALUE);
+    await step.skip();
+    const passes = await chunkedPasses(test, `attempt_${'y'.repeat(24)}`, (input) =>
+      runConvergerPassWithManagementCredential(holder, (managementCredential) =>
+        convergeCustomerStage2({ ...input, managementCredential })));
+    expect(passes.result).toMatchObject({ verified: true });
+    expect(managementBindings(test)).toEqual([]);
+    expect(await step.word()).toBe('skipped');
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+  });
+
+  it('keeps the value for a fresh approval when a pass fails before the upload', async () => {
+    const test = await fixture();
+    const holder = new CustomerManagementCredentialHolder(() => NOW);
+    await createCustomerManagementCredentialStep(holder, test.storage).accept(MANAGEMENT_VALUE);
+    await expect(runConvergerPassWithManagementCredential(holder, (managementCredential) => convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'z'.repeat(24)}`,
+      managementCredential,
+      payload: { ...test.baseInput.payload, verifyReady: async () => ({ verified: false, reason: 'dns_record_absent' }) },
+    }))).rejects.toMatchObject({ code: 'payload_recovery_required' });
+    expect(holder.value()).toBe(MANAGEMENT_VALUE);
+    expect(test.cloudflare.state.finalUploads).toBe(0);
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+    holder.release();
+  });
+
+  it('refuses a malformed value before anything is sent', async () => {
+    const test = await fixture();
+    const failure = await convergeCustomerStage2({
+      ...test.baseInput, attemptId: `attempt_${'A'.repeat(24)}`, managementCredential: `${MANAGEMENT_VALUE}\n`,
+    }).then(() => null, (error: Error) => error);
+    expect(failure).toMatchObject({ code: 'invalid', stage: 'validate', outcome: 'not_sent' });
+    expect(`${failure?.message} ${JSON.stringify(failure)}`).not.toContain(MANAGEMENT_VALUE);
+    expect(test.cloudflare.state.finalUploads).toBe(0);
+    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+  });
+});
+
 
 describe('gateway teardown handoff from a real installation journal', () => {
-  async function installed(handover = false, opted = false) {
+  async function installed(handover = false, opted = false, managementCredential?: string) {
     const test = await fixture(null, false, opted);
-    const common = { ...test.baseInput, attemptId: `attempt_${'q'.repeat(24)}` };
+    const common = { ...test.baseInput, attemptId: `attempt_${'q'.repeat(24)}`, managementCredential };
     await convergeCustomerStage2(handover ? { ...common, handover: async () => undefined } : common);
     const owner = await readCustomerGatewayOwnershipState(test.baseInput.storage);
     if (owner.ownershipCertificate === null || owner.serializedPlan === null || owner.trust === null || test.journal.value === null) {
@@ -902,6 +1153,24 @@ describe('gateway teardown handoff from a real installation journal', () => {
     const plain = await installed();
     const plainVerified = await verifyGatewayTeardownHandoff({ handoff: await createGatewayTeardownHandoff(plain.input), trust: plain.input.trust, now: plain.input.now });
     expect(plainVerified.statement.management).not.toHaveProperty('servicePolicyId');
+  });
+
+  it.each([false, true])('keeps the management credential out of every receipt of an install made with one (self-upload handover: %s)', async (handover) => {
+    // A synthetic value in Cloudflare's account token form, assembled at run time.
+    const value = `cfat_${'Gd1q'.repeat(10)}${'8c'.repeat(4)}`;
+    const { input, test } = await installed(handover, false, value);
+    expect(test.cloudflare.state.finalBindings).toContainEqual({ name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' });
+    const encoded = await createGatewayTeardownHandoff(input);
+    const verified = await verifyGatewayTeardownHandoff({ handoff: encoded, trust: input.trust, now: input.now });
+    expect(verified.statement.dependentResourcesAbsent).toBe(true);
+    // The adoption receipt and ownership state, the journal the handoff certifies, the signed handoff itself, and
+    // everything else durable or sent outside the upload's metadata part: neither the value nor the binding's name.
+    const owner = await readCustomerGatewayOwnershipState(test.baseInput.storage);
+    expect(owner.adoptionReceipt).not.toBeNull();
+    for (const durable of [JSON.stringify(owner), JSON.stringify(input.journal), encoded, JSON.stringify(verified), test.observable()]) {
+      expect(durable).not.toContain(value);
+      expect(durable).not.toContain('ANKKA_MANAGEMENT_TOKEN');
+    }
   });
 
   it('signs an operator-managed statement that verifies but never claims a revoked grant', async () => {

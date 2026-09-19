@@ -7,14 +7,119 @@ separate authority. This does not turn MCP tools into write-capable tools.
 
 ## Credential custody
 
-The administrator creates an account-owned token in Cloudflare and adds it
-as the `ANKKA_MANAGEMENT_TOKEN` encrypted secret on the installed gateway Worker,
-using Cloudflare's dashboard or local Wrangler. No token-entry form is served
-by Ankka. The token never passes through Ankka-hosted infrastructure, and the
-gateway never returns it to the dashboard or records it in Durable Object state.
+**The token never passes through anything Ankka hosts.** An administrator of
+your Cloudflare account creates the account-owned token in Cloudflare, and it
+reaches your gateway in one of two ways:
+
+- **During setup**, on the setup page your own Worker serves before the second
+  Cloudflare approval. The page links to Cloudflare's token page with both
+  permissions and a name filled in, and has one field to paste the token
+  into. The value goes from your browser to your own Worker and nowhere else.
+- **On an installed gateway**, directly in Cloudflare: as the
+  `ANKKA_MANAGEMENT_TOKEN` encrypted secret on the gateway Worker, using
+  Cloudflare's dashboard or local Wrangler. A Settings flow that takes the
+  same link and field, behind one Cloudflare approval, is planned
+  ([issue #176](https://github.com/ankka-ai/ankka-mcp-gateway/issues/176));
+  until it exists, these Cloudflare-side instructions are how an installed
+  gateway gets, replaces, or rotates its token.
+
+Neither `deploy.ankka.ai` nor `auth.ankka.ai` serves a token-entry form or
+receives the value, and the gateway never returns it to a browser.
+
+### What the setup page does with the value
+
+The setup page already runs in the Durable Object that is about to hold your
+install approval, which is broader (Workers, DNS, Access). The pasted token is
+kept the same way, in the same memory, for the same minutes:
+
+- The field is not echoed and is emptied as soon as it is read. The value is
+  sent once, in the body of a same-origin POST under the setup session, and is
+  never placed in a URL, a fragment, a cookie, or browser storage.
+- Your Worker accepts only Cloudflare's two account-token forms (see
+  [Accepted token forms](#accepted-token-forms)) and answers with one fixed
+  word. A refused value gets one fixed error. No response, error, or log line
+  carries the value.
+- The value lives only in the object's memory, next to the install approval.
+  It is never written to Durable Object storage, the install journal, a
+  receipt, or the status route. Storage keeps one fixed word about your
+  choice (`provided` or `skipped`) so the status can say what happened.
+- The final runtime upload the install already makes writes it as the
+  `secret_text` binding `ANKKA_MANAGEMENT_TOKEN`. That adds no Cloudflare API
+  call. After the upload nothing in the object keeps the value.
+- The step is locked while an approval or an install runs, so a running
+  install uploads exactly what you chose before it started.
+- While it waits for your approval the object keeps one alarm ahead of itself
+  so Cloudflare does not evict it: a pending timer only prevents hibernation,
+  and an idle object is otherwise evicted after one to two minutes. This tick
+  never replaces an alarm the install has set, makes no Cloudflare API call,
+  and runs an install pass only when the install already holds its approval,
+  so it cannot disturb a callback that is still exchanging its code. The
+  value is forgotten as soon as no approval can use it any more, and after
+  thirty minutes at the latest.
+- If Cloudflare restarts the object anyway, the value is lost. The install
+  still completes, without the token, and the page that follows the install
+  says so. Add the token afterwards as described for an installed gateway.
+
+The install status route (`/__ankka/install/status`) carries one fixed word
+about this step and never the value: `held`, `installed`, `skipped`, or
+`dropped`. The key is absent until you have chosen.
+
+Continuing without a token is allowed through an explicit control on the
+setup page. Until the token exists, adding sources and managing team access
+stay disabled; updates, rollback, and removal do not need it.
+
+### The template link
+
+```text
+https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=<URL-encoded JSON>&name=<name>
+```
+
+The JSON is `[{"key":"access","type":"edit"},{"key":"mcp_portals","type":"edit"}]`
+and the name is `Ankka gateway <management hostname>`, so the token can be
+found again in Cloudflare later. This link was verified against the Cloudflare
+dashboard on 2026-09-19: it pre-filled **Access: Apps and Policies Edit** and
+**MCP Portals Edit**. `:account` is Cloudflare's own placeholder; the dashboard
+asks which account when you have more than one. The link carries permission
+keys and a name, never a credential. See Cloudflare's
+[template link guide](https://developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/).
+The two keys live in one constant,
+`CLOUDFLARE_MANAGEMENT_PERMISSION_GROUP_KEYS` in
+[`customer-management-credential.ts`](../apps/installer/src/customer-management-credential.ts).
+
+### Accepted token forms
+
+The setup page accepts exactly the two forms Cloudflare documents for an
+account API token in its
+[token formats reference](https://developers.cloudflare.com/fundamentals/api/get-started/token-formats/):
+
+| Form | Accepted value |
+| --- | --- |
+| Scannable, created or rolled since 2026 | `cfat_` followed by 40 to 64 alphanumeric characters (40 characters and Cloudflare's checksum) |
+| Created before the scannable format | 40 characters: letters, digits, `-` and `_` |
+
+Cloudflare documents the scannable form as `cfat_[40 characters][checksum]`
+and says tokens in the earlier form "continue to work". It publishes neither
+the checksum's length nor its algorithm for account tokens (the sibling Access
+service-token secret of its
+[2026-08-26 changelog](https://developers.cloudflare.com/changelog/post/2026-08-26-service-token-secret-format/)
+uses eight characters), so the check allows 40 to 64 characters after the
+prefix: it exists to catch a wrong paste, and Cloudflare alone judges the
+token. Cloudflare calls
+the earlier form a 40-character alphanumeric string; tokens issued in that
+form also contain `-` and `_`, so both are accepted there. The checksum itself
+is not recomputed: its algorithm is not published. Should Cloudflare issue an
+account token in another form, the setup page refuses it with its fixed
+message and the install continues without it; the token can then be added as
+described for an installed gateway.
+
+Everything else is refused before anything is kept, including a user API
+token (`cfut_`), a Global API Key (`cfk_`), surrounding whitespace, and any
+longer value. Setup does not verify the token against Cloudflare: the form
+check costs no API call, and **Settings → Verify management access** checks
+the installed token afterwards.
 
 For disposable development gateways, the [lifecycle runner](AGENT_LIFECYCLE.md)
-is a third operator-controlled provisioning path: it reads the operator's
+is a further, operator-controlled provisioning path: it reads the operator's
 token from the operator's credential store and writes it as the Worker
 secret with the operator's own deployment authority. The attended
 [browser runner](LIVE_LIFECYCLE.md) does the same only when its private config
@@ -31,11 +136,17 @@ provider authority of a stolen token.
 
 ## Setup and verified endpoint permissions
 
-1. In Cloudflare, open **Manage Account → Account API Tokens → Create Token**.
-   This requires a Super Administrator. Use an account-owned token, not a user
-   OAuth grant or Global API Key. See [Cloudflare's account-token guide](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/).
+During installation, the setup page in your own Worker does steps 1 to 3 with
+you: open its link, create the token, paste it. For a gateway that is already
+installed:
+
+1. In Cloudflare, open **Manage Account → Account API Tokens → Create Token**,
+   or open the [template link](#the-template-link), which fills in step 2.
+   This requires a Super Administrator or Administrator. Use an account-owned
+   token, not a user OAuth grant or Global API Key. See [Cloudflare's account-token guide](https://developers.cloudflare.com/fundamentals/api/get-started/account-owned-tokens/).
 2. For the selected account, use **Access: Apps and Policies
-   Write** and **MCP Portals Write**. These passed the endpoint check below,
+   Write** and **MCP Portals Write**. A template link names the same level
+   `edit`, and the setup page says **Edit**. These passed the endpoint check below,
    including both account and zone Access routes. Do not add unrelated permissions
    to make a failing test pass.
 3. Add the value directly as the encrypted Worker secret `ANKKA_MANAGEMENT_TOKEN`.
@@ -85,7 +196,17 @@ revoke the token; the administrator revokes it separately in Cloudflare.
 The signed release contract declares the optional customer-managed binding.
 Updates preserve it only as a secret binding; unsupported older contracts must
 not silently inherit or expose it. Deployment and bootstrap must never receive
-its value from Ankka.
+its value from Ankka: during setup it comes from your browser to your own
+Worker, and the hosted installer's uploads never carry it.
+
+The install's exact read-backs follow the same rule. The read-back of the
+final runtime version accepts `ANKKA_MANAGEMENT_TOKEN` as a `secret_text`
+binding without a readable value exactly when the install supplied the token,
+and refuses it, under any type, otherwise. Recovery in the final runtime
+inspects the version it is itself running, so it expects the binding exactly
+when its own environment carries it. The setup shell's read-back never
+accepts it: the shell is uploaded by the hosted installer, which never holds
+the value.
 
 ## Qualification
 

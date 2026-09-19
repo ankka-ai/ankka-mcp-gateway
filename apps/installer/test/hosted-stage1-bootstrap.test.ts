@@ -391,7 +391,9 @@ describe('hosted Stage 1 coordinator', () => {
   });
 
   it('accepts a shell that names an earlier failure and stays strict about unknown keys and status', async () => {
-    type Answer = Partial<CustomerInstallStatus> & { readonly extra?: true };
+    // The management word is widened to any string so a foreign word can be sent to the strict parse.
+    type Answer = Omit<Partial<CustomerInstallStatus>, 'managementCredential'> &
+      { readonly extra?: true; readonly managementCredential?: string };
     const answer = (extra: Answer) => async (_input: RequestInfo | URL, init?: RequestInit) => {
       const value = {
         schemaVersion: 1,
@@ -436,6 +438,12 @@ describe('hosted Stage 1 coordinator', () => {
     // Shells from a release before the field existed answer without it.
     const legacy = await attempt({ failure: undefined });
     expect(new URL(legacy.handoffUrl).pathname).toBe('/__ankka/install');
+    // The shell and this readiness check share one schema, so the fixed word
+    // about the management token step reads here too; only a fixed word does.
+    const chosen = await attempt({ managementCredential: 'skipped' });
+    expect(new URL(chosen.handoffUrl).pathname).toBe('/__ankka/install');
+    await expect(attempt({ managementCredential: 'configured' }))
+      .rejects.toMatchObject({ code: 'bootstrap_failed', status: 502, reason: 'readiness_schema_invalid' });
     await expect(attempt({ extra: true }))
       .rejects.toMatchObject({ code: 'bootstrap_failed', status: 502, reason: 'readiness_schema_invalid' });
     await expect(attempt({ failure: { code: 'provider_recovery_required', reason: 'not a reason' } }))

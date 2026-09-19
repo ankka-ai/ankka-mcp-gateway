@@ -27,11 +27,17 @@ Installation requires:
   policies, and MCP Portal resources;
 - one hostname for the team's MCP Portal;
 - a different hostname for the management dashboard; and
-- the initial administrators, who also form the initial Portal audience.
+- the initial administrators, who also form the initial Portal audience; and
+- a Super Administrator or Administrator of the Cloudflare account, to create
+  the gateway's one management token during setup (you can also add it later).
 
-The installer browser flow uses Cloudflare OAuth. Do not create an API token for Ankka,
-paste a provider credential into the installer, or put credentials in a URL or
-configuration file.
+The installer browser flow uses Cloudflare OAuth. Never paste a Cloudflare
+token or a provider credential into `deploy.ankka.ai`, and never put
+credentials in a URL or configuration file. The one token this product asks
+for is the [management token](MANAGEMENT_TOKEN.md): you create it in
+Cloudflare and paste it only into the setup page of your own gateway, which is
+served by the Worker in your account. It never passes through anything Ankka
+hosts.
 
 ## Cloudflare permissions
 
@@ -74,11 +80,16 @@ source. Their exact combined scope set and first-time account subdomain
 registration still require a fresh live canary before production promotion;
 older canary results do not qualify these changes.
 
-V1 Team membership is managed directly in Cloudflare. Do not create or add a
-Team-management API token to the gateway. Cloudflare does not support scoping
-an API token to one reusable Access policy, so an account token would widen the
-credential boundary instead of completing this flow. See
-[Team access](TEAM_ACCESS.md).
+Those approvals are temporary; your gateway keeps no Cloudflare authority from
+them. Adding a source and giving a teammate access are writes into your
+account, so the gateway needs one standing credential of its own: the
+account-owned [management token](MANAGEMENT_TOKEN.md) with exactly **Access:
+Apps and Policies Edit** and **MCP Portals Edit**. Cloudflare does not support
+scoping an API token to one Access policy: this token can edit every Access
+policy in the account, and the setup page says so before asking for it. It
+stays inside your account as an encrypted secret of your Worker. Do not add
+any other API token to the gateway, and revoke the retired preview Team token
+if you created one. See [Team access](TEAM_ACCESS.md).
 
 ## Installation flow
 
@@ -89,8 +100,10 @@ The public installer is designed to:
 3. revoke that grant and open the setup page in your own Worker;
 4. choose a domain from the dropdown, gateway name, two hostnames, and administrators;
 5. review the complete deployment plan and edit it if needed;
-6. approve a fresh grant so your Worker can install and verify the remaining resources; and
-7. open the MCP URL and management URL.
+6. create the management token from the link on that page and paste it into
+   your own gateway, or continue without it;
+7. approve a fresh grant so your Worker can install and verify the remaining resources; and
+8. open the MCP URL and management URL.
 
 Each review sends the chosen configuration, signed by your Worker's ownership
 key, to the hosted issuer to certify the exact final callback address. This
@@ -98,6 +111,17 @@ request contains no Cloudflare grant. The draft and signed response live in
 your Worker; the initial domain list and deployment evidence remain in the
 hosted session for its one-hour lifetime. The setup capability expires after
 ten minutes. MCP source credentials never enter this flow.
+
+The management token step opens Cloudflare's token page with both permissions
+and a name that contains your management hostname already filled in. You
+create the token there and paste it into the one field on your gateway's
+page. Your Worker keeps it only in memory, beside the approval that follows,
+and the install's last step saves it as the encrypted secret
+`ANKKA_MANAGEMENT_TOKEN`. It is never stored, logged, or shown again. If you
+continue without it, or if Cloudflare restarts your Worker's state before the
+install finishes and the value is lost, setup still completes: adding sources
+and managing team access stay disabled until you add the token as described
+in [Management token](MANAGEMENT_TOKEN.md).
 
 Installation does not add an upstream MCP source. The default-deny onboarding
 candidate restores a separate Sources workflow: discover and review the exact
