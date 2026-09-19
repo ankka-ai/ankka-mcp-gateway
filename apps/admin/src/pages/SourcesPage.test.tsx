@@ -288,6 +288,23 @@ describe('SourcesPage', () => {
     expect(installing.getTeam).not.toHaveBeenCalled()
   })
 
+  it('reads its sources again when the token arrived after the dashboard loaded, instead of calling installation paused', async () => {
+    const disabled: ManagedSources = { ...sources, applyMode: 'account_token', installationEnabled: false, sources: [draft] }
+    const api: GatewayAdminApi = {
+      ...actionApi({ schemaVersion: 1, actions: [], blockingAction: null }),
+      getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(disabled).mockResolvedValue({ ...disabled, installationEnabled: true }),
+      getTeam: vi.fn(async () => ({
+        schemaVersion: 1 as const, revision: 1, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
+        members: [], adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null,
+      })),
+    }
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Add source' })).toBeEnabled())
+    expect(api.getSources).toHaveBeenCalledTimes(2)
+    expect(screen.queryByText(/temporarily unavailable/u)).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
+  })
+
   it('names an open token change as what source installation waits for', async () => {
     const pointer = { kind: 'management_credential' as const, actionId: `action_${'m'.repeat(32)}` }
     render(<GatewayProvider api={actionApi({ schemaVersion: 1, actions: [], blockingAction: pointer })}><SourcesPage /></GatewayProvider>)

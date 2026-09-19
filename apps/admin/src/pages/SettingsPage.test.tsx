@@ -251,6 +251,8 @@ describe('SettingsPage management token', () => {
     await act(() => vi.advanceTimersByTimeAsync(3_000))
     expect(await (await opened()).findByText('Cloudflare accepted the token. Your gateway now runs with it. Verify management access to prove that it can do its work.')).toBeVisible()
     expect(client.getTeam).toHaveBeenCalledTimes(3)
+    // Sources were loaded while the token was missing: they are read again, so the Sources page is not left disabled.
+    expect(client.getSources).toHaveBeenCalledTimes(2)
     expect(section().getByRole('button', { name: 'Verify management access' })).toBeEnabled()
     expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
     // It stops asking once the token is there.

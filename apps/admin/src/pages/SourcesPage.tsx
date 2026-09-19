@@ -138,6 +138,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     isCheckingSourceActions,
     prepareSourceApply,
     refreshSourceActions,
+    refreshSources,
     saveSourceDraft,
     sourceActions,
     sourceActionsError,
@@ -162,11 +163,15 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   useEffect(() => {
     if (!tokenInQuestion) { setMissingToken(null); return }
     let active = true
-    void getTeam().then((team) => {
-      if (active) setMissingToken(team.managementCredentialConfigured === false ? { choice: team.managementCredentialChoice ?? null } : 'configured')
+    void getTeam().then(async (team) => {
+      if (!active) return
+      if (team.managementCredentialConfigured === false) { setMissingToken({ choice: team.managementCredentialChoice ?? null }); return }
+      // The token arrived after this dashboard loaded its sources: read them again before saying anything is paused.
+      await refreshSources().catch(() => {})
+      if (active) setMissingToken('configured')
     }).catch(() => { if (active) setMissingToken('unreadable') })
     return () => { active = false }
-  }, [getTeam, tokenInQuestion])
+  }, [getTeam, refreshSources, tokenInQuestion])
   const [sourceMode, setSourceMode] = useState<'catalog' | 'custom'>(catalog.sources.length > 0 ? 'catalog' : 'custom')
   const [catalogSourceId, setCatalogSourceId] = useState<string | null>(null)
   const [label, setLabel] = useState('')
@@ -215,6 +220,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   // The gateway decides whether installing ends a rollback; this page only says so beside the control that commits to it.
   const rollbackNote = installationEnabled && sources.installEndsRollbackTo ? rollbackEndsMessage(sources.installEndsRollbackTo) : null
   const applyBlocked = isBusy || isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || sourceActions.blockingAction !== null
+  // The gateway itself said it has no management token: the page leads to the one way of adding it.
+  const tokenIsMissing = !installationEnabled && missingToken !== null && missingToken !== 'configured' && missingToken !== 'unreadable'
   const latestActions = new Map<string, SourceActionSummary>()
   for (const action of sourceActions?.actions ?? []) {
     const previous = latestActions.get(action.sourceId)
@@ -333,7 +340,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
       {showBigQuery && installationEnabled ? <BigQuerySetupForm disabled={applyBlocked || resumingBigQuery} /> : null}
 
-      {!installationEnabled && missingToken !== null && missingToken !== 'configured' && missingToken !== 'unreadable' ? (
+      {tokenIsMissing ? (
         <>
           <ManagementTokenCard choice={missingToken.choice} />
           <p role="status" className="mt-4 text-sm leading-6 text-kumo-subtle">Saved drafts are retained. They can be installed once your gateway has the token.</p>
@@ -617,7 +624,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <div className="empty-card">
             <div className="flex size-12 items-center justify-center rounded-2xl bg-kumo-tint text-kumo-subtle"><Database size={23} /></div>
             <h2 className="mt-4 text-base font-semibold text-kumo-strong">No sources yet</h2>
-            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : 'Your gateway needs its management token before it can install a source.'}</p>
+            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : tokenIsMissing ? 'Your gateway needs its management token before it can install a source.' : 'Source installation is unavailable right now.'}</p>
             <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={() => setShowForm(true)}><Plus size={16} weight="bold" /> Add your first source</Button>
           </div>
         ) : (

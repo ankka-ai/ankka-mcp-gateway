@@ -311,7 +311,7 @@ const ACTIONS_KEY = 'ankka-mcp-gateway/source-actions/v1';
 const UPDATES_KEY = 'ankka-mcp-gateway/runtime-updates/v1';
 const TEARDOWNS_KEY = 'ankka-mcp-gateway/teardown-actions/v1';
 const TEAM_KEY = 'ankka-mcp-gateway/team-access/v1';
-// The one management token change an administrator has open, without its value: see credentialAction below.
+// The one management token change an administrator has open, without its value: see safeCredentialAction.
 const MANAGEMENT_CHANGE_KEY = 'ankka-mcp-gateway/management-credential-action/v1';
 // Setup records the administrator's choice at its token step under this key, as a fixed word and never the value.
 const MANAGEMENT_CHOICE_KEY = 'ankka-mcp-gateway/management-credential-choice/v1';

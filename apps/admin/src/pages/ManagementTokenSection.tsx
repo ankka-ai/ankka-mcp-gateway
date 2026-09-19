@@ -99,7 +99,7 @@ function verificationLines(result: ManagementVerification): string[] {
 
 /** Settings → Cloudflare management: the one way to add, replace and verify the gateway's own token. */
 export function ManagementTokenSection() {
-  const { getTeam, verifyManagementAccess } = useGateway()
+  const { getTeam, refreshSources, verifyManagementAccess } = useGateway()
   const { start, starting } = useManagementTokenStart()
   const [team, setTeam] = useState<Team | null>(null)
   const [teamState, setTeamState] = useState<'loading' | 'read' | 'unreadable'>('loading')
@@ -136,7 +136,12 @@ export function ManagementTokenSection() {
       const next = await readTeam()
       if (stopped || !active.current) return
       attempts += 1
-      if (next?.managementCredentialConfigured === true) { setArrival('arrived'); return }
+      if (next?.managementCredentialConfigured === true) {
+        setArrival('arrived')
+        // Sources were loaded while the token was missing; without this they would stay disabled until a reload.
+        void refreshSources().catch(() => {})
+        return
+      }
       // Until the token arrives this answer costs no Cloudflare call and always succeeds, so a failure means a token is there.
       if (next === null) { setArrival('unreadable'); return }
       if (attempts >= ARRIVAL_POLL_LIMIT) { setArrival('late'); return }
@@ -144,7 +149,7 @@ export function ManagementTokenSection() {
     }
     void check()
     return () => { stopped = true; window.clearTimeout(timer) }
-  }, [readTeam])
+  }, [readTeam, refreshSources])
 
   const verify = async () => {
     if (verifying) return
