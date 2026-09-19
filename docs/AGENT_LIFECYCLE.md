@@ -174,6 +174,15 @@ The job is a private JSON file outside the checkout with mode `0600`.
 }
 ```
 
+An optional `"managementCredentialAtInstall": true` installs the management
+token the way a customer's setup does since the token step moved into setup:
+the converge stage hands it to the converger, the final runtime upload carries
+it as the `ANKKA_MANAGEMENT_TOKEN` secret binding, the exact read-back requires
+it, and the manage stage then finds it bound and writes nothing. Without the
+option the manage stage writes the secret itself, as before. The choice is part
+of what `approve` binds; a job approved before the option existed keeps its
+digest.
+
 The management hostname is `manage<prefix>.<zone>` and the Portal hostname is
 `mcp<prefix>.<zone>`; a job with a used prefix stops at `preflight`. The
 approver must be the gateway's administrator email. A credential reference is
