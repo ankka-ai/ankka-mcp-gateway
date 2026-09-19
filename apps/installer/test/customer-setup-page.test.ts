@@ -127,7 +127,7 @@ describe('customer setup management token step', () => {
     // One paste field: not echoed, not remembered, and without a name no form submission could carry.
     const fields = [...html.matchAll(/<input\b[^>]*>/giu)].map((match) => match[0]).filter((field) => field.includes('credential'));
     expect(fields).toEqual([
-      '<input id="credential-value" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="64" required>',
+      '<input id="credential-value" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="96" required>',
     ]);
     expect(html).not.toMatch(/<form\b[^>]*\b(?:action|method)=/iu);
     // Every id names one element: the script addresses the page by id, and the management address field keeps its own.

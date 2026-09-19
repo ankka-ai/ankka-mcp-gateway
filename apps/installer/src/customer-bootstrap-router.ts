@@ -53,7 +53,7 @@ const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const AUTHORIZATION_CODE = /^[A-Za-z0-9._~-]{8,4096}$/u;
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_HANDOFF_BYTES = 60 * 1024;
-/** An account token is at most 53 characters; nothing larger is read on the management step. */
+/** An account token is at most 69 characters here; nothing larger is read on the management step. */
 const MAX_MANAGEMENT_STEP_BYTES = 512;
 /** Either the pasted value or the explicit choice to continue without one; never both, never anything else. */
 const managementStepSchema = v.union([

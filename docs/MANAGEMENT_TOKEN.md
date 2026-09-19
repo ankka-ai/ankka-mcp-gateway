@@ -94,15 +94,17 @@ account API token in its
 
 | Form | Accepted value |
 | --- | --- |
-| Scannable, created or rolled since 2026 | `cfat_`, 40 alphanumeric characters, and an 8-character checksum: 53 characters |
+| Scannable, created or rolled since 2026 | `cfat_` followed by 40 to 64 alphanumeric characters (40 characters and Cloudflare's checksum) |
 | Created before the scannable format | 40 characters: letters, digits, `-` and `_` |
 
 Cloudflare documents the scannable form as `cfat_[40 characters][checksum]`
-and says tokens in the earlier form "continue to work". It gives the
-checksum's length, eight characters, for the sibling Access service-token
-secret in its
-[2026-08-26 changelog](https://developers.cloudflare.com/changelog/post/2026-08-26-service-token-secret-format/),
-which gives the scannable account token its 53 characters. Cloudflare calls
+and says tokens in the earlier form "continue to work". It publishes neither
+the checksum's length nor its algorithm for account tokens (the sibling Access
+service-token secret of its
+[2026-08-26 changelog](https://developers.cloudflare.com/changelog/post/2026-08-26-service-token-secret-format/)
+uses eight characters), so the check allows 40 to 64 characters after the
+prefix: it exists to catch a wrong paste, and Cloudflare alone judges the
+token. Cloudflare calls
 the earlier form a 40-character alphanumeric string; tokens issued in that
 form also contain `-` and `_`, so both are accepted there. The checksum itself
 is not recomputed: its algorithm is not published. Should Cloudflare issue an

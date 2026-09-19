@@ -845,7 +845,8 @@ describe('management token step of setup', () => {
     const refused: BoundaryValue[] = [
       { managementToken: `cfut_${'a'.repeat(48)}` },
       { managementToken: `cfk_${'a'.repeat(48)}` },
-      { managementToken: `${SCANNABLE_VALUE}x` },
+      { managementToken: `${SCANNABLE_VALUE}-` },
+      { managementToken: `cfat_${'a'.repeat(65)}` },
       { managementToken: ` ${LEGACY_VALUE}` },
       { managementToken: `Bearer ${LEGACY_VALUE}` },
       { managementToken: '' },

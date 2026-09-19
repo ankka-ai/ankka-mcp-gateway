@@ -59,17 +59,20 @@ export function customerManagementCredentialTemplateLink(managementHostname: str
 /**
  * The two forms Cloudflare documents for an account API token
  * (developers.cloudflare.com/fundamentals/api/get-started/token-formats):
- * the scannable `cfat_[40 characters][checksum]`, whose checksum is eight
- * characters as in the sibling Access service-token secret (changelog of
- * 2026-08-26), and the earlier unprefixed 40-character form, which
- * "continues to work". Cloudflare calls the earlier form alphanumeric; tokens
- * issued in it also contain `-` and `_`. The checksum is not recomputed: its
- * algorithm is not published. Nothing else is accepted: a user token
- * (`cfut_`) or a Global API Key (`cfk_`) is not account-owned.
+ * the scannable `cfat_[40 characters][checksum]` and the earlier unprefixed
+ * 40-character form, which "continues to work". Cloudflare publishes neither
+ * the checksum's length nor its algorithm (the sibling Access service-token
+ * secret of the 2026-08-26 changelog uses eight characters), so the scannable
+ * form is accepted with 40 to 64 alphanumeric characters after its prefix and
+ * the checksum is not recomputed: this check catches a wrong paste, and
+ * Cloudflare alone judges the token. Cloudflare calls the earlier form
+ * alphanumeric; tokens issued in it also contain `-` and `_`. Nothing else is
+ * accepted: a user token (`cfut_`) or a Global API Key (`cfk_`) is not
+ * account-owned.
  */
-const SCANNABLE_ACCOUNT_FORM = /^cfat_[A-Za-z0-9]{48}$/u;
+const SCANNABLE_ACCOUNT_FORM = /^cfat_[A-Za-z0-9]{40,64}$/u;
 const LEGACY_ACCOUNT_FORM = /^[A-Za-z0-9_-]{40}$/u;
-const MAX_LENGTH = 53;
+const MAX_LENGTH = 69;
 
 export const customerManagementCredentialSchema = v.pipe(
   v.string(),

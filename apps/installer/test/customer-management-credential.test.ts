@@ -81,12 +81,19 @@ describe('management token form', () => {
     expect(parseCustomerManagementCredential(LEGACY_VALUE)).toBe(LEGACY_VALUE);
   });
 
+  it('does not depend on the length of the scannable checksum, which Cloudflare does not publish', () => {
+    for (const length of [40, 48, 64]) {
+      const value = `cfat_${'a'.repeat(length)}`;
+      expect(parseCustomerManagementCredential(value)).toBe(value);
+    }
+  });
+
   it.each([
     ['empty', ''],
     ['a user token', `cfut_${'a'.repeat(48)}`],
     ['a Global API Key', `cfk_${'a'.repeat(48)}`],
-    ['a short scannable value', `cfat_${'a'.repeat(47)}`],
-    ['a long scannable value', `cfat_${'a'.repeat(49)}`],
+    ['a short scannable value', `cfat_${'a'.repeat(39)}`],
+    ['a long scannable value', `cfat_${'a'.repeat(65)}`],
     ['punctuation in a scannable value', `cfat_${'a'.repeat(47)}-`],
     ['an upper-case prefix', `CFAT_${'a'.repeat(48)}`],
     ['a 39-character value', 'a'.repeat(39)],
