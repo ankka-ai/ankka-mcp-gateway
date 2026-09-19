@@ -83,9 +83,11 @@ async function gateway() {
     name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256',
   }, true, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
+  // Each fixture publishes a newly generated key, so it needs its own signing-key ID.
+  const kid = `synthetic-flow-key-${crypto.randomUUID()}`;
   const encode = (value: BoundaryObject) => base64UrlEncode(new TextEncoder().encode(JSON.stringify(value)));
   const now = Math.floor(Date.now() / 1000);
-  const unsigned = `${encode({ alg: 'RS256', kid: 'synthetic-flow-key', typ: 'JWT' })}.${encode({
+  const unsigned = `${encode({ alg: 'RS256', kid, typ: 'JWT' })}.${encode({
     iss: ISSUER, aud: [AUDIENCE], email: ADMIN, nbf: now - 1, exp: now + 300,
   })}`;
   const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', keys.privateKey, new TextEncoder().encode(unsigned));
@@ -95,7 +97,7 @@ async function gateway() {
   };
   vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
     const url = v.is(v.instance(Request), input) ? input.url : String(input);
-    if (url === `${ISSUER}/cdn-cgi/access/certs`) return Response.json({ keys: [{ ...jwk, kid: 'synthetic-flow-key', alg: 'RS256', use: 'sig' }] });
+    if (url === `${ISSUER}/cdn-cgi/access/certs`) return Response.json({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] });
     throw new Error('unexpected network request');
   });
 
