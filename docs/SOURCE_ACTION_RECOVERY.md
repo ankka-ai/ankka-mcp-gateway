@@ -60,6 +60,16 @@ execution provably never started. If execution wins the race, cancellation
 cannot erase it. If cancellation wins, the old callback cannot start execution.
 The user must separately authorize any replacement attempt.
 
+**Remove source** discards an unused draft instead of keeping it for another
+attempt. The same-origin `DELETE /api/sources` takes `schemaVersion: 1`, the
+displayed source `revision`, and `sourceId`. The gateway checks the revision,
+actor, source and lifecycle journals, and any retained BigQuery bridge evidence
+inside its serialized mutation. A storage transaction removes the draft, all
+of its authorizations and its empty bridge record together. Removal works for
+failed or cancelled attempts with no write evidence, and for approvals the
+actor can cancel. Installed sources and any provisioning evidence require
+resource cleanup; this operation cannot discard their receipts.
+
 Expiry never clears an armed write, resource receipt, Portal update or uncertain
 execution. An absent resource in the Cloudflare dashboard does not prove that a
 request was never armed or sent. Credentials remain request-local under the existing

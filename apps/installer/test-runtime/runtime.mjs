@@ -6,9 +6,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // Bundles production state/crypto code; SQLite and Web Crypto execute in workerd.
-export async function createRuntime({ storage = false, diagnostics = false, gateway = false } = {}) {
+export async function createRuntime({ storage = false, diagnostics = false, gateway = false, sourceRemoval = false } = {}) {
   const bundle = await build({
-    entryPoints: [fileURLToPath(new URL(gateway ? './gateway-worker.ts' : './bootstrap-worker.ts', import.meta.url))],
+    entryPoints: [fileURLToPath(new URL(sourceRemoval ? './source-removal-worker.ts' : gateway ? './gateway-worker.ts' : './bootstrap-worker.ts', import.meta.url))],
     bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022',
     external: ['cloudflare:workers'],
   });

@@ -40,7 +40,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn(),
-    saveSourceDraft: vi.fn(async () => ({ ...sources, revision: 8 })),
+    removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(async () => ({ ...sources, revision: 8 })),
     prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => emptyActions),
     getSourceAction: vi.fn(),

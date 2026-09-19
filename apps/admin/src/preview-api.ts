@@ -287,6 +287,19 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone(this.#sources)
   }
 
+  async removeSourceDraft(revision: number, sourceId: string): Promise<ManagedSources> {
+    if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
+    const source = this.#sources.sources.find((item) => item.id === sourceId)
+    const actions = this.#sourceActions.filter((action) => action.sourceId === sourceId)
+    if (!source || source.status !== 'draft' || actions.some((action) => action.state !== 'failed' && !action.canCancel)) {
+      throw new GatewayApiError(409, 'source_removal_requires_cleanup')
+    }
+    this.#sources = { ...this.#sources, revision: revision + 1,
+      sources: this.#sources.sources.filter((item) => item.id !== sourceId) }
+    this.#sourceActions = this.#sourceActions.filter((action) => action.sourceId !== sourceId)
+    return structuredClone(this.#sources)
+  }
+
   async prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<SourceApplyResult> {
     if (!this.#sources.installationEnabled) throw new GatewayApiError(409, 'source_addition_paused')
     if (revision !== this.#sources.revision || !this.#sources.sources.some((source) => source.id === sourceId && source.status === 'draft')) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })

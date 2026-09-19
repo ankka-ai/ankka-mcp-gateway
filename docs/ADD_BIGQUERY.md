@@ -94,6 +94,15 @@ receipts identify what can be checked and resumed. A successful Worker upload
 is not repeated and does not require another key upload when finishing the
 source connection.
 
+To discard a setup that has not begun provisioning, choose **Remove source** on
+its installation card or in its source details. This also works after a Google
+connection check fails, after authorization expires, or after cancellation.
+Removal needs no Cloudflare approval or management token: it atomically clears
+the draft, its action history and its empty bridge record inside your gateway.
+An unused approval can only be removed by the administrator who started it.
+Old callbacks and resume links are rejected, including after you add the same
+configuration again. You can also remove ordinary unused source drafts this way.
+
 If a create request has an uncertain outcome, setup stops with its pending
 receipt. Do not start another bridge with the same configuration or adopt a
 resource based only on its name. Review the exact account resources before

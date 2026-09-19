@@ -136,6 +136,20 @@ export function memoryStorage(initial) {
         writes.push({ key: entryKey, value: structuredClone(owned) });
       }
     },
+    async delete(key) {
+      return values.delete(key);
+    },
+    async transaction(operation) {
+      const before = structuredClone(values);
+      const previousWrites = writes.length;
+      try { return await operation(this); }
+      catch (error) {
+        values.clear();
+        for (const [key, value] of before) values.set(key, value);
+        writes.length = previousWrites;
+        throw error;
+      }
+    },
     snapshot(key = STORAGE_KEY) {
       const value = values.get(key);
       return value === undefined ? undefined : structuredClone(value);

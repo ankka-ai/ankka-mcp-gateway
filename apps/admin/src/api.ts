@@ -362,6 +362,7 @@ export interface GatewayAdminApi {
   getUpdate(): Promise<RuntimeUpdate>
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
+  removeSourceDraft(revision: number, sourceId: string): Promise<ManagedSources>
   prepareSourceAction(revision: number, sourceId: string, renewActionId?: string): Promise<SourceApplyResult>
   getSourceActions(): Promise<SourceActions>
   getSourceAction(actionId: string): Promise<SourceAction>
@@ -388,6 +389,8 @@ export function rollbackEndsMessage(release: string): string {
 export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually registered Google OAuth client. Cloudflare currently documents manual OAuth without an admin credential flow, so one operator connection for your team is not supported. No credentials have been requested. Keep Require user auth off; see the BigQuery setup guide.'
 
 const ERROR_MESSAGES = new Map([
+  ['source_not_found', 'This source has already been removed. Refresh Sources.'],
+  ['source_removal_requires_cleanup', 'This source has started provisioning. Check its installation status; its resources must be cleaned up before it can be removed.'],
   ['bigquery_setup_invalid', 'Review the query project and dataset names before continuing.'],
   ['preview_only', 'This is a local preview. Open your deployed gateway to connect BigQuery.'],
   ['bigquery_setup_conflict', 'Check the existing BigQuery setup before starting another attempt.'],
@@ -583,6 +586,12 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
         revision,
         source: { ...source, enabledTools: [...new Set(source.enabledTools)].sort() },
       }),
+    })
+  }
+
+  removeSourceDraft(revision: number, sourceId: string): Promise<ManagedSources> {
+    return this.#request('/api/sources', managedSourcesSchema, {
+      method: 'DELETE', body: JSON.stringify({ schemaVersion: 1, revision, sourceId }),
     })
   }
 

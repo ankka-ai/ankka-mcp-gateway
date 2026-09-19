@@ -64,6 +64,7 @@ interface GatewayContextValue {
   clearUpdateNotice(): void
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(source: SourceDraftInput): Promise<ManagedSources>
+  removeSourceDraft(sourceId: string): Promise<void>
   prepareSourceApply(sourceId: string, renewActionId?: string): Promise<SourceApplyResult>
   prepareRuntimeAction(operation: RuntimeOperation): Promise<PreparedAction>
   prepareTeardownAction(): Promise<PreparedAction>
@@ -401,6 +402,20 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       setSources((current) => current && current.revision > next.revision ? current : next)
       setSourceNotice({ tone: 'success', message: 'Draft saved inside your gateway. The live Portal was not changed.' })
       return next
+    }),
+    removeSourceDraft: (sourceId) => runBusy(async () => {
+      const current = sources ?? await refreshSources()
+      try {
+        const next = await apiRef.current.removeSourceDraft(current.revision, sourceId)
+        setSources((current) => current && current.revision > next.revision ? current : next)
+        setSourceActions((current) => current ? { ...current,
+          actions: current.actions.filter((action) => action.sourceId !== sourceId),
+          blockingAction: current.blockingAction?.kind === 'source' && current.blockingAction.sourceId === sourceId
+            ? null : current.blockingAction } : current)
+        setSourceNotice({ tone: 'success', message: 'Source removed.' })
+      } finally {
+        await Promise.all([refreshSources().catch(() => {}), refreshSourceActions().catch(() => {})])
+      }
     }),
     prepareSourceApply: (sourceId, renewActionId) => runBusy(async () => {
       const current = sources ?? await refreshSources()

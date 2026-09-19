@@ -3142,6 +3142,62 @@ async function cancelSourceAction(storage, actionId, actorEmail, now) {
   });
 }
 
+function parseSourceRemoval(value) {
+  return exactKeys(value, ['schemaVersion', 'revision', 'sourceId']) && value.schemaVersion === 1 &&
+    Number.isSafeInteger(value.revision) && value.revision >= 1 && isText(value.sourceId) && SOURCE_ID.test(value.sourceId)
+    ? value : null;
+}
+
+// Only a bridge record that proves no resource exists can be discarded with a
+// draft. Unknown record shapes retain their evidence for recovery.
+function unstartedBigQueryDraft(record, sourceId) {
+  return exactKeys(record, ['schemaVersion', 'sourceId', 'actionId', 'configuration', 'workerName',
+    'hostname', 'operatorEmail', 'sourceHash', 'application', 'workerVersion', 'domainId', 'pending', 'ready',
+    ...(Object.hasOwn(record ?? {}, 'failure') ? ['failure'] : [])]) && record.schemaVersion === 1 &&
+    record.sourceId === sourceId && record.ready === false && record.application === null &&
+    record.workerVersion === null && record.domainId === null && record.pending === null;
+}
+
+async function removeSourceDraft(storage, input, actorEmail, now) {
+  if (!input || !normalizedActor(actorEmail)) return fixedJson(400, { schemaVersion: 1, error: 'source_invalid' });
+  // The draft, its authorizations and its empty bridge record disappear in one
+  // transaction. An old callback can no longer claim or resume this source.
+  return storage.transaction(async (transaction) => {
+    const current = safeManagementSources(await transaction.get(SOURCES_KEY));
+    if (!current) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+    if (current.revision !== input.revision) return sourceActionConflict('draft_changed');
+    const source = current.sources.find((candidate) => candidate.id === input.sourceId);
+    if (!source) return fixedJson(404, { schemaVersion: 1, error: 'source_not_found' });
+    if (source.status !== 'draft') return fixedJson(409, { schemaVersion: 1, error: 'source_removal_requires_cleanup' });
+    const snapshot = await sourceActionSnapshot(transaction, actorEmail, now);
+    if (!snapshot) return fixedJson(503, { schemaVersion: 1, error: 'source_actions_unavailable' });
+    const blocker = snapshot.blockingAction;
+    if (blocker && (blocker.kind !== 'source' || blocker.sourceId !== source.id)) return sourceSnapshotConflict(snapshot);
+    const actions = safeSourceActions(await transaction.get(ACTIONS_KEY));
+    const related = actions?.actions.filter((action) => action.sourceId === source.id) ?? [];
+    if (await otherLifecycleBlocksSource(transaction, now, related.find(sourceActionBlocks)?.actionId) ||
+        await teamActionBlocksLifecycle(transaction)) return sourceActionConflict('lifecycle_pending');
+    if (related.some((action) => sourceActionHasWriteEvidence(action) ||
+        (action.status !== 'failed' && !sourceActionCanCancel(action, actorEmail, now)))) {
+      return fixedJson(409, { schemaVersion: 1, error: 'source_removal_requires_cleanup' });
+    }
+    const bridgeKey = `ankka-mcp-gateway/bigquery-source/v1/${source.id}`;
+    const bridge = await transaction.get(bridgeKey);
+    if (bridge !== undefined && !unstartedBigQueryDraft(bridge, source.id)) {
+      return fixedJson(409, { schemaVersion: 1, error: 'source_removal_requires_cleanup' });
+    }
+    const updated = safeManagementSources({ ...current, revision: current.revision + 1,
+      sources: current.sources.filter((candidate) => candidate.id !== source.id) });
+    const nextActions = actions ? safeSourceActions({ ...actions, revision: actions.revision + 1,
+      actions: actions.actions.filter((action) => action.sourceId !== source.id) }) : null;
+    if (!updated || (actions && !nextActions)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
+    await transaction.put(SOURCES_KEY, updated);
+    if (nextActions) await transaction.put(ACTIONS_KEY, nextActions);
+    if (bridge !== undefined) await transaction.delete(bridgeKey);
+    return fixedJson(200, updated);
+  });
+}
+
 function sameProvider(left, right) {
   return left && right && left.id === right.id && (left.parentId ?? '') === (right.parentId ?? '');
 }
@@ -5342,6 +5398,10 @@ export class AdminState {
         await this.state.storage.put(TEAM_KEY, { ...state, pendingAction: cancelled });
         return fixedJson(200, publicTeamAction(cancelled));
       }
+      if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'DELETE') {
+        const input = parseSourceRemoval(await readJsonInput(request, 1_024));
+        return removeSourceDraft(this.state.storage, input, request.headers.get('x-ankka-actor-email'), Date.now());
+      }
       if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'PUT') {
         if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
         if (await teamActionBlocksLifecycle(this.state.storage)) return fixedJson(409, {
@@ -5815,12 +5875,12 @@ async function handleSourceDiscovery(request, env) {
 }
 
 async function handleSources(request, env) {
-  if (request.method !== 'GET' && request.method !== 'PUT') {
-    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, PUT' });
+  if (!['GET', 'PUT', 'DELETE'].includes(request.method)) {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, PUT, DELETE' });
   }
   const access = await managementActor(request, env);
   if (access.response) return access.response;
-  if (request.method === 'PUT' && !sameOriginMutation(request)) {
+  if (request.method !== 'GET' && !sameOriginMutation(request)) {
     return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   }
   if (request.method === 'PUT' && SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
@@ -5838,14 +5898,18 @@ async function handleSources(request, env) {
       return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     }
   }
-  const input = parseSourceSave(await readJsonInput(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES));
+  const removing = request.method === 'DELETE';
+  const body = await readJsonInput(request, removing ? 1_024 : SOURCE_SAVE_REQUEST_LIMIT_BYTES);
+  const input = removing ? parseSourceRemoval(body) : parseSourceSave(body);
   if (!input) return fixedJson(400, { schemaVersion: 1, error: 'source_invalid' });
-  try { await verifyManagedSource(input.source); } catch (error) { return sourceErrorResponse(error); }
+  if (!removing) {
+    try { await verifyManagedSource(input.source); } catch (error) { return sourceErrorResponse(error); }
+  }
   try {
     const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCES_PATH}`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json' },
-      body: canonicalJson({ schemaVersion: 1, revision: input.revision, source: input.source }),
+      method: request.method,
+      headers: { 'content-type': 'application/json', 'x-ankka-actor-email': access.actorEmail },
+      body: canonicalJson(removing ? input : { schemaVersion: 1, revision: input.revision, source: input.source }),
     }));
     if (!(response instanceof Response)) return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
     if (response.status !== 200) return response;

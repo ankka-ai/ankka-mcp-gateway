@@ -124,7 +124,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     })),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn<GatewayAdminApi['discoverSource']>(),
-    saveSourceDraft: vi.fn<GatewayAdminApi['saveSourceDraft']>(async () => sources),
+    removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn<GatewayAdminApi['saveSourceDraft']>(async () => sources),
     prepareSourceAction: vi.fn<GatewayAdminApi['prepareSourceAction']>(async () => prepared),
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
     getSourceAction: vi.fn(async (_actionId: string) => sourceAction),

@@ -59,8 +59,8 @@ async function fixture(run) {
       } })),
     } });
   };
-  const request = (path, method, body) => {
-    const init = { method, headers };
+  const request = (path, method, body, extraHeaders = {}) => {
+    const init = { method, headers: { ...headers, ...extraHeaders } };
     if (body !== undefined) init.body = JSON.stringify(body);
     return worker.fetch(new Request(`https://manage.example.com${path}`, init), env);
   };
@@ -69,6 +69,27 @@ async function fixture(run) {
       mode(value) { responseMode = value; } });
   } finally { globalThis.fetch = originalFetch; }
 }
+
+test('source removal requires the administrator, same origin and the current draft revision, without a management token', async () => {
+  await fixture(async ({ request, calls, storage }) => {
+    const current = await (await request('/api/sources', 'GET')).json();
+    const source = { id: 'source-0123456789abcdef', label: 'Unused draft', url: 'https://unused.example.com/mcp',
+      authMode: 'none', onBehalfOfUser: false, enabledTools: ['read'], status: 'draft' };
+    await storage.put(SOURCE_KEY, { schemaVersion: 1, revision: current.revision + 1,
+      applyMode: 'oauth_per_action', sources: [...current.sources, source] });
+    const input = { schemaVersion: 1, revision: current.revision + 1, sourceId: source.id };
+    const before = structuredClone(storage.writes);
+    assert.equal((await request('/api/sources', 'DELETE', input, { 'cf-access-jwt-assertion': '' })).status, 401);
+    assert.equal((await request('/api/sources', 'DELETE', input, { origin: 'https://other.example.com' })).status, 403);
+    assert.equal((await request('/api/sources', 'DELETE', { ...input, revision: current.revision })).status, 409);
+    assert.equal((await request('/api/sources', 'DELETE', { ...input, sourceId: current.sources[0].id })).status, 409);
+    assert.deepEqual(storage.writes, before);
+    const removed = await request('/api/sources', 'DELETE', input);
+    assert.equal(removed.status, 200);
+    assert.deepEqual((await removed.json()).sources, current.sources);
+    assert.equal(calls.length, 0, 'removing an unused draft makes no provider call');
+  });
+});
 
 test('BigQuery public discovery is OAuth protected and never approves its connection', async () => {
   await fixture(async ({ request, calls, storage }) => {

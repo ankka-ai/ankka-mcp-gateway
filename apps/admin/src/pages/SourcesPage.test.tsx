@@ -34,7 +34,7 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
     getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-    discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
+    discoverSource: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   }
@@ -42,6 +42,50 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
 
 describe('source installation recovery', () => {
   afterEach(cleanup)
+
+  it('removes a failed BigQuery setup and its status card without starting another authorization', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction({ state: 'failed', status: 'failed', canCancel: false,
+      failureCode: 'bigquery_google_auth_http_400' })
+    let removed = false
+    const api = actionApi(actionSnapshot(action))
+    api.getSources = vi.fn(async () => ({ ...sources, revision: removed ? 5 : 4,
+      installationEnabled: false, sources: removed ? [] : [draft] }))
+    api.getSourceActions = vi.fn(async () => removed
+      ? { schemaVersion: 1 as const, actions: [], blockingAction: null } : actionSnapshot(action))
+    api.getBigQuerySetups = vi.fn(async () => ({ schemaVersion: 1 as const, available: true,
+      setups: removed ? [] : [{ sourceId: draft.id, actionId: action.actionId, ready: false,
+        credentialRequired: true, recoveryRequired: false }] }))
+    api.removeSourceDraft = vi.fn(async () => {
+      removed = true
+      return api.getSources()
+    })
+    const page = render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
+    await user.click(within(card).getByRole('button', { name: 'Remove source' }))
+    await waitFor(() => expect(screen.queryByRole('article')).not.toBeInTheDocument())
+    expect(api.removeSourceDraft).toHaveBeenCalledExactlyOnceWith(4, draft.id)
+    expect(screen.getByText('Source removed.')).toBeVisible()
+    expect(screen.queryByRole('button', { name: draft.label })).not.toBeInTheDocument()
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+    expect(api.resumeBigQuery).not.toHaveBeenCalled()
+    expect(api.cancelSourceAction).not.toHaveBeenCalled()
+    page.unmount()
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await screen.findByText('No sources yet')
+    expect(screen.queryByText('BigQuery setup failed')).not.toBeInTheDocument()
+  })
+
+  it('removes an unused draft from its source details', async () => {
+    const user = userEvent.setup()
+    const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
+    api.removeSourceDraft = vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_conflict'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: draft.label }))
+    await user.click(screen.getByRole('button', { name: 'Remove source' }))
+    await waitFor(() => expect(api.removeSourceDraft).toHaveBeenCalledExactlyOnceWith(4, draft.id))
+    expect(screen.getByRole('button', { name: draft.label })).toBeVisible()
+  })
 
   it('discovers slow consent in a fresh page without a return URL and blocks another Apply', async () => {
     const user = userEvent.setup()
@@ -92,6 +136,7 @@ describe('source installation recovery', () => {
     expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Cancel installation' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Resume installation' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove source' })).not.toBeInTheDocument()
     expect(screen.queryByText(/nothing changed|start a fresh authorization/i)).not.toBeInTheDocument()
   })
 
@@ -211,7 +256,7 @@ describe('SourcesPage', () => {
       getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
+      discoverSource: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
@@ -327,7 +372,7 @@ describe('SourcesPage', () => {
           { name: 'execute_sql', description: 'Synthetic write query.', destructiveHint: true, defaultSelected: false },
         ],
       })),
-      saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
+      removeSourceDraft: vi.fn(), saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
@@ -373,7 +418,7 @@ describe('SourcesPage', () => {
         authentication: 'oauth',
         tools: [],
       })),
-      saveSourceDraft,
+      removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction,
       getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
@@ -434,7 +479,7 @@ describe('SourcesPage', () => {
         authentication: 'none',
         tools: [{ name: 'reports.read', defaultSelected: true }],
       })),
-      saveSourceDraft,
+      removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -465,7 +510,7 @@ describe('SourcesPage', () => {
         schemaVersion: 1, status: 'discovered', endpoint: url, protocolVersion: '2026-07-28', authentication: 'none',
         tools: [{ name: 'search', title: 'Search', description: 'Search documents.', readOnlyHint: true, defaultSelected: true }],
       })),
-      saveSourceDraft,
+      removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -512,7 +557,7 @@ describe('SourcesPage', () => {
       getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource,
-      saveSourceDraft,
+      removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -577,7 +622,7 @@ describe('SourcesPage', () => {
           defaultSelected: false,
         })),
       })),
-      saveSourceDraft,
+      removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -638,7 +683,7 @@ describe('SourcesPage', () => {
         authentication: 'oauth',
         tools: [],
       })),
-      saveSourceDraft,
+      removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
