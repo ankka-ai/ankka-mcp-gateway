@@ -21,6 +21,16 @@ describe('HttpGatewayAdminApi', () => {
     updatedAt: '2026-08-29T00:00:00.000Z',
   } as const
 
+  it('removes the exact draft at its displayed revision through the same-origin API', async () => {
+    const fetch = vi.fn(async () => Response.json({ schemaVersion: 1, revision: 5, applyMode: 'account_token', sources: [] }))
+    vi.stubGlobal('fetch', fetch)
+    await new HttpGatewayAdminApi().removeSourceDraft(4, 'source-example')
+    expect(fetch).toHaveBeenCalledExactlyOnceWith('/api/sources', expect.objectContaining({
+      method: 'DELETE', credentials: 'same-origin', redirect: 'error',
+      body: JSON.stringify({ schemaVersion: 1, revision: 4, sourceId: 'source-example' }),
+    }))
+  })
+
   it.each(['bigquery_google_key_invalid', 'bigquery_google_auth_http_400', 'bigquery_google_query_http_403',
     'bigquery_google_response_invalid', 'bigquery_setup_failed', 'bigquery_google_auth_http_private-detail'])
   ('keeps only bounded BigQuery failure codes from the source status: %s', async (code) => {

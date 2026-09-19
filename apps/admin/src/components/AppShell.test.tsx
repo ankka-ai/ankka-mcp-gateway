@@ -37,7 +37,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     getTeam: vi.fn(async () => { throw new GatewayApiError(503, 'team_unavailable') }),
     prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
-    discoverSource: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
+    discoverSource: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => removalRecorded), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), chooseSourceActionTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
     prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),

@@ -18,9 +18,12 @@ interface SourceListProps {
   /** One sentence to read before installing, shown directly beside each install control; nothing when null. */
   installNote?: string | null
   onAuthorize(sourceId: string): void
+  canRemove?(sourceId: string): boolean
+  removeDisabled?: boolean
+  onRemove?(sourceId: string): void
 }
 
-export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, installNote = null, onAuthorize }: SourceListProps) {
+export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, installNote = null, onAuthorize, canRemove, removeDisabled = false, onRemove }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -134,6 +137,10 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                       <div className="mt-2 flex max-h-52 flex-wrap gap-2 overflow-y-auto pr-1" role="region" aria-label={`${source.label} allowed tools`} tabIndex={0}>
                         {source.enabledTools.map((tool) => <code key={tool} className="tool-chip break-all">{tool}</code>)}
                       </div>
+                      {source.status === 'draft' && canRemove?.(source.id) && onRemove ? (
+                        <Button variant="secondary-destructive" className="pressable mt-4" disabled={isBusy || removeDisabled}
+                          onClick={() => onRemove(source.id)}>Remove source</Button>
+                      ) : null}
                     </td>
                   </tr>
                 ) : null}

@@ -42,6 +42,121 @@ async function fixture() {
   return { controller, storage, runtime, prepare, fetch };
 }
 
+async function removeDraft(test, sourceId, actor = 'admin@example.com', revision) {
+  const sources = await (await test.runtime.fetch(new Request('https://admin-state.invalid/sources'))).json();
+  return test.runtime.fetch(new Request('https://admin-state.invalid/sources', { method: 'DELETE',
+    headers: { 'Content-Type': 'application/json', 'x-ankka-actor-email': actor },
+    body: JSON.stringify({ schemaVersion: 1, revision: revision ?? sources.revision, sourceId }),
+  }));
+}
+
+describe('removing an unstarted BigQuery source', () => {
+  it.each(['waiting', 'failed', 'expired', 'cancelled'])('removes a %s setup and prevents its old callback from provisioning', async (state) => {
+    const test = await fixture();
+    const prepared = await (await test.prepare()).json();
+    const claim = JSON.parse(new TextDecoder().decode(base64UrlDecode(new URL(prepared.handoffUrl).hash.slice(1))));
+    if (state === 'failed') expect((await signedBigQuery(test, claim,
+      { bigqueryPhase: 'preflight_failed', bigqueryFailureCode: 'bigquery_google_auth_http_400' })).status).toBe(200);
+    if (state === 'cancelled') expect((await test.runtime.fetch(new Request(
+      `https://admin-state.invalid/source-actions/${claim.actionId}`, { method: 'DELETE',
+        body: JSON.stringify({ actorEmail: claim.actorEmail, now: Date.now() }) }))).status).toBe(200);
+    if (state === 'expired') {
+      const key = 'ankka-mcp-gateway/source-actions/v1';
+      const actions = await test.storage.get(key);
+      await test.storage.put(key, { ...actions, actions: actions.actions.map((action) => ({ ...action,
+        issuedAt: Date.now() - 700_000, expiresAt: Date.now() - 100_000 })) });
+    }
+    const removed = await removeDraft(test, prepared.sourceId);
+    expect(removed.status).toBe(200);
+    expect((await removed.json()).sources.some((source) => source.id === prepared.sourceId)).toBe(false);
+    expect(await test.storage.get(`ankka-mcp-gateway/bigquery-source/v1/${prepared.sourceId}`)).toBeUndefined();
+    expect((await (await test.controller.list()).json()).setups).toEqual([]);
+    expect(await test.controller.readSourceAction(claim.actionId)).toBeNull();
+    expect((await signedBigQuery(test, claim, { bigqueryPhase: 'start' })).status).toBe(409);
+    expect((await test.controller.run({ actionId: claim.actionId, actionKey: claim.actionKey, actorEmail: claim.actorEmail,
+      accessToken: 'synthetic-cloudflare-operation-grant', actionExpiresAt: claim.expiresAt, serviceAccountJson: GOOGLE_KEY })).status).toBe(409);
+    expect(test.fetch).not.toHaveBeenCalled();
+    const sources = await (await test.runtime.fetch(new Request('https://admin-state.invalid/sources'))).json();
+    const next = await test.controller.prepare(new Request('https://manage.example.com/api/bigquery', { method: 'POST',
+      body: JSON.stringify({ ...body, revision: sources.revision }) }), claim.actorEmail, false);
+    expect(next.status).toBe(200);
+    expect((await next.json()).actionId).not.toBe(claim.actionId);
+    expect((await signedBigQuery(test, claim, { bigqueryPhase: 'start' })).status).toBe(409);
+  });
+
+  it('keeps an active approval owned by another administrator and rejects a stale revision', async () => {
+    const test = await fixture();
+    const prepared = await (await test.prepare()).json();
+    const before = structuredClone(test.storage.writes);
+    expect((await removeDraft(test, prepared.sourceId, 'different@example.com')).status).toBe(409);
+    expect((await removeDraft(test, prepared.sourceId, 'admin@example.com', 1)).status).toBe(409);
+    expect(test.storage.writes).toEqual(before);
+  });
+
+  it('keeps the draft and receipts when provisioning wins the race with removal', async () => {
+    const test = await fixture();
+    const prepared = await (await test.prepare()).json();
+    const claim = JSON.parse(new TextDecoder().decode(base64UrlDecode(new URL(prepared.handoffUrl).hash.slice(1))));
+    expect((await signedBigQuery(test, claim, { bigqueryPhase: 'start' })).status).toBe(200);
+    const before = structuredClone(test.storage.writes);
+    expect((await removeDraft(test, prepared.sourceId)).status).toBe(409);
+    expect(test.storage.writes).toEqual(before);
+    expect((await test.controller.readSourceAction(claim.actionId)).action.status).toBe('applying');
+  });
+
+  it('removes a setup during its Google check without allowing the delayed callback to create resources', async () => {
+    const test = await fixture();
+    const prepared = await (await test.prepare()).json();
+    const claim = JSON.parse(new TextDecoder().decode(base64UrlDecode(new URL(prepared.handoffUrl).hash.slice(1))));
+    let tokenRequested;
+    let releaseToken;
+    const started = new Promise((resolve) => { tokenRequested = resolve; });
+    const delayed = new Promise((resolve) => { releaseToken = resolve; });
+    test.fetch.mockImplementation(async (input) => {
+      if (String(input) === 'https://oauth2.googleapis.com/token') {
+        tokenRequested();
+        await delayed;
+        return Response.json({ access_token: 'synthetic-google-access-token', token_type: 'Bearer', expires_in: 3600 });
+      }
+      expect(String(input)).toBe('https://bigquery.googleapis.com/mcp');
+      return Response.json({ result: { content: [{ type: 'text', text: '{"jobComplete":true}' }] } });
+    });
+    const running = test.controller.run({ actionId: claim.actionId, actionKey: claim.actionKey, actorEmail: claim.actorEmail,
+      accessToken: 'synthetic-cloudflare-operation-grant', actionExpiresAt: claim.expiresAt, serviceAccountJson: GOOGLE_KEY });
+    await started;
+    try { expect((await removeDraft(test, prepared.sourceId)).status).toBe(200); }
+    finally { releaseToken(); }
+    expect((await running).status).toBe(409);
+    expect(test.fetch.mock.calls.every(([url]) => String(url).startsWith('https://oauth2.googleapis.com/') ||
+      String(url) === 'https://bigquery.googleapis.com/mcp')).toBe(true);
+    expect((await (await test.controller.list()).json()).setups).toEqual([]);
+  });
+
+  it.each(['application', 'workerVersion', 'domainId', 'pending', 'ready', 'unknown'])('retains %s evidence even if the source journal has lost the action', async (field) => {
+    const test = await fixture();
+    const prepared = await (await test.prepare()).json();
+    await test.storage.put('ankka-mcp-gateway/source-actions/v1', { schemaVersion: 1, revision: 2, actions: [] });
+    const key = `ankka-mcp-gateway/bigquery-source/v1/${prepared.sourceId}`;
+    const record = await test.storage.get(key);
+    await test.storage.put(key, { ...record, [field]: field === 'ready' ? true : 'synthetic-write-evidence' });
+    const before = structuredClone(test.storage.writes);
+    expect((await removeDraft(test, prepared.sourceId)).status).toBe(409);
+    expect(test.storage.writes).toEqual(before);
+  });
+
+  it('rolls back all local deletion if the bridge-record deletion fails', async () => {
+    const test = await fixture();
+    const prepared = await (await test.prepare()).json();
+    const keys = ['ankka-mcp-gateway/management-sources/v1', 'ankka-mcp-gateway/source-actions/v1',
+      `ankka-mcp-gateway/bigquery-source/v1/${prepared.sourceId}`];
+    const before = await Promise.all(keys.map((key) => test.storage.get(key)));
+    const originalDelete = test.storage.delete;
+    test.storage.delete = async (key) => { await originalDelete(key); throw new Error('synthetic storage failure'); };
+    await expect(removeDraft(test, prepared.sourceId)).rejects.toThrow('synthetic storage failure');
+    expect(await Promise.all(keys.map((key) => test.storage.get(key)))).toEqual(before);
+  });
+});
+
 describe('BigQuery setup with the production source-action state machine', () => {
   it('prepares the real source draft and same-origin handoff without a provider credential or grant', async () => {
     const test = await fixture();

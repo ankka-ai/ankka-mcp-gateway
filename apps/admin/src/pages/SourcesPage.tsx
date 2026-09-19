@@ -148,6 +148,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     refreshSourceActions,
     refreshSources,
     saveSourceDraft,
+    removeSourceDraft,
     sourceActions,
     sourceActionsError,
     sourceActionsPollingPaused,
@@ -236,6 +237,11 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     if (!previous || Date.parse(action.issuedAt) >= Date.parse(previous.issuedAt)) latestActions.set(action.sourceId, action)
   }
   const blocker = sourceActions?.blockingAction
+  const canRemoveDraft = (sourceId: string) => sourceActions !== null && sourceActionsError === null &&
+    (!blocker || (blocker.kind === 'source' && blocker.sourceId === sourceId)) &&
+    sources.sources.some((source) => source.id === sourceId && source.status === 'draft') &&
+    sourceActions.actions.filter((action) => action.sourceId === sourceId)
+      .every((action) => action.state === 'failed' || action.canCancel)
   const showActionStatus = sources.sources.some((source) => source.status === 'draft') || latestActions.size > 0 || Boolean(blocker) || sourceActionsError !== null
 
   const clearDraftForm = () => {
@@ -417,6 +423,11 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   </>
                 ) : null}
                 <BigQueryFailure setup={setup} />
+                {canRemoveDraft(action.sourceId) ? (
+                  <Button variant="secondary-destructive" className="pressable mt-3"
+                    disabled={isBusy || resumingBigQuery || isCheckingSourceActions}
+                    onClick={() => void removeSourceDraft(action.sourceId).catch(() => {})}>Remove source</Button>
+                ) : null}
                 {signInPause && action.canRenew === true ? (
                   <SourceToolChoice
                     action={action}
@@ -647,6 +658,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             draftLabel={(sourceId) => sourceDraftLabel(latestActions.get(sourceId))}
             installNote={blocker ? null : rollbackNote}
             onAuthorize={(sourceId) => void authorize(sourceId)}
+            canRemove={canRemoveDraft}
+            removeDisabled={isCheckingSourceActions || resumingBigQuery}
+            onRemove={(sourceId) => void removeSourceDraft(sourceId).catch(() => {})}
           />
         )}
       </section>
