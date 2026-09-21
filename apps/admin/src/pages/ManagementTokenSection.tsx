@@ -84,7 +84,7 @@ function verificationLines(result: ManagementVerification): string[] {
   if (result.token === 'rejected') return ['Cloudflare rejected the token: it was revoked, has expired, or belongs to another account. Replace it.']
   if (result.token !== 'active') return ['Cloudflare did not answer the token check, so nothing is proven yet. Try again in a moment.']
   if (result.status === 'verified') {
-    return ['Verified. The token is active, and your gateway wrote its own MCP Portal and its own Portal Access policy back unchanged. That proves both permissions: MCP Portals Edit and Access: Apps and Policies Edit.']
+    return ['Verified. The token is active with MCP Portals Edit and Access: Apps and Policies Edit permissions.']
   }
   const lines = PERMISSIONS.map(([key, permission, resource]) => {
     const word = result[key]
@@ -171,8 +171,8 @@ export function ManagementTokenSection() {
   const status = tokenState === 'loading' ? 'Checking your management token…'
     : tokenState === 'unreadable'
       ? 'Your gateway could not read its management token status. Reload this page or verify management access.'
-      : tokenStatus?.managementCredentialConfigured !== true ? 'Your gateway has no management token yet.'
-        : 'Your gateway has a management token. Verify management access to check its permissions.'
+      : tokenStatus?.managementCredentialConfigured !== true ? 'No management token configured.'
+        : 'Management token configured.'
 
   return (
     <section className="mt-8" aria-labelledby="management-title">
@@ -189,13 +189,17 @@ export function ManagementTokenSection() {
           <p>{MANAGEMENT_ACCESS_REACH}</p>
           {arrival === 'waiting' || tokenState === 'loading' ? null : (
             <>
-              <p className="text-kumo-subtle">Replacing the token takes the same steps: create the new token first, then one approval in Cloudflare and the new token pasted into your own gateway. Your gateway cannot delete the old token. Afterwards, delete it in Cloudflare under Manage Account → Account API Tokens: both are named <strong>{nameInCloudflare}</strong>, and the old one has the earlier creation date. Removing your gateway does not delete the token either.</p>
+              <p className="text-kumo-subtle">To replace it, create a new token first. Delete the old token in Cloudflare afterwards.</p>
               <ManagementTokenCreateLink />
               <div className="flex flex-wrap gap-3">
                 <Button variant="secondary" loading={verifying} onClick={() => void verify()}>Verify management access</Button>
                 <Button variant="secondary" loading={starting} disabled={verifying} onClick={() => void start()}>Replace management token</Button>
               </div>
-              <p className="text-kumo-subtle">Verifying writes your gateway’s own MCP Portal and its own Portal Access policy back to Cloudflare exactly as they are. Nothing changes, and both permissions are proven.</p>
+              <details className="text-kumo-subtle">
+                <summary className="cursor-pointer">Token details</summary>
+                <p className="mt-3">Verification re-saves your gateway’s MCP Portal and Access policy unchanged to check both permissions.</p>
+                <p className="mt-2">Manage tokens in Cloudflare under Manage Account → Account API Tokens. Look for <strong>{nameInCloudflare}</strong>; the older creation date identifies the previous token. Replacing the token or removing your gateway does not delete it.</p>
+              </details>
             </>
           )}
           {verification === 'failed' ? <p role="alert" className="notice-banner notice-error">The check could not be run. Reload this page and try again.</p> : null}
@@ -204,7 +208,7 @@ export function ManagementTokenSection() {
               <ul className="space-y-1">{verificationLines(verification).map((line) => <li key={line}>{line}</li>)}</ul>
             </div>
           ) : null}
-          <a className="underline underline-offset-4" href="https://github.com/ankka-ai/ankka-mcp-gateway/blob/main/docs/MANAGEMENT_TOKEN.md" target="_blank" rel="noreferrer">What the token is and what it can reach</a>
+          <a className="underline underline-offset-4" href="https://github.com/ankka-ai/ankka-mcp-gateway/blob/main/docs/MANAGEMENT_TOKEN.md" target="_blank" rel="noreferrer">Management token guide</a>
         </div>
       )}
     </section>

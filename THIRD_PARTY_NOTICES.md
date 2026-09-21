@@ -1,6 +1,6 @@
 # Third-party notices
 
-Except for the anti-slop plugin identified below, third-party dependencies are
+Except for the vendored material identified below, third-party dependencies are
 consumed as published npm packages recorded exactly in `package-lock.json`.
 The gateway dashboard and experimental adapter dependencies include:
 
@@ -58,6 +58,21 @@ Copyright (c) 2026 Dillon Mulroy and licensed under the MIT License. Its full
 license text is retained in `tools/oxlint/anti-slop/LICENSE`. Oxlint and
 `@oxlint/plugins` are development-only npm dependencies under their licenses
 and versions recorded in `package-lock.json`.
+
+The BigQuery icon in `apps/admin/src/assets/google-bigquery.svg` comes from
+Simple Icons contributors under CC0 1.0 Universal. The full license is retained
+in `third_party/licenses/simple-icons-CC0-1.0.md`; provenance is in `ORIGINS.md`.
+Google owns the BigQuery trademark. Its use identifies compatibility and does
+not imply affiliation or endorsement.
+
+Provider icons under `apps/admin/src/assets/connectors/` include Dashboard Icons
+artwork published by Homarr Labs and contributors under Apache-2.0, and HubSpot,
+Intercom, and Linear artwork from Simple Icons contributors under CC0 1.0.
+Their licenses are retained under `third_party/licenses/`; exact sources and
+modifications are listed in `ORIGINS.md`. Ahrefs and Gorgias icons are official
+website favicons used by maintainer request to identify those providers; no
+separate asset license was supplied. All provider trademarks belong to their
+respective owners; inclusion does not imply endorsement or affiliation.
 
 The release builder generates `payload/admin/LICENSE.txt` and
 `payload/admin/THIRD_PARTY_LICENSES.txt` from the exact clean source commit and

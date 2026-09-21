@@ -1,6 +1,7 @@
 import { Button } from './Button'
-import { Check, Copy, LinkSimple } from '@phosphor-icons/react'
+import { Check, Copy } from '@phosphor-icons/react'
 import { useEffect, useState } from 'react'
+import ankkaIcon from '../assets/ankka-icon.svg'
 import { useGateway } from '../GatewayContext'
 
 function safeMcpUrl(value: string | undefined): string | null {
@@ -36,8 +37,8 @@ export function GatewayEndpoint() {
   return (
     <section className="mt-6 rounded-2xl border border-kumo-line bg-kumo-overlay p-5 sm:p-6" aria-labelledby="gateway-endpoint-title">
       <div className="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-x-4 gap-y-4 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:gap-x-5">
-        <div aria-hidden="true" className="flex size-11 items-center justify-center self-start rounded-xl bg-kumo-fill/60 text-kumo-subtle sm:self-center">
-          <LinkSimple size={22} />
+        <div aria-hidden="true" className="size-11 self-start overflow-hidden rounded-xl sm:self-center">
+          <img src={ankkaIcon} width={44} height={44} alt="" />
         </div>
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1">

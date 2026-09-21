@@ -1,4 +1,5 @@
 import { compactMatrixStyles, matrixLoaderStyles, matrixLoaderSvg } from './matrix-loader';
+import { stepListStyles } from './step-list';
 
 /**
  * Presentation shared by the Worker pages and the dashboard's installation handoff.
@@ -8,7 +9,7 @@ export const customerLoadingStyles = matrixLoaderStyles;
 
 export const customerLoadingIndicator = `<span class="ankka-loader" aria-hidden="true">${matrixLoaderSvg}</span>`;
 
-export const customerPageStyles = `${customerLoadingStyles}
+export const customerPageStyles = `${customerLoadingStyles}${stepListStyles}
 .ankka-setup {
   color-scheme: dark;
   --canvas: #141414;
@@ -55,7 +56,6 @@ body.ankka-setup { margin: 0; }
 .ankka-setup h2 { margin: 0 0 1rem; font-size: 1.375rem; letter-spacing: -0.02em; line-height: 1.25; }
 .ankka-setup p { margin-block: 1.25rem; text-wrap: pretty; }
 .ankka-setup main > p { color: var(--muted); }
-.ankka-setup .eyebrow { margin: 0 0 1.25rem; font: 400 var(--font-size-label)/1.5 var(--font-mono); letter-spacing: 0.09em; text-transform: uppercase; text-align: center; }
 .ankka-setup #intro { max-width: 48ch; margin: 1rem auto; text-align: center; }
 .ankka-setup #message { min-height: 1.6em; color: var(--muted); font-size: var(--font-size-ui); }
 .ankka-setup .page-form > #message { text-align: center; margin-block: 1rem 2rem; }
@@ -128,9 +128,6 @@ body.ankka-setup { margin: 0; }
 .ankka-setup .domain-guide > p { color: var(--muted); }
 .ankka-setup .address-examples { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.5rem; padding: 1.25rem; border: 1px solid var(--border); border-radius: var(--radius-panel); }
 .ankka-setup .address-examples dd { margin: 0.35rem 0 0; font-family: var(--font-mono); font-size: var(--font-size-ui); }
-.ankka-setup .domain-steps { padding-inline-start: 1.4rem; margin-block: 2rem; }
-.ankka-setup .domain-steps li { padding-inline-start: 0.5rem; margin-block: 1.25rem; }
-.ankka-setup .domain-steps p { color: var(--muted); margin-block: 0.35rem; font-size: var(--font-size-ui); }
 .ankka-setup .domain-note { font-size: var(--font-size-caption); }
 .ankka-setup .warning { padding: 0.75rem 1rem; border: 1px solid color-mix(in srgb, var(--danger) 35%, transparent); border-radius: var(--radius-control); color: var(--danger); }
 .ankka-setup .page-message > .ankka-loader, .ankka-setup #progress .ankka-loader, .ankka-setup .page-loader .ankka-loader { display: grid; width: 12rem; height: 8rem; margin: 2rem auto; }

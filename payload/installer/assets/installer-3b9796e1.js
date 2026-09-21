@@ -483,7 +483,6 @@ function renderResult() {
     ['Gateway shell', provision?.workerName],
     ['Management page', basics?.managementHostname],
   ]);
-  byId('result-eyebrow').textContent = 'Installation status';
   switch (current) {
     case 'provisioned': {
       title.textContent = 'Ankka Gateway installed';

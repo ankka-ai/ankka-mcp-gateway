@@ -1,5 +1,6 @@
 import { customerPageEnd, customerPageStart } from './customer-page-shell';
 import { customerLoadingIndicator } from './customer-page-theme';
+import { stepListScript } from './step-list';
 import * as v from 'valibot';
 
 import { base64UrlDecode, constantTimeEqual, openCustomerTeardownCookie, pkceChallenge, randomBase64Url, sealCustomerTeardownCookie, sha256 } from './crypto';
@@ -120,13 +121,14 @@ export function page(failed: boolean, reason?: CustomerTeardownReason): Response
  * result word in its own address (never the receipt) and hops to the
  * installer with the signed receipt, or shows the reason word's message.
  */
-function progressPage(attemptId: string): Response {
+export function progressPage(attemptId: string): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
-  return new Response(`${customerPageStart('Removing your Ankka Gateway', 'message')}<h1>Removing your Ankka Gateway</h1><p id="message" role="status" aria-live="polite"><span id="loader" class="page-loader">${customerLoadingIndicator}</span>Cloudflare approved the removal. Your gateway is removing its connected resources; this page updates itself.</p><ol id="steps"></ol><p id="detail"></p><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{
+  return new Response(`${customerPageStart('Removing your Ankka Gateway', 'message')}<h1>Removing your Ankka Gateway</h1><p id="message" role="status" aria-live="polite"><span id="loader" class="page-loader">${customerLoadingIndicator}</span>Cloudflare approved the removal. Your gateway is removing its connected resources; this page updates itself.</p><ol id="steps" class="ankka-steps" role="list" aria-label="Removal progress"></ol><p id="detail"></p><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{
+${stepListScript}
 const attempt=${scriptLiteral(attemptId)},messages=${scriptLiteral(removalFailures)},message=document.querySelector('#message'),loader=document.querySelector('#loader'),steps=document.querySelector('#steps'),detail=document.querySelector('#detail');
 let active=true,timer,controller;const stop=()=>{active=false;clearTimeout(timer);if(controller)controller.abort()};addEventListener('pagehide',stop);
 const words=(result,reason)=>{const url=new URL(location.href);url.search='';url.searchParams.set('attempt',attempt);url.searchParams.set('result',result);if(reason)url.searchParams.set('reason',reason);history.replaceState(null,'',url.pathname+url.search)};
-const show=(state)=>{steps.replaceChildren(...state.steps.map(step=>{const item=document.createElement('li');item.textContent=step.label+(step.state==='done'?' — Removed':step.state==='active'?' — Removing…':'');return item}));
+const show=(state)=>{loader.hidden=state.steps.length>0;const stoppedIndex=state.status==='settled'&&state.result!=='removed'?state.steps.findIndex(step=>step.state!=='done'):-1;steps.replaceChildren(...state.steps.map((step,index)=>{const stopped=index===stoppedIndex;return progressStep(step.label,stopped?'stopped':step.state,step.state==='done'?'Removed':stopped?'Stopped':step.state==='active'?'Removing…':'Waiting')}));
 if(state.status!=='settled')return false;stop();loader.remove();
 if(state.result==='removed'&&/^https:\\/\\//.test(state.handoffUrl||'')){words('removed');message.textContent='Connected resources removed. Continue to the final removal of the gateway.';const link=document.createElement('a');link.href=state.handoffUrl;link.textContent='Continue to final removal';detail.replaceChildren(link);location.replace(state.handoffUrl);return true}
 const reason=Object.hasOwn(messages,state.reason||'')?state.reason:null;words('recovery_required',reason);message.textContent=reason?messages[reason]:'Removal stopped. Return to Settings to review saved progress before trying again.';return true};

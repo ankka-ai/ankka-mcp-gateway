@@ -12,10 +12,12 @@ import { BigQuerySetupForm } from '../src/components/BigQuerySetupForm'
 import { GatewayEndpoint } from '../src/components/GatewayEndpoint'
 import { LifecycleScreen } from '../src/components/LifecycleScreen'
 import { LoadingIndicator } from '../src/components/LoadingIndicator'
-import { NativeConnectorGuides } from '../src/components/NativeConnectorGuides'
+import { ProviderConnectorSetup } from '../src/components/ProviderConnectorSetup'
+import { NATIVE_CONNECTOR_RECIPES } from '../src/connectors/native-recipes'
 import { PageHeader } from '../src/components/PageHeader'
 import { SourceList } from '../src/components/SourceList'
 import { StatusPill } from '../src/components/StatusPill'
+import { ProgressStep, StepList } from '../src/components/StepList'
 import { customerPageStyles } from '../../installer/src/customer-page-theme'
 import '../src/styles.css'
 import './components.css'
@@ -33,6 +35,29 @@ function Components() {
   return (
     <main className="component-catalog">
       <style>{customerPageStyles}</style>
+      {group === 'steps' ? <>
+        <Sample title="Progress · Running"><StepList label="Example removal progress">
+          <ProgressStep label="Gateway storage" state="done" status="Removed" />
+          <ProgressStep label="Management domain" state="active" status="Removing…" />
+          <ProgressStep label="Administrator policy" status="Waiting" />
+          <ProgressStep label="Management Access application" status="Waiting" />
+          <ProgressStep label="Gateway Worker" status="Waiting" />
+        </StepList></Sample>
+        <Sample title="Progress · Stopped"><StepList label="Example stopped removal">
+          <ProgressStep label="Gateway storage" state="done" status="Removed" />
+          <ProgressStep label="Management domain" state="stopped" status="Stopped"><p className="mt-2 text-sm text-kumo-subtle">Review the saved progress before authorizing another attempt.</p></ProgressStep>
+          <ProgressStep label="Gateway Worker" status="Waiting" />
+        </StepList></Sample>
+        <Sample title="Setup · Current step"><StepList label="Example setup steps">
+          <ProgressStep label="Choose your data" state="current" status="Current step" />
+          <ProgressStep label="Approve and upload key" />
+          <ProgressStep label="Connect and grant access" />
+        </StepList></Sample>
+        <Sample title="Progress · Completed"><StepList label="Example completed progress">
+          <ProgressStep label="Connected resources" state="done" status="Removed" />
+          <ProgressStep label="Gateway Worker" state="done" status="Removed" />
+        </StepList></Sample>
+      </> : null}
       {group === 'buttons' ? <>
         <Sample title="Dashboard · Button"><div className="component-row">
           <Button variant="primary">Primary</Button><Button variant="secondary">Secondary</Button>
@@ -74,7 +99,7 @@ function Components() {
         <Sample title="SourceList · Search, filters, and expansion">{sources ? <SourceList sources={sources.sources} installationEnabled isBusy={false} onAuthorize={() => setNotice('This is a component sample. No installation was started.')} /> : <LoadingIndicator />}{notice ? <p role="status" className="notice-banner mt-5">{notice}</p> : null}</Sample>
       </> : null}
       {group === 'bigquery-components' ? <Sample title="BigQuerySetupForm"><BigQuerySetupForm disabled={false} /></Sample> : null}
-      {group === 'provider-guides' ? <Sample title="NativeConnectorGuides"><p className="component-help">Expand the guide and choose a provider to inspect every recipe.</p><NativeConnectorGuides /></Sample> : null}
+      {group === 'provider-guides' ? NATIVE_CONNECTOR_RECIPES.filter(recipe => recipe.id !== 'bigquery').map(recipe => <Sample key={recipe.id} title={recipe.displayName}><ProviderConnectorSetup recipe={recipe} /></Sample>) : null}
     </main>
   )
 }

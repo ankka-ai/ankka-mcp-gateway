@@ -1,10 +1,11 @@
 import { ArrowUpRight, Database, GearSix, Users, WarningCircle, X } from '@phosphor-icons/react'
-import { Link, Outlet } from '@tanstack/react-router'
+import { Link, Outlet, useLocation } from '@tanstack/react-router'
 import { LifecycleScreen } from './LifecycleScreen'
 import type { ComponentType } from 'react'
 import { useGateway, type RemovalProgress } from '../GatewayContext'
 import { BrandMark } from './BrandMark'
 import { Button } from './Button'
+import { DashboardSkeleton } from './DashboardSkeleton'
 
 type AppPath = '/sources' | '/team' | '/settings'
 
@@ -28,6 +29,9 @@ const removalGuidance = {
 
 export function AppShell() {
   const { error, hasLoaded, isBusy, isLoading, reload, clearError, prepareTeardownAction, removal, status, update } = useGateway()
+  const pathname = useLocation({ select: location => location.pathname })
+  const initialLoading = isLoading && !hasLoaded
+  const page = pathname === '/team' ? 'team' : pathname === '/settings' ? 'settings' : 'sources'
 
   // The way back into a removal whose page was lost: the consent Settings starts, resumed from the gateway's saved progress.
   const continueRemoval = async () => {
@@ -37,16 +41,8 @@ export function AppShell() {
     } catch { /* The provider keeps the safe error visible. */ }
   }
 
-  if (isLoading && !hasLoaded) {
-    return (
-      <LifecycleScreen title="Loading your gateway…" loading>
-        <p role="status">Reading your gateway’s current status.</p>
-      </LifecycleScreen>
-    )
-  }
-
   // A removal that has begun explains a dashboard that cannot load, and its one action does not depend on what failed.
-  if (removal !== null && !hasLoaded) {
+  if (removal !== null && !hasLoaded && !initialLoading) {
     return (
       <div className="flex min-h-dvh items-center justify-center bg-canvas px-5">
         <div className="surface-card w-full max-w-md p-6 text-center">
@@ -70,7 +66,7 @@ export function AppShell() {
     )
   }
 
-  if (error && !hasLoaded) {
+  if (error && !hasLoaded && !initialLoading) {
     return (
       <LifecycleScreen title="Couldn’t load the gateway">
         <p role="alert">{error}</p>
@@ -173,7 +169,7 @@ export function AppShell() {
               </button>
             </div>
           ) : null}
-          <Outlet />
+          {initialLoading ? <DashboardSkeleton page={page} /> : <Outlet />}
         </main>
       </div>
     </div>
