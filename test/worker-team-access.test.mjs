@@ -1873,6 +1873,21 @@ async function dashboardClient(gateway, run) {
   try { return await run(new HttpGatewayAdminApi()); } finally { globalThis.fetch = network; }
 }
 
+test('the dashboard can save and reload a Gateway Management draft through its strict API client', async () => fixture(async (gateway) => {
+  await dashboardClient(gateway, async (dashboard) => {
+    const current = await dashboard.getSources();
+    const discovery = await dashboard.discoverSource(`${MANAGEMENT_ORIGIN}/api/mcp`);
+    const saved = await dashboard.saveSourceDraft(current.revision, {
+      label: 'Gateway Management', url: discovery.endpoint, authMode: 'oauth',
+      enabledTools: discovery.tools.map((tool) => tool.name),
+    });
+    assert.equal(saved.sources.find((source) => source.id === MANAGEMENT_ID).onBehalfOfUser, true);
+    assert.deepEqual(await dashboard.getSources(), saved);
+    assert.equal((await dashboard.getStatus()).status, 'ready');
+    assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === MANAGEMENT_ID).initialManager, ADMIN);
+  });
+}));
+
 test('the dashboard client accepts every answer the gateway gives an administrator', async () => fixture(async (gateway) => {
   await dashboardClient(gateway, async (dashboard) => {
     assert.equal((await dashboard.getStatus()).serviceIdentity, null);
@@ -3805,7 +3820,8 @@ async function installManagementSource(gateway, enabledTools = null) {
   const saved = await savedResponse.json();
   const source = saved.sources.find((item) => item.id === MANAGEMENT_ID);
   assert.equal(source.onBehalfOfUser, true);
-  assert.equal(source.initialManager, ADMIN);
+  assert.equal(Object.hasOwn(source, 'initialManager'), false);
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((item) => item.id === MANAGEMENT_ID).initialManager, ADMIN);
   const begun = await gateway.api('/api/source-actions', { method: 'POST', body: {
     schemaVersion: 1, revision: saved.revision, sourceId: source.id,
   } });
@@ -3838,6 +3854,11 @@ async function installManagementSource(gateway, enabledTools = null) {
     schemaVersion: 1, revision: saved.revision, sourceId: source.id,
   } });
   assert.equal(resumed.status, 200, await resumed.clone().text());
+  await dashboardClient(gateway, async (dashboard) => {
+    const installed = (await dashboard.getSources()).sources.find((item) => item.id === MANAGEMENT_ID);
+    assert.equal(installed.status, 'installed');
+    assert.equal(Object.hasOwn(installed, 'initialManager'), false);
+  });
   return { source, application, server };
 }
 

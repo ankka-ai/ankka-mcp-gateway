@@ -6626,7 +6626,12 @@ async function publicSources(sources, stub, env) {
   const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCE_REMOVAL_PATH}`));
   if (response.status !== 200) throw new Error('source_removal_unavailable');
   const { pendingRemoval } = await response.json();
-  return { ...sources, applyMode: 'account_token', installationEnabled, installEndsRollbackTo,
+  // Ownership metadata belongs to durable state, not the public source contract.
+  const publicEntries = sources.sources.map((source) => ({
+    id: source.id, label: source.label, url: source.url, authMode: source.authMode,
+    onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools, status: source.status,
+  }));
+  return { ...sources, sources: publicEntries, applyMode: 'account_token', installationEnabled, installEndsRollbackTo,
     removalEnabled: true, removalCredentialConfigured: managementCredential(env) !== null, pendingRemoval };
 }
 
