@@ -3,9 +3,10 @@
 const TEAM_MAX_SOURCES = 32;
 // A reserved source identity, installed and assigned through the ordinary source lifecycle.
 const MANAGEMENT_SOURCE_ID = 'source-616e6b6b616d6370';
-const MANAGEMENT_MCP_PATH = '/mcp';
+// The signed deployment routes /api/* to the Worker before the dashboard SPA.
+const MANAGEMENT_MCP_PATH = '/api/mcp';
 // The existing customer-owned consent pages use the same source assignment.
-const MANAGEMENT_SOURCE_PATHS = ['/mcp', '/__ankka/operation', '/__ankka/install/oauth/callback'];
+const MANAGEMENT_SOURCE_PATHS = [MANAGEMENT_MCP_PATH, '/__ankka/operation', '/__ankka/install/oauth/callback'];
 const TEAM_EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
 const TEAM_SOURCE_ID = /^[a-z][a-z0-9-]{0,31}$/u;
 const TEAM_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
@@ -8147,7 +8148,7 @@ async function handleManagementMcp(request, env) {
       Object.keys(message).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key))) return error(-32600, 'Invalid request');
   const access = await managementSourceAccess(request, env, message.method !== 'tools/call');
   if (!access) return fixedJson(401, { error: 'access_required' }, { 'www-authenticate':
-    `Bearer resource_metadata="${url.origin}/.well-known/cloudflare-access-protected-resource/mcp"` });
+    `Bearer resource_metadata="${url.origin}/.well-known/cloudflare-access-protected-resource${MANAGEMENT_MCP_PATH}"` });
   if (!Object.hasOwn(message, 'id')) {
     return message.method.startsWith('notifications/') ? new Response(null, { status: 202, headers: PUBLIC_HEADERS }) : error(-32600, 'Invalid request');
   }
@@ -8194,7 +8195,7 @@ async function managementMcpBrowser(request, env) {
     return managementMcpPage(connected ? 'Source authorized' : 'Authorization unfinished',
       '<p>Return to your agent to check the source and continue setup.</p>');
   }
-  const match = /^\/mcp\/authorize\/(action_[A-Za-z0-9_-]{32})$/u.exec(url.pathname);
+  const match = /^\/api\/mcp\/authorize\/(action_[A-Za-z0-9_-]{32})$/u.exec(url.pathname);
   if (!match || url.search || !['GET', 'POST'].includes(request.method) || !access.enabledTools.includes('authorize_mcp_source')) return sourceToolsRefusal(404, 'not_found');
   const stub = adminStateStub(env, 'v1:management');
   const read = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/${match[1]}`));

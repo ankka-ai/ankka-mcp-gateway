@@ -174,7 +174,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     setAddingManagement(true)
     setManagementError(null)
     try {
-      const url = `${window.location.origin}/mcp`
+      const url = `${window.location.origin}/api/mcp`
       const discovered = await discoverSource(url)
       await saveSourceDraft({ label: 'Gateway Management', url, authMode: 'oauth',
         enabledTools: discovered.tools.map((tool) => tool.name).sort() })

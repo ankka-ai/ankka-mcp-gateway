@@ -4,6 +4,7 @@ import { setImmediate as nextTurn } from 'node:timers/promises';
 import test from 'node:test';
 import * as v from 'valibot';
 
+import { APPROVED_CLOUDFLARE_CONTRACT } from '../apps/installer/scripts/sign-gateway-release.mjs';
 import { HttpGatewayAdminApi } from '../apps/admin/src/api.ts';
 import worker, { AdminState, planTeamAccessChange, prepareCurrentGatewayTeardown, verifyAccess } from '../payload/worker/index.js';
 import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
@@ -3792,12 +3793,12 @@ const MANAGEMENT_ID = 'source-616e6b6b616d6370';
 const MANAGEMENT_AUDIENCE = 'synthetic-management-source-audience';
 
 async function installManagementSource(gateway, enabledTools = null) {
-  const discovery = await (await gateway.api('/api/sources/discover', { method: 'POST', body: { url: `${MANAGEMENT_ORIGIN}/mcp` } })).json();
+  const discovery = await (await gateway.api('/api/sources/discover', { method: 'POST', body: { url: `${MANAGEMENT_ORIGIN}/api/mcp` } })).json();
   assert.ok(discovery.tools.length > 10);
   const current = await (await gateway.api('/api/sources')).json();
   const savedResponse = await gateway.api('/api/sources', { method: 'PUT', body: {
     schemaVersion: 1, revision: current.revision,
-    source: { label: 'Gateway Management', url: `${MANAGEMENT_ORIGIN}/mcp`, authMode: 'oauth',
+    source: { label: 'Gateway Management', url: `${MANAGEMENT_ORIGIN}/api/mcp`, authMode: 'oauth',
       enabledTools: enabledTools ?? discovery.tools.map((tool) => tool.name).sort() },
   } });
   assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
@@ -3817,12 +3818,20 @@ async function installManagementSource(gateway, enabledTools = null) {
   server.tools = discovery.tools.map((tool) => ({ name: tool.name }));
   server.status = 'ready';
   server.authentication_status = 'authenticated';
-  const application = [...gateway.provider.state.apps.values()].find((item) => item.domain === 'manage.example.com/mcp');
+  const application = [...gateway.provider.state.apps.values()].find((item) => item.domain === 'manage.example.com/api/mcp');
   assert.ok(application);
   application.aud = MANAGEMENT_AUDIENCE;
   assert.equal(application.oauth_configuration.enabled, true);
+  // Browser consent and protocol routes must reach the Worker instead of the
+  // dashboard's SPA fallback under the exact signed deployment contract.
+  for (const destination of application.destinations.filter((entry) => entry.type === 'public')) {
+    const path = new URL(`https://${destination.uri}`).pathname;
+    assert.ok(APPROVED_CLOUDFLARE_CONTRACT.assets.runWorkerFirst.some((pattern) =>
+      pattern.endsWith('*') && path.startsWith(pattern.slice(0, -1))), path);
+  }
+
   assert.deepEqual(application.destinations, [{ type: 'via_mcp_server_portal', mcp_server_id: server.id },
-    { type: 'public', uri: 'manage.example.com/mcp' },
+    { type: 'public', uri: 'manage.example.com/api/mcp' },
     { type: 'public', uri: 'manage.example.com/__ankka/operation' },
     { type: 'public', uri: 'manage.example.com/__ankka/install/oauth/callback' }]);
   const resumed = await gateway.api(`/api/source-actions/${action.actionId}/renew`, { method: 'POST', body: {
@@ -3833,7 +3842,7 @@ async function installManagementSource(gateway, enabledTools = null) {
 }
 
 async function managementRpc(gateway, method, params, { email = ADMIN, audience = MANAGEMENT_AUDIENCE, extraHeaders = {} } = {}) {
-  const response = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}/mcp`, {
+  const response = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}/api/mcp`, {
     method: 'POST', headers: { ...await gateway.headers(email, audience), ...extraHeaders },
     body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
   }), gateway.env);
@@ -3932,12 +3941,12 @@ test('management MCP hands provider consent to the browser and reads sanitized r
   const started = await worker.fetch(new Request(handoff.authorizationUrl, { method: 'POST', headers }), gateway.env);
   assert.equal(started.status, 303, await started.clone().text());
   const authorization = new URL(started.headers.get('location'));
-  assert.equal(authorization.searchParams.get('redirect_uri'), `${MANAGEMENT_ORIGIN}/mcp/oauth/callback`);
-  const callback = new URL(`${MANAGEMENT_ORIGIN}/mcp/oauth/callback`);
+  assert.equal(authorization.searchParams.get('redirect_uri'), `${MANAGEMENT_ORIGIN}/api/mcp/oauth/callback`);
+  const callback = new URL(`${MANAGEMENT_ORIGIN}/api/mcp/oauth/callback`);
   callback.search = new URLSearchParams({ state: authorization.searchParams.get('state'), code: 'synthetic-authorization-code', iss: OAUTH_ISSUER });
   const finished = await worker.fetch(new Request(callback, { headers: { ...headers,
     cookie: started.headers.get('set-cookie').split(';')[0] } }), gateway.env);
-  assert.equal(finished.headers.get('location'), `${MANAGEMENT_ORIGIN}/mcp/result?source_oauth=connected`);
+  assert.equal(finished.headers.get('location'), `${MANAGEMENT_ORIGIN}/api/mcp/result?source_oauth=connected`);
   assert.equal(gateway.exchanges.length, 1);
   assert.equal(gateway.imports.length, 1);
   const evidence = JSON.stringify([prepared.body, diagnostic.body, gateway.managementStorage.writes]);

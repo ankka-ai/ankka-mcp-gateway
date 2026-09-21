@@ -47,7 +47,7 @@ describe('source installation recovery', () => {
     const user = userEvent.setup()
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
     api.getSources = vi.fn(async () => sources)
-    api.discoverSource = vi.fn().mockResolvedValue({ schemaVersion: 1, url: `${window.location.origin}/mcp`,
+    api.discoverSource = vi.fn().mockResolvedValue({ schemaVersion: 1, url: `${window.location.origin}/api/mcp`,
       authMode: 'oauth', tools: [{ name: 'save_gateway_team' }, { name: 'get_gateway_status' }] })
     api.saveSourceDraft = vi.fn().mockResolvedValue({ ...sources, revision: 5, sources: [{
       ...draft, id: 'source-616e6b6b616d6370', label: 'Gateway Management', onBehalfOfUser: true,
@@ -55,10 +55,10 @@ describe('source installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await user.click(await screen.findByRole('button', { name: 'Add Gateway Management' }))
     await waitFor(() => expect(api.saveSourceDraft).toHaveBeenCalledExactlyOnceWith(4, {
-      label: 'Gateway Management', url: `${window.location.origin}/mcp`, authMode: 'oauth',
+      label: 'Gateway Management', url: `${window.location.origin}/api/mcp`, authMode: 'oauth',
       enabledTools: ['get_gateway_status', 'save_gateway_team'],
     }))
-    expect(api.discoverSource).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/mcp`)
+    expect(api.discoverSource).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/api/mcp`)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
     expect(await screen.findByText(/Assign Gateway Management in Team/)).toBeVisible()
   })
