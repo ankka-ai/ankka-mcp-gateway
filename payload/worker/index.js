@@ -2088,6 +2088,9 @@ async function createResource(state, kind, token) {
       for (const route of MANAGEMENT_SOURCE_PATHS) body.destinations.push({ type: 'public', uri: new URL(state.source.url).host + route });
       body.oauth_configuration = { enabled: true, dynamic_client_registration: { enabled: true,
         allowed_uris: [...DEFAULT_OAUTH_CALLBACKS, `${new URL(state.source.url).origin}${SOURCE_OAUTH_CALLBACK}`,
+          // Cloudflare's initial administrator sign-in has a distinct callback
+          // from per-person Portal OAuth, even when the shared callback is on.
+          `https://dash.cloudflare.com/${account}/one/access-controls/ai-controls/mcp-server/oauth-callback/${encodeURIComponent(server.id)}`,
           'https://oauth-callbacks.cloudflareaccess.com/cdn-cgi/access/outbound-oauth-callback'],
         allow_any_on_localhost: true, allow_any_on_loopback: true },
         grant: { access_token_lifetime: '15m', session_duration: '336h' } };
