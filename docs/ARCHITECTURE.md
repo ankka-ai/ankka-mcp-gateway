@@ -92,6 +92,10 @@ and resolve the pending operation.
 
 ## Source management
 
+The optional [Gateway Management source](GATEWAY_MANAGEMENT_MCP.md) exposes fixed
+management operations through the same Portal and Team assignments. Its Worker
+endpoint independently verifies the source audience and live assignment.
+
 The gateway dashboard accepts public HTTPS MCP endpoints and
 standards-compliant OAuth-protected MCP endpoints.
 

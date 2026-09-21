@@ -5,7 +5,7 @@ import test from 'node:test';
 import * as v from 'valibot';
 
 import { HttpGatewayAdminApi } from '../apps/admin/src/api.ts';
-import worker, { AdminState, planTeamAccessChange, prepareCurrentGatewayTeardown } from '../payload/worker/index.js';
+import worker, { AdminState, planTeamAccessChange, prepareCurrentGatewayTeardown, verifyAccess } from '../payload/worker/index.js';
 import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
 import {
   ACCOUNT_ID,
@@ -99,11 +99,11 @@ async function fixture(run, claimInput) {
   }, true, ['sign', 'verify']);
   const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
   const kid = `synthetic-team-regression-key-${crypto.randomUUID()}`;
-  async function headers(email = ADMIN) {
+  async function headers(email = ADMIN, audience = gateway.env.CF_ACCESS_AUD) {
     const encode = (value) => Buffer.from(JSON.stringify(value)).toString('base64url');
     const now = Math.floor(Date.now() / 1000);
     const unsigned = `${encode({ alg: 'RS256', kid, typ: 'JWT' })}.${encode({
-      iss: gateway.env.CF_ACCESS_ISSUER, aud: [gateway.env.CF_ACCESS_AUD],
+      iss: gateway.env.CF_ACCESS_ISSUER, aud: [audience],
       email, nbf: now - 1, exp: now + 300,
     })}`;
     const signed = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', keys.privateKey, new TextEncoder().encode(unsigned));
@@ -3326,8 +3326,9 @@ const OAUTH_KEY = 'ankka-mcp-gateway/source-oauth/v1';
 const OAUTH_ISSUER = 'https://identity.example.net';
 const OAUTH_CALLBACK = '/__ankka/source-oauth/callback';
 
-async function sourceOauthFixture(run) {
+async function sourceOauthFixture(run, before = null) {
   return signInFixture(async (gateway) => {
+    if (before) await before(gateway);
     const installed = await installSignInSource(gateway);
     const network = globalThis.fetch;
     const exchanges = [], imports = [], registrations = [];
@@ -3785,4 +3786,251 @@ test('individual source removal refuses a resource recreated after a verified de
   assert.equal(resumed.status, 409);
   assertNoMutation(gateway.provider, baseline);
   assert.equal(gateway.provider.state.servers.has(server.id), true);
+}));
+
+const MANAGEMENT_ID = 'source-616e6b6b616d6370';
+const MANAGEMENT_AUDIENCE = 'synthetic-management-source-audience';
+
+async function installManagementSource(gateway, enabledTools = null) {
+  const discovery = await (await gateway.api('/api/sources/discover', { method: 'POST', body: { url: `${MANAGEMENT_ORIGIN}/mcp` } })).json();
+  assert.ok(discovery.tools.length > 10);
+  const current = await (await gateway.api('/api/sources')).json();
+  const savedResponse = await gateway.api('/api/sources', { method: 'PUT', body: {
+    schemaVersion: 1, revision: current.revision,
+    source: { label: 'Gateway Management', url: `${MANAGEMENT_ORIGIN}/mcp`, authMode: 'oauth',
+      enabledTools: enabledTools ?? discovery.tools.map((tool) => tool.name).sort() },
+  } });
+  assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
+  const saved = await savedResponse.json();
+  const source = saved.sources.find((item) => item.id === MANAGEMENT_ID);
+  assert.equal(source.onBehalfOfUser, true);
+  assert.equal(source.initialManager, ADMIN);
+  const begun = await gateway.api('/api/source-actions', { method: 'POST', body: {
+    schemaVersion: 1, revision: saved.revision, sourceId: source.id,
+  } });
+  assert.equal(begun.status, 409, await begun.clone().text());
+  const actions = await (await gateway.api('/api/source-actions')).json();
+  const action = actions.actions.find((item) => item.sourceId === source.id);
+  assert.equal(action.state, 'recovery_required');
+  const server = [...gateway.provider.state.servers.values()].find((item) => item.hostname === source.url);
+  assert.ok(server, await begun.clone().text());
+  server.tools = discovery.tools.map((tool) => ({ name: tool.name }));
+  server.status = 'ready';
+  server.authentication_status = 'authenticated';
+  const application = [...gateway.provider.state.apps.values()].find((item) => item.domain === 'manage.example.com/mcp');
+  assert.ok(application);
+  application.aud = MANAGEMENT_AUDIENCE;
+  assert.equal(application.oauth_configuration.enabled, true);
+  assert.deepEqual(application.destinations, [{ type: 'via_mcp_server_portal', mcp_server_id: server.id },
+    { type: 'public', uri: 'manage.example.com/mcp' },
+    { type: 'public', uri: 'manage.example.com/__ankka/operation' },
+    { type: 'public', uri: 'manage.example.com/__ankka/install/oauth/callback' }]);
+  const resumed = await gateway.api(`/api/source-actions/${action.actionId}/renew`, { method: 'POST', body: {
+    schemaVersion: 1, revision: saved.revision, sourceId: source.id,
+  } });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  return { source, application, server };
+}
+
+async function managementRpc(gateway, method, params, { email = ADMIN, audience = MANAGEMENT_AUDIENCE, extraHeaders = {} } = {}) {
+  const response = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}/mcp`, {
+    method: 'POST', headers: { ...await gateway.headers(email, audience), ...extraHeaders },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  }), gateway.env);
+  return { response, body: await response.json() };
+}
+
+test('Gateway Management installs as an ordinary assigned source with its own protected origin', () => fixture(async (gateway) => {
+  const { source, server } = await installManagementSource(gateway);
+  const teamResponse = await gateway.api('/api/team');
+  assert.equal(teamResponse.status, 200, await teamResponse.clone().text());
+  const team = await teamResponse.json();
+  assert.ok(team.members.find((item) => item.email === ADMIN).sourceIds.includes(source.id));
+  assert.ok(team.members.filter((item) => item.email !== ADMIN).every((item) => !item.sourceIds.includes(source.id)));
+  const portal = gateway.provider.state.portal;
+  assert.equal(portal.servers.find((entry) => entry.server_id === server.id).on_behalf, true);
+  const initialized = await managementRpc(gateway, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'synthetic', version: '1' } });
+  assert.equal(initialized.response.status, 200);
+  assert.equal(initialized.body.result.serverInfo.name, 'ankka-gateway-management');
+  const listed = await managementRpc(gateway, 'tools/list', {});
+  assert.ok(listed.body.result.tools.some((tool) => tool.name === 'save_gateway_team' && tool.annotations.readOnlyHint === false));
+  const status = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} });
+  assert.equal(status.body.result.structuredContent.ok, true);
+  assert.equal(JSON.stringify(status.body).includes(gateway.env.ANKKA_MANAGEMENT_TOKEN), false);
+}));
+
+test('management source assignment authorizes a non-administrator and live removal rejects the same token', () => fixture(async (gateway) => {
+  const { source } = await installManagementSource(gateway);
+  let team = await (await gateway.api('/api/team')).json();
+  const member = team.members.find((item) => item.email === MEMBER);
+  assert.ok(member);
+  member.sourceIds.push(source.id);
+  member.sourceIds.sort();
+  const assigned = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members: team.members,
+  } });
+  assert.equal(assigned.status, 200, await assigned.clone().text());
+  const read = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_team', arguments: {} }, { email: MEMBER });
+  assert.equal(read.body.result.structuredContent.ok, true);
+  team = read.body.result.structuredContent.result;
+  const change = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: {
+    expectedRevision: team.revision, members: [...team.members, { email: NEW_PERSON, sourceIds: [] }],
+  } }, { email: MEMBER });
+  assert.equal(change.body.result.structuredContent.ok, true, JSON.stringify(change.body));
+  team = await (await gateway.api('/api/team')).json();
+  team.members.find((item) => item.email === MEMBER).sourceIds = [];
+  assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members: team.members,
+  } })).status, 200);
+  const denied = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} }, { email: MEMBER });
+  assert.equal(denied.response.status, 401);
+}));
+
+test('management MCP rejects unassigned callers, other audiences, drift, cross-origin requests and arbitrary tools', () => fixture(async (gateway) => {
+  const { application } = await installManagementSource(gateway);
+  for (const options of [{ email: MEMBER }, { audience: gateway.env.CF_ACCESS_AUD },
+    { extraHeaders: { 'cf-access-authenticated-user-email': MEMBER } }]) {
+    const result = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} }, options);
+    assert.equal(result.response.status, 401);
+  }
+  const cross = await managementRpc(gateway, 'tools/list', {}, { extraHeaders: { origin: 'https://foreign.example.net' } });
+  assert.equal(cross.response.status, 403);
+  const before = gateway.provider.requests.length;
+  for (const params of [{ name: 'fetch', arguments: { url: 'https://foreign.example.net' } },
+    { name: 'save_gateway_team', arguments: { accountId: ACCOUNT_ID } },
+    { name: 'get_gateway_status', arguments: { authorization: 'synthetic-never-reflected' } }]) {
+    const invalid = await managementRpc(gateway, 'tools/call', params);
+    assert.equal(invalid.body.error.code, -32602);
+    assert.equal(JSON.stringify(invalid.body).includes('synthetic-never-reflected'), false);
+  }
+  assertNoMutation(gateway.provider, before);
+  application.destinations.push({ type: 'public', uri: 'foreign.example.net/mcp' });
+  assert.equal((await managementRpc(gateway, 'tools/list', {})).response.status, 401);
+}));
+
+test('management MCP hands provider consent to the browser and reads sanitized registration diagnostics', () => sourceOauthFixture(async (gateway) => {
+  const actionId = gateway.installed.action.actionId;
+  const prepared = await managementRpc(gateway, 'tools/call', { name: 'authorize_mcp_source', arguments: { actionId } });
+  const handoff = prepared.body.result.structuredContent.result;
+  assert.equal(handoff.status, 'user_authorization_required');
+  assert.equal(gateway.registrations.length, 0);
+  const headers = await gateway.headers(ADMIN, MANAGEMENT_AUDIENCE);
+  const page = await worker.fetch(new Request(handoff.authorizationUrl, { headers }), gateway.env);
+  assert.equal(page.status, 200);
+  assert.match(await page.text(), /Continue to provider/u);
+  gateway.oauthHook((request) => request.url.endsWith('/register')
+    ? Response.json({ error: 'synthetic-provider-detail-never-reflected' }, { status: 400 }) : undefined);
+  const failed = await worker.fetch(new Request(handoff.authorizationUrl, { method: 'POST', headers }), gateway.env);
+  assert.equal(failed.status, 409);
+  const diagnostic = await managementRpc(gateway, 'tools/call', { name: 'diagnose_mcp_source', arguments: { sourceId: gateway.installed.source.id } });
+  assert.deepEqual(diagnostic.body.result.structuredContent.result.authorization, {
+    stage: 'client_registration', httpStatus: 400, status: 'failed',
+    at: diagnostic.body.result.structuredContent.result.authorization.at,
+  });
+  assert.equal(JSON.stringify(diagnostic.body).includes('synthetic-provider-detail-never-reflected'), false);
+  gateway.oauthHook(undefined);
+  const started = await worker.fetch(new Request(handoff.authorizationUrl, { method: 'POST', headers }), gateway.env);
+  assert.equal(started.status, 303, await started.clone().text());
+  const authorization = new URL(started.headers.get('location'));
+  assert.equal(authorization.searchParams.get('redirect_uri'), `${MANAGEMENT_ORIGIN}/mcp/oauth/callback`);
+  const callback = new URL(`${MANAGEMENT_ORIGIN}/mcp/oauth/callback`);
+  callback.search = new URLSearchParams({ state: authorization.searchParams.get('state'), code: 'synthetic-authorization-code', iss: OAUTH_ISSUER });
+  const finished = await worker.fetch(new Request(callback, { headers: { ...headers,
+    cookie: started.headers.get('set-cookie').split(';')[0] } }), gateway.env);
+  assert.equal(finished.headers.get('location'), `${MANAGEMENT_ORIGIN}/mcp/result?source_oauth=connected`);
+  assert.equal(gateway.exchanges.length, 1);
+  assert.equal(gateway.imports.length, 1);
+  const evidence = JSON.stringify([prepared.body, diagnostic.body, gateway.managementStorage.writes]);
+  assert.equal(evidence.includes(gateway.accessToken), false);
+  assert.equal(evidence.includes(gateway.refreshToken), false);
+}, installManagementSource));
+
+test('management source remains usable after completed installation actions leave the bounded journal', () => fixture(async (gateway) => {
+  await installManagementSource(gateway);
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { schemaVersion: 1, revision: 99, actions: [] });
+  const result = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} });
+  assert.equal(result.body.result.structuredContent.ok, true);
+}));
+
+
+test('assigned managers can finish lifecycle consent but do not gain dashboard or credential APIs', () => fixture(async (gateway) => {
+  const { application } = await installManagementSource(gateway);
+  gateway.provider.state.policies.get(application.id)[0].include.push({ email: { email: MEMBER } });
+  const headers = await gateway.headers(MEMBER, MANAGEMENT_AUDIENCE);
+  for (const path of ['/__ankka/operation', '/__ankka/operation/oauth/start', '/__ankka/install/oauth/callback']) {
+    assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}${path}`, { headers }), gateway.env), MEMBER);
+  }
+  for (const path of ['/api/bigquery', '/api/management-credential/status']) {
+    assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}${path}`, { headers }), gateway.env), false);
+  }
+  assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}/__ankka/operation`, { headers }), {}), false);
+  gateway.provider.state.policies.get(application.id)[0].include = [{ email: { email: ADMIN } }];
+  assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}/__ankka/operation`, { headers }), gateway.env), false);
+}));
+
+test('management tool allowlists restrict discovery and execution, including direct calls', () => fixture(async (gateway) => {
+  await installManagementSource(gateway, ['get_gateway_status']);
+  const listed = await managementRpc(gateway, 'tools/list', {});
+  assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), ['get_gateway_status']);
+  const before = gateway.provider.requests.length;
+  const denied = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: { expectedRevision: 1, members: [] } });
+  assert.equal(denied.body.error.code, -32602);
+  assertNoMutation(gateway.provider, before);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} })).body.result.structuredContent.ok, true);
+}));
+
+test('management MCP creates, applies and removes a URL source through the shared journal', () => fixture(async (gateway) => {
+  await installManagementSource(gateway);
+  const call = async (name, args = {}) => {
+    const result = await managementRpc(gateway, 'tools/call', { name, arguments: args });
+    assert.equal(result.body.result.structuredContent.ok, true, JSON.stringify(result.body));
+    return result.body.result.structuredContent.result;
+  };
+  const sources = await call('list_mcp_sources');
+  const saved = await call('save_mcp_source_draft', { revision: sources.revision, source: {
+    label: 'Synthetic extra source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'],
+  } });
+  const source = saved.sources.find((item) => item.url === NEW_SOURCE_URL);
+  await call('apply_mcp_source', { revision: saved.revision, sourceId: source.id });
+  const installed = await call('list_mcp_sources');
+  assert.equal(installed.sources.find((item) => item.id === source.id).status, 'installed');
+  await call('remove_mcp_source', { revision: installed.revision, sourceId: source.id });
+  assert.equal((await call('list_mcp_sources')).sources.some((item) => item.id === source.id), false);
+}));
+
+test('management MCP can remove its own ordinary source and then denies the same caller', () => fixture(async (gateway) => {
+  await installManagementSource(gateway);
+  const current = await (await gateway.api('/api/sources')).json();
+  const removal = await managementRpc(gateway, 'tools/call', { name: 'remove_mcp_source', arguments: {
+    revision: current.revision, sourceId: MANAGEMENT_ID,
+  } });
+  assert.equal(removal.body.result.structuredContent.ok, true, JSON.stringify(removal.body));
+  assert.equal((await managementRpc(gateway, 'tools/list', {})).response.status, 401);
+}));
+
+test('management MCP does not expose gateway deletion before its browser recovery path is qualified', () => fixture(async (gateway) => {
+  await installManagementSource(gateway);
+  const result = await managementRpc(gateway, 'tools/call', { name: 'review_gateway_teardown', arguments: {} });
+  assert.equal(result.body.error.code, -32602);
+}));
+
+
+test('management rollback binds consent preparation to the reviewed release and digest', () => fixture(async (gateway) => {
+  await installManagementSource(gateway);
+  await runtimeAction(gateway, { release: gateway.env.ANKKA_GATEWAY_RELEASE });
+  const review = await managementRpc(gateway, 'tools/call', { name: 'review_gateway_update', arguments: {} });
+  const target = review.body.result.structuredContent.result.rollback;
+  assert.equal(target.available, true);
+  const args = { approvedRelease: target.release, approvedArtifactSha256: `sha256:${'7'.repeat(64)}` };
+  const before = gateway.provider.requests.length;
+  const refused = await managementRpc(gateway, 'tools/call', { name: 'rollback_gateway_update', arguments: args });
+  assert.equal(refused.body.result.structuredContent.error.code, 'runtime_action_conflict');
+  const prepared = await managementRpc(gateway, 'tools/call', { name: 'rollback_gateway_update', arguments: {
+    ...args, approvedArtifactSha256: target.artifactSha256,
+  } });
+  assert.equal(prepared.body.result.structuredContent.ok, true, JSON.stringify(prepared.body));
+  const handoff = prepared.body.result.structuredContent.result;
+  assert.equal(handoff.status, 'user_authorization_required');
+  assert.equal(new URL(handoff.handoffUrl).origin, MANAGEMENT_ORIGIN);
+  assertNoMutation(gateway.provider, before);
 }));

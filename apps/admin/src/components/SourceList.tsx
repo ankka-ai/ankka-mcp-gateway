@@ -86,7 +86,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
             const isExpanded = expanded === source.id || pendingRemovalSourceId === source.id
             const sourceDetailsId = `${detailsId}-${source.id}`
             const connection = source.authMode === 'oauth'
-              ? source.onBehalfOfUser ? 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
+              ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'Your own sign-in' : 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
               : 'Public'
 
             return (
@@ -108,7 +108,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                     </button>
                   </th>
                   <td className="hidden px-3 py-3 text-kumo-subtle sm:table-cell">
-                    {source.authMode === 'oauth' ? source.onBehalfOfUser ? 'Legacy OAuth' : 'OAuth' : 'Public'}
+                    {source.authMode === 'oauth' ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'OAuth' : 'Legacy OAuth' : 'OAuth' : 'Public'}
                   </td>
                   <td className="px-3 py-3">
                     {pendingRemovalSourceId === source.id ? <span className="text-warning-strong">Removal started</span> : source.status === 'installed' ? (

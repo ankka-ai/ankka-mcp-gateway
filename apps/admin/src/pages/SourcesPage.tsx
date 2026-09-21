@@ -92,6 +92,11 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, acc
   if (bridgeSetup && action.state === 'authorization_required') return 'BigQuery bridge setup needs its own Cloudflare approval and Google key upload. Complete those steps, or use Continue BigQuery setup if you returned before they finished.'
   if (bridgeSetup && action.state === 'authorization_expired') return 'This BigQuery attempt expired before deployment began. Continue BigQuery setup for fresh Cloudflare approval and another key upload.'
   if (bridgeSetup && action.state === 'recovery_required' && action.canRenew === true) return 'Resume BigQuery setup with fresh Cloudflare approval. Your gateway checks the saved resources before continuing; it asks for the Google key again only if the bridge Worker was not deployed.'
+  if (action.sourceId === 'source-616e6b6b616d6370') {
+    if (action.state === 'succeeded') return 'Gateway Management is ready. It is initially assigned to the person who added it. Manage its assignments in Team.'
+    if (action.state === 'recovery_required' && action.failureCode === 'source_connection_required') return 'Sign in to connect Gateway Management, then resume installation. Each assigned person uses their own sign-in. Keep Require user auth on if you use Cloudflare for setup.'
+    if (action.state === 'recovery_required' && ['source_tools_required', 'source_tools_chosen'].includes(action.failureCode ?? '')) return 'Review the management tools and resume installation. Gateway Management is initially assigned to the person who added it.'
+  }
   const unchosen = !toolsChosen && action.state === 'recovery_required' ? unchosenToolsGuidance(action) : null
   if (unchosen !== null) return unchosen
   if (accountToken && action.state === 'authorization_required') return 'This installation is prepared in your gateway. Check its status before taking another action. No new Cloudflare consent is needed.'
@@ -162,6 +167,21 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     sources,
   } = useGateway()
   const [showForm, setShowForm] = useState(false)
+  const [managementError, setManagementError] = useState<string | null>(null)
+  const [addingManagement, setAddingManagement] = useState(false)
+  const managementInstalled = sources?.sources.some((source) => source.id === 'source-616e6b6b616d6370') === true
+  async function addManagementSource() {
+    setAddingManagement(true)
+    setManagementError(null)
+    try {
+      const url = `${window.location.origin}/mcp`
+      const discovered = await discoverSource(url)
+      await saveSourceDraft({ label: 'Gateway Management', url, authMode: 'oauth',
+        enabledTools: discovered.tools.map((tool) => tool.name).sort() })
+    } catch (error) {
+      setManagementError(error instanceof Error ? error.message : 'Gateway Management could not be added.')
+    } finally { setAddingManagement(false) }
+  }
   const [showBigQuery, setShowBigQuery] = useState(false)
   const [bigQuery, setBigQuery] = useState<BigQuerySetups | null>(null)
   const [bigQueryError, setBigQueryError] = useState<string | null>(null)
@@ -380,6 +400,13 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
       <GatewayEndpoint />
       <SourceAuthorizationResult />
+      {!managementInstalled ? <div className="mt-6 rounded-lg border border-kumo-line p-4">
+        <h2 className="text-sm font-semibold text-kumo-strong">Gateway Management</h2>
+        <p className="mt-2 text-sm text-kumo-subtle">Let your agents manage sources, troubleshoot connections, and change Team access. Install this built-in source, then assign it in Team like any other source. It is initially assigned to the person who adds it.</p>
+        <Button className="mt-3" variant="secondary" disabled={!installationEnabled || applyBlocked || addingManagement} onClick={() => void addManagementSource()}>{addingManagement ? 'Adding…' : 'Add Gateway Management'}</Button>
+        {managementError ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{managementError}</p> : null}
+      </div> : <p className="mt-4 text-sm text-kumo-subtle">Assign Gateway Management in Team to let someone change gateway configuration and access.</p>}
+
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
       {showBigQuery && installationEnabled ? <BigQuerySetupForm disabled={applyBlocked || resumingBigQuery} /> : null}
 

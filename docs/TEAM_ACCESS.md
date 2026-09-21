@@ -4,7 +4,13 @@ Team reads current Cloudflare membership and displays its observation time.
 With the [customer-owned management token](MANAGEMENT_TOKEN.md) configured,
 administrators save source assignments directly in the gateway. The token stays
 in your Cloudflare account. Administrator identities remain fixed, and new
-sources start denied to everyone until an explicit Team grant.
+data sources start denied to everyone until an explicit Team grant.
+
+The optional [Gateway Management source](GATEWAY_MANAGEMENT_MCP.md) initially
+assigns its creator and uses ordinary Team assignments thereafter. People assigned
+its Team-write tool can manage assignments from their agents without becoming
+dashboard administrators. The backend reads the live source policy on every MCP
+request, so removing that assignment rejects even an otherwise unexpired token.
 
 A missing credential leaves the saved snapshot available, clearly unverified.
 Provider failures or unexpected policy shapes block verified reads and writes.
