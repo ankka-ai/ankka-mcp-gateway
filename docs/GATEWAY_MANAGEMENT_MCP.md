@@ -49,6 +49,13 @@ destinations on self-hosted applications. Team assignments synchronize both
 policies through the existing journal; the UI still presents one source. Each person authenticates with their
 own identity; this source is registered in the Portal with `on_behalf: true`.
 Ordinary upstream OAuth sources retain their shared team connection behavior.
+Managed OAuth must allow both the shared Cloudflare callback and the exact
+Cloudflare dashboard callback for this account and server. The dashboard uses
+`https://dash.cloudflare.com/<account-id>/one/access-controls/ai-controls/mcp-server/oauth-callback/<server-id>`
+for the initial administrator sign-in, even when the shared callback is enabled.
+A missing entry returns `invalid_request` with “Redirect URI not allowed by
+application configuration.” The callback is scoped to the owned server; no
+wildcard dashboard callback is needed.
 The dashboard's administrator policy remains a separate recovery entry point.
 The endpoint's authentication policy retains the installation's original audience
 so administrators can complete browser recovery consent after unassigning
