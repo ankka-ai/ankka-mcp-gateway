@@ -85,10 +85,17 @@ path currently has a beta gap for individual policy API requests. See
 
 ## Authorization
 
-The initial source boundary is read-only with exact tool allowlists. Wildcards
+The initial data-source boundary is read-only with exact tool allowlists. Wildcards
 are rejected. Tool names, descriptions, and source-authored annotations are
 untrusted review aids; the upstream and Cloudflare policy must independently
 enforce allowed operations.
+
+The optional [Gateway Management source](GATEWAY_MANAGEMENT_MCP.md) is an explicit
+management capability. Its ordinary source assignment grants fixed management
+operations; no separate MCP administrator role is required. The Worker validates
+the source-specific Access audience and current receipt-owned source policy for
+every request, and enforces the exact enabled tool list on execution. Provider
+consent and lifecycle handoffs retain their existing authorization boundaries.
 
 Browser requests cannot select arbitrary Cloudflare accounts or provider
 resources. The installer binds discovery, configuration, plan approval, OAuth
@@ -111,8 +118,9 @@ Cross-origin API requests are rejected.
 
 A gateway can additionally accept exactly one machine identity: the Access
 service token whose client id its deployment configuration opted into. The
-hosted installer never opts in, so customer installations accept only
-administrators. The Worker verifies a service token exactly like an
+hosted installer never opts in. Dashboard API access remains restricted to
+administrators; the optional management MCP source separately admits its assigned
+human identities. The Worker verifies a service token exactly like an
 administrator's token and then authorizes the exact `common_name` claim
 (`type: app` appears on both kinds of token and distinguishes nothing): a
 token with an email claim is an administrator or nothing, and a token without

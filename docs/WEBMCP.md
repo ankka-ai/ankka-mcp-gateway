@@ -5,7 +5,10 @@ management dashboard. It lets a compatible browser agent invoke named tools
 instead of locating and clicking individual controls. The tools use the same
 management operations and authorization checks as the visible interface.
 
-This is **browser-assisted management**, not a remote management MCP server or
+For native MCP clients, use the optional [Gateway Management source](GATEWAY_MANAGEMENT_MCP.md).
+It is assigned through Team and does not require the dashboard to stay open.
+
+WebMCP itself is **browser-assisted management**, not a remote management MCP server or
 an unattended deployment service. Keep the relevant page open in a compatible
 browser, sign in as a gateway administrator, and let the browser's agent tooling
 discover the tools available on that page. Browsers without WebMCP keep the

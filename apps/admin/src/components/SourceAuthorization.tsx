@@ -24,7 +24,9 @@ export function SourceAuthorization({ actionId, sourceId, revision, disabled }: 
     <Button variant="primary" className="pressable" disabled={disabled || pending} onClick={() => void authorize()}>
       {pending ? 'Opening authorization…' : 'Authorize source'}
     </Button>
-    <p className="mt-2 text-xs leading-5 text-kumo-subtle">Sign in with your provider to connect this source for your team. Credentials stay in your Cloudflare account. Providers that need manual OAuth setup can be connected using the Cloudflare link.</p>
+    <p className="mt-2 text-xs leading-5 text-kumo-subtle">{sourceId === 'source-616e6b6b616d6370'
+      ? 'Sign in with your gateway identity to connect Gateway Management. Each person assigned this source uses their own sign-in.'
+      : 'Sign in with your provider to connect this source for your team. Credentials stay in your Cloudflare account. Providers that need manual OAuth setup can be connected using the Cloudflare link.'}</p>
     {error ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{error}</p> : null}
   </div>
 }
