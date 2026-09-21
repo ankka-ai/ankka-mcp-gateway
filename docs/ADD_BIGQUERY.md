@@ -1,6 +1,7 @@
 # Add BigQuery
 
-Open **Sources → Add BigQuery** in a gateway release that includes this flow.
+Open **Sources → Add connector → Connector library → BigQuery**
+in a gateway release that includes this flow.
 The bridge, its Google credential, and the Cloudflare connection belong to your
 Cloudflare account. The hosted Ankka installer does not receive the Google key.
 
@@ -23,8 +24,8 @@ operator acknowledgement, not an automated audit of effective IAM.
 
 ## Connect
 
-1. Choose **Add BigQuery**, name the source, enter its query project, and list
-   datasets as `project.dataset`, one per line.
+1. Choose **Add connector → Connector library → BigQuery**, name the source,
+   enter its query project, and list datasets as `project.dataset`, one per line.
 2. Confirm that the dedicated Google identity and JSON key are ready. Continue
    to the fresh Cloudflare approval for this operation.
 3. Back on your gateway, choose the JSON key file and select **Deploy and
@@ -168,5 +169,5 @@ the service-account key in Google; revoke that key there when you no longer need
 it. Manually deployed bridges remain separate resources that you manage.
 
 The manual deployment instructions remain available for older gateways. The
-presence of **Add BigQuery** indicates that the installed release contains the
-flow; main-branch documentation alone does not establish live availability.
+availability of **BigQuery** in the **Connector library** indicates that the installed
+release contains the flow; main-branch documentation alone does not establish live availability.

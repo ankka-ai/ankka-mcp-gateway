@@ -1,19 +1,20 @@
 import { useState } from 'react'
 import type { ManagementCredentialChoice } from '../api'
 import { useGateway } from '../GatewayContext'
-import { managementTokenCreateLink, managementTokenName } from '../managementTokenLink'
+import { managementTokenCreateLink } from '../managementTokenLink'
 import { Button } from './Button'
+import { StepList } from './StepList'
 
 /** What a gateway without the token is told, by what setup recorded at its token step. */
 export function managementTokenChoiceSentence(choice: ManagementCredentialChoice | null | undefined): string {
-  if (choice === 'skipped') return 'You continued without a token during setup, so your gateway has never had one.'
-  if (choice === 'provided') return 'You pasted a token during setup, but your gateway lost it before it could be saved. It kept nothing of it, so the token has to be added again.'
-  return 'This gateway was set up before setup asked for the token, so it was never given one.'
+  if (choice === 'skipped') return 'You skipped the token during setup.'
+  if (choice === 'provided') return 'Your setup token was not saved. Add it again.'
+  return 'No management token was added during setup.'
 }
 
-export const MANAGEMENT_ACCESS_PURPOSE = 'Your gateway needs one Cloudflare API token of its own to add sources and change team access, because every approval you give it is temporary.'
-export const MANAGEMENT_ACCESS_REACH = 'Cloudflare cannot limit this token to your gateway: it can edit every Access policy in your account, and it never passes through anything Ankka hosts.'
-export const MANAGEMENT_ACCESS_STEPS = 'Create the token first: Cloudflare’s approval in the second step lasts only a few minutes. Creating it needs a Super Administrator or Administrator of your Cloudflare account.'
+export const MANAGEMENT_ACCESS_PURPOSE = 'Add sources and manage team access with a Cloudflare API token.'
+export const MANAGEMENT_ACCESS_REACH = 'This token can edit all Access policies in your Cloudflare account. It stays in your gateway and never passes through Ankka.'
+export const MANAGEMENT_ACCESS_STEPS = 'Create the token first as a Cloudflare account Administrator or Super Administrator. The next approval expires after a few minutes.'
 
 /** Step one of the flow, before any approval is spent: the link that creates the token with both permissions and its name. */
 export function ManagementTokenCreateLink() {
@@ -21,7 +22,7 @@ export function ManagementTokenCreateLink() {
   return (
     <p>
       <a className="underline underline-offset-4" href={managementTokenCreateLink(hostname)} target="_blank" rel="noopener noreferrer">Create the token in Cloudflare ↗</a>
-      {' '}The link fills in both permissions and the name <strong>{managementTokenName(hostname)}</strong>. Create it and copy it.
+      {' '}Permissions and name are prefilled. Create and copy the token.
     </p>
   )
 }
@@ -60,13 +61,13 @@ export function ManagementTokenCard({ choice, className = 'mt-6' }: {
       <p>{MANAGEMENT_ACCESS_REACH}</p>
       <p className="text-kumo-subtle">{managementTokenChoiceSentence(choice)}</p>
       <p className="text-kumo-subtle">{MANAGEMENT_ACCESS_STEPS}</p>
-      <ol className="list-decimal space-y-3 pl-5">
+      <StepList label="Management token setup steps">
         <li><ManagementTokenCreateLink /></li>
         <li>
-          <p>Add it to your gateway: you approve one change in Cloudflare, then paste the token on a page of your own gateway.</p>
+          <p>Approve in Cloudflare, then paste the token into your gateway.</p>
           <div className="mt-2"><Button variant="primary" loading={starting} onClick={() => void start()}>Add management token</Button></div>
         </li>
-      </ol>
+      </StepList>
     </section>
   )
 }

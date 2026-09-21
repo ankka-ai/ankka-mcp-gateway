@@ -59,12 +59,28 @@ function open(client: GatewayAdminApi, path = '/settings') {
 describe('AppShell during a removal', () => {
   afterEach(() => { cleanup(); vi.useRealTimers(); window.history.replaceState(null, '', '/') })
 
+  it.each(['/sources', '/team', '/settings'])('keeps navigation visible while %s loads, then replaces skeletons with content', async path => {
+    let finishStatus!: (value: GatewayStatus) => void
+    const pendingStatus = new Promise<GatewayStatus>(resolve => { finishStatus = resolve })
+    const client = api({ getStatus: vi.fn(() => pendingStatus), getSourceActions: vi.fn(async (): Promise<SourceActions> => ({ schemaVersion: 1, actions: [], blockingAction: null })) })
+    const { container } = open(client, path)
+    const title = path === '/team' ? 'Team' : path === '/settings' ? 'Settings' : 'Sources'
+    expect(await screen.findByText(`Loading ${title}…`)).toHaveAttribute('role', 'status')
+    expect(screen.getByRole('heading', { name: title, level: 1 })).toBeInTheDocument()
+    expect(screen.getAllByRole('navigation', { name: 'Gateway management' })).toHaveLength(2)
+    expect(screen.queryByText('Loading your gateway…')).not.toBeInTheDocument()
+    expect(container.querySelector('.dashboard-skeleton-block')).toBeInTheDocument()
+    finishStatus(status)
+    await waitFor(() => expect(container.querySelector('.dashboard-skeleton-block')).not.toBeInTheDocument())
+    expect(screen.getByRole('heading', { name: title, level: 1 })).toBeInTheDocument()
+  })
+
   it('still loads when Team answers 503 and offers the way back into the interrupted removal', async () => {
     const client = api()
     open(client)
 
     expect(await screen.findByRole('heading', { name: 'Settings', level: 1 })).toBeInTheDocument()
-    expect(await screen.findByText('Your gateway has a management token. Verify management access to check its permissions.')).toBeInTheDocument()
+    expect(await screen.findByText('Management token configured.')).toBeInTheDocument()
     expect(client.getTeam).not.toHaveBeenCalled()
     const notice = (await screen.findByText('Removal in progress')).closest('[role="status"]')
     expect(notice).toHaveTextContent('some of its connected resources may already be gone')

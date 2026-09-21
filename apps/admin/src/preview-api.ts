@@ -27,7 +27,7 @@ import type {
 } from './api'
 
 const PREVIEW_SCENARIOS = [
-  'empty', 'ready', 'update', 'update-running', 'update-failed', 'loading', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential',
+  'empty', 'ready', 'update', 'update-running', 'update-failed', 'loading', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential', 'team-editable',
   'source-pending', 'source-applying', 'source-expired', 'source-recovery', 'source-completed', 'source-late-success', 'source-lifecycle',
   'source-sign-in',
   'removal-interrupted',
@@ -181,9 +181,9 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     this.#team = {
       schemaVersion: 1,
       revision: 2,
-      editingEnabled: false,
-      editingDisabledReason: scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : 'managed_in_cloudflare',
-      managementCredentialConfigured: false,
+      editingEnabled: scenario === 'team-editable',
+      editingDisabledReason: scenario === 'team-editable' ? null : scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : 'managed_in_cloudflare',
+      managementCredentialConfigured: scenario === 'team-editable',
       adminEmails: ['admin@example.com'],
       members: [
         { email: 'admin@example.com', sourceIds: scenario === 'empty' ? [] : ['source-1111111111111111'] },

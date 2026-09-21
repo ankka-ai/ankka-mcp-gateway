@@ -1,16 +1,19 @@
-import { Input } from '@cloudflare/kumo'
+import { DropdownMenu, Input } from '@cloudflare/kumo'
 import { Button } from '../components/Button'
-import { ArrowRight, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react'
+import { Books, CaretDown, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GatewayApiError, GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type ManagementCredentialChoice, type SourceActionSummary, type SourceActionTools, type SourceDiscovery, type BigQuerySetups, isBigQueryPreflightFailure, rollbackEndsMessage, validHandoffUrl } from '../api'
 import { SOURCE_CATALOG, type SourceCatalog, type SourceCatalogSource } from '../catalog'
 import { useGateway } from '../GatewayContext'
 import { GatewayEndpoint } from '../components/GatewayEndpoint'
 import { ManagementTokenCard } from '../components/ManagementTokenCard'
 import { PageHeader } from '../components/PageHeader'
-import { NativeConnectorGuides } from '../components/NativeConnectorGuides'
-import { StatusPill } from '../components/StatusPill'
+import { ProviderConnectorSetup } from '../components/ProviderConnectorSetup'
+import type { NativeConnectorRecipe } from '../connectors/native-recipes'
 import { BigQuerySetupForm } from '../components/BigQuerySetupForm'
+import { ConnectorLibrary } from '../components/ConnectorLibrary'
+import { ConnectorSetupDialog } from '../components/ConnectorSetupDialog'
+import { StatusPill } from '../components/StatusPill'
 import { SourceList } from '../components/SourceList'
 import { SourceToolChoice } from '../components/SourceToolChoice'
 import { SourceAuthorization, SourceAuthorizationResult } from '../components/SourceAuthorization'
@@ -166,6 +169,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     sourceNotice,
     sources,
   } = useGateway()
+  const addConnector = useRef<HTMLButtonElement>(null)
   const [showForm, setShowForm] = useState(false)
   const [managementError, setManagementError] = useState<string | null>(null)
   const [addingManagement, setAddingManagement] = useState(false)
@@ -182,6 +186,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       setManagementError(error instanceof Error ? error.message : 'Gateway Management could not be added.')
     } finally { setAddingManagement(false) }
   }
+  const [showLibrary, setShowLibrary] = useState(false)
+  const [providerConnector, setProviderConnector] = useState<NativeConnectorRecipe | null>(null)
   const [showBigQuery, setShowBigQuery] = useState(false)
   const [bigQuery, setBigQuery] = useState<BigQuerySetups | null>(null)
   const [bigQueryError, setBigQueryError] = useState<string | null>(null)
@@ -207,7 +213,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     }).catch(() => { if (active) setMissingToken('unreadable') })
     return () => { active = false }
   }, [getTeam, refreshSources, tokenInQuestion])
-  const [sourceMode, setSourceMode] = useState<'catalog' | 'custom'>(catalog.sources.length > 0 ? 'catalog' : 'custom')
   const [catalogSourceId, setCatalogSourceId] = useState<string | null>(null)
   const [label, setLabel] = useState('')
   const [url, setUrl] = useState('')
@@ -290,7 +295,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       setResumingBigQuery(false)
     }
   }
-  const showActionStatus = sources.sources.some((source) => source.status === 'draft') || latestActions.size > 0 || Boolean(blocker) || sourceActionsError !== null
 
   const clearDraftForm = () => {
     setCatalogSourceId(null)
@@ -303,16 +307,28 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
   const chooseCatalogSource = (source: SourceCatalogSource) => {
     clearDraftForm()
-    setSourceMode('catalog')
+    setShowLibrary(false)
+    setProviderConnector(null)
+    setShowBigQuery(false)
+    setShowForm(true)
     setCatalogSourceId(source.sourceId)
     setLabel(source.displayName)
     setUrl(source.implementation.deployment.url)
   }
 
-  const chooseSourceMode = (mode: 'catalog' | 'custom') => {
-    if (sourceMode === mode) return
-    clearDraftForm()
-    setSourceMode(mode)
+  const openCustomConnector = () => {
+    if (catalogSource !== null) clearDraftForm()
+    setShowLibrary(false)
+    setProviderConnector(null)
+    setShowBigQuery(false)
+    setShowForm(true)
+  }
+
+  const openLibrary = () => {
+    setProviderConnector(null)
+    setShowForm(false)
+    setShowBigQuery(false)
+    setShowLibrary(true)
   }
 
   const inspect = async () => {
@@ -361,7 +377,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         enabledTools,
       })
       clearDraftForm()
-      setSourceMode(catalog.sources.length > 0 ? 'catalog' : 'custom')
       setShowForm(false)
     } catch (error) { setFormError(error instanceof Error ? error.message : 'The source draft could not be saved.') }
   }
@@ -383,21 +398,116 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     }
   }
 
+  const installationState = (sourceId: string) => {
+    const action = latestActions.get(sourceId)
+    if (!action) return null
+    const actionSource = sources.sources.find((source) => source.id === action.sourceId)
+    // A sign-in source paused before the Portal: its tools are chosen here, from its real list. A BigQuery
+    // bridge has a fixed allowlist and its own setup flow.
+    const signInPause = actionSource !== undefined && actionSource.status === 'draft' && actionSource.authMode === 'oauth' &&
+      action.state === 'recovery_required' && action.failureCode !== null && CONNECTION_PAUSES.has(action.failureCode) &&
+      bigQuery?.setups.some((setup) => setup.actionId === action.actionId) !== true
+    const toolsChosen = !signInPause || actionSource.enabledTools.length > 0
+    // While nothing is chosen, the card says what the source waits for now, not what it waited for last.
+    const live = toolLists[action.actionId]
+    const shown = toolsChosen || live === undefined || live === 'unsupported' ? action : { ...action, failureCode: LIVE_PAUSE[live] }
+    const setup = bigQuery?.setups.find((item) => item.actionId === action.actionId)
+    const preflightFailed = action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)
+    return { action, actionSource, signInPause, toolsChosen, shown, setup, preflightFailed }
+  }
+
+  const renderInstallation = (sourceId: string) => {
+    const state = installationState(sourceId)
+    if (!state || (state.action.state === 'succeeded' && state.actionSource?.status === 'installed')) return null
+    const { action, actionSource, signInPause, toolsChosen, shown, setup, preflightFailed } = state
+    return (
+      <article key={action.actionId} className="text-sm" aria-label={`Installation of ${actionSource?.label ?? action.sourceId}`}>
+        <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(shown, sourceActionsPollingPaused, sources.applyMode === 'account_token' && bigQuery !== null, toolsChosen, setup !== undefined && !setup.ready)}</p>
+        {preflightFailed ? <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Error code: {action.failureCode}</p> : null}
+        <p className="mt-2 text-xs leading-5 text-kumo-subtle">
+          Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
+        </p>
+        <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Action: {action.actionId}</p>
+        {signInPause && actionSource && action.canRenew === true && sources.applyMode === 'account_token' && shown.failureCode === 'source_connection_required' ? (
+          <SourceAuthorization actionId={action.actionId} sourceId={actionSource.id} revision={sources.revision} disabled={!installationEnabled || isBusy || isCheckingSourceActions} />
+        ) : null}
+        {action.connectionUrl && action.state === 'recovery_required' ? (
+          <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open source in Cloudflare</a>
+        ) : null}
+        {setup && !setup.ready && !setup.recoveryRequired && (action.canCancel || preflightFailed) ? (
+          <>
+            <Button variant="secondary" className="pressable mt-3" disabled={isBusy || resumingBigQuery || isCheckingSourceActions} onClick={() => void resumeBigQuery(action.actionId)}>Continue BigQuery setup</Button>
+            {rollbackNote ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{rollbackNote}</p> : null}
+          </>
+        ) : null}
+        <BigQueryFailure setup={setup} />
+        {canRemoveDraft(action.sourceId) ? (
+          <Button variant="secondary-destructive" className="pressable mt-3"
+            disabled={isBusy || resumingBigQuery || isCheckingSourceActions}
+            onClick={() => void removeSource(action.sourceId).catch(() => {})}>{action.failureCode === 'source_removal_required' ? 'Continue removal' : 'Remove source'}</Button>
+        ) : null}
+        {canRemoveDraft(action.sourceId) && needsBridgeCleanup(action.sourceId) ? (
+          <p className="mt-2 text-xs leading-5 text-kumo-subtle">Removes this source’s bridge from your Cloudflare account. Requires one Cloudflare approval; no Google key upload is needed.</p>
+        ) : null}
+        {signInPause && actionSource && action.canRenew === true ? (
+          <SourceToolChoice
+            action={action}
+            source={actionSource}
+            revision={sources.revision}
+            recommendedTools={catalog.sources.find((entry) => entry.implementation.deployment.url === actionSource.url)?.implementation.recommendedTools ?? NO_RECOMMENDED_TOOLS}
+            disabled={!installationEnabled || isBusy}
+            onState={reportToolList}
+          />
+        ) : null}
+        {signInPause && actionSource && action.canRenew !== true ? (
+          <p className="mt-3 text-xs leading-5 text-kumo-subtle">Only the administrator who started this installation can choose its tools and finish it.</p>
+        ) : null}
+        {/* With nothing chosen there is nothing a resume could attach: the choice comes first. */}
+        {toolsChosen && action.canRenew === true && action.state === 'recovery_required' && !bigQuery?.setups.some((setup) => setup.actionId === action.actionId && setup.recoveryRequired) ? (
+          <div className="mt-3">
+            <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Resume installation</Button>
+            {rollbackNote ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{rollbackNote}</p> : null}
+          </div>
+        ) : null}
+        {action.canCancel ? (
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void cancelSourceApply(action.actionId).catch(() => {})}>Cancel installation</Button>
+            <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">The existing consent link will stop working. You can then authorize the saved draft again.</p>
+          </div>
+        ) : action.state === 'authorization_required' || action.state === 'authorization_expired' ? (
+          <p className="mt-3 text-xs leading-5 text-kumo-subtle">Only the administrator who started this authorization can cancel it, and only before provisioning starts.</p>
+        ) : null}
+      </article>
+    )
+  }
+
   return (
     <div>
       <PageHeader
         title="Sources"
         action={
-          <div className="flex gap-2">
-          {bigQuery?.available ? <Button variant="secondary" className="pressable" disabled={!installationEnabled || applyBlocked} onClick={() => { setShowBigQuery((visible) => !visible); setShowForm(false) }}>{showBigQuery ? 'Close BigQuery' : 'Add BigQuery'}</Button> : null}
-          <Button variant="primary" className="pressable" disabled={!installationEnabled} onClick={() => { setShowForm((visible) => !visible); setShowBigQuery(false) }}>
-            {showForm ? <X size={16} /> : <Plus size={16} weight="bold" />}
-            {showForm ? 'Close' : 'Add source'}
-          </Button>
-          </div>
+          <DropdownMenu>
+            <DropdownMenu.Trigger ref={addConnector} disabled={!installationEnabled || isBusy} render={<Button variant="primary" className="pressable" />}>
+              <Plus size={16} weight="bold" aria-hidden="true" /> Add connector <CaretDown size={14} aria-hidden="true" />
+            </DropdownMenu.Trigger>
+            <DropdownMenu.Content align="end">
+              <DropdownMenu.Item icon={GlobeSimple} onClick={openCustomConnector}>Custom</DropdownMenu.Item>
+              <DropdownMenu.Item icon={Books} onClick={openLibrary}>Connector library</DropdownMenu.Item>
+            </DropdownMenu.Content>
+          </DropdownMenu>
         }
       />
 
+      <ConnectorLibrary finalFocus={showForm || showBigQuery || providerConnector !== null ? false : addConnector} open={showLibrary} onOpenChange={setShowLibrary} catalog={catalog}
+        bigQueryAvailable={bigQuery?.available === true} bigQueryBlocked={applyBlocked || resumingBigQuery} disabled={!installationEnabled || isBusy}
+        onProvider={recipe => { setShowLibrary(false); setShowForm(false); setShowBigQuery(false); setProviderConnector(recipe) }}
+        onCustom={openCustomConnector} onCatalogSource={chooseCatalogSource}
+        onBigQuery={() => { setProviderConnector(null); setShowLibrary(false); setShowForm(false); setShowBigQuery(true) }} />
+      <ConnectorSetupDialog open={providerConnector !== null} onOpenChange={open => { if (!open) setProviderConnector(null) }}
+        title={providerConnector?.displayName ?? 'Connector setup'} description={providerConnector?.description ?? ''}
+        closeLabel="Close connector details" onLibrary={openLibrary} finalFocus={showLibrary ? false : addConnector}>
+        {providerConnector ? <ProviderConnectorSetup recipe={providerConnector} /> : null}
+      </ConnectorSetupDialog>
       <GatewayEndpoint />
       <SourceAuthorizationResult />
       {!managementInstalled ? <div className="mt-6 rounded-lg border border-kumo-line p-4">
@@ -408,7 +518,11 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       </div> : <p className="mt-4 text-sm text-kumo-subtle">Assign Gateway Management in Team to let someone change gateway configuration and access.</p>}
 
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
-      {showBigQuery && installationEnabled ? <BigQuerySetupForm disabled={applyBlocked || resumingBigQuery} /> : null}
+      <ConnectorSetupDialog open={showBigQuery && installationEnabled} onOpenChange={setShowBigQuery}
+        title="Add BigQuery" description="Give your team read-only SQL and table discovery through a bridge in your Cloudflare account."
+        closeLabel="Close BigQuery setup" onLibrary={openLibrary} finalFocus={showLibrary ? false : addConnector}>
+        <BigQuerySetupForm embedded disabled={applyBlocked || resumingBigQuery} />
+      </ConnectorSetupDialog>
 
       {tokenIsMissing ? (
         <>
@@ -425,16 +539,14 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         </div>
       ) : null}
 
-      {showActionStatus ? (
-        <section className="surface-card mt-6 p-5 sm:p-6" aria-labelledby="source-actions-title">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <h2 id="source-actions-title" className="text-sm font-semibold text-kumo-strong">Source installation status</h2>
-            <Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions} onClick={() => void refreshSourceActions().catch(() => {})}>
+      {sourceActionsError || sourceActionsPollingPaused || (blocker && blocker.kind !== 'source') ? (
+        <div className="mt-6">
+          {sourceActionsError ? <p role="alert" className="mt-3 text-sm text-danger">{sourceActionsError} Applying sources is disabled until status can be checked.</p> : null}
+          {sources.sources.length === 0 ? (
+            <Button variant="secondary" className="pressable mt-3" disabled={isBusy || isCheckingSourceActions} onClick={() => void refreshSourceActions().catch(() => {})}>
               {isCheckingSourceActions ? 'Checking status…' : 'Check status'}
             </Button>
-          </div>
-          {sourceActionsError ? <p role="alert" className="mt-3 text-sm text-danger">{sourceActionsError} Applying sources is disabled until status can be checked.</p> : null}
-          {!sourceActions && !sourceActionsError ? <p role="status" className="mt-3 text-sm text-kumo-subtle">Checking for existing gateway actions…</p> : null}
+          ) : null}
           {sourceActionsPollingPaused ? <p role="status" className="mt-3 text-sm text-kumo-subtle">Automatic checks have paused. Use Check status for the latest result; this does not cancel the action.</p> : null}
           {blocker && blocker.kind !== 'source' ? (
             <p role="status" className="mt-3 text-sm leading-6 text-kumo-subtle">
@@ -442,150 +554,14 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               <span className="mt-1 block break-all font-mono text-xs">Action: {blocker.actionId}</span>
             </p>
           ) : null}
-          {sourceActions && !blocker && latestActions.size === 0 ? <p className="mt-3 text-sm text-kumo-subtle">No source installation is pending.</p> : null}
-          <div aria-live="polite">
-            {[...latestActions.values()].map((action) => {
-              const actionSource = sources.sources.find((source) => source.id === action.sourceId)
-              const setup = bigQuery?.setups.find((item) => item.actionId === action.actionId)
-              const preflightFailed = action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)
-              // A sign-in source paused before the Portal: its tools are chosen here, from its real list. A BigQuery
-              // bridge has a fixed allowlist and its own setup flow.
-              const signInPause = actionSource !== undefined && actionSource.status === 'draft' && actionSource.authMode === 'oauth' &&
-                action.state === 'recovery_required' && action.failureCode !== null && CONNECTION_PAUSES.has(action.failureCode) &&
-                setup === undefined
-              const toolsChosen = !signInPause || actionSource.enabledTools.length > 0
-              // While nothing is chosen, the card says what the source waits for now, not what it waited for last.
-              const live = toolLists[action.actionId]
-              const shown = toolsChosen || live === undefined || live === 'unsupported' ? action : { ...action, failureCode: LIVE_PAUSE[live] }
-              return (
-              <article key={action.actionId} className="mt-4 border-t border-kumo-line pt-4" aria-label={`Installation of ${actionSource?.label ?? action.sourceId}`}>
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <h3 className="text-sm font-semibold text-kumo-strong">{actionSource?.label ?? action.sourceId}</h3>
-                  <StatusPill tone={action.state === 'succeeded' ? 'ready' : preflightFailed || action.state === 'recovery_required' || action.state === 'authorization_expired' ? 'attention' : 'waiting'}>{actionLabel(shown)}</StatusPill>
-                </div>
-                <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(shown, sourceActionsPollingPaused, sources.applyMode === 'account_token' && bigQuery !== null, toolsChosen, setup !== undefined && !setup.ready)}</p>
-                {preflightFailed ? <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Error code: {action.failureCode}</p> : null}
-                <p className="mt-2 text-xs leading-5 text-kumo-subtle">
-                  Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
-                </p>
-                <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Action: {action.actionId}</p>
-                {signInPause && action.canRenew === true && sources.applyMode === 'account_token' && shown.failureCode === 'source_connection_required' ? (
-                  <SourceAuthorization actionId={action.actionId} sourceId={actionSource.id} revision={sources.revision} disabled={!installationEnabled || isBusy || isCheckingSourceActions} />
-                ) : null}
-                {action.connectionUrl && action.state === 'recovery_required' ? (
-                  <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open source in Cloudflare</a>
-                ) : null}
-                {setup && !setup.ready && !setup.recoveryRequired && (action.canCancel || preflightFailed) ? (
-                  <>
-                    <Button variant="secondary" className="pressable mt-3" disabled={isBusy || resumingBigQuery || isCheckingSourceActions} onClick={() => void resumeBigQuery(action.actionId)}>Continue BigQuery setup</Button>
-                    {rollbackNote ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{rollbackNote}</p> : null}
-                  </>
-                ) : null}
-                <BigQueryFailure setup={setup} />
-                {canRemoveDraft(action.sourceId) ? (
-                  <Button variant="secondary-destructive" className="pressable mt-3"
-                    disabled={isBusy || resumingBigQuery || isCheckingSourceActions}
-                    onClick={() => void removeSource(action.sourceId).catch(() => {})}>{action.failureCode === 'source_removal_required' ? 'Continue removal' : 'Remove source'}</Button>
-                ) : null}
-                {canRemoveDraft(action.sourceId) && needsBridgeCleanup(action.sourceId) ? (
-                  <p className="mt-2 text-xs leading-5 text-kumo-subtle">Removes this source’s bridge from your Cloudflare account. Requires one Cloudflare approval; no Google key upload is needed.</p>
-                ) : null}
-                {signInPause && action.canRenew === true ? (
-                  <SourceToolChoice
-                    action={action}
-                    source={actionSource}
-                    revision={sources.revision}
-                    recommendedTools={catalog.sources.find((entry) => entry.implementation.deployment.url === actionSource.url)?.implementation.recommendedTools ?? NO_RECOMMENDED_TOOLS}
-                    disabled={!installationEnabled || isBusy}
-                    onState={reportToolList}
-                  />
-                ) : null}
-                {signInPause && action.canRenew !== true ? (
-                  <p className="mt-3 text-xs leading-5 text-kumo-subtle">Only the administrator who started this installation can choose its tools and finish it.</p>
-                ) : null}
-                {/* With nothing chosen there is nothing a resume could attach: the choice comes first. */}
-                {toolsChosen && action.canRenew === true && action.state === 'recovery_required' && !bigQuery?.setups.some((setup) => setup.actionId === action.actionId && setup.recoveryRequired) ? (
-                  <div className="mt-3">
-                    <Button variant="secondary" className="pressable" disabled={!installationEnabled || isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void authorize(action.sourceId, action.actionId)}>Resume installation</Button>
-                    {rollbackNote ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{rollbackNote}</p> : null}
-                  </div>
-                ) : null}
-                {action.canCancel ? (
-                  <div className="mt-3 flex flex-wrap items-center gap-3">
-                    <Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions || sourceActionsError !== null} onClick={() => void cancelSourceApply(action.actionId).catch(() => {})}>Cancel installation</Button>
-                    <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">The existing consent link will stop working. You can then authorize the saved draft again.</p>
-                  </div>
-                ) : action.state === 'authorization_required' || action.state === 'authorization_expired' ? (
-                  <p className="mt-3 text-xs leading-5 text-kumo-subtle">Only the administrator who started this authorization can cancel it, and only before provisioning starts.</p>
-                ) : null}
-              </article>
-              )
-            })}
-          </div>
-        </section>
+        </div>
       ) : null}
 
-      {showForm && installationEnabled ? (
-        <section className="surface-card mt-7 p-5 sm:p-6" aria-labelledby="add-source-title">
-          <div className="flex flex-col justify-between gap-4 border-b border-kumo-line pb-5 sm:flex-row sm:items-start">
-            <div>
-              <h2 id="add-source-title" className="text-base font-semibold text-subheading">Add an MCP source</h2>
-              <p className="mt-1 max-w-[65ch] text-sm leading-6 text-kumo-subtle">Choose allowed tools. New sources start with nobody assigned; grant access in Team. Do not enter credentials here.</p>
-            </div>
-            <StatusPill tone="attention">Exact tools only</StatusPill>
-          </div>
-
-          <NativeConnectorGuides />
-
-          <form className="mt-6" onSubmit={save}>
-            <fieldset>
-              <legend className="text-sm font-medium text-kumo-default">Start with</legend>
-              <div className="mt-2 flex flex-wrap gap-2">
-                <button
-                  type="button"
-                  className="source-mode-button pressable"
-                  aria-pressed={sourceMode === 'catalog'}
-                  disabled={isBusy || catalog.sources.length === 0}
-                  onClick={() => chooseSourceMode('catalog')}
-                >
-                  Reviewed catalog
-                  {catalog.sources.length > 0 ? <span>{catalog.sources.length}</span> : null}
-                </button>
-                <button
-                  type="button"
-                  className="source-mode-button pressable"
-                  aria-pressed={sourceMode === 'custom'}
-                  disabled={isBusy}
-                  onClick={() => chooseSourceMode('custom')}
-                >
-                  <GlobeSimple size={15} /> Custom MCP URL
-                </button>
-              </div>
-              {catalog.sources.length === 0 ? (
-                <p className="mt-2 text-xs leading-5 text-kumo-subtle">No reviewed presets ship in this release. Add a compatible remote MCP endpoint directly.</p>
-              ) : null}
-            </fieldset>
-
-            {sourceMode === 'catalog' && catalogSource === null ? (
-              <div className="mt-5 grid gap-3 sm:grid-cols-2" aria-label="Reviewed source catalog">
-                {catalog.sources.map((source) => (
-                  <article key={source.sourceId} className="catalog-source-card">
-                    <div className="flex flex-wrap gap-2">
-                      <StatusPill tone="waiting">{source.implementation.connection.authMode === 'oauth' ? 'OAuth' : 'Public'}</StatusPill>
-                    </div>
-                    <h3 className="mt-4 text-sm font-semibold text-kumo-strong">{source.displayName}</h3>
-                    <p className="mt-1 text-xs leading-5 text-kumo-subtle">{source.description}</p>
-                    <p className="mt-3 text-[0.6875rem] text-kumo-inactive">
-                      {source.implementation.recommendedTools.length} recommended exact tool{source.implementation.recommendedTools.length === 1 ? '' : 's'}
-                    </p>
-                    <Button type="button" variant="secondary" className="pressable mt-4" disabled={isBusy} onClick={() => chooseCatalogSource(source)}>
-                      Select {source.displayName} <ArrowRight size={15} />
-                    </Button>
-                  </article>
-                ))}
-              </div>
-            ) : null}
-
+      <ConnectorSetupDialog open={showForm && installationEnabled} onOpenChange={setShowForm}
+        title={catalogSource ? `Set up ${catalogSource.displayName}` : 'Add custom connector'}
+        description="Choose allowed tools. New sources start with nobody assigned; grant access in Team. Do not enter credentials here."
+        closeLabel="Close connector setup" onLibrary={openLibrary} finalFocus={showLibrary ? false : addConnector}>
+          <form onSubmit={save}>
             {catalogSource ? (
               <div className="mt-5 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -595,7 +571,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                       Expected {catalogSource.implementation.connection.authMode === 'oauth' ? 'operator-connected OAuth' : 'public access'}. Live inspection must confirm it before you can save.
                     </p>
                   </div>
-                  <Button type="button" variant="secondary" className="pressable" disabled={isBusy} onClick={clearDraftForm}>Change source</Button>
+                  <Button type="button" variant="secondary" className="pressable" disabled={isBusy} onClick={openLibrary}>Change connector</Button>
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2" aria-label="Catalog-recommended tools">
                   {catalogSource.implementation.recommendedTools.map((tool) => <code key={tool} className="tool-chip">{tool}</code>)}
@@ -606,8 +582,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               </div>
             ) : null}
 
-            {sourceMode === 'custom' || catalogSource ? (
-              <>
+            <>
                 <div className="mt-5 grid gap-5 sm:grid-cols-2">
                   <Input className="w-full" label="Source name" placeholder="Company knowledge" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} />
                   <Input
@@ -627,8 +602,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   </Button>
                   <p className="text-xs leading-5 text-kumo-subtle">Source-authored names, descriptions, and safety hints are untrusted review aids.</p>
                 </div>
-              </>
-            ) : null}
+            </>
 
             {formError ? <p className="field-error" role="alert">{formError}</p> : null}
 
@@ -700,8 +674,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               </section>
             ) : null}
           </form>
-        </section>
-      ) : null}
+      </ConnectorSetupDialog>
 
       <section className="mt-7" aria-label="MCP sources">
         {sources.sources.length === 0 ? (
@@ -709,7 +682,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             <div className="flex size-12 items-center justify-center rounded-2xl bg-kumo-tint text-kumo-subtle"><Database size={23} /></div>
             <h2 className="mt-4 text-base font-semibold text-kumo-strong">No sources yet</h2>
             <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : tokenIsMissing ? 'Your gateway needs its management token before it can install a source.' : 'Source installation is unavailable right now.'}</p>
-            <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={() => setShowForm(true)}><Plus size={16} weight="bold" /> Add your first source</Button>
+            <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={openLibrary}><Plus size={16} weight="bold" /> Add your first connector</Button>
           </div>
         ) : (
           <SourceList
@@ -725,7 +698,11 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             onRefresh={async () => { await refreshSources(); await refreshSourceActions() }}
             authorizeDisabled={applyBlocked}
             isBusy={isBusy}
-            draftLabel={(sourceId) => sourceDraftLabel(latestActions.get(sourceId))}
+            installationDetails={renderInstallation}
+            statusAction={<Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions} onClick={() => void refreshSourceActions().catch(() => {})}>
+              {isCheckingSourceActions ? 'Checking status…' : 'Check status'}
+            </Button>}
+            draftLabel={(sourceId) => sourceDraftLabel(installationState(sourceId)?.shown)}
             installNote={blocker ? null : rollbackNote}
             onAuthorize={(sourceId) => void authorize(sourceId)}
             canRemove={canRemoveDraft}
@@ -733,6 +710,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             onRemoveDraft={(sourceId) => void removeSource(sourceId).catch(() => {})}
           />
         )}
+        {[...latestActions.keys()].filter(sourceId => !sources.sources.some(source => source.id === sourceId)).map(sourceId => (
+          <div key={sourceId} className="mt-4 border-t border-kumo-line pt-4">{renderInstallation(sourceId)}</div>
+        ))}
       </section>
     </div>
   )

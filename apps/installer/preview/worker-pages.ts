@@ -5,7 +5,7 @@ import { bigQueryCredentialPage } from '../src/customer-bigquery-credential-page
 import { customerManagementCredentialPage } from '../src/customer-management-credential-page'
 import { operationPage } from '../src/customer-operation-router'
 import { recoveryPage } from '../src/customer-gateway-entrypoint'
-import { page as customerTeardownPage } from '../src/customer-teardown-router'
+import { page as customerTeardownPage, progressPage as customerTeardownProgressPage } from '../src/customer-teardown-router'
 import { page as finalTeardownPage } from '../src/gateway-teardown-router'
 
 // This module is mounted only by Vite's local UI server, never by a Worker.
@@ -26,7 +26,8 @@ window.fetch=async(input,options={})=>{
   }
   if(path==='/__ankka/install/configuration')return Response.json(reviewed(JSON.parse(options.body)));
   if(path==='/__ankka/install/status')return Response.json({schemaVersion:1,status:'CONVERGING'});
-  if(path==='/api/teardown')return Response.json({hostname:'manage.example.com',message:'Review the final removal, then authorize it in Cloudflare.',failureReason:null,revocationUnconfirmed:true,canAuthorize:true,started:false,handoff:'synthetic-preview-receipt',steps:['Gateway storage','Management domain','Administrator policy','Management Access application','Gateway Worker'].map(label=>({label,done:false}))});
+  if(path==='/__ankka/operation/teardown/progress')return Response.json({status:scenario==='remove-stopped'?'settled':'running',result:scenario==='remove-stopped'?'recovery_required':null,reason:scenario==='remove-stopped'?'removal':null,steps:['Shared connections','Access applications','Access policies','DNS records','Verification'].map((label,index)=>({label,state:index===0?'done':index===1&&scenario!=='remove-stopped'?'active':'pending'}))});
+  if(path==='/api/teardown')return Response.json({hostname:'manage.example.com',message:scenario==='remove-final-running'?'Your gateway is removing its remaining resources.':'Review the final removal, then authorize it in Cloudflare.',failureReason:null,revocationUnconfirmed:scenario!=='remove-final-running',canAuthorize:scenario!=='remove-final-running',started:scenario==='remove-final-running',removing:scenario==='remove-final-running',handoff:'synthetic-preview-receipt',steps:['Gateway storage','Management domain','Administrator policy','Management Access application','Gateway Worker'].map((label,index)=>({label,done:scenario==='remove-final-running'&&index===0,current:scenario==='remove-final-running'&&index===1}))});
   return Response.json({error:'preview_only'},{status:409});
 };
 })();`
@@ -41,7 +42,8 @@ function render(scenario: string): Response | null {
   if (scenario === 'bigquery-key') return bigQueryCredentialPage('synthetic-preview-code', 'synthetic-preview-state')
   if (scenario === 'management-token') return customerManagementCredentialPage({ code: 'synthetic-preview-code', state: 'synthetic-preview-state', managementHostname: 'manage.example.com', expiresAt: 600_000, now: 0 })
   if (scenario === 'remove-review' || scenario === 'remove-error') return customerTeardownPage(scenario === 'remove-error')
-  if (scenario === 'remove-final') return finalTeardownPage()
+  if (scenario === 'remove-running' || scenario === 'remove-stopped') return customerTeardownProgressPage('attempt_' + 'a'.repeat(24))
+  if (scenario === 'remove-final' || scenario === 'remove-final-running') return finalTeardownPage()
   return null
 }
 

@@ -1,7 +1,7 @@
 import { Button } from './Button'
 import { SourceRemoval } from './SourceRemoval'
 import { CaretDown, CaretRight, Check, Clock, MagnifyingGlass } from '@phosphor-icons/react'
-import { Fragment, useId, useState } from 'react'
+import { Fragment, type ReactNode, useId, useState } from 'react'
 import type { ManagedSource } from '../api'
 
 const filters = [
@@ -15,6 +15,8 @@ interface SourceListProps {
   installationEnabled: boolean
   authorizeDisabled?: boolean
   isBusy: boolean
+  installationDetails?(sourceId: string): ReactNode
+  statusAction?: ReactNode
   draftLabel?(sourceId: string): string
   /** One sentence to read before installing, shown directly beside each install control; nothing when null. */
   installNote?: string | null
@@ -32,7 +34,7 @@ interface SourceListProps {
   onRemoveDraft?(sourceId: string): void
 }
 
-export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft }: SourceListProps) {
+export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, statusAction, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -60,6 +62,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
             </Button>
           ))}
         </div>
+        {statusAction}
         <label className="flex w-full items-center gap-2 rounded-lg bg-kumo-tint/55 px-3 sm:w-56">
           <MagnifyingGlass aria-hidden="true" size={16} className="shrink-0 text-kumo-subtle" />
           <input
@@ -83,6 +86,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
         </thead>
         <tbody>
           {visibleSources.map((source) => {
+            const installation = installationDetails?.(source.id)
             const isExpanded = expanded === source.id || pendingRemovalSourceId === source.id
             const sourceDetailsId = `${detailsId}-${source.id}`
             const connection = source.authMode === 'oauth'
@@ -134,6 +138,11 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                     )}
                   </td>
                 </tr>
+                {installation ? (
+                  <tr className="border-b border-kumo-line/70">
+                    <td colSpan={3} className="px-5 py-4 sm:pl-14">{installation}</td>
+                  </tr>
+                ) : null}
                 {isExpanded ? (
                   <tr id={sourceDetailsId} className="border-b border-kumo-line/70 bg-kumo-tint/40">
                     <td colSpan={3} className="px-5 py-5 sm:pl-14">

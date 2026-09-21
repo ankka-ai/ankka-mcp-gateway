@@ -1,3 +1,4 @@
+import { stepListScript } from './step-list';
 import { customerPageEnd, customerPageStart } from './customer-page-shell';
 import * as v from 'valibot';
 import { canonicalJson } from './canonical-json';
@@ -40,7 +41,7 @@ function sameOrigin(request: Request): boolean {
 }
 
 /** What the page says about a failure a reload may get past; every other failure has its own refusal word. */
-export const GATEWAY_TEARDOWN_RELOAD_GUIDANCE = 'Removal could not continue. Reload this page or use your saved recovery receipt.';
+export const GATEWAY_TEARDOWN_RELOAD_GUIDANCE = 'Removal could not continue. Reload this page to check its progress.';
 export type GatewayTeardownRefusalCode = 'teardown_receipt_expired' | 'teardown_receipt_rejected' | 'teardown_session_missing';
 
 /**
@@ -55,30 +56,28 @@ class GatewayTeardownRefusal extends Error {
 /** One message per refusal word: where a receipt this page can use comes from. */
 export function gatewayTeardownRefusalMessage(code: GatewayTeardownRefusalCode, hostname: string | null = null): string {
   if (code === 'teardown_session_missing') {
-    return "This browser has no removal open. Choose a recovery receipt you saved from this page, or open your gateway's management page and authorize the removal again.";
+    return "This browser has no removal open. Open your gateway's management page and authorize removal again.";
   }
-  return `${code === 'teardown_receipt_expired' ? 'This removal receipt has expired.' : 'This removal receipt could not be verified.'} Open your gateway's management page${
-    hostname === null ? '' : ` at ${hostname}`} and authorize the removal again to get a fresh one, or choose a recovery receipt you saved from this page.`;
+  return `${code === 'teardown_receipt_expired' ? 'This removal link has expired.' : 'This removal link could not be verified.'} Open your gateway's management page${
+    hostname === null ? '' : ` at ${hostname}`} and authorize removal again.`;
 }
 
 export function page(): Response {
   const nonce = randomBase64Url(18);
-  return new Response(`${customerPageStart('Remove your gateway · Ankka', 'form')}<p class="eyebrow">Gateway removal</p><h1>Finish removing your gateway</h1><p id="message" role="status" aria-live="polite">Loading removal progress…</p><small id="failure" hidden></small>
-<section id="review" hidden><p id="target"></p><p>Your sources and Portal have already been removed. A fresh Cloudflare approval lets Ankka finish removing the gateway's storage, management page, and Worker from your account.</p><ol id="steps"></ol>
+  return new Response(`${customerPageStart('Remove your gateway · Ankka', 'form')}<h1>Finish removing your gateway</h1><p id="message" role="status" aria-live="polite">Loading removal progress…</p><small id="failure" hidden></small>
+<section id="review" hidden><p id="target"></p><p>Your sources and Portal have already been removed. A fresh Cloudflare approval lets Ankka finish removing the gateway's storage, management page, and Worker from your account.</p><ol id="steps" class="ankka-steps" role="list" aria-label="Final removal progress"></ol>
 <p id="warning" class="warning" hidden>A previous temporary Cloudflare approval could not be confirmed revoked. Review Ankka MCP Gateway in Cloudflare → My Profile → Access Management → Connected Applications and revoke that approval.</p>
 <p id="token" class="warning" hidden>One thing is left in Cloudflare: removing a gateway does not delete its management token. If you created one for this gateway, delete the token named <strong id="token-name"></strong> under <a href="https://dash.cloudflare.com/?to=/:account/api-tokens" target="_blank" rel="noopener noreferrer">Manage Account → Account API Tokens</a>.</p>
-<button class="danger" id="authorize" hidden>Authorize final removal</button><p><button class="secondary" id="download">Download recovery receipt</button></p><small>Keep this receipt to resume if you lose this browser session. It contains resource references and signed removal evidence, but no credentials.</small></section>
-<section><label for="receipt">Resume from a saved recovery receipt</label><p><input id="receipt" type="file" accept="application/json,.json"></p></section>
+<button class="danger" id="authorize" hidden>Authorize final removal</button></section>
 <script nonce="${nonce}">(()=>{const message=document.querySelector('#message'),review=document.querySelector('#review'),authorize=document.querySelector('#authorize');let current,poll;
+${stepListScript}
 const reload=${JSON.stringify(GATEWAY_TEARDOWN_RELOAD_GUIDANCE)},rejected=${JSON.stringify(gatewayTeardownRefusalMessage('teardown_receipt_rejected'))};
 const api=async(path,body)=>{let response;try{response=await fetch(path,{method:body===undefined?'GET':'POST',headers:body===undefined?{}:{'content-type':'application/json',...(current?{'x-csrf-token':current.csrfToken}:{})},body:body===undefined?undefined:JSON.stringify(body),credentials:'same-origin',cache:'no-store'})}catch{throw new Error(reload)}if(!response.ok){const refusal=await response.json().catch(()=>null);throw new Error(refusal&&typeof refusal.message==='string'?refusal.message:reload)}return response.json()};
-const show=value=>{current=value;review.hidden=false;document.querySelector('#target').textContent='Gateway: '+value.hostname;message.textContent=value.message;const failure=document.querySelector('#failure');failure.hidden=!value.failureReason;failure.textContent=value.failureReason?'Removal reference: '+value.failureReason:'';document.querySelector('#warning').hidden=!value.revocationUnconfirmed;document.querySelector('#token').hidden=!value.managementTokenName;document.querySelector('#token-name').textContent=value.managementTokenName||'';authorize.hidden=!value.canAuthorize;authorize.disabled=false;authorize.textContent=value.started?'Authorize and resume removal':'Authorize final removal';const steps=document.querySelector('#steps');steps.replaceChildren(...value.steps.map(step=>{const item=document.createElement('li');item.textContent=step.label+(step.done?' — Removed':step.current?' — Removing…':'');return item}));clearTimeout(poll);if(value.removing)poll=setTimeout(()=>load().catch(error=>{message.textContent=error.message}),3000)};
+const show=value=>{current=value;review.hidden=false;document.querySelector('#target').textContent='Gateway: '+value.hostname;message.textContent=value.message;const failure=document.querySelector('#failure');failure.hidden=!value.failureReason;failure.textContent=value.failureReason?'Removal reference: '+value.failureReason:'';document.querySelector('#warning').hidden=!value.revocationUnconfirmed;document.querySelector('#token').hidden=!value.managementTokenName;document.querySelector('#token-name').textContent=value.managementTokenName||'';authorize.hidden=!value.canAuthorize;authorize.disabled=false;authorize.textContent=value.started?'Authorize and resume removal':'Authorize final removal';const steps=document.querySelector('#steps');steps.replaceChildren(...value.steps.map(step=>progressStep(step.label,step.done?'done':step.current?'active':'pending',step.done?'Removed':step.current?'Removing…':'Waiting')));clearTimeout(poll);if(value.removing)poll=setTimeout(()=>load().catch(error=>{message.textContent=error.message}),3000)};
 const load=async()=>show(await api('/api/teardown'));
 addEventListener('pagehide',()=>clearTimeout(poll));
 const accept=async(handoff)=>{await api('/api/teardown/import',{handoff});history.replaceState(null,'','/teardown');await load()};
 authorize.onclick=async()=>{authorize.disabled=true;try{const value=await api('/api/teardown/authorize',{});location.assign(value.authorizationUrl)}catch(error){message.textContent=error.message;authorize.disabled=false}};
-document.querySelector('#download').onclick=()=>{if(!current)return;const url=URL.createObjectURL(new Blob([current.handoff],{type:'application/json'}));const a=document.createElement('a');a.href=url;a.download='ankka-removal-receipt.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};
-document.querySelector('#receipt').onchange=async(event)=>{try{const file=event.target.files[0];if(!file||file.size>32768)throw new Error('Choose an Ankka removal receipt smaller than 32 KB.');await accept(await file.text())}catch(error){message.textContent=error.message}};
 (async()=>{try{const fragment=location.hash.slice(1);if(fragment){let handoff;try{if(!/^[A-Za-z0-9_-]{40,45000}$/.test(fragment))throw new Error();handoff=new TextDecoder('utf-8',{fatal:true}).decode(Uint8Array.from(atob(fragment.replace(/-/g,'+').replace(/_/g,'/')),c=>c.charCodeAt(0)))}catch{throw new Error(rejected)}await accept(handoff)}else await load()}catch(error){message.textContent=error.message}})()})();</script>${customerPageEnd}`, {
     headers: { ...headers, 'content-type': 'text/html; charset=utf-8',
       'content-security-policy': `default-src 'none'; script-src 'nonce-${nonce}'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'` },

@@ -12,8 +12,8 @@ const COMPONENTS = Object.freeze({
   admin: null,
   installer: [
     'assets/ankka-85bfe235.svg',
-    'assets/installer-711c3f62.css',
-    'assets/installer-c30a165c.js',
+    'assets/installer-3b9796e1.js',
+    'assets/installer-b768c2db.css',
     'index.html',
   ],
   worker: ['index.js'],
@@ -21,7 +21,7 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'edbf9a66c9b5ac5efd17aac2710a6b75f3eb0d9c52177dc4f4ee63911f784fbb',
+  installer: 'd577fa29afc7705693390bfdcbd3ed689fdbe643fe8ce998a6bbd54a86b4f2ba',
   worker: '7ddae83daae891dec188ad299c9c5051a1e2f727e5ddacd799a385ba0bff9677',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -35,6 +35,7 @@ const CONTENT_TYPES = Object.freeze({
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.svg': 'image/svg+xml',
+  '.png': 'image/png',
   '.txt': 'text/plain; charset=utf-8',
 });
 
@@ -115,7 +116,7 @@ test('release sources have one generated admin and four exact payload components
       for (const name of names.filter((entry) => ![
         'index.html', 'LICENSE.txt', 'THIRD_PARTY_LICENSES.txt',
       ].includes(entry))) {
-        assert.match(name, /^assets\/admin-[a-f0-9]{8}\.(?:css|js|svg)$/u);
+        assert.match(name, /^assets\/admin-[a-f0-9]{8}\.(?:css|js|svg|png)$/u);
       }
     } else {
       assert.deepEqual(names, expectedFiles);
@@ -130,7 +131,7 @@ test('release sources have one generated admin and four exact payload components
         assert.equal(record.sha256, FROZEN_LIFECYCLE_SHA256[relative]);
       }
       const basename = path.posix.basename(record.path);
-      const fingerprint = basename.match(/-([a-f0-9]{8})\.(?:css|js|svg)$/u)?.[1];
+      const fingerprint = basename.match(/-([a-f0-9]{8})\.(?:css|js|svg|png)$/u)?.[1];
       if (fingerprint && component !== 'admin') assert.equal(record.sha256.startsWith(fingerprint), true);
     }
   }
@@ -188,7 +189,7 @@ test('admin and installer HTML use external same-origin assets without inline ex
     assert.equal(sources.length >= 2, true);
     if (component === 'installer') assert.equal(sources.length, 3);
     for (const source of sources) {
-      assert.match(source, /^\/assets\/[a-z]+-[a-f0-9]{8}\.(?:css|js|svg)$/u);
+      assert.match(source, /^\/assets\/[a-z]+-[a-f0-9]{8}\.(?:css|js|svg|png)$/u);
       const file = await readFile(componentUrl(component, source.slice(1)));
       if (component === 'installer') {
         assert.equal(sha256(file).startsWith(source.match(/-([a-f0-9]{8})\./u)[1]), true);
@@ -336,7 +337,7 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /--color-sidebar:#131313/u);
   assert.match(adminCss, /--font-mono:var\(--font-sans\)/u);
 
-  const installerCss = await readFile(new URL('installer/assets/installer-711c3f62.css', ROOT), 'utf8');
+  const installerCss = await readFile(new URL('installer/assets/installer-b768c2db.css', ROOT), 'utf8');
   {
     const css = installerCss;
     assert.match(css, /font-family:\s*"Helvetica Neue", Helvetica, Arial, sans-serif/u);

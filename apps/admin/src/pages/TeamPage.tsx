@@ -1,11 +1,13 @@
 import { Button } from '../components/Button'
 import { AddUserDialog } from '../components/AddUserDialog'
+import { MemberAccessDialog } from '../components/MemberAccessDialog'
 import { Check, Trash, X } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type Team, type TeamAction, type TeamMember } from '../api'
 import { ManagementTokenCard } from '../components/ManagementTokenCard'
 import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
+import { DashboardSkeleton } from '../components/DashboardSkeleton'
 import { useGateway } from '../GatewayContext'
 import { isGatewayUiPreview } from '../preview-api'
 
@@ -223,18 +225,17 @@ export function TeamPage() {
         </div>
       ) : null}
       {message ? <p role="status" className={`notice-banner mt-6 notice-${action?.status === 'succeeded' ? 'success' : action?.status === 'failed' || action?.status === 'recovery_required' ? 'error' : 'neutral'}`}>{message}</p> : null}
-      {!team ? <p className="mt-8 text-sm text-kumo-subtle">{loading ? 'Loading team access…' : 'No team access information is available.'}</p> : (
+      {!team ? loading ? <DashboardSkeleton page="team" showHeader={false} /> : <p className="mt-8 text-sm text-kumo-subtle">No team access information is available.</p> : (
         <>
           {tokenMissing ? <ManagementTokenCard choice={team.managementCredentialChoice} /> : null}
           {tokenMissing && team.editingDisabledReason === 'management_credential_missing' ? <p role="status" className="mt-4 text-sm leading-6 text-kumo-subtle">Until your gateway has the token, you can still inspect the saved access configuration and shared tools.</p> : null}
-          {!team.editingEnabled && team.editingDisabledReason !== 'management_credential_missing' ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, teardown, or management token action is in progress. Finish or safely cancel that action, then refresh.' : team.editingDisabledReason === 'managed_in_cloudflare' ? <>Team membership is managed directly in Cloudflare for this release. This gateway does not accept a permanent Cloudflare management credential. Follow the <a href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/TEAM_ACCESS.md" target="_blank" rel="noreferrer" className="underline underline-offset-4">Team access guide</a> to review the owned Access policies.</> : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
+          {!team.editingEnabled && team.editingDisabledReason !== 'management_credential_missing' && team.editingDisabledReason !== 'managed_in_cloudflare' ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, teardown, or management token action is in progress. Finish or safely cancel that action, then refresh.' : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
           {sources && sources.installationEnabled !== true && sources.applyMode !== 'account_token' ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed sources below.' : 'This restriction does not change saved access.'}</p> : null}
           {needsRefresh ? <p role="status" className="notice-banner notice-warning mt-6">Editing is paused until the recorded state can be checked. Trying again reloads the saved configuration and discards unsaved selections; it does not resubmit a change.</p> : null}
           <section className="mt-7" aria-labelledby="edit-access-title">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <h2 id="edit-access-title" className="text-base font-semibold text-subheading">{recorded ? 'Recorded change' : `Team members (${draft.length})`}</h2>
               <div className="flex flex-wrap items-center gap-3">
-                <Button variant="secondary" disabled={loading || saving || isBusy || changed} onClick={() => void refresh()}>Refresh from Cloudflare</Button>
                 {recorded || changed ? <StatusPill tone="attention">{recorded ? 'Not fully verified' : 'Unsaved changes'}</StatusPill> : null}
                 {!recorded ? <AddUserDialog members={draft} disabled={disabled} onAdd={(email) => {
                   if (!disabled) setDraft((current) => canonicalMembers([...current, { email, sourceIds: [] }]))
@@ -248,32 +249,19 @@ export function TeamPage() {
 
             <div className="mt-5 border-t border-kumo-line">
               {displayedMembers.map((member) => (
-                <fieldset key={member.email} disabled={disabled} className="min-w-0 border-b border-kumo-line/70 py-4">
-                  <legend className="sr-only">{member.email}</legend>
-                  <div className="grid items-center gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_auto]">
-                    <div className="min-w-0">
-                      <p className="break-all text-sm font-medium text-kumo-strong">{member.email}</p>
-                      <p className="mt-1 text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Administrator · role unchanged' : 'Team member'}</p>
-                    </div>
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap gap-2">
-                        {installed.map((source) => (
-                          <label key={source.id} className="inline-flex min-w-0 items-center gap-2 rounded-md bg-kumo-tint px-2.5 py-1.5 text-sm" title={`${source.enabledTools.length} shared tools`}>
-                            <input className="size-4 shrink-0 accent-brand" type="checkbox" checked={member.sourceIds.includes(source.id)} onChange={(event) => {
-                              const checked = event.target.checked
-                              setDraft((current) => current.map((person) => person.email === member.email ? { ...person, sourceIds: checked ? [...new Set([...person.sourceIds, source.id])] : person.sourceIds.filter((id) => id !== source.id) } : person))
-                            }} />
-                            <span className="break-words">{source.label}</span>
-                          </label>
-                        ))}
-                      </div>
-                      {member.sourceIds.length === 0 ? <p className="mt-1 text-xs text-kumo-subtle">No sources selected.</p> : null}
-                    </div>
-                    <div className="justify-self-end sm:min-w-9">
-                      {!administrators.has(member.email) && !recorded ? <Button type="button" variant="secondary" className="size-9 justify-center p-0" aria-label={`Remove ${member.email}`} onClick={() => setDraft((current) => current.filter((person) => person.email !== member.email))}><Trash size={16} aria-hidden="true" /></Button> : null}
-                    </div>
+                <div key={member.email} role="group" aria-label={member.email} className="flex min-w-0 items-center justify-between gap-4 border-b border-kumo-line/70 py-4">
+                  <div className="min-w-0">
+                    <p className="break-all text-sm font-medium text-kumo-strong">{member.email}</p>
+                    <p className="mt-1 text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Administrator · role unchanged' : 'Team member'}</p>
+                    <p className="mt-1 text-xs text-kumo-subtle">{member.sourceIds.length === 0 ? 'No sources selected.' : `${member.sourceIds.length} ${member.sourceIds.length === 1 ? 'source' : 'sources'} selected`}</p>
                   </div>
-                </fieldset>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <MemberAccessDialog member={member} sources={installed} disabled={disabled} onChange={sourceIds => {
+                      if (!disabled) setDraft(current => current.map(person => person.email === member.email ? { ...person, sourceIds } : person))
+                    }} />
+                    {!administrators.has(member.email) && !recorded ? <Button type="button" variant="secondary" disabled={disabled} className="size-9 justify-center p-0" aria-label={`Remove ${member.email}`} onClick={() => setDraft((current) => current.filter((person) => person.email !== member.email))}><Trash size={16} aria-hidden="true" /></Button> : null}
+                  </div>
+                </div>
               ))}
               {displayedMembers.length === 0 && !recorded ? <p className="py-5 text-sm text-kumo-subtle">No users have been configured.</p> : null}
             </div>
@@ -286,38 +274,6 @@ export function TeamPage() {
               </Button>
               {canCancel ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving || loading || needsRefresh || callbackId !== null} onClick={() => void cancelRecordedChange()}><X size={16} /> Cancel recorded change</Button> : null}
               {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving} onClick={() => setDraft(effectiveMembers)}>Discard unsaved changes</Button> : null}
-              <p className="max-w-[65ch] text-xs leading-5 text-kumo-subtle">Access is not confirmed until Cloudflare applies and verifies the change. Existing cached sessions may remain valid until they expire or are revoked in Cloudflare Access.</p>
-            </div>
-            <p className="mt-3 max-w-[75ch] text-xs leading-5 text-kumo-subtle">Finish any active permission change before removing your gateway. Removal checks the saved ownership receipts and current policies.</p>
-
-            <details className="mt-5 border-t border-kumo-line pt-4">
-              <summary className="cursor-pointer text-sm font-medium text-subheading">Saved access configuration <span className="ml-2 text-xs font-normal text-kumo-subtle">Revision {team.revision}</span></summary>
-              <p className="mt-2 text-sm leading-6 text-kumo-subtle">{team.observedAt ? `Cloudflare policy membership checked at ${new Date(team.observedAt).toLocaleString()}. Refresh to see later changes. This does not guarantee effective access or immediately revoke existing sessions.` : 'This is the last saved configuration. Current Cloudflare policy membership has not been verified.'}</p>
-              <ul className="mt-3 divide-y divide-kumo-line" aria-label="Saved team access">
-                {effectiveMembers.map((member) => (
-                  <li key={member.email} className="flex flex-col gap-1 py-3 text-sm sm:flex-row sm:justify-between sm:gap-5">
-                    <span className="break-all font-medium text-kumo-strong">{member.email}</span>
-                    <span className="text-kumo-subtle sm:text-right">{member.sourceIds.length ? member.sourceIds.map((id) => team.sources.find((source) => source.id === id)?.label ?? 'Unavailable source').join(', ') : 'No source access'}</span>
-                  </li>
-                ))}
-                {effectiveMembers.length === 0 ? <li className="py-3 text-sm text-kumo-subtle">No users have been configured.</li> : null}
-              </ul>
-            </details>
-          </section>
-
-          <section className="surface-card mt-5 p-5 sm:p-6" aria-labelledby="shared-tools-title">
-            <h2 id="shared-tools-title" className="text-base font-semibold text-subheading">Shared source tools</h2>
-            <p className="mt-2 max-w-[75ch] text-sm leading-6 text-kumo-subtle">Everyone granted a source gets the same enabled tools. This page does not set per-user tool permissions. Review the shared allowlist in <a href="/sources" className="underline underline-offset-4">Sources</a>.</p>
-            <div className="mt-4 divide-y divide-kumo-line">
-              {team.sources.map((source) => (
-                <details key={source.id} className="py-3">
-                  <summary className="cursor-pointer text-sm font-medium text-kumo-strong">{source.label} · {source.enabledTools.length} tools{source.status === 'draft' ? ' · Draft, not assignable' : ''}</summary>
-                  <ul className="mt-3 flex max-h-56 flex-wrap gap-2 overflow-y-auto" aria-label={`${source.label} enabled tools`}>
-                    {source.enabledTools.map((tool) => <li key={tool} className="tool-chip break-all"><code>{tool}</code></li>)}
-                  </ul>
-                </details>
-              ))}
-              {team.sources.length === 0 ? <p className="py-3 text-sm text-kumo-subtle">No MCP sources yet.</p> : null}
             </div>
           </section>
         </>

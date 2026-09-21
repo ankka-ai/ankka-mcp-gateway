@@ -376,7 +376,7 @@ describe('hosted removal browser callback and durable recovery', () => {
       test.closeImportWindow();
       const expired = await refused(await test.send('/api/teardown/import', { handoff: second }));
       expect(expired).toEqual({ error: 'teardown_receipt_expired', message: gatewayTeardownRefusalMessage('teardown_receipt_expired', ROOT_TEST.hostname) });
-      expect(expired.message).toContain(`management page at ${ROOT_TEST.hostname} and authorize the removal again`);
+      expect(expired.message).toContain(`management page at ${ROOT_TEST.hostname} and authorize removal again`);
       expect(expired.message).not.toContain('Reload');
       // The accepted receipt is the saved recovery receipt: it still opens its job.
       expect((await test.import()).status).toBe(200);
@@ -394,6 +394,11 @@ describe('hosted removal browser callback and durable recovery', () => {
       expect(html).toContain(JSON.stringify(GATEWAY_TEARDOWN_RELOAD_GUIDANCE));
       expect(html).toContain(JSON.stringify(gatewayTeardownRefusalMessage('teardown_receipt_rejected')));
       expect(html).toContain('refusal.message');
+      expect(html).not.toContain('Download recovery receipt');
+      expect(html).not.toContain('type="file"');
+      expect(html).not.toContain("querySelector('#download')");
+      expect(html).not.toContain("querySelector('#receipt')");
+      expect(html).toContain("await accept(handoff)");
     } finally { test.close(); }
     // The first receipt of a removal, arriving after its window: no job exists, and the gateway it names can sign another.
     const late = await fixture();

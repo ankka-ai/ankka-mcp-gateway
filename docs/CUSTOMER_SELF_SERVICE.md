@@ -215,8 +215,8 @@ for its boundaries and recovery behavior.
 
 ## Add BigQuery
 
-Compatible releases provide **Sources → Add BigQuery**. Enter your query project
-and datasets, approve Cloudflare, and upload a dedicated service-account JSON
+Compatible releases provide **Sources → Add connector → Connector library → BigQuery**.
+Enter your query project and datasets, approve Cloudflare, and upload a dedicated service-account JSON
 key directly to your gateway. It deploys the protected bridge and configures
 its callback before the operator connects the source and grants team access.
 See the [complete flow and recovery instructions](ADD_BIGQUERY.md).

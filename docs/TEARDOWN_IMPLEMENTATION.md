@@ -118,8 +118,9 @@ receipt that verifies except for its closed window, with the management
 hostname that receipt certifies; `teardown_receipt_rejected` for a receipt that
 does not verify or contradicts the accepted job, naming no hostname; and
 `teardown_session_missing` when the browser holds no removal. Each says to
-authorize the removal again on the gateway's management page or to choose a
-saved recovery receipt. Every other failure keeps `teardown_unavailable` and
+authorize the removal again on the gateway's management page. The page does not
+expose receipt download or upload controls; signed handoffs remain internal to
+the removal flow. Every other failure keeps `teardown_unavailable` and
 the reload wording, as does a request that never reached the installer.
 
 The distinct `gateway-root-finalize` operation requests `workers-scripts.write`

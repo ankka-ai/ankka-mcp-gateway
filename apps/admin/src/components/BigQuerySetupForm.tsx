@@ -4,6 +4,7 @@ import { ArrowRight } from '@phosphor-icons/react'
 import { type BigQuerySetupInput, rollbackEndsMessage, validHandoffUrl } from '../api'
 import { useGateway } from '../GatewayContext'
 import { Button } from './Button'
+import { StepList, ProgressStep } from './StepList'
 
 const PROJECT = /^[a-z][a-z0-9-]{4,61}[a-z0-9]$/u
 
@@ -17,7 +18,7 @@ export function parseBigQueryDatasets(text: string): BigQuerySetupInput['configu
   return datasets.every(({ projectId, datasetId }) => PROJECT.test(projectId) && /^[A-Za-z0-9_]{1,1024}$/u.test(datasetId)) ? datasets : null
 }
 
-export function BigQuerySetupForm({ disabled }: { disabled: boolean }) {
+export function BigQuerySetupForm({ disabled, embedded = false }: { disabled: boolean; embedded?: boolean }) {
   const { api, sources, refreshSources, refreshSourceActions } = useGateway()
   const [label, setLabel] = useState('BigQuery')
   const [queryProjectId, setQueryProjectId] = useState('')
@@ -48,12 +49,14 @@ export function BigQuerySetupForm({ disabled }: { disabled: boolean }) {
     }
   }
   return (
-    <section className="surface-card mt-7 p-5 sm:p-6" aria-labelledby="bigquery-title">
-      <h2 id="bigquery-title" className="text-base font-semibold text-subheading">Add BigQuery</h2>
-      <p className="mt-2 max-w-[70ch] text-sm leading-6 text-kumo-subtle">Give your team read-only SQL and table discovery through a bridge in your Cloudflare account.</p>
-      <ol className="mt-5 grid list-inside list-decimal gap-2 text-sm text-kumo-subtle sm:grid-cols-3" aria-label="BigQuery setup steps">
-        <li>Choose your data</li><li>Approve and upload key</li><li>Connect and grant access</li>
-      </ol>
+    <section className={embedded ? undefined : 'surface-card mt-7 p-5 sm:p-6'} aria-label={embedded ? 'BigQuery connection' : undefined} aria-labelledby={embedded ? undefined : 'bigquery-title'}>
+      {!embedded ? <><h2 id="bigquery-title" className="text-base font-semibold text-subheading">Add BigQuery</h2>
+      <p className="mt-2 max-w-[70ch] text-sm leading-6 text-kumo-subtle">Give your team read-only SQL and table discovery through a bridge in your Cloudflare account.</p></> : null}
+      <StepList label="BigQuery setup steps">
+        <ProgressStep label="Choose your data" state="current" status="Current step" />
+        <ProgressStep label="Approve and upload key" />
+        <ProgressStep label="Connect and grant access" />
+      </StepList>
       <form className="mt-6" onSubmit={(event) => void submit(event)}>
         <fieldset disabled={disabled || submitting}>
           <legend className="sr-only">BigQuery connection</legend>

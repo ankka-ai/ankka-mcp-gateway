@@ -59,14 +59,14 @@ select:focus-visible, textarea:focus-visible, summary:focus-visible {
   -webkit-mask-image: linear-gradient(to bottom, rgb(0 0 0) 20%, rgb(0 0 0 / 0) 100%);
   mask-image: linear-gradient(to bottom, rgb(0 0 0) 20%, rgb(0 0 0 / 0) 100%);
 }
-.product-label, .eyebrow, .outline-number,
+.product-label, .outline-number,
 .setup-outline strong, button, .primary-button, .secondary-button, .danger-button,
 .disclosure summary, .stage-position, .artwork-picker, footer > span {
   font-family: var(--font-mono);
   font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
-.product-label, .eyebrow { font-size: var(--font-size-label); line-height: 1.5; letter-spacing: 0.09em; text-transform: uppercase; }
+.product-label { font-size: var(--font-size-label); line-height: 1.5; letter-spacing: 0.09em; text-transform: uppercase; }
 .product-label { color: var(--muted); }
 .layout, main, .panel { min-width: 0; background: transparent; border: 0; }
 main { padding: 0; }
@@ -81,7 +81,6 @@ h1 { max-width: 19ch; font-size: clamp(2.625rem, 5vw, 4.5rem); font-weight: 300;
 h2 { font-size: 1.375rem; font-weight: 400; line-height: 1.25; letter-spacing: -0.02em; }
 h3 { font-size: 1rem; font-weight: 500; line-height: 1.4; }
 p { text-wrap: pretty; }
-.eyebrow { margin: 0 0 1.5rem; color: var(--muted); }
 .lede { max-width: 44ch; margin: 1.75rem 0 2.25rem; font-size: var(--font-size-body); color: var(--muted); line-height: 1.6; }
 .intro-copy .lede { max-width: 34ch; margin-block-end: 0; }
 .setup-controls { padding-block-start: 0.25rem; }
@@ -265,7 +264,6 @@ footer .disclosure p { font-size: var(--font-size-caption); }
   .product-label { font-size: var(--font-size-label); }
   .welcome-panel { grid-template-columns: 1fr; gap: 2.75rem; }
   #welcome-title { font-size: clamp(2.75rem, 10vw, 4.5rem); }
-  .eyebrow { margin-block-end: 1.25rem; }
   .intro-copy .lede { margin-block-start: 1.5rem; max-width: 34ch; }
   .setup-controls { padding: 0; }
   .setup-outline li { padding-block: 1.25rem; }

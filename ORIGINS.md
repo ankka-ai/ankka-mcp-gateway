@@ -53,6 +53,47 @@ Copyright (c) 2020 Jeremy Danyow. The published
 `@cfworker/json-schema@4.1.1` npm tarball declares MIT but omits the repository
 license file, so the release license generator uses this reviewed copy.
 
+## BigQuery icon
+
+`apps/admin/src/assets/google-bigquery.svg` was copied on 2026-09-21 from
+[Simple Icons](https://github.com/simple-icons/simple-icons/blob/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/googlebigquery.svg),
+revision `b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76`. Simple Icons contributors
+publish the artwork under CC0 1.0 Universal, which permits redistribution;
+the license is retained in `third_party/licenses/simple-icons-CC0-1.0.md`.
+The only modification is a blue fill. Reviewed on 2026-09-21 for scripts,
+external references, and private metadata; none were present. Google owns the
+BigQuery brand and trademark; the icon identifies the supported connector.
+
+## Provider connector icons
+
+The files in `apps/admin/src/assets/connectors/` were obtained and reviewed on
+2026-09-21 to identify their respective providers in the connector library:
+
+- Airtable, Confluence, GitHub, GitLab, Google Drive, Google Sheets, Jira,
+  Notion, Salesforce, Sentry, Slack, and Stripe: the corresponding SVGs from
+  [Dashboard Icons](https://github.com/homarr-labs/dashboard-icons/tree/cf87d9bbd47792b20893f090ff48763fe874b05d/svg),
+  revision `cf87d9bbd47792b20893f090ff48763fe874b05d`, published by Homarr Labs
+  and contributors under Apache-2.0. The license permits redistribution and is
+  retained in `third_party/licenses/dashboard-icons-Apache-2.0.txt`. Google
+  Sheets has an added viewBox for scaling; all other files are unchanged.
+- HubSpot, Intercom, and Linear: SVGs from
+  [Simple Icons](https://github.com/simple-icons/simple-icons/tree/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons),
+  revision `b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76`, by Simple Icons
+  contributors under CC0 1.0 Universal. The retained license is
+  `third_party/licenses/simple-icons-CC0-1.0.md`. Only fills were added for color
+  and contrast on the dark background. Both Intercom regions share one icon.
+- Ahrefs: the unchanged SVG favicon linked from the official homepage,
+  `https://static.ahrefs.com/favicon.svg?v=2`.
+- Gorgias: the unchanged PNG favicon linked from its official homepage,
+  `https://cdn.prod.website-files.com/5e4ff204e7b6f80e402d407a/655f0a6ab7ecc73b0e8cbcad_Favicon%201.png`.
+
+The Ahrefs and Gorgias assets remain the property of their respective providers;
+no separate asset license was supplied. Their inclusion was requested by the
+repository maintainer for provider identification, not as a grant of broader
+redistribution or trademark rights. All provider marks remain the property of
+their owners. SVGs were reviewed for scripts, external references and private
+metadata; none were present. Assets are served locally without provider requests.
+
 ## Other repository code
 
 Material not listed above was written for this public repository. Published npm

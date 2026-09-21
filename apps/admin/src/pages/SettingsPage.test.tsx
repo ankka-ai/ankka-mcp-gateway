@@ -156,8 +156,8 @@ describe('SettingsPage management token', () => {
     const { container } = render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
 
     expect(await (await opened()).findByRole('heading', { name: 'Add your management token' })).toBeInTheDocument()
-    expect(section().getByText('You continued without a token during setup, so your gateway has never had one.')).toBeVisible()
-    expect(section().getByText(/Create the token first: Cloudflare’s approval in the second step lasts only a few minutes\./u)).toBeVisible()
+    expect(section().getByText('You skipped the token during setup.')).toBeVisible()
+    expect(section().getByText(/Create the token first as a Cloudflare account Administrator/u)).toBeVisible()
     expect(container.textContent).not.toMatch(/Variables and Secrets|encrypted secret named|Enter the token only in Cloudflare|wrangler/u)
     expect(section().queryByRole('button', { name: 'Verify management access' })).not.toBeInTheDocument()
     expect(section().queryByRole('button', { name: 'Replace management token' })).not.toBeInTheDocument()
@@ -173,17 +173,19 @@ describe('SettingsPage management token', () => {
     const client = api()
     client.getManagementCredentialStatus = vi.fn(async () => withToken)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    expect(await (await opened()).findByText('Your gateway has a management token. Verify management access to check its permissions.')).toBeVisible()
+    expect(await (await opened()).findByText('Management token configured.')).toBeVisible()
     expect(client.getTeam).not.toHaveBeenCalled()
     expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
     expect(section().getByRole('button', { name: 'Verify management access' })).toBeEnabled()
-    const replacing = section().getByText(/Replacing the token takes the same steps/u)
-    expect(replacing).toHaveTextContent(`Your gateway cannot delete the old token. Afterwards, delete it in Cloudflare under Manage Account → Account API Tokens: both are named Ankka gateway ${window.location.hostname}, and the old one has the earlier creation date.`)
+    const details = section().getByText('Token details').closest('details')
+    expect(details).not.toHaveAttribute('open')
+    expect(details).toHaveTextContent(`Look for Ankka gateway ${window.location.hostname}; the older creation date identifies the previous token.`)
+    expect(details).toHaveTextContent('Replacing the token or removing your gateway does not delete it.')
     expect(section().queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
   })
 
   const verifications: [ManagementVerification, string[]][] = [
-    [verified, ['Verified. The token is active, and your gateway wrote its own MCP Portal and its own Portal Access policy back unchanged. That proves both permissions: MCP Portals Edit and Access: Apps and Policies Edit.']],
+    [verified, ['Verified. The token is active with MCP Portals Edit and Access: Apps and Policies Edit permissions.']],
     [{ ...verified, status: 'permission_missing', accessPolicies: 'permission_missing' }, [
       'The token is active.', 'MCP Portals Edit: proven. Your gateway wrote its own MCP Portal back unchanged.',
       'Access: Apps and Policies Edit: missing. Cloudflare refused the token for your gateway’s own Portal Access policy.',
