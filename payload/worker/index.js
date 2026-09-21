@@ -302,6 +302,7 @@ const TEARDOWN_RECEIPT_KINDS = Object.freeze({
   mcp_server: 'mcp_server', portal: 'mcp_portal', dns_record: 'dns_record',
   source_access_application: 'access_application', portal_access_application: 'access_application',
   source_access_policy: 'access_policy', portal_access_policy: 'access_policy',
+  management_access_application: 'access_application', management_access_policy: 'access_policy',
 });
 /** The phases a bounded removal pass may report, in the order they run. */
 const TEARDOWN_PHASES = Object.freeze(['bridge_preflight', 'sharing_preflight', 'preflight', 'remove', 'sharing_delete', 'delete', 'verify', 'bridges']);
@@ -1481,10 +1482,6 @@ async function buildDesiredResources(settings, installationId, sourceDefaultDeny
     onBehalfOfUser: source.authentication.onBehalfOfUser,
   }];
   const sourceApplication = { metadata, sourceResourceKey: mcpKey, applicationType: 'mcp' };
-  if (managementSource) {
-    sourceApplication.hostname = new URL(source.url).host + MANAGEMENT_MCP_PATH;
-    sourceApplication.paths = MANAGEMENT_SOURCE_PATHS;
-  }
   const sourceSpecifications = source === null ? [] : [
     {
       kind: 'mcp_server', key: mcpKey, desired: {
@@ -1504,6 +1501,22 @@ async function buildDesiredResources(settings, installationId, sourceDefaultDeny
       defaultAction: 'deny', allow: sourceAllowPolicy,
     } },
   ];
+  if (managementSource) {
+    const applicationKey = await stableResourceKey('management-app', installationId, source.id);
+    const policyKey = await stableResourceKey('management-policy', installationId, source.id);
+    const emails = [...new Set([...source.administratorEmails, ...allowedEmails])].sort(compareText);
+    sourceSpecifications.push(
+      { kind: 'management_access_application', key: applicationKey, desired: {
+        metadata, applicationType: 'self_hosted', hostname: new URL(source.url).host + MANAGEMENT_MCP_PATH,
+        paths: MANAGEMENT_SOURCE_PATHS,
+      } },
+      { kind: 'management_access_policy', key: policyKey, desired: {
+        metadata, sourceApplicationResourceKey: applicationKey, defaultAction: 'deny',
+        allow: { identitiesRef: 'management.authentication', identityType: 'email', identityCount: emails.length,
+          identitiesHash: await sha256({ emails }), emails },
+      } },
+    );
+  }
   const specifications = [
     ...sourceSpecifications,
     { kind: 'portal', key: portalKey, desired: {
@@ -1861,6 +1874,12 @@ function exactDestination(value, expected) {
 function accessApplicationCandidate(value, kind, state) {
   if (!isRecord(value) || !safeProviderId(value.id)) return false;
   const destinations = Array.isArray(value.destinations) ? value.destinations : [];
+  if (kind === 'management_access_application') {
+    const desired = resource(state, kind);
+    return value.name === marker(state.installationId, desired.key) || MANAGEMENT_SOURCE_PATHS.some((path) =>
+      value.domain === new URL(state.settings.sources[0].url).host + path ||
+      destinations.some((item) => item?.type === 'public' && item.uri === new URL(state.settings.sources[0].url).host + path));
+  }
   if (kind === 'source_access_application') {
     const server = locator(state, 'mcp_server');
     const desired = resource(state, kind);
@@ -1885,18 +1904,18 @@ function accessApplicationCandidate(value, kind, state) {
 
 function accessApplicationIdentityMatches(value, kind, state) {
   if (!isRecord(value) || !safeProviderId(value.id)) return false;
+  if (kind === 'management_access_application') {
+    const desired = resource(state, kind);
+    return value.type === 'self_hosted' && value.name === marker(state.installationId, desired.key) &&
+      value.domain === desired.desired.hostname && managedOauthMatches(value) &&
+      Array.isArray(value.destinations) && value.destinations.length === MANAGEMENT_SOURCE_PATHS.length &&
+      MANAGEMENT_SOURCE_PATHS.every((path) => value.destinations.some((item) => exactKeys(item, ['type', 'uri']) &&
+        item.type === 'public' && item.uri === new URL(state.settings.sources[0].url).host + path));
+  }
   if (kind === 'source_access_application') {
     const server = locator(state, 'mcp_server');
     const desired = resource(state, kind);
     if (value.type !== 'mcp' || server === null || value.name !== marker(state.installationId, desired.key)) return false;
-    if (desired.desired.hostname) {
-      const destinations = value.destinations;
-      return value.domain === desired.desired.hostname && managedOauthMatches(value) &&
-        Array.isArray(destinations) && destinations.length === MANAGEMENT_SOURCE_PATHS.length + 1 &&
-        MANAGEMENT_SOURCE_PATHS.every((path) => destinations.some((item) => exactKeys(item, ['type', 'uri']) &&
-          item.type === 'public' && item.uri === new URL(state.settings.sources[0].url).host + path)) &&
-        destinations.some((item) => exactKeys(item, ['type', 'mcp_server_id']) && item.type === 'via_mcp_server_portal' && item.mcp_server_id === server.id);
-    }
     return (value.domain === undefined || value.domain === null) &&
       exactDestination(value, { type: 'via_mcp_server_portal', mcp_server_id: server.id });
   }
@@ -1919,6 +1938,8 @@ function managedOauthMatches(value) {
 }
 
 function policyMatches(value, desired, settings) {
+  if (desired.kind === 'management_access_policy') return teamPolicyMatches(value,
+    teamPolicy(desired.desired.allow.emails, `${settings.sources[0].label} users [${marker(desired.desired.metadata.installationId, desired.key)}]`), value?.id);
   if (desired.kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers') {
     return teamPolicyMatches(value, teamPolicy([], `${settings.sources[0].label} users [${marker(
       desired.desired.metadata.installationId, desired.key,
@@ -1947,7 +1968,7 @@ function dnsMatches(value, desired) {
     );
 }
 
-async function discoverResource(state, kind, token, hint = null) {
+async function discoverResource(state, kind, token, hint = null, requireAccountListing = false) {
   const desired = resource(state, kind);
   if (!desired) return Object.freeze({ status: 'conflict', provider: null });
   const account = encodeURIComponent(state.target.accountId);
@@ -1974,14 +1995,14 @@ async function discoverResource(state, kind, token, hint = null) {
       ? Object.freeze({ status: 'present', provider: Object.freeze({ id: desired.key }) })
       : providerOutcome(response.status === 'absent' ? 'absent' : response.status, response);
   }
-  if (kind === 'source_access_application' || kind === 'portal_access_application') {
+  if (accessApplicationKind(kind)) {
     // The zone paths are the ones the grant covers. An MCP application has
     // no hostname and is stored with the account, where the zone listing
     // never shows it, so a known source application is read by id; only a
     // baseline without one falls back to listings, the account listing
     // included when the grant can read it. The portal application, a zone
     // hostname, keeps the listing that proves it is the only one.
-    const known = kind === 'source_access_application' ? hint ?? locator(state, kind) : null;
+    const known = kind !== 'portal_access_application' ? hint ?? locator(state, kind) : null;
     // A known application that is gone is absent; a listed one that vanishes
     // before its read is an unsettled answer, named with its status.
     const readApplication = async (id, listed) => {
@@ -1999,11 +2020,11 @@ async function discoverResource(state, kind, token, hint = null) {
     const listed = await providerList(`/zones/${zone}/access/apps`, token);
     if (listed.status !== 'ok') return providerOutcome(listed.status, listed);
     let candidates = listed.result.filter((value) => accessApplicationCandidate(value, kind, state));
-    if (kind === 'source_access_application' && candidates.length === 0) {
+    if ((kind === 'source_access_application' || kind === 'management_access_application') && (requireAccountListing || candidates.length === 0)) {
       const accountListed = await providerList(`/accounts/${account}/access/apps`, token);
       if (accountListed.status === 'ok') {
         candidates = accountListed.result.filter((value) => accessApplicationCandidate(value, kind, state));
-      } else if (accountListed.status !== 'blocked' && accountListed.status !== 'auth') {
+      } else if (requireAccountListing || (accountListed.status !== 'blocked' && accountListed.status !== 'auth')) {
         return providerOutcome(accountListed.status, accountListed);
       }
     }
@@ -2013,10 +2034,8 @@ async function discoverResource(state, kind, token, hint = null) {
     // single-application read; the list is only used to bound the candidate set.
     return readApplication(candidates[0].id, true);
   }
-  if (kind === 'source_access_policy' || kind === 'portal_access_policy') {
-    const parentKind = kind === 'source_access_policy'
-      ? 'source_access_application'
-      : 'portal_access_application';
+  if (accessPolicyKind(kind)) {
+    const parentKind = policyApplicationKind(kind);
     const parent = locator(state, parentKind);
     if (!parent) return Object.freeze({ status: 'conflict', provider: null });
     // Policies stay a listing: a competing policy on the application must be seen.
@@ -2051,7 +2070,7 @@ async function createResource(state, kind, token) {
   if (!desired) return Object.freeze({ status: 'conflict', provider: null });
   let path;
   let body;
-  if (kind === 'source_access_application') {
+  if (kind === 'source_access_application' || kind === 'management_access_application') {
     const server = locator(state, 'mcp_server');
     if (!server) return Object.freeze({ status: 'conflict', provider: null });
     // Cloudflare stores this hostname-less application with the account, but
@@ -2062,7 +2081,9 @@ async function createResource(state, kind, token) {
       type: 'mcp',
       destinations: [{ type: 'via_mcp_server_portal', mcp_server_id: server.id }],
     };
-    if (desired.desired.hostname) {
+    if (kind === 'management_access_application') {
+      body.type = 'self_hosted';
+      body.destinations = [];
       body.domain = desired.desired.hostname;
       for (const route of MANAGEMENT_SOURCE_PATHS) body.destinations.push({ type: 'public', uri: new URL(state.source.url).host + route });
       body.oauth_configuration = { enabled: true, dynamic_client_registration: { enabled: true,
@@ -2134,17 +2155,16 @@ async function createResource(state, kind, token) {
         updated_tools: toolProjection(state.settings.sources[0].enabledTools),
       }];
     }
-  } else if (kind === 'source_access_policy' || kind === 'portal_access_policy') {
-    const parentKind = kind === 'source_access_policy'
-      ? 'source_access_application'
-      : 'portal_access_application';
+  } else if (accessPolicyKind(kind)) {
+    const parentKind = policyApplicationKind(kind);
     const parent = locator(state, parentKind);
     if (!parent) return Object.freeze({ status: 'conflict', provider: null });
     path = `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
-    const name = `${kind === 'source_access_policy' ? state.settings.sources[0].label : state.settings.connect.name} users [${marker(state.installationId, desired.key)}]`;
+    const name = `${sourcePolicyKind(kind) ? state.settings.sources[0].label : state.settings.connect.name} users [${marker(state.installationId, desired.key)}]`;
     body = kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers'
       ? teamPolicy([], name)
-      : { name, decision: 'allow', include: emailRules(state.settings), exclude: [], require: [] };
+      : kind === 'management_access_policy' ? teamPolicy(desired.desired.allow.emails, name)
+        : { name, decision: 'allow', include: emailRules(state.settings), exclude: [], require: [] };
   } else {
     path = `/zones/${zone}/dns_records`;
     body = {
@@ -2160,11 +2180,7 @@ async function createResource(state, kind, token) {
   if (response.status !== 'ok') return providerOutcome(response.status, response);
   const id = resultId(response.result);
   if (!id) return providerOutcome('unknown', response);
-  const parent = kind === 'source_access_policy'
-    ? locator(state, 'source_access_application')
-    : kind === 'portal_access_policy'
-      ? locator(state, 'portal_access_application')
-      : null;
+  const parent = accessPolicyKind(kind) ? locator(state, policyApplicationKind(kind)) : null;
   const provider = { id };
   if (parent) provider.parentId = parent.id;
   return Object.freeze({
@@ -2174,7 +2190,7 @@ async function createResource(state, kind, token) {
 }
 
 function receiptResource(state, desired, provider) {
-  const policy = desired.kind === 'source_access_policy' || desired.kind === 'portal_access_policy';
+  const policy = accessPolicyKind(desired.kind);
   const resourceValue = {
     kind: desired.kind,
     key: desired.key,
@@ -2182,7 +2198,8 @@ function receiptResource(state, desired, provider) {
     desiredHash: desired.desiredHash,
     marker: marker(state.installationId, desired.key),
   };
-  if (policy) resourceValue.identityHash = state.accessPolicy.identitiesHash;
+  if (policy) resourceValue.identityHash = desired.kind === 'management_access_policy'
+    ? desired.desired.allow.identitiesHash : state.accessPolicy.identitiesHash;
   return Object.freeze(resourceValue);
 }
 
@@ -2238,7 +2255,7 @@ async function parseReadyReceipt(value, claim) {
     const resourceValue = value.resources[index];
     const desired = claim.resources[index];
     const kind = resourceOrder[index];
-    const policy = kind === 'source_access_policy' || kind === 'portal_access_policy';
+    const policy = accessPolicyKind(kind);
     if (!exactKeys(resourceValue, policy
       ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
       : ['kind', 'key', 'provider', 'desiredHash', 'marker'])) return null;
@@ -2601,11 +2618,12 @@ function safeManagementControl(value) {
   const sourceProviderLocators = new Set();
   for (const source of value.sourceOwnership) {
     if (!exactKeys(source, ['sourceId', 'resources']) || !SOURCE_ID.test(source.sourceId) ||
-        !Array.isArray(source.resources) || source.resources.length !== 3) return null;
+        !Array.isArray(source.resources) || source.resources.length !== sourceResourceOrder(source.sourceId).length) return null;
     const resources = source.resources.map(safeSourceActionResource);
     if (resources.some((resourceValue) => resourceValue === null) || resources.some((resourceValue) => (
       resourceValue.marker !== marker(value.installationId, resourceValue.key)
-    )) || resources[2].provider.parentId !== resources[1].provider.id) return null;
+    )) || resources[2].provider.parentId !== resources[1].provider.id ||
+      (resources.length === 5 && resources[4].provider.parentId !== resources[3].provider.id)) return null;
     for (const resourceValue of resources) {
       const locatorKey = teardownProviderLocatorKey(resourceValue);
       if (sourceProviderLocators.has(locatorKey)) return null;
@@ -2832,9 +2850,19 @@ const SOURCE_ACTION_RESOURCE_ORDER = Object.freeze([
   'mcp_server', 'source_access_application', 'source_access_policy',
 ]);
 
+const MANAGEMENT_RESOURCE_ORDER = Object.freeze([...SOURCE_ACTION_RESOURCE_ORDER,
+  'management_access_application', 'management_access_policy']);
+function sourceResourceOrder(sourceId) {
+  return sourceId === MANAGEMENT_SOURCE_ID ? MANAGEMENT_RESOURCE_ORDER : SOURCE_ACTION_RESOURCE_ORDER;
+}
+function accessPolicyKind(kind) { return ['source_access_policy', 'portal_access_policy', 'management_access_policy'].includes(kind); }
+function accessApplicationKind(kind) { return ['source_access_application', 'portal_access_application', 'management_access_application'].includes(kind); }
+function sourcePolicyKind(kind) { return ['source_access_policy', 'management_access_policy'].includes(kind); }
+function policyApplicationKind(kind) { return kind.replace('_policy', '_application'); }
+
 function safeSourceActionResource(value, index) {
-  const kind = SOURCE_ACTION_RESOURCE_ORDER[index];
-  const policy = kind === 'source_access_policy';
+  const kind = MANAGEMENT_RESOURCE_ORDER[index];
+  const policy = accessPolicyKind(kind);
   if (!exactKeys(value, policy
     ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
     : ['kind', 'key', 'provider', 'desiredHash', 'marker']) || value.kind !== kind ||
@@ -2849,9 +2877,9 @@ function safeSourceActionResource(value, index) {
 function safeSourceActionPending(value) {
   if (value === null) return null;
   if (!exactKeys(value, ['kind', 'phase', 'provider']) ||
-      !SOURCE_ACTION_RESOURCE_ORDER.includes(value.kind) ||
+      !MANAGEMENT_RESOURCE_ORDER.includes(value.kind) ||
       (value.phase !== 'send_armed' && value.phase !== 'submitted')) return false;
-  const policy = value.kind === 'source_access_policy';
+  const policy = accessPolicyKind(value.kind);
   const provider = value.provider === null ? null : parseProviderLocator(value.provider, policy);
   if (value.phase === 'send_armed' ? value.provider !== null : !provider) return false;
   return Object.freeze({ kind: value.kind, phase: value.phase, provider });
@@ -2883,16 +2911,16 @@ function safeSourceAction(value) {
       !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
       !isText(value.actionKeyHash) || !HASH.test(value.actionKeyHash) ||
       !isText(value.sourceHash) || !HASH.test(value.sourceHash) ||
-      !Array.isArray(value.resources) || value.resources.length > SOURCE_ACTION_RESOURCE_ORDER.length ||
+      !Array.isArray(value.resources) || value.resources.length > sourceResourceOrder(value.sourceId).length ||
       (value.failureCode !== null && (!isText(value.failureCode) ||
         !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)))) return null;
   const resources = value.resources.map(safeSourceActionResource);
   const pending = safeSourceActionPending(value.pending);
   const portalUpdate = safePortalUpdate(value.portalUpdate);
   if (resources.some((resourceValue) => resourceValue === null) || pending === false || portalUpdate === false ||
-      resources.some((resourceValue, index) => resourceValue.kind !== SOURCE_ACTION_RESOURCE_ORDER[index]) ||
-      (pending && pending.kind !== SOURCE_ACTION_RESOURCE_ORDER[resources.length]) ||
-      (portalUpdate && resources.length !== SOURCE_ACTION_RESOURCE_ORDER.length)) return null;
+      resources.some((resourceValue, index) => resourceValue.kind !== sourceResourceOrder(value.sourceId)[index]) ||
+      (pending && pending.kind !== sourceResourceOrder(value.sourceId)[resources.length]) ||
+      (portalUpdate && resources.length !== sourceResourceOrder(value.sourceId).length)) return null;
   return Object.freeze({
     ...value,
     actorEmail: normalizedActor(value.actorEmail),
@@ -2948,16 +2976,17 @@ function sourceActionCanRenew(action, actorEmail, now) {
   // A completed connection check has no outstanding write. Other recovery
   // work must wait out the previous execution window before rotating its key.
   // An unacknowledged hostname-less app creation has no authoritative locator:
-  // the zone listing cannot prove it absent, so it still needs manual review.
+  // the zone listing cannot prove it absent. Built-in management recovery
+  // requires a successful account-wide listing before it can reconcile or retry.
   return action.failureCode !== 'source_removal_required' && action.actorEmail === normalizedActor(actorEmail) && now >= action.issuedAt &&
     (action.expiresAt <= now || sourceActionConnectionPaused(action) ||
       (action.bigquerySetupStarted === true && action.failureCode === 'bigquery_setup_required')) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
     sourceActionState(action, now) === 'recovery_required' &&
-    !(action.pending?.kind === 'source_access_application' && action.pending.provider === null);
+    !(action.pending?.kind === 'source_access_application' && action.pending.provider === null && action.sourceId !== MANAGEMENT_SOURCE_ID);
 }
 
-// The fixed reasons an installation waits before the Portal with all three
+// The fixed reasons an installation waits before the Portal with all source
 // receipts and no write outstanding. `source_tools_required`: connected and
 // synced, nothing chosen yet. `source_tools_chosen`: a choice is saved.
 const SOURCE_CONNECTION_PAUSES = Object.freeze([
@@ -2967,7 +2996,7 @@ const SOURCE_CONNECTION_PAUSES = Object.freeze([
 
 function sourceActionConnectionPaused(action) {
   return action.status === 'recovery_required' && action.pending === null && action.portalUpdate === null &&
-    action.resources.length === SOURCE_ACTION_RESOURCE_ORDER.length &&
+    action.resources.length === sourceResourceOrder(action.sourceId).length &&
     SOURCE_CONNECTION_PAUSES.includes(action.failureCode);
 }
 
@@ -3355,7 +3384,8 @@ async function actionDesiredState(control, sources, action) {
       enabledTools: [...source.enabledTools],
     }],
   };
-  const desiredResources = (await buildDesiredResources(settings, control.installationId, true)).slice(0, 3);
+  if (source.id === MANAGEMENT_SOURCE_ID) settings.sources[0].administratorEmails = [...control.audienceEmails];
+  const desiredResources = (await buildDesiredResources(settings, control.installationId, true)).slice(0, sourceResourceOrder(source.id).length);
   return Object.freeze({
     installationId: control.installationId,
     target: Object.freeze({ accountId: control.accountId, zoneId: control.zoneId }),
@@ -3621,8 +3651,8 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   try { await verifyGatewaySource(desiredState.source, env); } catch {
     return failSourceAction(storage, action, 'source_discovery_failed');
   }
-  for (let index = 0; index < SOURCE_ACTION_RESOURCE_ORDER.length; index += 1) {
-    const kind = SOURCE_ACTION_RESOURCE_ORDER[index];
+  for (let index = 0; index < sourceResourceOrder(action.sourceId).length; index += 1) {
+    const kind = sourceResourceOrder(action.sourceId)[index];
     const state = { ...desiredState, resources: action.resources };
     const desired = resource(state, kind);
     if (!desired) return failSourceAction(storage, action, 'source_action_invalid');
@@ -3638,6 +3668,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     if (action.pending) {
       const observed = await discoverResource(
         state, kind, parsed.claim.cloudflareAccessToken, action.pending.provider,
+        action.sourceId === MANAGEMENT_SOURCE_ID && accessApplicationKind(kind) && action.pending.provider === null,
       );
       if (observed.status === 'absent') {
         action = await persistSourceAction(storage, { ...action, pending: null });
@@ -3926,7 +3957,7 @@ async function chooseSourceActionTools(storage, env, input) {
   if (canonicalJson({ ...receipt, desiredHash: null }) !== canonicalJson({ ...action.resources[0], desiredHash: null })) {
     return sourceToolsRefusal(409, 'source_action_state_unavailable');
   }
-  const reboundAction = safeSourceAction({ ...rebound, resources: [receipt, action.resources[1], action.resources[2]] });
+  const reboundAction = safeSourceAction({ ...rebound, resources: [receipt, ...action.resources.slice(1)] });
   const nextActions = reboundAction && safeSourceActions({
     ...actions,
     revision: actions.revision + 1,
@@ -4494,7 +4525,7 @@ async function safePersistedReadyReceipt(value, environment, installationId) {
   for (let index = 0; index < expectedOrder.length; index += 1) {
     const resource = value.resources[index];
     const kind = expectedOrder[index];
-    const policy = kind === 'source_access_policy' || kind === 'portal_access_policy';
+    const policy = accessPolicyKind(kind);
     if (!exactKeys(resource, policy
       ? ['kind', 'key', 'provider', 'desiredHash', 'marker', 'identityHash']
       : ['kind', 'key', 'provider', 'desiredHash', 'marker']) || resource.kind !== kind ||
@@ -4506,7 +4537,7 @@ async function safePersistedReadyReceipt(value, environment, installationId) {
     const locatorKey = `${kind}\u0000${provider.parentId ?? ''}\u0000${provider.id}`;
     if (locators.has(locatorKey)) return null;
     locators.add(locatorKey);
-    if (kind === 'source_access_application' || kind === 'portal_access_application') {
+    if (accessApplicationKind(kind)) {
       if (accessApplicationIds.has(provider.id)) return null;
       accessApplicationIds.add(provider.id);
     }
@@ -4551,10 +4582,10 @@ function teardownResourceKey(resource) {
 }
 
 function teardownProviderLocatorKey(resource) {
-  if (resource.kind === 'source_access_application' || resource.kind === 'portal_access_application') {
+  if (accessApplicationKind(resource.kind)) {
     return `access_application\u0000${resource.provider.id}`;
   }
-  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+  if (accessPolicyKind(resource.kind)) {
     return `access_policy\u0000${resource.provider.parentId}\u0000${resource.provider.id}`;
   }
   return `${resource.kind}\u0000${resource.provider.id}`;
@@ -4567,7 +4598,7 @@ function sameTeardownResourceAuthority(left, right) {
 function teardownResources(root, sourceOwnership, currentPolicies = false, removedInitialSource = null) {
   if (!Array.isArray(root.receipt?.resources) || !Array.isArray(sourceOwnership)) return null;
   const receiptSources = root.receipt.resources.filter((resource) => (
-    SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind)
+    MANAGEMENT_RESOURCE_ORDER.includes(resource.kind)
   ));
   const extras = [];
   let receiptSourceOwner = null;
@@ -4577,7 +4608,7 @@ function teardownResources(root, sourceOwnership, currentPolicies = false, remov
   ));
   for (const source of orderedOwnership) {
     if (!exactKeys(source, ['sourceId', 'resources']) || !SOURCE_ID.test(source.sourceId) ||
-        !Array.isArray(source.resources) || source.resources.length !== SOURCE_ACTION_RESOURCE_ORDER.length) return null;
+        !Array.isArray(source.resources) || source.resources.length !== sourceResourceOrder(source.sourceId).length) return null;
     if (sourceIds.has(source.sourceId)) return null;
     sourceIds.add(source.sourceId);
     const resources = source.resources.map(safeSourceActionResource);
@@ -4603,7 +4634,7 @@ function teardownResources(root, sourceOwnership, currentPolicies = false, remov
   // remove server mappings when a server is deleted; removing the Portal
   // first keeps restart verification independent of that cascade.
   const removal = currentPolicies
-    ? [...root.receipt.resources].filter((resource) => !SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind)).reverse()
+    ? [...root.receipt.resources].filter((resource) => !MANAGEMENT_RESOURCE_ORDER.includes(resource.kind)).reverse()
       .concat([...extras].reverse(), [...receiptSources].reverse())
     : [...extras].reverse().concat([...root.receipt.resources].reverse());
   for (const resource of removal) {
@@ -4622,33 +4653,28 @@ function teardownResources(root, sourceOwnership, currentPolicies = false, remov
 }
 
 function teardownSettings(control, source, sourceId) {
+  const sources = [];
+  if (source !== null) {
+    const configured = { id: sourceId, label: source.label, url: source.url,
+      authentication: Object.freeze({ mode: source.authMode, onBehalfOfUser: source.onBehalfOfUser }),
+      enabledTools: source.enabledTools };
+    if (source.id === MANAGEMENT_SOURCE_ID) configured.administratorEmails = [...control.audienceEmails];
+    sources.push(Object.freeze(configured));
+  }
   return Object.freeze({
     schemaVersion: 1,
-    connect: Object.freeze({
-      name: control.portal.name,
-      hostname: control.portal.hostname,
-      codeMode: 'default_on',
-    }),
+    connect: Object.freeze({ name: control.portal.name, hostname: control.portal.hostname, codeMode: 'default_on' }),
     access: Object.freeze({ adminEmails: source?.id === MANAGEMENT_SOURCE_ID ? [source.initialManager] : control.audienceEmails, memberEmails: Object.freeze([]) }),
-    sources: Object.freeze(source === null ? [] : [Object.freeze({
-      id: sourceId,
-      label: source.label,
-      url: source.url,
-      authentication: Object.freeze({
-        mode: source.authMode,
-        onBehalfOfUser: source.onBehalfOfUser,
-      }),
-      enabledTools: source.enabledTools,
-    })]),
+    sources: Object.freeze(sources),
   });
 }
 
 function teardownReceiptResourceMatchesDesired(actual, desired, identityHash) {
-  const policy = actual.kind === 'source_access_policy' || actual.kind === 'portal_access_policy';
+  const policy = accessPolicyKind(actual.kind);
   return actual.kind === desired.kind && actual.key === desired.key &&
     actual.desiredHash === desired.desiredHash &&
     actual.marker === marker(desired.desired.metadata.installationId, desired.key) &&
-    (!policy || actual.identityHash === identityHash) &&
+    (!policy || actual.identityHash === (desired.kind === 'management_access_policy' ? desired.desired.allow.identitiesHash : identityHash)) &&
     ((actual.kind !== 'mcp_server' && actual.kind !== 'portal') || actual.provider.id === desired.key);
 }
 
@@ -4716,7 +4742,7 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
     if (sourceIdentityHash !== audienceHash && sourceIdentityHash !== emptyAudienceHash && sourceIdentityHash !== managementHash) return null;
     const desiredResources = (await buildDesiredResources(
       settings, root.installationId, sourceIdentityHash === emptyAudienceHash,
-    )).slice(0, 3);
+    )).slice(0, sourceResourceOrder(source.id).length);
     const state = Object.freeze({
       installationId: root.installationId,
       target: root.receipt.target,
@@ -4777,7 +4803,7 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
   // unobserved combinations of independently interrupted mapping mutations.
   if (portalAlternatives.length > 1) return null;
   const resources = [...layout.resources];
-  const firstSource = resources.findIndex((resource) => SOURCE_ACTION_RESOURCE_ORDER.includes(resource.kind));
+  const firstSource = resources.findIndex((resource) => MANAGEMENT_RESOURCE_ORDER.includes(resource.kind));
   resources.splice(firstSource < 0 ? resources.length : firstSource, 0, ...partialResources);
   if (new Set(resources.map(teardownProviderLocatorKey)).size !== resources.length) return null;
   const portalMappings = portalServerMappings(control, sources, Object.freeze({
@@ -4806,10 +4832,10 @@ function teardownProviderPath(resource, target) {
   if (resource.kind === 'portal') {
     return `/accounts/${account}/access/ai-controls/mcp/portals/${id}`;
   }
-  if (resource.kind === 'source_access_application' || resource.kind === 'portal_access_application') {
+  if (accessApplicationKind(resource.kind)) {
     return `/zones/${zone}/access/apps/${id}`;
   }
-  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+  if (accessPolicyKind(resource.kind)) {
     return `/zones/${zone}/access/apps/${encodeURIComponent(resource.provider.parentId)}/policies/${id}`;
   }
   return `/zones/${zone}/dns_records/${id}`;
@@ -4820,7 +4846,7 @@ function teardownPolicyMatches(value, desired, settings, currentPolicies = false
     // Assignment changes do not transfer ownership. The immutable locator and
     // exact marked name still bind the policy to this installation. Only the
     // supported email or deny-everyone policy shapes may have changed.
-    const name = `${desired.kind === 'source_access_policy'
+    const name = `${sourcePolicyKind(desired.kind)
       ? settings.sources[0]?.label : settings.connect.name} users [${marker(
       desired.desired.metadata.installationId, desired.key,
     )}]`;
@@ -4828,8 +4854,9 @@ function teardownPolicyMatches(value, desired, settings, currentPolicies = false
       return teamPolicyMatches(value, teamPolicy(teamPolicyAudience(value), name), value?.id);
     } catch { return false; }
   }
+  if (desired.kind === 'management_access_policy') return policyMatches(value, desired, settings);
   if (!isRecord(value) || !safeProviderId(value.id) || value.decision !== 'allow' ||
-      value.name !== `${desired.kind === 'source_access_policy'
+      value.name !== `${sourcePolicyKind(desired.kind)
         ? settings.sources[0]?.label
         : settings.connect.name} users [${marker(
         desired.desired.metadata.installationId,
@@ -4859,7 +4886,7 @@ function teardownOwnershipMatches(resource, result, authority, currentPolicies =
     return [authority.portalMappings, ...authority.portalAlternatives].some((mappings) =>
       portalExact(result, authority.control, mappings));
   }
-  if (resource.kind === 'source_access_policy' || resource.kind === 'portal_access_policy') {
+  if (accessPolicyKind(resource.kind)) {
     return teardownPolicyMatches(result, entry.desired, entry.state.settings, currentPolicies);
   }
   if (resource.kind === 'dns_record') {
@@ -4901,12 +4928,12 @@ async function teardownServersUnshared(root, authority, token, signal) {
 }
 
 async function teardownApplicationChildrenMatch(root, resource, authority, token, signal) {
-  if (!['source_access_application', 'portal_access_application'].includes(resource.kind)) return true;
+  if (!accessApplicationKind(resource.kind)) return true;
   const path = `${teardownProviderPath(resource, root.receipt.target)}/policies`;
   const listed = await providerList(path, token, {}, signal);
   if (listed.status !== 'ok') return false;
   const owned = authority.resources.filter((entry) =>
-    ['source_access_policy', 'portal_access_policy'].includes(entry.kind) &&
+    accessPolicyKind(entry.kind) &&
     entry.provider.parentId === resource.provider.id);
   const seen = new Set();
   for (const policy of listed.result) {
@@ -4921,8 +4948,7 @@ async function teardownResourceDelete(root, resource, token, signal) {
   const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE', signal });
   // Access may accept deletion asynchronously. Acceptance is not absence:
   // the caller still verifies the exact resource before recording removal.
-  const accessResource = ['source_access_application', 'portal_access_application',
-    'source_access_policy', 'portal_access_policy'].includes(resource.kind);
+  const accessResource = (accessApplicationKind(resource.kind) || accessPolicyKind(resource.kind));
   if (response.status === 'ok' || (accessResource && response.status === 'blocked' && response.httpStatus === 202)) return 'submitted';
   return response.status;
 }
@@ -5498,7 +5524,7 @@ function safeSourceRemoval(value) {
   if (!exactKeys(value, ['schemaVersion', 'actionId', 'sourceId', 'sourceHash', 'resourcesHash', 'step', 'pending']) ||
       value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
       !HASH.test(value.sourceHash) || !HASH.test(value.resourcesHash) || !Number.isSafeInteger(value.step) ||
-      value.step < 0 || value.step > 4 || !isBoolean(value.pending) || (value.step === 4 && value.pending)) return false;
+      value.step < 0 || value.step > sourceResourceOrder(value.sourceId).length + 1 || !isBoolean(value.pending) || (value.step === sourceResourceOrder(value.sourceId).length + 1 && value.pending)) return false;
   return Object.freeze({ ...value });
 }
 
@@ -5580,7 +5606,7 @@ async function removeManagedSource(storage, env, input) {
   const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
   if (!authority || !ownership) return sourceRemovalRefusal('source_removal_ownership_conflict');
   // Detach first, then delete the server while its Access protection remains.
-  const resources = [ownership.resources[0], ownership.resources[2], ownership.resources[1]];
+  const resources = [ownership.resources[0], ...ownership.resources.slice(1).reverse()];
   const scoped = { ...authority, resources };
   const sourceHash = await managedSourceHash(source);
   const resourcesHash = await sha256(ownership.resources);
@@ -6190,7 +6216,7 @@ export async function verifyAccess(request, env, nowMs = Date.now()) {
   const path = new URL(request.url).pathname;
   if (path !== '/__ankka/install/oauth/callback' && path !== '/__ankka/operation' &&
       !path.startsWith('/__ankka/operation/')) return false;
-  const assigned = await managementSourceAccess(request, env, false, nowMs);
+  const assigned = await managementSourceAccess(request, env, true, nowMs, true);
   return assigned?.actorEmail ?? false;
 }
 
@@ -6652,7 +6678,7 @@ function safeTeamAction(value, context) {
       !HASH.test(value.actionKeyHash) || !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
       !HASH.test(value.planHash) || !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
       (value.failureCode !== null && !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)) ||
-      !Array.isArray(value.journal) || value.journal.length > 33) return null;
+      !Array.isArray(value.journal) || value.journal.length > 34) return null;
   try {
     normalizeTeamAccessRequest(value.request, { ...context,
       revision: value.status === 'succeeded' ? context.revision - 1 : context.revision });
@@ -7038,7 +7064,7 @@ async function verifyManagementAccess(storage, env) {
   // The saved policy is the one a Team change would call its `before`, from the same planner, decided before any call.
   let target = null;
   try {
-    target = context && planTeamAccessChange({ schemaVersion: 1, expectedRevision: context.team.revision,
+    target = context && planGatewayTeamAccess({ schemaVersion: 1, expectedRevision: context.team.revision,
       members: context.team.members }, context.planner).policies.find((policy) => policy.kind === 'portal');
   } catch { target = null; }
   if (!context || !target) return answer('unconfirmed', 'active', 'not_checked', 'not_checked');
@@ -7116,7 +7142,7 @@ async function teamSnapshot(storage, env) {
     const context = await teamRuntimeContext(storage, env);
     if (!context) return null;
     context.signal = AbortSignal.timeout(30_000);
-    const plan = planTeamAccessChange({ schemaVersion: 1, expectedRevision: state.revision,
+    const plan = planGatewayTeamAccess({ schemaVersion: 1, expectedRevision: state.revision,
       members: state.members }, context.planner);
     const audiences = await verifyTeamPolicies(context, plan, managementCredential(env), [], null, true);
     if (!audiences) return null;
@@ -7124,7 +7150,11 @@ async function teamSnapshot(storage, env) {
     const emails = audiences.get(portal.policyId);
     if (admins.some((email) => !emails.includes(email))) return null;
     const sourcePolicies = plan.policies.filter((policy) => policy.kind === 'source');
-    const inconsistent = sourcePolicies.some((policy) => audiences.get(policy.policyId).some((email) => !emails.includes(email)));
+    const nativePolicy = plan.policies.find((policy) => policy.kind === 'management');
+    const nativeSource = sourcePolicies.find((policy) => policy.sourceId === MANAGEMENT_SOURCE_ID);
+    const nativeMismatch = nativePolicy && canonicalJson(audiences.get(nativePolicy.policyId)) !== canonicalJson(
+      [...new Set([...context.control.audienceEmails, ...audiences.get(nativeSource.policyId)])].sort(compareText));
+    const inconsistent = nativeMismatch || sourcePolicies.some((policy) => audiences.get(policy.policyId).some((email) => !emails.includes(email)));
     if (inconsistent && (!state.pendingAction || ['failed', 'succeeded'].includes(state.pendingAction.status))) return null;
     // A partially applied proposal may temporarily disagree across policies.
     // Keep it resumable, but do not label the saved roster as a live snapshot.
@@ -7152,6 +7182,19 @@ async function teamSnapshot(storage, env) {
     editingDisabledReason: blocked ? 'lifecycle_action_pending' : configured ? null : 'management_credential_missing' };
 }
 
+function planGatewayTeamAccess(value, context) {
+  const plan = planTeamAccessChange(value, context);
+  if (!context.managementTarget) return plan;
+  const target = teamTarget(context.managementTarget, true);
+  const source = plan.policies.find((policy) => policy.kind === 'source' && policy.sourceId === MANAGEMENT_SOURCE_ID);
+  if (!source || plan.policies.some((policy) => policy.applicationId === target.applicationId || policy.policyId === target.policyId)) teamFail('team_access_invalid_target');
+  const audience = (policy) => [...new Set([...context.managementAuthenticationEmails, ...teamPolicyAudience(policy)])].sort(compareText);
+  const native = { kind: 'management', ...target,
+    before: teamPolicy(audience(source.before), target.policyName), after: teamPolicy(audience(source.after), target.policyName) };
+  return teamFreeze({ ...plan, policies: [...plan.policies, native],
+    policyChanges: canonicalJson(native.before) === canonicalJson(native.after) ? plan.policyChanges : [...plan.policyChanges, native] });
+}
+
 async function teamRuntimeContext(storage, env) {
   const team = await readTeamState(storage, env);
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
@@ -7174,9 +7217,11 @@ async function teamRuntimeContext(storage, env) {
   if (!portalResource) return null;
   const portal = target(portalResource);
   const sourceTargets = control.sourceOwnership.map((source) => target(source.resources[2], source.sourceId));
+  const native = control.sourceOwnership.find((source) => source.sourceId === MANAGEMENT_SOURCE_ID)?.resources[4];
   return { team, control, sources, environment, authority,
     planner: { revision: team.revision, adminEmails: admins, serviceActor: serviceActorOf(accessConfiguration(env)), sources: teamSources(sources),
-      currentMembers: team.members, portalTarget: portal, sourceTargets } };
+      currentMembers: team.members, portalTarget: portal, sourceTargets,
+      managementTarget: native ? target(native, MANAGEMENT_SOURCE_ID) : null, managementAuthenticationEmails: control.audienceEmails } };
 }
 
 async function prepareTeamAction(storage, env, input) {
@@ -7189,7 +7234,7 @@ async function prepareTeamAction(storage, env, input) {
       await otherLifecycleBlocksTeam(storage, input.issuedAt)) return null;
   const context = await teamRuntimeContext(storage, env);
   if (!context) return null;
-  const plan = planTeamAccessChange(input.request, context.planner);
+  const plan = planGatewayTeamAccess(input.request, context.planner);
   const previous = context.team.pendingAction;
   const unfinished = previous && !['failed', 'succeeded'].includes(previous.status);
   // Resume only the exact retained proposal, including legacy OAuth proposals.
@@ -7223,7 +7268,7 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return null;
   if (readAudience && (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings))) return null;
   const readPolicy = async (policy) => {
-    const kind = policy.kind === 'portal' ? 'portal_access_application' : 'source_access_application';
+    const kind = policy.kind === 'portal' ? 'portal_access_application' : policy.kind === 'management' ? 'management_access_application' : 'source_access_application';
     const resourceValue = context.authority.resources.find((value) => value.kind === kind && value.provider.id === policy.applicationId);
     const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
     if (!entry) return null;
@@ -7292,7 +7337,7 @@ async function processTeamAction(env, storage, prepared, nowMs) {
   if (!context || !action || action.actionId !== prepared.actionId ||
       action.status !== 'authorization_required' || action.expiresAt <= nowMs ||
       await otherLifecycleBlocksTeam(storage, nowMs)) return null;
-  const plan = planTeamAccessChange(action.request, context.planner);
+  const plan = planGatewayTeamAccess(action.request, context.planner);
   if (action.sourceRevision !== context.sources.revision || action.planHash !== await sha256({ plan, sourceRevision: context.sources.revision }) ||
       action.journal.some((entry) => !plan.policyChanges.some((policy) => policy.policyId === entry.policyId))) return null;
   let teamState = context.team;
@@ -7976,30 +8021,34 @@ async function managementSourceContext(storage, env, allowDraft = false) {
     action = { sourceId: source.id, sourceHash: await managedSourceHash(source), resources: ownership.resources };
   } else {
     const actions = safeSourceActions(await storage.get(ACTIONS_KEY));
-    action = actions?.actions.filter((item) => item.sourceId === source.id && item.resources.length === 3)
+    action = actions?.actions.filter((item) => item.sourceId === source.id && item.resources.length === MANAGEMENT_RESOURCE_ORDER.length)
       .sort((left, right) => right.issuedAt - left.issuedAt)[0];
     if (!action || !sourceActionConnectionPaused(action)) return null;
   }
   const desired = await actionDesiredState(control, sources, action);
   if (!desired || canonicalJson(action.resources.map((receipt, index) =>
     receiptResource(desired, desired.desiredResources[index], receipt.provider))) !== canonicalJson(action.resources)) return null;
-  const receipt = action.resources[1];
-  const policy = action.resources[2];
-  const path = `/accounts/${encodeURIComponent(control.accountId)}/access/apps/${encodeURIComponent(receipt.provider.id)}`;
   const signal = AbortSignal.timeout(10_000);
-  const [application, policies] = await Promise.all([
-    providerCall(path, token, { signal }), providerList(`${path}/policies`, token, {}, signal),
-  ]);
-  if (application.status !== 'ok' || application.result?.id !== receipt.provider.id ||
-      !accessApplicationIdentityMatches(application.result, 'source_access_application', desired) ||
-      !oauthText(application.result.aud, 512) || policies.status !== 'ok' ||
-      !Array.isArray(policies.result) || policies.result.length !== 1) return null;
-  const live = policies.result[0];
-  let emails;
-  try { emails = teamPolicyAudience(live); } catch { return null; }
-  const name = `${source.label} users [${policy.marker}]`;
-  if (!teamPolicyMatches(live, teamPolicy(emails, name), policy.provider.id)) return null;
-  return { aud: application.result.aud, emails, enabledTools: source.enabledTools, installed: source.status === 'installed' };
+  const read = async (index) => {
+    const receipt = action.resources[index];
+    const path = `/accounts/${encodeURIComponent(control.accountId)}/access/apps/${encodeURIComponent(receipt.provider.id)}`;
+    const [application, policies] = await Promise.all([
+      providerCall(path, token, { signal }), providerList(`${path}/policies`, token, {}, signal),
+    ]);
+    if (application.status !== 'ok' || application.result?.id !== receipt.provider.id ||
+        !accessApplicationIdentityMatches(application.result, receipt.kind, desired) ||
+        policies.status !== 'ok' || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
+    const policy = action.resources[index + 1];
+    const live = policies.result[0];
+    let emails;
+    try { emails = teamPolicyAudience(live); } catch { return null; }
+    if (!teamPolicyMatches(live, teamPolicy(emails, `${source.label} users [${policy.marker}]`), policy.provider.id)) return null;
+    return { aud: application.result.aud, emails };
+  };
+  const [portal, native] = await Promise.all([read(1), read(3)]);
+  if (!portal || !native || !oauthText(native.aud, 512) || canonicalJson(native.emails) !==
+      canonicalJson([...new Set([...control.audienceEmails, ...portal.emails])].sort(compareText))) return null;
+  return { aud: native.aud, emails: portal.emails, enabledTools: source.enabledTools, installed: source.status === 'installed' };
 }
 
 async function managementOperationActorAllowed(storage, env, actorEmail) {
@@ -8008,7 +8057,7 @@ async function managementOperationActorAllowed(storage, env, actorEmail) {
   return context !== null && context.emails.includes(actorEmail);
 }
 
-async function managementSourceAccess(request, env, allowDraft = false, nowMs = Date.now()) {
+async function managementSourceAccess(request, env, allowDraft = false, nowMs = Date.now(), allowAdministratorConsent = false) {
   const endpoint = managementSourceUrl(env);
   if (!endpoint || new URL(request.url).origin !== new URL(endpoint).origin) return null;
   const stub = adminStateStub(env, 'v1:management');
@@ -8020,7 +8069,7 @@ async function managementSourceAccess(request, env, allowDraft = false, nowMs = 
     const configuration = accessConfiguration(env);
     if (!configuration || !oauthText(context.aud, 512) || !Array.isArray(context.emails)) return null;
     const actor = await verifyAccessAssertion(request, { ...configuration, aud: context.aud,
-      emails: context.emails, serviceClientId: null }, nowMs);
+      emails: allowAdministratorConsent ? [...new Set([...context.emails, ...configuration.emails])] : context.emails, serviceClientId: null }, nowMs);
     return actor?.kind === 'human' ? { actor, actorEmail: actor.email,
       enabledTools: context.enabledTools, installed: context.installed } : null;
   } catch { return null; }
