@@ -41,15 +41,23 @@ ordinary MCP authority after source revocation.
 The built-in source has reserved ID `source-616e6b6b616d6370` and endpoint
 `https://<management-hostname>/api/mcp`. The `/api/` prefix uses the signed
 deployment’s existing Worker-first routing, including browser consent pages.
-Its Access application covers `/api/mcp` and the
-existing customer operation consent paths. Each person authenticates with their
+Cloudflare uses two receipt-owned Access applications: a Portal source application
+with only its MCP server destination, and a self-hosted application with Managed
+OAuth covering `/api/mcp` and the existing customer operation consent paths.
+Cloudflare rejects path destinations on MCP applications and rejects Portal
+destinations on self-hosted applications. Team assignments synchronize both
+policies through the existing journal; the UI still presents one source. Each person authenticates with their
 own identity; this source is registered in the Portal with `on_behalf: true`.
 Ordinary upstream OAuth sources retain their shared team connection behavior.
 The dashboard's administrator policy remains a separate recovery entry point.
+The endpoint's authentication policy retains the installation's original audience
+so administrators can complete browser recovery consent after unassigning
+themselves. Authentication alone does not authorize MCP tools: the Worker also
+requires the current Portal source assignment.
 
 On each MCP request the Worker reconstructs the source from ownership receipts,
-reads its live Access application and sole source policy, and verifies the signed
-Access assertion against that application's audience. Issuer, signature, expiry,
+reads both live Access applications and their sole policies, and verifies the signed
+Access assertion against the self-hosted application's audience. Issuer, signature, expiry,
 email, and current source assignment must match. Membership is not cached.
 Service identities, an administrator token for a different audience, an unassigned
 identity, a missing assertion, and changed resource shapes are rejected. Calling
@@ -82,6 +90,12 @@ not introduce a new credential, role system, hosted relay, or telemetry stream.
 3. Start or retry provider sign-in using the browser handoff. Do not replay a
    provider write with an unknown outcome; follow the recorded recovery action.
 4. Read the action and real tool list, choose the intended tools, and resume.
+
+An interrupted built-in management application creation with no returned ID can
+be retried after the previous authorization expires. Recovery first requires a
+successful account-wide application listing and exact ownership checks. An
+unavailable listing, conflicting application, or changed resource leaves the
+journal intact and does not trigger another creation.
 
 Diagnostics never include authorization codes, access or refresh tokens, client
 secrets, raw provider bodies, or arbitrary error messages. Missing older evidence

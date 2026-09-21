@@ -53,6 +53,15 @@ function teamProvider() {
       if (intercepted instanceof Response) return intercepted;
       const { record, state } = context;
       if (record.pathname === `/client/v4/accounts/${ACCOUNT_ID}/tokens/verify`) return envelope({ status: 'active' });
+      if (record.method === 'POST' && record.pathname.endsWith('/access/apps')) {
+        const destinations = record.body.destinations ?? [];
+        const pathDomain = [record.body.domain, ...destinations.filter((entry) => entry.type === 'public').map((entry) => entry.uri)]
+          .some((domain) => domain?.includes('/'));
+        if ((record.body.type === 'mcp' && pathDomain) ||
+            (record.body.type === 'self_hosted' && destinations.some((entry) => entry.type === 'via_mcp_server_portal'))) {
+          return Response.json({ success: false, errors: [{ code: 12130, message: 'Invalid application destinations' }] }, { status: 400 });
+        }
+      }
       const appPath = record.pathname.startsWith(`${API_APPS}/`) ? API_APPS : `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
       if (record.method !== 'PUT' || !record.pathname.startsWith(`${appPath}/`)) return undefined;
       const [appId, segment, policyId, extra] = record.pathname.slice(appPath.length + 1).split('/');
@@ -3807,7 +3816,7 @@ test('individual source removal refuses a resource recreated after a verified de
 const MANAGEMENT_ID = 'source-616e6b6b616d6370';
 const MANAGEMENT_AUDIENCE = 'synthetic-management-source-audience';
 
-async function installManagementSource(gateway, enabledTools = null) {
+async function installManagementSource(gateway, enabledTools = null, recover = null) {
   const discovery = await (await gateway.api('/api/sources/discover', { method: 'POST', body: { url: `${MANAGEMENT_ORIGIN}/api/mcp` } })).json();
   assert.ok(discovery.tools.length > 10);
   const current = await (await gateway.api('/api/sources')).json();
@@ -3829,6 +3838,7 @@ async function installManagementSource(gateway, enabledTools = null) {
   const actions = await (await gateway.api('/api/source-actions')).json();
   const action = actions.actions.find((item) => item.sourceId === source.id);
   assert.equal(action.state, 'recovery_required');
+  if (recover) await recover({ action, source, saved });
   const server = [...gateway.provider.state.servers.values()].find((item) => item.hostname === source.url);
   assert.ok(server, await begun.clone().text());
   server.tools = discovery.tools.map((tool) => ({ name: tool.name }));
@@ -3846,7 +3856,13 @@ async function installManagementSource(gateway, enabledTools = null) {
       pattern.endsWith('*') && path.startsWith(pattern.slice(0, -1))), path);
   }
 
-  assert.deepEqual(application.destinations, [{ type: 'via_mcp_server_portal', mcp_server_id: server.id },
+  assert.equal(application.type, 'self_hosted');
+  const portalApplication = [...gateway.provider.state.apps.values()].find((item) =>
+    item.destinations?.some((entry) => entry.mcp_server_id === server.id));
+  assert.equal(portalApplication.type, 'mcp');
+  assert.deepEqual(portalApplication.destinations, [{ type: 'via_mcp_server_portal', mcp_server_id: server.id }]);
+  assert.equal(portalApplication.domain, undefined);
+  assert.deepEqual(application.destinations, [
     { type: 'public', uri: 'manage.example.com/api/mcp' },
     { type: 'public', uri: 'manage.example.com/__ankka/operation' },
     { type: 'public', uri: 'manage.example.com/__ankka/install/oauth/callback' }]);
@@ -3859,7 +3875,7 @@ async function installManagementSource(gateway, enabledTools = null) {
     assert.equal(installed.status, 'installed');
     assert.equal(Object.hasOwn(installed, 'initialManager'), false);
   });
-  return { source, application, server };
+  return { source, application, portalApplication, server };
 }
 
 async function managementRpc(gateway, method, params, { email = ADMIN, audience = MANAGEMENT_AUDIENCE, extraHeaders = {} } = {}) {
@@ -3984,8 +4000,11 @@ test('management source remains usable after completed installation actions leav
 
 
 test('assigned managers can finish lifecycle consent but do not gain dashboard or credential APIs', () => fixture(async (gateway) => {
-  const { application } = await installManagementSource(gateway);
-  gateway.provider.state.policies.get(application.id)[0].include.push({ email: { email: MEMBER } });
+  const { application, portalApplication } = await installManagementSource(gateway);
+  for (const app of [application, portalApplication]) {
+    const policy = gateway.provider.state.policies.get(app.id)[0];
+    if (!policy.include.some((entry) => entry.email?.email === MEMBER)) policy.include.push({ email: { email: MEMBER } });
+  }
   const headers = await gateway.headers(MEMBER, MANAGEMENT_AUDIENCE);
   for (const path of ['/__ankka/operation', '/__ankka/operation/oauth/start', '/__ankka/install/oauth/callback']) {
     assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}${path}`, { headers }), gateway.env), MEMBER);
@@ -3994,7 +4013,7 @@ test('assigned managers can finish lifecycle consent but do not gain dashboard o
     assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}${path}`, { headers }), gateway.env), false);
   }
   assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}/__ankka/operation`, { headers }), {}), false);
-  gateway.provider.state.policies.get(application.id)[0].include = [{ email: { email: ADMIN } }];
+  gateway.provider.state.policies.get(portalApplication.id)[0].include = [{ email: { email: ADMIN } }];
   assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}/__ankka/operation`, { headers }), gateway.env), false);
 }));
 
@@ -4029,12 +4048,15 @@ test('management MCP creates, applies and removes a URL source through the share
 }));
 
 test('management MCP can remove its own ordinary source and then denies the same caller', () => fixture(async (gateway) => {
-  await installManagementSource(gateway);
+  const { application, portalApplication, server } = await installManagementSource(gateway);
   const current = await (await gateway.api('/api/sources')).json();
   const removal = await managementRpc(gateway, 'tools/call', { name: 'remove_mcp_source', arguments: {
     revision: current.revision, sourceId: MANAGEMENT_ID,
   } });
   assert.equal(removal.body.result.structuredContent.ok, true, JSON.stringify(removal.body));
+  assert.equal(gateway.provider.state.apps.has(application.id), false);
+  assert.equal(gateway.provider.state.apps.has(portalApplication.id), false);
+  assert.equal(gateway.provider.state.servers.has(server.id), false);
   assert.equal((await managementRpc(gateway, 'tools/list', {})).response.status, 401);
 }));
 
@@ -4063,4 +4085,97 @@ test('management rollback binds consent preparation to the reviewed release and 
   assert.equal(handoff.status, 'user_authorization_required');
   assert.equal(new URL(handoff.handoffUrl).origin, MANAGEMENT_ORIGIN);
   assertNoMutation(gateway.provider, before);
+}));
+
+for (const accountLookup of ['available', 'unavailable', 'collision']) {
+  test(`management installation recovers an unacknowledged application only after authoritative lookup (${accountLookup})`, () => fixture(async (gateway) => {
+    let rejected = false;
+    gateway.provider.hook(({ record }) => {
+      if (!rejected && record.method === 'POST' && record.pathname.endsWith('/access/apps') && record.body.type === 'mcp') {
+        rejected = true;
+        return envelope(null, 400);
+      }
+    });
+    await installManagementSource(gateway, null, async ({ action, source, saved }) => {
+      const journal = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.find((entry) => entry.actionId === action.actionId);
+      assert.equal(journal.resources.length, 1);
+      assert.equal(journal.pending.kind, 'source_access_application');
+      assert.equal(journal.pending.provider, null);
+      await expireSourceAction(gateway, action.actionId);
+      gateway.reloadManagement();
+      const renew = () => gateway.api(`/api/source-actions/${action.actionId}/renew`, { method: 'POST', body: {
+        schemaVersion: 1, revision: saved.revision, sourceId: source.id,
+      } });
+      const accountPath = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+      if (accountLookup !== 'available') {
+        gateway.provider.hook(({ record }) => {
+          if (record.method !== 'GET' || record.pathname !== accountPath) return undefined;
+          if (accountLookup === 'unavailable') return envelope(null, 403);
+          const attempt = gateway.provider.requests.findLast((entry) => entry.method === 'POST' && entry.body?.type === 'mcp');
+          return envelope([{ ...attempt.body, id: 'synthetic-foreign-app', destinations: [] }]);
+        });
+        const baseline = gateway.provider.requests.length;
+        assert.equal((await renew()).status, 409);
+        assertNoMutation(gateway.provider, baseline);
+        assert.equal(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.find((entry) => entry.actionId === action.actionId).pending.provider, null);
+        await expireSourceAction(gateway, action.actionId);
+      }
+      gateway.provider.hook(undefined);
+      const baseline = gateway.provider.requests.length;
+      assert.equal((await renew()).status, 409, 'waits for OAuth after provisioning');
+      const requests = gateway.provider.requests.slice(baseline);
+      const listed = requests.findIndex((entry) => entry.method === 'GET' && entry.pathname === accountPath);
+      const created = requests.findIndex((entry) => entry.method === 'POST');
+      assert.ok(listed >= 0 && created > listed);
+      assert.equal(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.find((entry) => entry.actionId === action.actionId).resources.length, 5);
+      gateway.reloadManagement();
+    });
+    assert.equal((await managementRpc(gateway, 'tools/list', {})).response.status, 200);
+  }));
+}
+
+test('removing the administrator management assignment retains browser recovery but revokes MCP authority', () => fixture(async (gateway) => {
+  const { application, portalApplication } = await installManagementSource(gateway);
+  const team = await gateway.view();
+  team.members.find((member) => member.email === ADMIN).sourceIds = [];
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members: team.members,
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.ok(gateway.provider.state.policies.get(application.id)[0].include.some((entry) => entry.email?.email === ADMIN));
+  assert.ok(!gateway.provider.state.policies.get(portalApplication.id)[0].include.some((entry) => entry.email?.email === ADMIN));
+  assert.equal((await managementRpc(gateway, 'tools/list', {})).response.status, 401);
+  const headers = await gateway.headers(ADMIN, MANAGEMENT_AUDIENCE);
+  assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}/__ankka/operation`, { headers }), gateway.env), ADMIN);
+  gateway.reloadManagement();
+  assert.equal((await gateway.api('/api/team')).status, 200);
+}));
+
+test('management assignment synchronizes both policies and resumes an interrupted authentication policy update', () => fixture(async (gateway) => {
+  const { source, application, portalApplication } = await installManagementSource(gateway);
+  const team = await gateway.view();
+  const input = { schemaVersion: 1, expectedRevision: team.revision,
+    members: [...team.members, { email: NEW_PERSON, sourceIds: [source.id] }] };
+  gateway.provider.hook(({ record }) => record.method === 'PUT' && record.pathname.includes(`/apps/${application.id}/policies/`)
+    ? envelope(null, 503) : undefined);
+  assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: input })).status, 409);
+  assert.ok(gateway.provider.state.policies.get(portalApplication.id)[0].include.some((entry) => entry.email?.email === NEW_PERSON));
+  assert.ok(!gateway.provider.state.policies.get(application.id)[0].include.some((entry) => entry.email?.email === NEW_PERSON));
+  assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: NEW_PERSON })).response.status, 401);
+  gateway.reloadManagement();
+  gateway.provider.hook(undefined);
+  const resumed = await gateway.api('/api/team-actions', { method: 'POST', body: input });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.ok(gateway.provider.state.policies.get(application.id)[0].include.some((entry) => entry.email?.email === NEW_PERSON));
+  assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: NEW_PERSON })).response.status, 200);
+  const current = await gateway.view();
+  const revoked = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: current.revision,
+    members: current.members.filter((member) => member.email !== NEW_PERSON),
+  } });
+  assert.equal(revoked.status, 200, await revoked.clone().text());
+  for (const app of [application, portalApplication]) {
+    assert.ok(!gateway.provider.state.policies.get(app.id)[0].include.some((entry) => entry.email?.email === NEW_PERSON));
+  }
+  assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: NEW_PERSON })).response.status, 401);
 }));
