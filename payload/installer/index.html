@@ -8,7 +8,7 @@
     <meta name="robots" content="noindex, nofollow">
     <title>Install Ankka MCP Gateway</title>
     <link rel="icon" type="image/svg+xml" sizes="any" href="/assets/ankka-85bfe235.svg">
-    <link rel="stylesheet" href="/assets/installer-fe33c506.css">
+    <link rel="stylesheet" href="/assets/installer-711c3f62.css">
   </head>
   <body>
     <canvas class="ambient-field" aria-hidden="true"></canvas>
@@ -23,14 +23,6 @@
 
     <div class="layout">
       <main id="main" tabindex="-1">
-        <nav class="step-indicators" aria-label="Installation progress">
-          <ol class="steps">
-            <li><a href="/" data-route-link="/" data-step="describe" aria-label="Deploy your gateway"><span class="step-index" aria-hidden="true">01</span><span aria-hidden="true">Deploy</span><span class="step-dot" aria-hidden="true"></span></a></li>
-            <li><a href="/review" data-route-link="/review" data-step="review" aria-label="Review and connect Cloudflare"><span class="step-index" aria-hidden="true">02</span><span aria-hidden="true">Review</span><span class="step-dot" aria-hidden="true"></span></a></li>
-            <li><a href="/deploy" data-route-link="/deploy" data-step="approve" aria-label="Approve in Cloudflare"><span class="step-index" aria-hidden="true">03</span><span aria-hidden="true">Approve</span><span class="step-dot" aria-hidden="true"></span></a></li>
-            <li><a href="/result" data-route-link="/result" data-step="finish" aria-label="Finish secure setup"><span class="step-index" aria-hidden="true">04</span><span aria-hidden="true">Finish</span><span class="step-dot" aria-hidden="true"></span></a></li>
-          </ol>
-        </nav>
         <div id="live-notice" class="notice" role="status" aria-live="polite">Loading installer…</div>
 
         <section class="panel welcome-panel" data-route="/" aria-labelledby="welcome-title" hidden>
@@ -70,7 +62,7 @@
           <p id="approval-expiry" class="caption tabular"></p>
           <div id="authorization-handoff" class="callout" hidden><strong>Continue to Cloudflare</strong><p>Sign in to your team’s account to continue.</p><a id="authorization-link" class="primary-button" hidden>Continue to Cloudflare</a></div>
           <p class="caption">Approval links expire after ten minutes. You can retry here.</p>
-          <div class="button-row split"><button class="secondary-button" type="button" data-go="/review">Back</button><button id="restart-approval" class="secondary-button" type="button">Start a fresh approval</button></div>
+          <div class="button-row split"><button class="secondary-button" type="button" data-go="/">Back</button><button id="restart-approval" class="secondary-button" type="button">Start a fresh approval</button></div>
         </section>
 
         <section class="panel" data-route="/result" aria-labelledby="result-title" hidden>
@@ -107,6 +99,6 @@
         <p>You can also deploy from the public source repository.</p>
       </details>
     </footer>
-    <script src="/assets/installer-903e7656.js"></script>
+    <script src="/assets/installer-c30a165c.js"></script>
   </body>
 </html>

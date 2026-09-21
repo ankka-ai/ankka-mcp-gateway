@@ -12,8 +12,8 @@ const COMPONENTS = Object.freeze({
   admin: null,
   installer: [
     'assets/ankka-85bfe235.svg',
-    'assets/installer-903e7656.js',
-    'assets/installer-fe33c506.css',
+    'assets/installer-711c3f62.css',
+    'assets/installer-c30a165c.js',
     'index.html',
   ],
   worker: ['index.js'],
@@ -21,7 +21,7 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'b39db3124e177cdb11f0c431336542d3751c15ca6816d4a4c2531f68b92ba0d0',
+  installer: 'edbf9a66c9b5ac5efd17aac2710a6b75f3eb0d9c52177dc4f4ee63911f784fbb',
   worker: 'c302a016c9020c4540605d0cdf3745d7dae1b6a764e2b1dc596606d858d2d545',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -336,7 +336,7 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.match(adminCss, /--color-sidebar:#131313/u);
   assert.match(adminCss, /--font-mono:var\(--font-sans\)/u);
 
-  const installerCss = await readFile(new URL('installer/assets/installer-fe33c506.css', ROOT), 'utf8');
+  const installerCss = await readFile(new URL('installer/assets/installer-711c3f62.css', ROOT), 'utf8');
   {
     const css = installerCss;
     assert.match(css, /font-family:\s*"Helvetica Neue", Helvetica, Arial, sans-serif/u);
@@ -357,7 +357,6 @@ test('plain CSS keeps the reviewed typography and accessibility floors', async (
   assert.doesNotMatch(installerCss, /--font-display|font-family:\s*var\(--font-display\)/u);
   assert.match(installerCss, /--font-size-body:\s*1rem/u);
   assert.match(installerCss, /input,\s*\nselect,\s*\ntextarea[\s\S]*?font-size:\s*var\(--font-size-body\)/u);
-  assert.match(installerCss, /\.step-dot\s*\{[^}]*border-radius:\s*0/u);
   assert.match(installerCss, /\.operation-copy > p:last-child\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
   assert.match(installerCss, /\.stage-position\s*\{[^}]*font-size:\s*0\.8125rem/u);
 });
@@ -371,7 +370,7 @@ test('admin and installer carry the reviewed Ankka wordmark and navigation treat
   assert.match(installer, /M0 18\.2697V5\.97501/u);
   assert.match(admin, /Gateway management/u);
   assert.match(installer, /class="product-label">Gateway setup/u);
-  assert.match(installer, /class="step-indicators" aria-label="Installation progress"/u);
+  assert.doesNotMatch(installer, /class="step-indicators"|data-step=/u);
   assert.doesNotMatch(installer, /<aside\b/iu);
   assert.doesNotMatch(installer, /class="canary-badge"/u);
 });

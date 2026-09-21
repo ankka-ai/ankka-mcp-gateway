@@ -1,7 +1,6 @@
 'use strict';
 
 const ROUTES = new Set(['/', '/gateway', '/review', '/deploy', '/result']);
-const STEP_ROUTES = Object.freeze(['/', '/review', '/deploy', '/result']);
 const CUSTOMER_INSTALL_PATH = '/__ankka/install';
 const HANDOFF_POLL_MS = 3000;
 const HANDOFF_POLL_MAX_MS = 15000;
@@ -413,19 +412,6 @@ async function pollHandoff(delayMs = 0) {
   }, delayMs);
 }
 
-function renderSteps() {
-  const current = state.route === '/gateway' ? '/' : state.route;
-  for (const link of document.querySelectorAll('.steps a[data-route-link]')) {
-    const target = link.dataset.routeLink;
-    const index = STEP_ROUTES.indexOf(target);
-    const currentIndex = STEP_ROUTES.indexOf(current);
-    link.classList.toggle('is-current', target === current);
-    link.classList.toggle('is-complete', index !== -1 && index < currentIndex);
-    if (target === current) link.setAttribute('aria-current', 'step');
-    else link.removeAttribute('aria-current');
-  }
-}
-
 function renderWelcome() {
   byId('save-gateway').textContent = 'Deploy to Cloudflare';
 }
@@ -562,7 +548,7 @@ function renderResult() {
     }
     default: {
       title.textContent = 'Nothing to finish yet';
-      intro.textContent = 'Describe your gateway and connect Cloudflare to install it.';
+      intro.textContent = 'Choose Deploy to Cloudflare to start your installation.';
       detail.textContent = '';
       describe.hidden = false;
     }
@@ -575,7 +561,6 @@ function render() {
   for (const panel of document.querySelectorAll('[data-route]')) {
     panel.hidden = panel.dataset.route !== current;
   }
-  renderSteps();
   if (current === '/') renderWelcome();
   if (current === '/review') renderReview();
   if (current === '/deploy') renderDeploy();
