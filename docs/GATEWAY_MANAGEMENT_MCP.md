@@ -39,7 +39,9 @@ ordinary MCP authority after source revocation.
 ## Access boundary
 
 The built-in source has reserved ID `source-616e6b6b616d6370` and endpoint
-`https://<management-hostname>/mcp`. Its Access application covers `/mcp` and the
+`https://<management-hostname>/api/mcp`. The `/api/` prefix uses the signed
+deployment’s existing Worker-first routing, including browser consent pages.
+Its Access application covers `/api/mcp` and the
 existing customer operation consent paths. Each person authenticates with their
 own identity; this source is registered in the Portal with `on_behalf: true`.
 Ordinary upstream OAuth sources retain their shared team connection behavior.
