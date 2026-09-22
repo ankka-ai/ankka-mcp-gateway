@@ -1,3 +1,4 @@
+import { canonicalJson } from '../src/canonical-json';
 import {
   CustomerStage2DurableStatePort,
   initializeCustomerStage2Sql,
@@ -158,5 +159,19 @@ describe('customer Stage 2 SQLite journal', () => {
     sql.schemaVersion = 1;
     sql.state = { revision: 1, stateJson: '{"schemaVersion":1}' };
     await expect(new CustomerStage2DurableStatePort(storage).read()).rejects.toThrow('conflict');
+  });
+
+  it('reads a journal an earlier release stored before `cleanup` existed', async () => {
+    const sql = new FakeSqlStorage();
+    const storage = durableStorage(sql);
+    initializeCustomerStage2Sql(storage);
+    const value = journal();
+    const { cleanup, ...earlier } = value;
+    expect(cleanup).toBeNull();
+    sql.state = { revision: value.revision, stateJson: canonicalJson(earlier) };
+    const port = new CustomerStage2DurableStatePort(storage);
+    await expect(port.read()).resolves.toEqual(value);
+    sql.state = { revision: value.revision, stateJson: canonicalJson({ ...earlier, extra: true }) };
+    await expect(port.read()).rejects.toThrow('conflict');
   });
 });

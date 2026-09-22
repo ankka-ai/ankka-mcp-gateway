@@ -1,3 +1,4 @@
+import { canonicalJson } from '../src/canonical-json';
 import {
   CustomerBootstrapDurableStatePort,
   initializeCustomerBootstrapSql,
@@ -130,6 +131,31 @@ describe('customer bootstrap SQLite Durable Object state', () => {
     sql.schemaVersion = 1;
     sql.state = { revision: 1, stateJson: '{"schemaVersion":1}' };
     const port = new CustomerBootstrapDurableStatePort(storage);
+    await expect(port.read()).rejects.toThrow('conflict');
+  });
+
+  it('reads a record an earlier release stored before its optional fields existed', async () => {
+    const sql = new FakeSqlStorage();
+    const storage = fakeDurableStorage(sql);
+    initializeCustomerBootstrapSql(storage);
+    const capability = await createCustomerBootstrapCapability({ now: 1_800_000_000_000, randomBytes });
+    const initial = initialCustomerBootstrapState({
+      installId: `acg-${'a'.repeat(24)}`,
+      bootstrapId: capability.bootstrapId,
+      secretCommitment: capability.secretCommitment,
+      expiresAt: capability.expiresAt,
+    });
+    // As an earlier release wrote it: canonical, without `failureReason` or `cleanup`.
+    const { failureReason, cleanup, ...earlier } = initial;
+    expect([failureReason, cleanup]).toEqual([null, null]);
+    sql.state = { revision: initial.revision, stateJson: canonicalJson(earlier) };
+    const port = new CustomerBootstrapDurableStatePort(storage);
+    expect(await port.read()).toEqual(initial);
+
+    // The stored bytes must still be canonical, and unknown fields still fail closed.
+    sql.state = { revision: initial.revision, stateJson: JSON.stringify(earlier, null, 1) };
+    await expect(port.read()).rejects.toThrow('conflict');
+    sql.state = { revision: initial.revision, stateJson: canonicalJson({ ...earlier, extra: true }) };
     await expect(port.read()).rejects.toThrow('conflict');
   });
 });

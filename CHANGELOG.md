@@ -4,6 +4,18 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let a gateway that updated to v0.2.2 or v0.2.3 read the install records an
+  earlier release wrote. Those releases added an optional `cleanup` field to the
+  install record and the Stage 2 journal, and their reads compared the parsed
+  record, now carrying `"cleanup":null`, byte for byte with the stored one. Every
+  record an earlier release stored therefore failed to read, so updates, source
+  and BigQuery setup, token changes and removal all answered
+  `recovery_unavailable` before reaching Cloudflare. Reads now require the stored
+  bytes to be canonical, and still reject unknown fields. A gateway already on
+  v0.2.2 or v0.2.3 cannot run the update that carries this fix, because the
+  update is itself such an operation; its runtime has to be replaced once from
+  outside, keeping its bindings, before it updates normally again.
+
 - Release the lifecycle lock when a gateway removal stops before deleting
   anything. If an ownership check refused a resource after you authorized
   removal, for example because an Access policy was changed in Cloudflare, Team
