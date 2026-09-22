@@ -266,6 +266,13 @@ export function releaseNotes(repository, manifest, receipt) {
   const webMcpReleaseNotes = manifest.release === 'gateway-v0.1.19'
     ? '- WebMCP exposes supported management actions only in compatible browsers with the gateway or installer page open; no remote management MCP endpoint is added.\n\n'
     : '';
+  const connectorReleaseNotes = manifest.release === 'gateway-v0.2.2'
+    ? '- Installed connectors can change their exact tool allowlist. New tools stay off until you select them.\n' +
+      '- An installed connector can be renamed in your gateway, in Team, and on its Access policy. Who can use it does not change.\n' +
+      '- Connector access can be shared through named teams.\n' +
+      '- Settings lets you add, replace, or verify the management token. Creating the token starts only after you have copied it.\n' +
+      '- Gateways already on v0.2 can install this update directly. Older gateways still update through v0.1.82 first.\n\n'
+    : '';
   const apiSourceReleaseNotes = manifest.release === 'gateway-v0.1.82'
     ? '- Compatibility bridge: update existing gateways to this release first, then check for updates again to install v0.2.0. Configuration, credentials, sources and Team access are preserved.\n' +
       '- This release accepts the exact new API-source deployment contract but keeps the old binding set. API-source tools become available with the second update.\n\n'
@@ -274,6 +281,7 @@ export function releaseNotes(repository, manifest, receipt) {
         '- Agent-authored API sources are built in, with no feature flag or separate runtime deployment. Existing v0.1 gateways upgrade through v0.1.82 first; no fresh installation is required.\n\n'
       : '';
   return `${channelLabel} of Ankka MCP Gateway. This GitHub Release mirrors the exact signed artifact already committed to the customer update channel.\n\n` +
+    connectorReleaseNotes +
     apiSourceReleaseNotes +
     teamReleaseNotes +
     bridgeReleaseNotes +
