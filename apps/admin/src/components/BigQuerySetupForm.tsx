@@ -1,3 +1,5 @@
+import { Checkbox } from './Checkbox'
+import { Disclosure } from './Disclosure'
 import { type FormEvent, useState } from 'react'
 import { Input } from '@cloudflare/kumo'
 import { ArrowRight } from '@phosphor-icons/react'
@@ -68,17 +70,16 @@ export function BigQuerySetupForm({ disabled, embedded = false }: { disabled: bo
           <label htmlFor="bigquery-datasets" className="mb-1.5 mt-5 block text-sm font-medium text-kumo-default">Datasets to discover</label>
           <textarea id="bigquery-datasets" className="text-input min-h-24 w-full" placeholder={'analytics-data-project.reporting'} value={datasets} maxLength={18_000} required onChange={(event) => setDatasets(event.target.value)} />
           <p className="mt-1.5 text-xs leading-5 text-kumo-subtle">One project.dataset per line. Google IAM controls which data SQL can read; keep its dataset permissions scoped to this list.</p>
-          <details className="mt-5 rounded-xl border border-kumo-line p-4 text-sm leading-6">
-            <summary className="cursor-pointer font-medium text-kumo-strong">Prepare your Google service account</summary>
+          <Disclosure className="mt-5 text-sm leading-6" label="Prepare your Google service account">
             <ol className="mt-3 list-inside list-decimal space-y-2 text-kumo-subtle">
               <li>Create a dedicated service account and enable the BigQuery API and Google’s BigQuery MCP service in the projects you will query or inspect.</li>
               <li>Grant BigQuery Job User in the query project, MCP User in each query and data project, and BigQuery Data Viewer on each selected dataset.</li>
               <li>Remove broader inherited data or write access, then create a JSON key. Keep the file ready for the next step.</li>
             </ol>
             <a className="mt-3 inline-block underline underline-offset-4" href="https://github.com/ValentinOtt/ankka-mcp-gateway/blob/main/docs/BIGQUERY_GOOGLE_AUTH.md" target="_blank" rel="noreferrer">Google permissions and setup guide</a>
-          </details>
+          </Disclosure>
           <label className="mt-5 flex items-start gap-3 text-sm leading-6 text-kumo-subtle">
-            <input className="mt-1" type="checkbox" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
+            <Checkbox className="mt-1" checked={confirmed} onChange={(event) => setConfirmed(event.target.checked)} />
             <span>I have a dedicated service account with the read-only permissions above and its JSON key ready.</span>
           </label>
           <p className="mt-3 text-xs leading-5 text-kumo-subtle">After Cloudflare approval, upload the key directly to your gateway. It is stored as a Worker secret in your Cloudflare account. Your team gets three tools: read-only SQL, table details, and table listing. Nobody is assigned access until you grant it.</p>

@@ -56,8 +56,6 @@ export function SettingsPage() {
     : update.status === 'unavailable' ? 'Channel unavailable' : 'Up to date'
   const channelLabel = update.channel === 'stable' ? 'Stable' : 'Canary'
   const availableRelease = update.status === 'available' ? update.available?.release : null
-  // A recorded release the gateway can no longer restore: say why instead of offering it.
-  const rollbackEnded = !update.rollback.available && 'release' in update.rollback ? update.rollback.release : null
 
   return (
     <div>
@@ -84,15 +82,12 @@ export function SettingsPage() {
           <div><dt>Installed</dt><dd>{update.current?.release ?? 'Unavailable'}</dd></div>
           <div><dt>{availableRelease ? 'Available version' : 'Release channel'}</dt><dd>{availableRelease ?? channelLabel}</dd></div>
         </dl>
-        <p className="update-label">{channelLabel} release channel · {update.available?.classification.kind === 'normal' ? 'Normal update' : update.status === 'unavailable' ? 'Unverified' : 'No change'}</p>
         {update.status === 'unavailable' ? (
           <p>The signed channel could not be verified. Gateway management and an already available rollback remain usable.</p>
         ) : update.available?.notes?.length ? (
           <ul className="release-notes">{update.available.notes.map(note => <li key={note}>{note}</li>)}</ul>
-        ) : (
-          <p>The installed runtime matches the {update.channel} channel.</p>
-        )}
-        <div className="actions">
+        ) : null}
+        {update.status === 'available' || update.rollback.available ? <div className="actions">
           {update.status === 'available' ? (
             <button type="button" disabled={isBusy} aria-busy={pendingRuntimeOperation === 'update'} onClick={() => void authorize('update')}>
               {pendingRuntimeOperation === 'update' ? <LoadingIndicator inline /> : null} Update
@@ -102,10 +97,8 @@ export function SettingsPage() {
             <button type="button" className="secondary" disabled={isBusy} aria-busy={pendingRuntimeOperation === 'rollback'} onClick={() => void authorize('rollback')}>
               {pendingRuntimeOperation === 'rollback' ? <LoadingIndicator inline /> : null} Rollback
             </button>
-          ) : rollbackEnded ? (
-            <p>You can no longer roll back to {rollbackEnded}. A connector was installed or Team access was changed after the update, and the older version cannot work with those changes.</p>
           ) : null}
-        </div>
+        </div> : null}
       </section>
 
       <section

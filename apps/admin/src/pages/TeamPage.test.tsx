@@ -155,7 +155,7 @@ describe('TeamPage', () => {
     const administrator = await screen.findByRole('group', { name: 'admin@example.com' })
     await toggleAccess(user, administrator, /Company knowledge/)
     expect(accessCheckbox(administrator)).toBeChecked()
-    expect(screen.getByText('Administrator · role unchanged')).toBeInTheDocument()
+    expect(screen.getByText('Administrator')).toBeInTheDocument()
   })
 
   it('keeps existing-connector permission controls usable while connector addition is paused', async () => {

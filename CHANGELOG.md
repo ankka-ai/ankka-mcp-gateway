@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Unify expand/collapse controls and checkboxes across connector tools, Team
+  access and setup forms. Simplify Settings copy and release status, remove the
+  redundant connector status button, and refresh the README introduction.
+
 - Make Team access saves and retries faster by overlapping independent
   Cloudflare ownership reads and using verified progress from the saved change.
   Retrying an interrupted save advances to unfinished policies without replaying
