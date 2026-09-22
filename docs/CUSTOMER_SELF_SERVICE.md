@@ -439,7 +439,11 @@ separately from dashboard data through an administrator-authenticated route
 that accepts only a saved source ID. No source credentials or browser cookies
 are forwarded. Remote artwork must use HTTPS on the MCP endpoint's own origin;
 redirects and cross-origin artwork are rejected. Embedded base64 artwork is
-also supported. The gateway bounds image bytes and raster dimensions, checks
-image types, and restricts SVG to simple artwork. Icon responses are privately
-cached for five minutes. Missing, protected, unsupported, or broken icons keep
-the source's initial; there is no third-party favicon service or website scrape.
+also supported. If MCP metadata requires authentication (HTTP 401 or 403), the
+gateway tries the public `/favicon.png` on that source's own origin. Source
+owners can expose this static PNG while keeping their MCP endpoint protected.
+This fallback must return a PNG directly; redirects and login pages are rejected.
+The gateway bounds image bytes and raster dimensions, checks image types, and
+restricts SVG to simple artwork. Icon responses are privately cached for five
+minutes. Missing, protected, unsupported, or broken icons keep the source's
+initial; there is no third-party favicon service or website scrape.

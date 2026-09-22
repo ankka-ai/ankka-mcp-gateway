@@ -85,6 +85,50 @@ test('missing metadata and protected servers fall back without an icon', async (
   }
 });
 
+test('protected metadata uses a public same-origin PNG without forwarding credentials', async (t) => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64');
+  for (const status of [401, 403]) {
+    const requests = [];
+    t.mock.method(globalThis, 'fetch', async (request) => {
+      requests.push(request);
+      assert.equal(request.headers.has('authorization'), false);
+      assert.equal(request.headers.has('cookie'), false);
+      assert.equal(request.headers.has('cf-access-jwt-assertion'), false);
+      if (request.url === endpoint) return new Response(null, { status, headers: {
+        'www-authenticate': 'Bearer resource_metadata="https://icons.example.com/.well-known/oauth-protected-resource"',
+      } });
+      assert.equal(request.url, 'https://icons.example.com/favicon.png');
+      assert.equal(request.method, 'GET');
+      assert.equal(request.credentials, 'omit');
+      assert.equal(request.redirect, 'manual');
+      return new Response(png, { headers: { 'content-type': 'image/png' } });
+    });
+    const icon = await fetchMcpSourceIcon(endpoint);
+    assert.equal(icon.type, 'image/png');
+    assert.deepEqual(Buffer.from(icon.bytes), png);
+    assert.equal(requests.length, 2);
+    t.mock.restoreAll();
+  }
+});
+
+test('public PNG fallback rejects login redirects, invalid images and oversized responses', async (t) => {
+  for (const reply of [
+    () => new Response(null, { status: 302, headers: { location: 'https://login.example.com/' } }),
+    () => new Response(svg, { headers: { 'content-type': 'image/svg+xml' } }),
+    () => new Response('not an image', { headers: { 'content-type': 'image/png' } }),
+    () => new Response('x'.repeat(128 * 1024 + 1), { headers: { 'content-type': 'image/png' } }),
+  ]) {
+    let calls = 0;
+    t.mock.method(globalThis, 'fetch', async (request) => {
+      calls++;
+      return request.url === endpoint ? new Response(null, { status: 401 }) : reply();
+    });
+    assert.equal(await fetchMcpSourceIcon(endpoint), null);
+    assert.equal(calls, 2);
+    t.mock.restoreAll();
+  }
+});
+
 test('the icon route requires gateway access before any upstream fetch', async (t) => {
   let fetched = false;
   t.mock.method(globalThis, 'fetch', async () => { fetched = true; throw new Error('unexpected fetch'); });
