@@ -546,6 +546,14 @@ describe('HttpGatewayAdminApi', () => {
       message: 'Finish or cancel any unfinished connector installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.',
     })
   })
+
+  it('sends you to the Team page when teams still hold Access groups', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, error: 'teardown_teams_present' }, { status: 409 })))
+    await expect(new HttpGatewayAdminApi().prepareTeardownAction()).rejects.toMatchObject({
+      code: 'teardown_teams_present',
+      message: 'Delete your teams on the Team page first. Removal does not delete their Cloudflare Access groups.',
+    })
+  })
 })
 
 // A sign-in source is installed with nothing enabled; its tools are chosen afterwards from Cloudflare's synced list.

@@ -558,6 +558,25 @@ describe('TeamPage', () => {
     expect(client.prepareTeamAction).not.toHaveBeenCalled()
   })
 
+  it('says no policy changed when the token lacks group write, and offers resume or cancellation', async () => {
+    const user = userEvent.setup()
+    const grant: TeamGrant = { id: 'team-0123456789abcdef', name: 'Finance', memberEmails: ['analyst@example.com'], sourceIds: [sourceId] }
+    const pendingAction: TeamAction = { schemaVersion: 1, actionId, status: 'recovery_required', expiresAt, failureCode: 'team_access_group_permission_missing', canCancel: true }
+    const canceled: TeamAction = { ...pendingAction, status: 'failed', failureCode: 'team_action_cancelled', canCancel: false }
+    const getTeam = vi.fn().mockResolvedValueOnce({ ...team, pendingAction, proposedMembers: team.members, proposedTeams: [grant] })
+      .mockResolvedValue({ ...team, pendingAction: canceled })
+    const client = renderTeam(api({ getTeam, cancelTeamAction: vi.fn(async () => canceled) }))
+    const message = await screen.findByText(/No access policy was changed/)
+    expect(message).toHaveTextContent('The management token cannot edit Cloudflare Access groups.')
+    expect(message).toHaveTextContent('Resume the recorded change once this is fixed, or cancel it.')
+    expect(screen.queryByText(/Some access policies may already have changed/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Resume recorded change' })).toBeEnabled()
+    await user.click(screen.getByRole('button', { name: 'Cancel recorded change' }))
+    expect(await screen.findByText('The recorded change was canceled before any access policy was changed.')).toBeInTheDocument()
+    expect(client.cancelTeamAction).toHaveBeenCalledExactlyOnceWith(actionId)
+    expect(client.prepareTeamAction).not.toHaveBeenCalled()
+  })
+
   it.each(['authorization_required', 'applying', 'recovery_required'] as const)('does not offer cancellation for a non-cancellable %s action', async (actionStatus) => {
     const pendingAction: TeamAction = { schemaVersion: 1, actionId, status: actionStatus, expiresAt, failureCode: null, canCancel: false }
     const client = renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, pendingAction, proposedMembers: team.members })), getTeamAction: vi.fn(async () => pendingAction) }))

@@ -536,6 +536,7 @@ const ERROR_MESSAGES = new Map([
   ['runtime_action_invalid', 'The runtime action is no longer valid.'],
   ['runtime_update_not_available', 'The installed runtime already matches its release channel.'],
   ['teardown_action_conflict', 'Finish or cancel any unfinished connector installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.'],
+  ['teardown_teams_present', 'Delete your teams on the Team page first. Removal does not delete their Cloudflare Access groups.'],
   ['teardown_action_invalid', 'The teardown request was rejected. Reload the management page before trying again.'],
   ['teardown_actions_unavailable', 'Receipt-authorized teardown is not available from this gateway release.'],
   ['update_channel_unavailable', 'The signed release channel is temporarily unavailable.'],

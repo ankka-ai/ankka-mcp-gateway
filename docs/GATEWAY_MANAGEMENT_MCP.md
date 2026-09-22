@@ -77,6 +77,10 @@ On each MCP request the Worker reconstructs the source from ownership receipts,
 reads both live Access applications and their sole policies, and verifies the signed
 Access assertion against the self-hosted application's audience. Issuer, signature, expiry,
 email, and current source assignment must match. Membership is not cached.
+A [named team](TEAM_ACCESS.md#named-teams) assigns the source through a group
+rule on both policies. The Worker reads that group on each request and accepts it
+only when it is a group this gateway created for one of its teams, with its
+stable name.
 Service identities, an administrator token for a different audience, an unassigned
 identity, a missing assertion, and changed resource shapes are rejected. Calling
 the Worker directly does not bypass this check. Stored tool allowlists constrain
