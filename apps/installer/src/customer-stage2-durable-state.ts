@@ -72,7 +72,9 @@ export class CustomerStage2DurableStatePort implements CustomerStage2JournalPort
       conflict();
     }
     const journal = parseCustomerStage2Journal(decoded);
-    if (journal === null || journal.revision !== row.revision || canonicalJson(journal) !== row.state_json) {
+    // The stored bytes must be canonical. A journal an earlier release wrote lacks
+    // fields added since, and parsing fills their defaults, so compare what was stored.
+    if (journal === null || journal.revision !== row.revision || canonicalJson(decoded) !== row.state_json) {
       conflict();
     }
     return journal;

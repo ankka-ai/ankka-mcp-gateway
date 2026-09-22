@@ -85,7 +85,9 @@ export class CustomerBootstrapDurableStatePort implements CustomerBootstrapState
       conflict();
     }
     const state = parseCustomerBootstrapState(decoded);
-    if (state === null || state.revision !== row.revision || canonicalJson(state) !== row.state_json) conflict();
+    // The stored bytes must be canonical. A record an earlier release wrote lacks
+    // fields added since, and parsing fills their defaults, so compare what was stored.
+    if (state === null || state.revision !== row.revision || canonicalJson(decoded) !== row.state_json) conflict();
     return state;
   }
 
