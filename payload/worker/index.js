@@ -346,7 +346,9 @@ const DEFAULT_OAUTH_CALLBACKS = Object.freeze([
 ]);
 const REQUEST_LIMIT_BYTES = 96 * 1024;
 const BOOTSTRAP_REQUEST_LIMIT_BYTES = 128 * 1024;
-const PROVIDER_RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024;
+// Synced MCP tool schemas can exceed 4 MiB even below the 500-tool ceiling.
+// Keep provider reads bounded while admitting catalogues up to 8 MiB.
+const PROVIDER_RESPONSE_LIMIT_BYTES = 8 * 1024 * 1024;
 const MCP_RESPONSE_LIMIT_BYTES = 4 * 1024 * 1024;
 const MCP_DISCOVERY_LIMIT_BYTES = 8 * 1024 * 1024;
 const MCP_REQUEST_LIMIT_BYTES = 32 * 1024;

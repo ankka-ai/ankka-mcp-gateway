@@ -3565,6 +3565,52 @@ async function removeSource(gateway, sourceId, options = {}) {
   });
 }
 
+test('a paused source with a 6 MiB synced catalogue can list tools and be removed', () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  const tools = manyTools(263).map((tool) => ({ ...tool, inputSchema: { type: 'object',
+    description: 'Synthetic schema documentation. '.repeat(800) } }));
+  connectSignInSource(gateway, installed.serverId, tools);
+  const bytes = Buffer.byteLength(JSON.stringify(gateway.provider.state.servers.get(installed.serverId)));
+  assert.ok(bytes > 6 * 1024 * 1024 && bytes < 8 * 1024 * 1024);
+  const catalogue = await gateway.api(installed.toolsPath);
+  assert.equal(catalogue.status, 200, await catalogue.clone().text());
+  const listed = await catalogue.json();
+  assert.equal(listed.state, 'ready');
+  assert.equal(listed.tools.length, tools.length);
+  assert.ok(!JSON.stringify(listed).includes('Synthetic schema documentation'), 'raw schemas stay out of dashboard responses');
+  const response = await removeSource(gateway, installed.source.id);
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).sources.some((source) => source.id === installed.source.id), false);
+  assert.equal(gateway.provider.state.servers.has(installed.serverId), false);
+}));
+
+for (const declared of [true, false]) test(`source removal refuses a catalogue above 8 MiB (${declared ? 'declared' : 'streamed'}) without deleting`, () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  let cancelled = false;
+  gateway.provider.hook(({ record }) => {
+    if (record.method !== 'GET' || !record.pathname.endsWith(`/mcp/servers/${installed.serverId}`)) return undefined;
+    const headers = { 'content-type': 'application/json' };
+    if (declared) headers['content-length'] = String(8 * 1024 * 1024 + 1);
+    return new Response(new ReadableStream({
+      start(controller) {
+        if (!declared) {
+          controller.enqueue(new Uint8Array(8 * 1024 * 1024));
+          controller.enqueue(new Uint8Array(1));
+        }
+      },
+      cancel() { cancelled = true; },
+    }), { headers });
+  });
+  const baseline = gateway.provider.requests.length;
+  const response = await removeSource(gateway, installed.source.id);
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error, 'source_removal_ownership_conflict');
+  assert.equal(cancelled, true);
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_REMOVAL_KEY), undefined);
+  assert.equal(gateway.provider.state.servers.has(installed.serverId), true);
+}));
+
 for (const chosen of [false, true]) test(`a paused source can be removed ${chosen ? 'after choosing tools' : 'without connecting or installing it'}`, () => signInFixture(async (gateway) => {
   const installed = await installSignInSource(gateway);
   if (chosen) {
