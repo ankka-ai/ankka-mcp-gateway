@@ -1718,6 +1718,94 @@ test('account token reads live Team policies and applies a change without OAuth'
   assert.doesNotMatch(canonicalJson(after), /synthetic-account-management-token|handoffUrl/);
 }));
 
+async function sevenSourceTeamRequest(gateway) {
+  for (let index = 1; index < 7; index += 1) {
+    await addHistoricalInstalledSource(gateway, { label: `Source ${index}`, url: `https://source-${index}.example.net/mcp` });
+  }
+  const before = await gateway.view();
+  return { schemaVersion: 1, expectedRevision: before.revision,
+    members: [...before.members, { email: NEW_PERSON, sourceIds: before.sources.map(({ id }) => id) }] };
+}
+
+test('a seven-source Team save overlaps reads but drains them before each serial write', async () => fixture(async (gateway) => {
+  const input = await sevenSourceTeamRequest(gateway);
+  let active = 0;
+  let peak = 0;
+  gateway.provider.hook(async ({ record }) => {
+    assert.ok(!record.pathname.includes('/mcp/servers'), 'saving access never loads upstream tool catalogues');
+    if (record.method === 'PUT') {
+      assert.equal(active, 0, 'ownership reads settle before a policy write');
+      return;
+    }
+    active += 1;
+    peak = Math.max(peak, active);
+    await nextTurn();
+    active -= 1;
+  });
+  const response = await gateway.api('/api/team-actions', { method: 'POST', body: input });
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal(active, 0);
+  assert.equal(peak, 4);
+  assert.equal(gateway.provider.puts().length, 8, 'one Portal policy and seven source policies');
+}));
+
+test('Team resumes a bounded seven-source save without spending every attempt on completed policies', async (context) => fixture(async (gateway) => {
+  const input = await sevenSourceTeamRequest(gateway);
+  const timeout = AbortSignal.timeout.bind(AbortSignal);
+  let deadline;
+  let reads;
+  context.mock.method(AbortSignal, 'timeout', (milliseconds) => {
+    if (milliseconds !== 60_000) return timeout(milliseconds);
+    deadline = new AbortController();
+    reads = 0;
+    return deadline.signal;
+  });
+  gateway.provider.hook(async ({ request, record }) => {
+    // Deterministic slow-provider budget: every attempt can afford the full
+    // ownership graph and a few changes, but not all seven. Abort only reads,
+    // so every successful PUT must be recognized rather than sent again.
+    if (record.method === 'GET' && deadline && ++reads > 44) deadline.abort();
+    await nextTurn();
+    request.signal.throwIfAborted();
+  });
+  let completed = false;
+  let previousWrites = 0;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    deadline = null;
+    const response = await gateway.api('/api/team-actions', { method: 'POST', body: input });
+    const result = await response.json();
+    if (response.status === 200) { completed = true; break; }
+    assert.equal(response.status, 409);
+    assert.equal(result.error, 'team_action_recovery_required', 'deadline expiry is not reported as policy drift');
+    const writes = gateway.provider.puts().length;
+    assert.ok(writes > previousWrites, 'each interrupted attempt makes forward progress');
+    previousWrites = writes;
+    gateway.reloadManagement();
+  }
+  assert.equal(completed, true, 'repeated bounded attempts converge');
+  const writes = gateway.provider.puts();
+  assert.equal(writes.length, 8);
+  assert.equal(new Set(writes.map(({ pathname }) => pathname)).size, 8, 'verified and lost-response writes are not replayed');
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).pendingAction.status, 'succeeded');
+}));
+
+test('a retry rejects drift on an already verified Team policy before changing another target', async () => fixture(async (gateway) => {
+  const input = await sevenSourceTeamRequest(gateway);
+  let writes = 0;
+  gateway.provider.hook(({ record }) => record.method === 'PUT' && ++writes === 2 ? envelope(null, 503) : undefined);
+  assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: input })).status, 409);
+  const completed = gateway.managementStorage.snapshot(TEAM_KEY).pendingAction.journal.find(({ phase }) => phase === 'verified');
+  assert.ok(completed);
+  const live = [...gateway.provider.state.policies.values()].flat().find(({ id }) => id === completed.policyId);
+  live.include.push({ email: { email: 'external-change@example.com' } });
+  gateway.provider.hook(undefined);
+  const baseline = gateway.provider.requests.length;
+  const response = await gateway.api('/api/team-actions', { method: 'POST', body: input });
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).error, 'team_policy_drift');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
 test('live Team reads reconcile external membership and invalidate stale revisions', async () => fixture(async (gateway) => {
   gateway.env.ANKKA_MANAGEMENT_TOKEN = MANAGEMENT_TOKEN;
   const before = await gateway.view();
