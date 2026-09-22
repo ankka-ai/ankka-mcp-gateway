@@ -33,7 +33,7 @@ describe('HttpGatewayAdminApi', () => {
 
   it.each(['bigquery_google_key_invalid', 'bigquery_google_auth_http_400', 'bigquery_google_query_http_403',
     'bigquery_google_response_invalid', 'bigquery_setup_failed', 'bigquery_google_auth_http_private-detail'])
-  ('keeps only bounded BigQuery failure codes from the source status: %s', async (code) => {
+  ('keeps only bounded BigQuery failure codes from the connector status: %s', async (code) => {
     const actionId = `action_${'a'.repeat(32)}`
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, actionId, sourceId: 'source-test',
       status: 'failed', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: code })))
@@ -41,13 +41,13 @@ describe('HttpGatewayAdminApi', () => {
     expect(action.failureCode).toBe(code.endsWith('private-detail') ? 'source_action_failed' : code)
   })
 
-  it('accepts direct source completion without a consent URL', async () => {
+  it('accepts direct connector completion without a consent URL', async () => {
     const completed = { schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z' }
     vi.stubGlobal('fetch', vi.fn(async () => Response.json(completed)))
     await expect(new HttpGatewayAdminApi().prepareSourceAction(4, 'source-test')).resolves.toEqual(completed)
   })
 
-  it('renews an exact source action through its same-origin endpoint', async () => {
+  it('renews an exact connector action through its same-origin endpoint', async () => {
     const actionId = `action_${'a'.repeat(32)}`
     const prepared = { schemaVersion: 1, actionId, status: 'authorization_required',
       expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: 'https://manage.example.com/__ankka/operation#synthetic' }
@@ -83,7 +83,7 @@ describe('HttpGatewayAdminApi', () => {
     }))
   })
 
-  it('saves an exact sorted source draft through the production API', async () => {
+  it('saves an exact sorted connector draft through the production API', async () => {
     let capturedInit: RequestInit | undefined
     const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
       capturedInit = init
@@ -120,7 +120,7 @@ describe('HttpGatewayAdminApi', () => {
     )
   })
 
-  it('discovers source actions without requiring a saved action identifier or authorization fragment', async () => {
+  it('discovers connector actions without requiring a saved action identifier or authorization fragment', async () => {
     const actionId = `action_${'a'.repeat(32)}`
     const action = {
       schemaVersion: 1, actionId, sourceId: 'source-1111111111111111', status: 'authorization_required',
@@ -153,10 +153,10 @@ describe('HttpGatewayAdminApi', () => {
   })
 
   it.each([
-    ['draft_changed', 'saved source draft changed'],
-    ['source_pending', 'source installation is already pending'],
+    ['draft_changed', 'saved connector draft changed'],
+    ['source_pending', 'connector installation is already pending'],
     ['lifecycle_pending', 'Another gateway action is pending'],
-    ['recovery_required', 'Source provisioning may have started'],
+    ['recovery_required', 'Connector provisioning may have started'],
   ])('preserves the safe %s conflict reason and action pointer', async (reason, message) => {
     const action = { kind: reason === 'lifecycle_pending' ? 'runtime' : 'source', actionId: `action_${'a'.repeat(32)}` }
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({
@@ -210,7 +210,7 @@ describe('HttpGatewayAdminApi', () => {
     expect(JSON.stringify(snapshot)).not.toContain('synthetic-sensitive')
   })
 
-  it('preserves the legacy source status and cancellation response shape', async () => {
+  it('preserves the legacy connector status and cancellation response shape', async () => {
     const actionId = `action_${'a'.repeat(32)}`
     const action = { schemaVersion: 1, actionId, sourceId: 'source-1111111111111111', status: 'failed', expiresAt: '2030-01-01T00:10:00.000Z', failureCode: 'source_action_denied' }
     const fetch = vi.fn(async () => Response.json(action))
@@ -258,7 +258,7 @@ describe('HttpGatewayAdminApi', () => {
     for (const request of [
       api.prepareSourceAction(4, 'source-1111111111111111'),
       api.saveSourceDraft(4, { label: 'Knowledge', url: 'https://knowledge.example.com/mcp', authMode: 'none', enabledTools: ['search'] }),
-    ]) await expect(request).rejects.toEqual(expect.objectContaining({ code: 'source_addition_paused', message: 'New-source installation is temporarily unavailable in this release. Existing sources and team permissions remain available.' }))
+    ]) await expect(request).rejects.toEqual(expect.objectContaining({ code: 'source_addition_paused', message: 'New-connector installation is temporarily unavailable in this release. Existing connectors and team permissions remain available.' }))
   })
 
   it('saves the exact revision-bound Team batch through one same-origin POST without a handoff', async () => {
@@ -362,7 +362,7 @@ describe('HttpGatewayAdminApi', () => {
     expect(fetch).toHaveBeenCalledWith(`/api/team-actions/${actionId}`, expect.objectContaining({ method: 'DELETE', credentials: 'same-origin', redirect: 'error', body: '{}' }))
   })
 
-  it('accepts larger Team rosters while retaining field, source, and tool validation', async () => {
+  it('accepts larger Team rosters while retaining field, connector, and tool validation', async () => {
     const person = { email: 'teammate@example.com', sourceIds: [] }
     const source = { id: 'source-1111111111111111', label: 'Knowledge', enabledTools: ['search'], status: 'installed' }
     const validTeam = {
@@ -488,7 +488,7 @@ describe('HttpGatewayAdminApi', () => {
     await expect(new HttpGatewayAdminApi().getStatus()).rejects.toMatchObject({ code: 'response_invalid' })
   })
 
-  it('accepts who prepared a source or Team action and rejects an unknown kind', async () => {
+  it('accepts who prepared a connector or Team action and rejects an unknown kind', async () => {
     const actionId = `action_${'a'.repeat(32)}`
     const action = { schemaVersion: 1, actionId, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z', failureCode: null }
     for (const actorKind of ['human', 'service'] as const) {
@@ -501,7 +501,7 @@ describe('HttpGatewayAdminApi', () => {
     await expect(new HttpGatewayAdminApi().getSourceAction(actionId)).rejects.toMatchObject({ code: 'response_invalid' })
   })
 
-  it('accepts the release a source installation would stop being restorable, absent, null or named, and nothing looser', async () => {
+  it('accepts the release a connector installation would stop being restorable, absent, null or named, and nothing looser', async () => {
     const base = { schemaVersion: 1, revision: 4, applyMode: 'account_token', installationEnabled: true, sources: [] }
     for (const [reported, expected] of [
       [{}, undefined], [{ installEndsRollbackTo: null }, null], [{ installEndsRollbackTo: 'gateway-v0.9.9' }, 'gateway-v0.9.9'],
@@ -542,13 +542,13 @@ describe('HttpGatewayAdminApi', () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, error: 'teardown_action_conflict' }, { status: 409 })))
     await expect(new HttpGatewayAdminApi().prepareTeardownAction()).rejects.toMatchObject({
       code: 'teardown_action_conflict',
-      message: 'Finish or cancel any unfinished source installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.',
+      message: 'Finish or cancel any unfinished connector installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.',
     })
   })
 })
 
 // A sign-in source is installed with nothing enabled; its tools are chosen afterwards from Cloudflare's synced list.
-describe('the tool choice of a sign-in source', () => {
+describe('the tool choice of a sign-in connector', () => {
   afterEach(() => { vi.unstubAllGlobals() })
 
   const actionId = `action_${'a'.repeat(32)}`
@@ -604,7 +604,7 @@ describe('the tool choice of a sign-in source', () => {
     }
   })
 
-  it('keeps the two reasons such an installation waits for, and a source saved without tools', async () => {
+  it('keeps the two reasons such an installation waits for, and a connector saved without tools', async () => {
     const action = { schemaVersion: 1, actionId, sourceId, status: 'recovery_required', state: 'recovery_required',
       issuedAt: '2030-01-01T00:00:00.000Z', expiresAt: '2030-01-01T00:10:00.000Z', canCancel: false, canRenew: true }
     for (const failureCode of ['source_tools_required', 'source_tools_chosen']) {
@@ -621,11 +621,11 @@ describe('the tool choice of a sign-in source', () => {
     ['source_connection_required', /installed with nothing enabled and nobody assigned/u],
     ['source_sync_required', /has not finished syncing the tools/u],
     ['source_tools_required', /Choose its tools below to finish installation/u],
-    ['source_tools_mismatch', /not in the list Cloudflare synced from this source/u],
+    ['source_tools_mismatch', /not in the list Cloudflare synced from this connector/u],
     ['source_tools_unavailable', /not waiting for a tool choice/u],
     ['source_tools_invalid', /between 1 and 500 tools/u],
     ['source_tools_unsupported', /cannot be offered here\. Nothing was enabled/u],
-    ['source_catalogue_unavailable', /did not return this source’s server record/u],
+    ['source_catalogue_unavailable', /did not return this connector’s server record/u],
   ])('names %s instead of a failed request', async (code, wording) => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, error: code, detail: 'synthetic-sensitive-provider-text' }, { status: 409 })))
     const error = await new HttpGatewayAdminApi().getSourceActionTools(actionId).catch((cause: unknown) => cause)
@@ -671,7 +671,7 @@ describe('the management token', () => {
     vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, error: 'management_credential_action_conflict' }, { status: 409 })))
     await expect(new HttpGatewayAdminApi().prepareManagementCredentialAction()).rejects.toMatchObject({
       status: 409, code: 'management_credential_action_conflict',
-      message: 'Your gateway has an unfinished source installation, update, removal, Team change or management token change. Finish it, or wait for its approval to expire (ten minutes at most), then try again.',
+      message: 'Your gateway has an unfinished connector installation, update, removal, Team change or management token change. Finish it, or wait for its approval to expire (ten minutes at most), then try again.',
     })
   })
 
@@ -726,7 +726,7 @@ describe('the management token', () => {
 
   it('points every refusal about the token at Settings, the one place that adds or replaces it', async () => {
     for (const [code, wording] of [
-      ['management_credential_required', 'Add a valid management token in Settings before installing sources.'],
+      ['management_credential_required', 'Add a valid management token in Settings before installing connectors.'],
       ['team_management_credential_missing', 'Add your management token in Settings, then retry.'],
       ['team_management_credential_invalid', 'Cloudflare rejected the management token. Verify management access in Settings to see what is missing, or replace the token there.'],
     ] as const) {
@@ -736,7 +736,7 @@ describe('the management token', () => {
   })
 })
 
-describe('source provider authorization', () => {
+describe('connector provider authorization', () => {
   afterEach(() => vi.unstubAllGlobals())
   it('binds authorization to the current action and draft revision', async () => {
     const result = { schemaVersion: 1, authorizationUrl: 'https://identity.example.net/authorize?state=synthetic', expiresAt: '2026-09-19T12:05:00Z' }
@@ -757,8 +757,8 @@ describe('source provider authorization', () => {
   })
 })
 
-describe('individual source removal', () => {
-  it('sends only the reviewed revision to the exact same-origin source endpoint', async () => {
+describe('individual connector removal', () => {
+  it('sends only the reviewed revision to the exact same-origin connector endpoint', async () => {
     const result = { schemaVersion: 1, revision: 8, applyMode: 'account_token', installationEnabled: true,
       removalEnabled: true, removalCredentialConfigured: true, pendingRemoval: null, sources: [] }
     vi.stubGlobal('fetch', vi.fn(async () => Response.json(result)))

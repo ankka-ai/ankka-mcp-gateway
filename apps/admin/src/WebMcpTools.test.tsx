@@ -79,7 +79,7 @@ async function executeTool(registered: Map<string, WebMcpTool>, name: string, in
 describe('WebMcpTools', () => {
   afterEach(() => { cleanup(); delete document.modelContext; window.history.replaceState(null, '', '/') })
 
-  it.each([false, true])('shows a source saved through WebMCP without reloading the page (uncertain response: %s)', async (uncertain) => {
+  it.each([false, true])('shows a connector saved through WebMCP without reloading the page (uncertain response: %s)', async (uncertain) => {
     let saved: ManagedSources = { ...sources, installationEnabled: true }
     const api = fixtureApi()
     api.getSources = vi.fn(async () => structuredClone(saved))
@@ -91,15 +91,15 @@ describe('WebMcpTools', () => {
     const { registered, modelContext } = modelContextFixture()
     document.modelContext = modelContext
     render(<GatewayProvider api={api}><WebMcpTools /><SourcesPage /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     await waitFor(() => expect(registered.has('save_mcp_source_draft')).toBe(true))
     const result = await executeTool(registered, 'save_mcp_source_draft', {
       label: 'Saved by an agent', url: 'https://source.example.com/mcp', authMode: 'none', enabledTools: ['search'],
     })
     expect(result.ok).toBe(!uncertain)
     expect(await screen.findByText('Saved by an agent')).toBeVisible()
-    expect(screen.queryByText('No sources yet')).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeEnabled()
+    expect(screen.queryByText('No connectors yet')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeEnabled()
     expect(api.saveSourceDraft).toHaveBeenCalledTimes(1)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })

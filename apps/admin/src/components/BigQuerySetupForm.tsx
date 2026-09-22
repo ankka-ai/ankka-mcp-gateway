@@ -61,7 +61,7 @@ export function BigQuerySetupForm({ disabled, embedded = false }: { disabled: bo
         <fieldset disabled={disabled || submitting}>
           <legend className="sr-only">BigQuery connection</legend>
           <div className="grid gap-5 sm:grid-cols-2">
-            <Input label="Source name" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} required />
+            <Input label="Connector name" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} required />
             <Input label="Query project ID" placeholder="analytics-query-project" value={queryProjectId} maxLength={63} onChange={(event) => setQueryProjectId(event.target.value)} required />
           </div>
           <p className="mt-2 text-xs leading-5 text-kumo-subtle">Google runs and bills query jobs in this project. It may differ from the projects containing your data.</p>

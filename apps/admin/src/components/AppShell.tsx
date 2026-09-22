@@ -16,7 +16,7 @@ interface NavItem {
 }
 
 const navigation: NavItem[] = [
-  { to: '/sources', label: 'Sources', icon: Database },
+  { to: '/sources', label: 'Connectors', icon: Database },
   { to: '/team', label: 'Team', icon: Users },
   { to: '/settings', label: 'Settings', icon: GearSix },
 ]

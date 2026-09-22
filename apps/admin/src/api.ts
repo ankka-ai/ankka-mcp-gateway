@@ -407,7 +407,7 @@ export interface GatewayAdminApi {
   verifyManagementAccess(): Promise<ManagementVerification>
 }
 
-export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-source installation is temporarily unavailable in this release. Existing sources and team permissions remain available.'
+export const SOURCE_ADDITION_PAUSED_MESSAGE = 'New-connector installation is temporarily unavailable in this release. Existing connectors and team permissions remain available.'
 /** Shown beside a control that starts or resumes a source installation, only while the gateway reports that it ends a rollback. */
 export function rollbackEndsMessage(release: string): string {
   return `After this you can no longer roll back to ${release}.`
@@ -415,16 +415,16 @@ export function rollbackEndsMessage(release: string): string {
 export const GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE = 'BigQuery requires a manually registered Google OAuth client. Cloudflare currently documents manual OAuth without an admin credential flow, so one operator connection for your team is not supported. No credentials have been requested. Keep Require user auth off; see the BigQuery setup guide.'
 
 const ERROR_MESSAGES = new Map([
-  ['source_not_found', 'This source has already been removed. Refresh Sources.'],
-  ['source_removal_requires_cleanup', 'This source has started provisioning. Check its installation status; its resources must be cleaned up before it can be removed.'],
-  ['source_removal_unavailable', 'This source cannot be removed while another operation or an uncertain resource write needs attention. Check its installation status.'],
+  ['source_not_found', 'This connector has already been removed. Refresh Connectors.'],
+  ['source_removal_requires_cleanup', 'This connector has started provisioning. Check its installation status; its resources must be cleaned up before it can be removed.'],
+  ['source_removal_unavailable', 'This connector cannot be removed while another operation or an uncertain resource write needs attention. Check its installation status.'],
   ['source_removal_unverified', 'The gateway could not verify removal of the BigQuery bridge. Its cleanup records are saved. Continue removal with a fresh Cloudflare approval.'],
-  ['source_oauth_invalid', 'This authorization attempt is no longer valid. Start again from your source.'],
-  ['source_oauth_unavailable', 'This source could not be authorized here. Try again, or open it in Cloudflare for manual OAuth setup.'],
+  ['source_oauth_invalid', 'This authorization attempt is no longer valid. Start again from your connector.'],
+  ['source_oauth_unavailable', 'This connector could not be authorized here. Try again, or open it in Cloudflare for manual OAuth setup.'],
   ['bigquery_setup_invalid', 'Review the query project and dataset names before continuing.'],
   ['preview_only', 'This is a local preview. Open your deployed gateway to connect BigQuery.'],
   ['bigquery_setup_conflict', 'Check the existing BigQuery setup before starting another attempt.'],
-  ['bigquery_setup_required', 'Your BigQuery bridge setup needs to resume before its source can connect.'],
+  ['bigquery_setup_required', 'Your BigQuery bridge setup needs to resume before its connector can connect.'],
   ['bigquery_setup_failed', 'BigQuery setup could not be confirmed. Check its recorded status before trying again.'],
   ['bigquery_google_connection_failed', 'The Google identity could not run the connection check. Review its key and project permissions, then retry setup.'],
   ['bigquery_resource_collision', 'A Cloudflare resource already uses the bridge address or name. Review it before continuing.'],
@@ -434,16 +434,16 @@ const ERROR_MESSAGES = new Map([
   ['webmcp_handoff_invalid', 'The authorization handoff could not be verified. Check the recorded action before retrying.'],
   ['access_required', 'Your Cloudflare Access session is no longer active. Sign in again and refresh.'],
   ['origin_required', 'Reload this management page before making changes.'],
-  ['management_credential_required', 'Add a valid management token in Settings before installing sources.'],
-  ['management_credential_action_conflict', 'Your gateway has an unfinished source installation, update, removal, Team change or management token change. Finish it, or wait for its approval to expire (ten minutes at most), then try again.'],
+  ['management_credential_required', 'Add a valid management token in Settings before installing connectors.'],
+  ['management_credential_action_conflict', 'Your gateway has an unfinished connector installation, update, removal, Team change or management token change. Finish it, or wait for its approval to expire (ten minutes at most), then try again.'],
   ['management_credential_unavailable', 'Your gateway could not reach its management state. Try again in a moment.'],
   ['team_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
-  ['team_invalid', 'Review the email addresses and installed source selections before trying again.'],
+  ['team_invalid', 'Review the email addresses and installed connector selections before trying again.'],
   ['team_action_conflict', 'A team access change is already in progress. Refresh to review or resume it.'],
   ['team_action_invalid', 'The team access action could not be verified. Refresh before trying again.'],
   ['team_recovery_required', 'Some access policies may already have changed. Resume the recorded change before editing access again.'],
   ['team_access_revision_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
-  ['team_access_invalid_request', 'Review the email addresses and installed source selections before trying again.'],
+  ['team_access_invalid_request', 'Review the email addresses and installed connector selections before trying again.'],
   ['team_access_admin_required', 'Gateway administrators must remain in your team. Their roles cannot be changed here.'],
   ['team_access_invalid_state', 'The saved access configuration could not be verified. Refresh before making changes.'],
   ['team_access_invalid_target', 'The owned access policies could not be verified. No new change can be prepared.'],
@@ -455,50 +455,50 @@ const ERROR_MESSAGES = new Map([
   ['team_management_credential_invalid', 'Cloudflare rejected the management token. Verify management access in Settings to see what is missing, or replace the token there.'],
   ['team_prepare_failed', 'The team access request could not be confirmed. Refresh to check whether a change was recorded before trying again.'],
   ['team_cancel_failed', 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.'],
-  ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable after source provisioning or team policy changes begin. A compatible removal release is required; do not discard the ownership or recovery records.'],
-  ['source_action_conflict', 'This source action cannot proceed. Check the recorded status before trying again.'],
-  ['source_action_state_unavailable', 'The saved source action state could not be verified. Check status before starting another installation.'],
-  ['source_actions_unavailable', 'The saved source action state could not be verified. Check status before starting another installation.'],
+  ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable after connector provisioning or team policy changes begin. A compatible removal release is required; do not discard the ownership or recovery records.'],
+  ['source_action_conflict', 'This connector action cannot proceed. Check the recorded status before trying again.'],
+  ['source_action_state_unavailable', 'The saved connector action state could not be verified. Check status before starting another installation.'],
+  ['source_actions_unavailable', 'The saved connector action state could not be verified. Check status before starting another installation.'],
   ['response_invalid', 'The gateway response could not be verified. Check status before trying again.'],
-  ['source_action_not_found', 'The recorded source action was not found. Check status to review the saved actions.'],
-  ['source_action_recovery_required', 'Source provisioning may have started. Keep the recorded action and review its status before attempting recovery.'],
-  ['source_action_failed', 'The source action failed. Check its recorded status before trying again.'],
-  ['source_action_legacy_policy', 'This source authorization uses an older permission policy. Cancel it only if provisioning never started; otherwise retain its journal for reconciliation.'],
-  ['source_action_invalid', 'The source action no longer matches the saved draft.'],
+  ['source_action_not_found', 'The recorded connector action was not found. Check status to review the saved actions.'],
+  ['source_action_recovery_required', 'Connector provisioning may have started. Keep the recorded action and review its status before attempting recovery.'],
+  ['source_action_failed', 'The connector action failed. Check its recorded status before trying again.'],
+  ['source_action_legacy_policy', 'This connector authorization uses an older permission policy. Cancel it only if provisioning never started; otherwise retain its journal for reconciliation.'],
+  ['source_action_invalid', 'The connector action no longer matches the saved draft.'],
   ['source_addition_paused', SOURCE_ADDITION_PAUSED_MESSAGE],
   ['source_authentication_changed', 'The endpoint authentication mode changed. Inspect it again before saving.'],
   ['source_authentication_unsupported', 'The endpoint did not return the standard MCP OAuth discovery challenge.'],
   ['source_google_shared_oauth_unsupported', GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE],
-  ['source_capacity_exceeded', 'This source would exceed the gateway source-state capacity. Reduce its tool selection or remove another draft.'],
-  ['source_removal_credential_required', 'Add a valid management token in Settings before removing this source.'],
-  ['source_not_found', 'This source has already been removed. Refresh the source list.'],
-  ['source_removal_unavailable', 'Source removal could not read your gateway’s saved records. Refresh and try again.'],
-  ['source_removal_pending', 'Finish the source removal already in progress before changing another source.'],
-  ['source_removal_action_conflict', 'Finish or cancel the pending installation, Team change, update, gateway removal or management token change before removing this source.'],
-  ['source_removal_ownership_conflict', 'Removal stopped because your gateway could not verify ownership or confirm that only this Portal uses the source. Check its resources in Cloudflare, then try again.'],
+  ['source_capacity_exceeded', 'This connector would exceed the gateway connector capacity. Reduce its tool selection or remove another draft.'],
+  ['source_removal_credential_required', 'Add a valid management token in Settings before removing this connector.'],
+  ['source_not_found', 'This connector has already been removed. Refresh the connector list.'],
+  ['source_removal_unavailable', 'Connector removal could not read your gateway’s saved records. Refresh and try again.'],
+  ['source_removal_pending', 'Finish the connector removal already in progress before changing another connector.'],
+  ['source_removal_action_conflict', 'Finish or cancel the pending installation, Team change, update, gateway removal or management token change before removing this connector.'],
+  ['source_removal_ownership_conflict', 'Removal stopped because your gateway could not verify ownership or confirm that only this Portal uses the connector. Check its resources in Cloudflare, then try again.'],
   ['source_removal_recovery_required', 'Removal could not be confirmed. Check status, then continue removal; your gateway will check saved progress before making further changes.'],
-  ['source_removal_managed_bigquery', 'Individual removal of managed BigQuery bridges is not available yet. Their Worker and stored key require separate Cloudflare authorization. You can revoke source access in Team. Full gateway removal cleans up the bridge too.'],
-  ['source_conflict', 'The source list changed in another tab. Refresh and try again.'],
-  ['source_invalid', 'The source draft was rejected. Review its endpoint and exact tool selection.'],
+  ['source_removal_managed_bigquery', 'Individual removal of managed BigQuery bridges is not available yet. Their Worker and stored key require separate Cloudflare authorization. You can revoke connector access in Team. Full gateway removal cleans up the bridge too.'],
+  ['source_conflict', 'The connector list changed in another tab. Refresh and try again.'],
+  ['source_invalid', 'The connector draft was rejected. Review its endpoint and exact tool selection.'],
   ['source_protocol_unsupported', 'The endpoint did not accept a supported MCP discovery protocol.'],
   ['source_response_invalid', 'The endpoint returned an invalid or oversized MCP response.'],
   ['source_tool_list_invalid', 'The endpoint returned an invalid or duplicate tool catalogue.'],
   ['source_tools_changed', 'The tool catalogue changed. Inspect it again before saving.'],
   // An installation that waits for the operator is not a failed request: say what it waits for.
-  ['source_connection_required', 'The source is installed with nothing enabled and nobody assigned. Connect it in Cloudflare, then continue below.'],
-  ['source_sync_required', 'Cloudflare has not finished syncing the tools of this source. Sync its capabilities in Cloudflare, then continue below.'],
-  ['source_tools_required', 'The source is connected and nothing is enabled yet. Choose its tools below to finish installation.'],
-  ['source_tools_mismatch', 'A selected tool is not in the list Cloudflare synced from this source. Review the selection below.'],
+  ['source_connection_required', 'The connector is installed with nothing enabled and nobody assigned. Connect it in Cloudflare, then continue below.'],
+  ['source_sync_required', 'Cloudflare has not finished syncing the tools of this connector. Sync its capabilities in Cloudflare, then continue below.'],
+  ['source_tools_required', 'The connector is connected and nothing is enabled yet. Choose its tools below to finish installation.'],
+  ['source_tools_mismatch', 'A selected tool is not in the list Cloudflare synced from this connector. Review the selection below.'],
   ['source_tools_unavailable', 'This installation is not waiting for a tool choice. Check its recorded status.'],
   ['source_tools_invalid', 'Select between 1 and 500 tools from the list, then try again.'],
-  ['source_tools_unsupported', 'Cloudflare’s synced list for this source cannot be offered here. Nothing was enabled.'],
-  ['source_catalogue_unavailable', 'Cloudflare did not return this source’s server record. Try again in a moment.'],
+  ['source_tools_unsupported', 'Cloudflare’s synced list for this connector cannot be offered here. Nothing was enabled.'],
+  ['source_catalogue_unavailable', 'Cloudflare did not return this connector’s server record. Try again in a moment.'],
   ['source_unreachable', 'The MCP endpoint could not be reached within the discovery deadline.'],
   ['source_url_invalid', 'Enter a public HTTPS MCP endpoint without credentials, query parameters, or a custom port.'],
   ['runtime_action_conflict', 'Another runtime action is active or the installed version changed.'],
   ['runtime_action_invalid', 'The runtime action is no longer valid.'],
   ['runtime_update_not_available', 'The installed runtime already matches its release channel.'],
-  ['teardown_action_conflict', 'Finish or cancel any unfinished source installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.'],
+  ['teardown_action_conflict', 'Finish or cancel any unfinished connector installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.'],
   ['teardown_action_invalid', 'The teardown request was rejected. Reload the management page before trying again.'],
   ['teardown_actions_unavailable', 'Receipt-authorized teardown is not available from this gateway release.'],
   ['update_channel_unavailable', 'The signed release channel is temporarily unavailable.'],
@@ -524,10 +524,10 @@ export class GatewayApiError extends Error {
 
 function sourceActionConflictMessage(reason: SourceActionConflictReason | undefined): string | undefined {
   switch (reason) {
-    case 'draft_changed': return 'The saved source draft changed. Refresh and review its current tool selection before applying.'
-    case 'source_pending': return 'A source installation is already pending. Check its recorded status before starting another installation.'
-    case 'lifecycle_pending': return 'Another gateway action is pending. Review that action before starting a source installation.'
-    case 'recovery_required': return 'Source provisioning may have started. Keep the recorded action and review its recovery status; starting again is blocked.'
+    case 'draft_changed': return 'The saved connector draft changed. Refresh and review its current tool selection before applying.'
+    case 'source_pending': return 'A connector installation is already pending. Check its recorded status before starting another installation.'
+    case 'lifecycle_pending': return 'Another gateway action is pending. Review that action before starting a connector installation.'
+    case 'recovery_required': return 'Connector provisioning may have started. Keep the recorded action and review its recovery status; starting again is blocked.'
     default: return undefined
   }
 }

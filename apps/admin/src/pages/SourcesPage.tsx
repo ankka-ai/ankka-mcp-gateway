@@ -59,13 +59,13 @@ function sourceDraftLabel(action: SourceActionSummary | undefined): string {
 }
 
 function actionLabel(action: SourceActionSummary): string {
-  if (action.failureCode === 'source_removal_required') return action.state === 'applying' ? 'Removing source' : 'Finish removing source'
+  if (action.failureCode === 'source_removal_required') return action.state === 'applying' ? 'Removing connector' : 'Finish removing connector'
   if (action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)) return 'BigQuery setup failed'
   if (action.state === 'recovery_required') {
-    if (action.failureCode === 'source_connection_required') return 'Connect your source'
+    if (action.failureCode === 'source_connection_required') return 'Connect your connector'
     if (action.failureCode === 'bigquery_setup_required') return 'Resume BigQuery setup'
-    if (action.failureCode === 'source_sync_required') return 'Sync source tools'
-    if (action.failureCode === 'source_tools_mismatch') return 'Review source tools'
+    if (action.failureCode === 'source_sync_required') return 'Sync connector tools'
+    if (action.failureCode === 'source_tools_mismatch') return 'Review connector tools'
     if (action.failureCode === 'source_tools_required') return 'Choose tools'
     if (action.failureCode === 'source_tools_chosen') return 'Finish installation'
   }
@@ -75,13 +75,13 @@ function actionLabel(action: SourceActionSummary): string {
 /** A sign-in source installed with nothing enabled: what it waits for, in the order the operator meets it. */
 function unchosenToolsGuidance(action: SourceActionSummary): string | null {
   if (action.failureCode === 'source_connection_required') {
-    return 'This source is installed with nothing enabled: it is not attached to your Portal and nobody has been assigned access. Authorize the source, then choose which tools to allow from its real list below. If you use Cloudflare for manual setup, keep Require user auth off.'
+    return ''
   }
   if (action.failureCode === 'source_sync_required') {
-    return 'This source is installed with nothing enabled. Open it in Cloudflare and sync its capabilities, resolving any connection error. When its status is Ready, come back: this page lists its real tools so you can choose which to allow.'
+    return 'This connector is installed with nothing enabled. Open it in Cloudflare and sync its capabilities, resolving any connection error. When its status is Ready, come back: this page lists its real tools so you can choose which to allow.'
   }
   if (action.failureCode === 'source_tools_required') {
-    return 'This source is connected and nothing is enabled yet. Choose the tools to allow from its real list below; the gateway then attaches it with exactly those. Nobody has been assigned access.'
+    return 'This connector is connected and nothing is enabled yet. Choose the tools to allow from its real list below; the gateway then attaches it with exactly those. Nobody has been assigned access.'
   }
   return null
 }
@@ -113,34 +113,30 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, acc
     case 'authorization_expired':
       return 'The gateway did not start this attempt. Cancel this authorization, then authorize the saved draft again.'
     case 'applying':
-      return 'The gateway is applying the source and verifying Cloudflare resources. Wait for a confirmed result before taking another action.'
+      return 'The gateway is applying the connector and verifying Cloudflare resources. Wait for a confirmed result before taking another action.'
     case 'succeeded':
-      return 'The source installation was verified. Grant access in Team before sharing it with approved members.'
+      return 'The connector installation was verified. Grant access in Team before sharing it with approved members.'
     case 'failed':
       return action.failureCode === 'source_action_denied'
         ? 'This authorization was cancelled. You can authorize the saved draft again.'
         : 'This attempt is closed. Review the saved draft before starting another authorization.'
     case 'recovery_required':
       if (action.failureCode === 'source_connection_required') {
-        return 'Authorize the source to connect it, then review its tools and finish installation. If you use Cloudflare for manual setup, keep Require user auth off. Nobody has been assigned access.'
+        return 'Authorize the connector to connect it, then review its tools and finish installation. If you use Cloudflare for manual setup, keep Require user auth off. Nobody has been assigned access.'
       }
       if (action.failureCode === 'source_sync_required') {
         return 'Open the server in Cloudflare and sync its capabilities. Resolve any connection error, then return when its status is Ready to resume and finish installation.'
       }
       if (action.failureCode === 'source_tools_mismatch') {
-        return 'The synced source is missing one or more tools from your saved selection. Review its catalogue in Cloudflare and restore the selected tools before resuming. The gateway will keep your exact selection.'
+        return 'The synced connector is missing one or more tools from your saved selection. Review its catalogue in Cloudflare and restore the selected tools before resuming. The gateway will keep your exact selection.'
       }
       if (action.failureCode === 'source_tools_chosen') {
-        return 'Your tool selection is saved. Resume to attach the source with exactly those tools and finish installation. Nobody has been assigned access.'
+        return 'Your tool selection is saved. Resume to attach the connector with exactly those tools and finish installation. Nobody has been assigned access.'
       }
       return action.canRenew === true
         ? 'Resume this recorded installation using the gateway management credential. The gateway checks the retained resources before continuing.'
         : 'Provisioning may be incomplete or still finishing. Check status after the previous approval expires. The journal is retained; uncertain resource ownership requires review in Cloudflare.'
   }
-}
-
-function actionTime(value: string): string {
-  return new Date(value).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
 interface SourcesPageProps {
@@ -349,7 +345,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       const next = await discoverSource(url.trim())
       if (catalogSource && next.endpoint !== catalogSource.implementation.deployment.url) {
         setDiscovery(null)
-        setFormError('The inspected endpoint no longer matches this reviewed catalog entry. Choose a different source or use the custom URL flow.')
+        setFormError('The inspected endpoint no longer matches this reviewed catalog entry. Choose a different connector or use the custom URL flow.')
         return
       }
       if (catalogSource && next.authentication !== catalogSource.implementation.connection.authMode) {
@@ -374,7 +370,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       return
     }
     if (!discovery || label.trim().length < 2 || (!signIn && enabledTools.length === 0)) {
-      setFormError(signIn ? 'Give the source a name of at least two characters.' : 'Give the source a name and select at least one exact tool.')
+      setFormError(signIn ? 'Give the connector a name of at least two characters.' : 'Give the connector a name and select at least one exact tool.')
       return
     }
     setFormError(null)
@@ -387,7 +383,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       })
       clearDraftForm()
       setShowForm(false)
-    } catch (error) { setFormError(error instanceof Error ? error.message : 'The source draft could not be saved.') }
+    } catch (error) { setFormError(error instanceof Error ? error.message : 'The connector draft could not be saved.') }
   }
 
   const authorize = async (sourceId: string, renewActionId?: string) => {
@@ -435,24 +431,21 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       disabled={isBusy || isCheckingSourceActions}
       credentialConfigured={sources.removalCredentialConfigured === true}
       managedBigQuery={false}
-      rollbackNote={sources.installEndsRollbackTo ? `Removing this source means you can no longer restore ${sources.installEndsRollbackTo}.` : null}
+      rollbackNote={sources.installEndsRollbackTo ? `Removing this connector means you can no longer restore ${sources.installEndsRollbackTo}.` : null}
       onRemove={removeInstalledSource}
       onRefresh={async () => { await refreshSources(); await refreshSourceActions() }}
     /> : null
     if (sources.pendingRemoval?.sourceId === sourceId && removal) return removal
+    const guidance = actionGuidance(shown, sourceActionsPollingPaused, sources.applyMode === 'account_token' && bigQuery !== null, toolsChosen, setup !== undefined && !setup.ready)
     return (
       <article key={action.actionId} className="text-sm" aria-label={`Installation of ${actionSource?.label ?? action.sourceId}`}>
-        <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(shown, sourceActionsPollingPaused, sources.applyMode === 'account_token' && bigQuery !== null, toolsChosen, setup !== undefined && !setup.ready)}</p>
+        {guidance ? <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{guidance}</p> : null}
         {preflightFailed ? <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Error code: {action.failureCode}</p> : null}
-        <p className="mt-2 text-xs leading-5 text-kumo-subtle">
-          Started <time dateTime={action.issuedAt}>{actionTime(action.issuedAt)}</time> · Authorization expires <time dateTime={action.expiresAt}>{actionTime(action.expiresAt)}</time>
-        </p>
-        <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Action: {action.actionId}</p>
         {signInPause && actionSource && action.canRenew === true && sources.applyMode === 'account_token' && shown.failureCode === 'source_connection_required' ? (
           <SourceAuthorization actionId={action.actionId} sourceId={actionSource.id} revision={sources.revision} disabled={!installationEnabled || isBusy || isCheckingSourceActions} />
         ) : null}
         {action.connectionUrl && action.state === 'recovery_required' ? (
-          <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open source in Cloudflare</a>
+          <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open connector in Cloudflare</a>
         ) : null}
         {setup && !setup.ready && !setup.recoveryRequired && (action.canCancel || preflightFailed) ? (
           <>
@@ -465,10 +458,10 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         {canRemoveDraft(action.sourceId) ? (
           <Button variant="secondary-destructive" className="pressable mt-3"
             disabled={isBusy || resumingBigQuery || isCheckingSourceActions}
-            onClick={() => void removeSource(action.sourceId).catch(() => {})}>{action.failureCode === 'source_removal_required' ? 'Continue removal' : 'Remove source'}</Button>
+            onClick={() => void removeSource(action.sourceId).catch(() => {})}>{action.failureCode === 'source_removal_required' ? 'Continue removal' : 'Remove connector'}</Button>
         ) : null}
         {canRemoveDraft(action.sourceId) && needsBridgeCleanup(action.sourceId) ? (
-          <p className="mt-2 text-xs leading-5 text-kumo-subtle">Removes this source’s bridge from your Cloudflare account. Requires one Cloudflare approval; no Google key upload is needed.</p>
+          <p className="mt-2 text-xs leading-5 text-kumo-subtle">Removes this connector’s bridge from your Cloudflare account. Requires one Cloudflare approval; no Google key upload is needed.</p>
         ) : null}
         {signInPause && actionSource && action.canRenew === true ? (
           <SourceToolChoice
@@ -505,7 +498,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   return (
     <div>
       <PageHeader
-        title="Sources"
+        title="Connectors"
         action={
           <DropdownMenu>
             <DropdownMenu.Trigger ref={addConnector} disabled={!installationEnabled || isBusy} render={<Button variant="primary" className="pressable" />}>
@@ -533,10 +526,10 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       <SourceAuthorizationResult />
       {!managementInstalled ? <div className="mt-6 rounded-lg border border-kumo-line p-4">
         <h2 className="text-sm font-semibold text-kumo-strong">Gateway Management</h2>
-        <p className="mt-2 text-sm text-kumo-subtle">Let your agents manage sources, troubleshoot connections, and change Team access. Install this built-in source, then assign it in Team like any other source. It is initially assigned to the person who adds it.</p>
+        <p className="mt-2 text-sm text-kumo-subtle">Let your agents manage connectors, troubleshoot connections, and change Team access. Install this built-in connector, then assign it in Team like any other connector. It is initially assigned to the person who adds it.</p>
         <Button className="mt-3" variant="secondary" disabled={!installationEnabled || applyBlocked || addingManagement} onClick={() => void addManagementSource()}>{addingManagement ? 'Adding…' : 'Add Gateway Management'}</Button>
         {managementError ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{managementError}</p> : null}
-      </div> : <p className="mt-4 text-sm text-kumo-subtle">Assign Gateway Management in Team to let someone change gateway configuration and access.</p>}
+      </div> : null}
 
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
       <ConnectorSetupDialog open={showBigQuery && installationEnabled} onOpenChange={setShowBigQuery}
@@ -551,28 +544,26 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <p role="status" className="mt-4 text-sm leading-6 text-kumo-subtle">Saved drafts are retained. They can be installed once your gateway has the token.</p>
         </>
       ) : null}
-      {!installationEnabled && (sources.applyMode !== 'account_token' || missingToken === 'configured' || missingToken === 'unreadable') ? <p role="status" className="notice-banner notice-warning mt-6">{missingToken === 'unreadable' ? <>Source installation needs a working management token. Check it in <a href="/settings" className="underline">Settings</a>.</> : SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
+      {!installationEnabled && (sources.applyMode !== 'account_token' || missingToken === 'configured' || missingToken === 'unreadable') ? <p role="status" className="notice-banner notice-warning mt-6">{missingToken === 'unreadable' ? <>Connector installation needs a working management token. Check it in <a href="/settings" className="underline">Settings</a>.</> : SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.</p> : null}
 
       {sourceNotice ? (
         <div role="status" className={`notice-banner mt-6 notice-${sourceNotice.tone}`}>
           <p>{sourceNotice.message}</p>
-          <button type="button" className="pressable" aria-label="Dismiss source notice" onClick={clearSourceNotice}><X size={14} /></button>
+          <button type="button" className="pressable" aria-label="Dismiss connector notice" onClick={clearSourceNotice}><X size={14} /></button>
         </div>
       ) : null}
 
-      {sourceActionsError || sourceActionsPollingPaused || (blocker && blocker.kind !== 'source') ? (
+      {sourceActionsError || (blocker && blocker.kind !== 'source') ? (
         <div className="mt-6">
-          {sourceActionsError ? <p role="alert" className="mt-3 text-sm text-danger">{sourceActionsError} Applying sources is disabled until status can be checked.</p> : null}
+          {sourceActionsError ? <p role="alert" className="mt-3 text-sm text-danger">{sourceActionsError} Applying connectors is disabled until status can be checked.</p> : null}
           {sources.sources.length === 0 ? (
             <Button variant="secondary" className="pressable mt-3" disabled={isBusy || isCheckingSourceActions} onClick={() => void refreshSourceActions().catch(() => {})}>
               {isCheckingSourceActions ? 'Checking status…' : 'Check status'}
             </Button>
           ) : null}
-          {sourceActionsPollingPaused ? <p role="status" className="mt-3 text-sm text-kumo-subtle">Automatic checks have paused. Use Check status for the latest result; this does not cancel the action.</p> : null}
           {blocker && blocker.kind !== 'source' ? (
             <p role="status" className="mt-3 text-sm leading-6 text-kumo-subtle">
-              A gateway {blocker.kind === 'runtime' ? 'update or rollback' : blocker.kind === 'teardown' ? 'removal' : blocker.kind === 'management_credential' ? 'management token' : blocker.kind === 'source_removal' ? 'source removal' : 'Team access'} action is blocking source installation. Review that action before applying a source.
-              <span className="mt-1 block break-all font-mono text-xs">Action: {blocker.actionId}</span>
+              A gateway {blocker.kind === 'runtime' ? 'update or rollback' : blocker.kind === 'teardown' ? 'removal' : blocker.kind === 'management_credential' ? 'management token' : blocker.kind === 'source_removal' ? 'connector removal' : 'Team access'} action is blocking connector installation. Review that action before applying a connector.
             </p>
           ) : null}
         </div>
@@ -580,7 +571,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
       <ConnectorSetupDialog open={showForm && installationEnabled} onOpenChange={setShowForm}
         title={catalogSource ? `Set up ${catalogSource.displayName}` : 'Add custom connector'}
-        description="Choose allowed tools. New sources start with nobody assigned; grant access in Team. Do not enter credentials here."
+        description="Choose allowed tools. New connectors start with nobody assigned; grant access in Team. Do not enter credentials here."
         closeLabel="Close connector setup" onLibrary={openLibrary} finalFocus={showLibrary ? false : addConnector}>
           <form onSubmit={save}>
             {catalogSource ? (
@@ -598,14 +589,14 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   {catalogSource.implementation.recommendedTools.map((tool) => <code key={tool} className="tool-chip">{tool}</code>)}
                 </div>
                 <p className="mt-2 text-[0.6875rem] leading-5 text-kumo-inactive">{catalogSource.implementation.connection.authMode === 'oauth'
-                  ? 'This source needs sign-in: recommendations are preselected when you choose its tools, after you have connected it. Review every exact name then.'
+                  ? 'This connector needs sign-in: recommendations are preselected when you choose its tools, after you have connected it. Review every exact name then.'
                   : 'Recommendations are preselected only after inspection. Review every exact name before saving.'}</p>
               </div>
             ) : null}
 
             <>
                 <div className="mt-5 grid gap-5 sm:grid-cols-2">
-                  <Input className="w-full" label="Source name" placeholder="Company knowledge" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} />
+                  <Input className="w-full" label="Connector name" placeholder="Company knowledge" value={label} maxLength={80} onChange={(event) => setLabel(event.target.value)} />
                   <Input
                     className="w-full"
                     label="MCP URL"
@@ -619,9 +610,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <Button type="button" variant="secondary" className="pressable" loading={isBusy} onClick={() => void inspect()}>
-                    <MagnifyingGlass size={16} /> Inspect source
+                    <MagnifyingGlass size={16} /> Inspect connector
                   </Button>
-                  <p className="text-xs leading-5 text-kumo-subtle">Source-authored names, descriptions, and safety hints are untrusted review aids.</p>
+                  <p className="text-xs leading-5 text-kumo-subtle">Connector-authored names, descriptions, and safety hints are untrusted review aids.</p>
                 </div>
             </>
 
@@ -634,7 +625,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                     <h3 id="catalogue-title" className="text-sm font-semibold text-subheading">Tool allowlist</h3>
                     <p className="mt-1 text-xs leading-5 text-kumo-subtle">
                       {discovery.authentication === 'oauth' && discovery.tools.length === 0
-                        ? 'This source needs sign-in, so its tools can only be listed after you connect it.'
+                        ? 'This connector needs sign-in, so its tools can only be listed after you connect it.'
                         : `${discovery.tools.length} tools discovered with MCP ${discovery.protocolVersion ?? 'compatible protocol'}.${catalogSource ? ' Catalog recommendations that still exist are preselected for review.' : ''}`}
                     </p>
                   </div>
@@ -654,12 +645,12 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                     <div className="mt-5 max-w-[80ch] text-xs leading-5 text-kumo-subtle" aria-label="What happens next">
                       <p className="text-sm font-medium text-kumo-default">Nothing to choose yet. What happens next:</p>
                       <ol className="mt-2 list-decimal space-y-1.5 pl-5">
-                        <li>Save this draft and install it. The gateway creates the source with nothing enabled and nobody assigned, and does not attach it to your Portal.</li>
-                        <li>Connect the source once in Cloudflare, as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.</li>
-                        <li>Come back to this page. It lists the source’s real tools and you choose which to allow. Only those are attached.</li>
+                        <li>Save this draft and install it. The gateway creates the connector with nothing enabled and nobody assigned, and does not attach it to your Portal.</li>
+                        <li>Connect the connector once in Cloudflare, as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.</li>
+                        <li>Come back to this page. It lists the connector’s real tools and you choose which to allow. Only those are attached.</li>
                       </ol>
                       {catalogSource ? (
-                        <p className="mt-3">The catalog recommends {catalogSource.implementation.recommendedTools.length} tool{catalogSource.implementation.recommendedTools.length === 1 ? '' : 's'} for this source. Those that exist in its real list are preselected when you choose.</p>
+                        <p className="mt-3">The catalog recommends {catalogSource.implementation.recommendedTools.length} tool{catalogSource.implementation.recommendedTools.length === 1 ? '' : 's'} for this connector. Those that exist in its real list are preselected when you choose.</p>
                       ) : null}
                     </div>
                   ) : null
@@ -686,10 +677,10 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
                 <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
                   <Button type="submit" variant="primary" className="pressable" loading={isBusy} aria-describedby={signIn && rollbackNote ? 'save-draft-rollback-note' : undefined} disabled={(!signIn && enabledTools.length === 0) || Boolean(discovery.connectionBlock)}>Save draft</Button>
-                  <span className="text-xs text-kumo-subtle">{signIn ? 'This draft is saved with no tools. You choose them after connecting the source.' : `${enabledTools.length} exact tool${enabledTools.length === 1 ? '' : 's'} selected`}</span>
+                  <span className="text-xs text-kumo-subtle">{signIn ? 'This draft is saved with no tools. You choose them after connecting the connector.' : `${enabledTools.length} exact tool${enabledTools.length === 1 ? '' : 's'} selected`}</span>
                   {/* Older releases cannot read a source saved without tools, so for this one draft the save is what ends a rollback. */}
                   {signIn && rollbackNote ? (
-                    <p id="save-draft-rollback-note" className="basis-full text-xs leading-5 text-kumo-subtle">{rollbackNote} Older releases cannot read a source saved without tools.</p>
+                    <p id="save-draft-rollback-note" className="basis-full text-xs leading-5 text-kumo-subtle">{rollbackNote} Older releases cannot read a connector saved without tools.</p>
                   ) : null}
                 </div>
               </section>
@@ -697,12 +688,12 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           </form>
       </ConnectorSetupDialog>
 
-      <section className="mt-7" aria-label="MCP sources">
+      <section className="mt-7" aria-label="MCP connectors">
         {sources.sources.length === 0 ? (
           <div className="empty-card">
             <div className="flex size-12 items-center justify-center rounded-2xl bg-kumo-tint text-kumo-subtle"><Database size={23} /></div>
-            <h2 className="mt-4 text-base font-semibold text-kumo-strong">No sources yet</h2>
-            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP source and verify that each allowed tool is read-only.' : tokenIsMissing ? 'Your gateway needs its management token before it can install a source.' : 'Source installation is unavailable right now.'}</p>
+            <h2 className="mt-4 text-base font-semibold text-kumo-strong">No connectors yet</h2>
+            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP connector and verify that each allowed tool is read-only.' : tokenIsMissing ? 'Your gateway needs its management token before it can install a connector.' : 'Connector installation is unavailable right now.'}</p>
             <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={openLibrary}><Plus size={16} weight="bold" /> Add your first connector</Button>
           </div>
         ) : (
@@ -714,7 +705,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             pendingRemovalSourceId={sources.pendingRemoval?.sourceId}
             removalDisabled={isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || Boolean(blocker && blocker.kind !== 'source_removal')}
             managedBigQuerySourceIds={bigQuery?.setups.map((setup) => setup.sourceId)}
-            removalNote={sources.installEndsRollbackTo ? `Removing this source means you can no longer restore ${sources.installEndsRollbackTo}.` : null}
+            removalNote={sources.installEndsRollbackTo ? `Removing this connector means you can no longer restore ${sources.installEndsRollbackTo}.` : null}
             onRemove={removeInstalledSource}
             onRefresh={async () => { await refreshSources(); await refreshSourceActions() }}
             authorizeDisabled={applyBlocked}

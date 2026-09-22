@@ -87,7 +87,7 @@ const GatewayContext = createContext<GatewayContextValue | null>(null)
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u
 const SOURCE_ACTION_POLL_INTERVAL = 5_000
 const SOURCE_ACTION_POLL_LIMIT = 60
-const SOURCE_ACTION_STATUS_UNAVAILABLE = 'Source action status is temporarily unavailable. Check status before authorizing another source.'
+const SOURCE_ACTION_STATUS_UNAVAILABLE = 'Connector action status is temporarily unavailable. Check status before authorizing another connector.'
 
 function errorMessage(cause: Error | null): string {
   return cause?.message ?? 'The gateway request failed.'
@@ -297,8 +297,8 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     const removal = url.searchParams.get('sourceRemovalResult')
     if (removal !== null) {
       for (const parameter of ['sourceRemoval', 'sourceRemovalResult', 'sourceRemovalReason']) removeResultParameter(parameter)
-      setSourceNotice(removal === 'applied' ? { tone: 'success', message: 'Source and BigQuery bridge removed.' }
-        : removal === 'revocation_unconfirmed' ? { tone: 'neutral', message: 'Source and BigQuery bridge removed. The temporary Cloudflare approval could not be confirmed revoked; review your active OAuth grants in Cloudflare.' }
+      setSourceNotice(removal === 'applied' ? { tone: 'success', message: 'Connector and BigQuery bridge removed.' }
+        : removal === 'revocation_unconfirmed' ? { tone: 'neutral', message: 'Connector and BigQuery bridge removed. The temporary Cloudflare approval could not be confirmed revoked; review your active OAuth grants in Cloudflare.' }
           : { tone: 'neutral', message: 'BigQuery removal did not finish. Its cleanup records are saved. Use Continue removal to authorize another attempt.' })
     }
     const actionId = url.searchParams.get('sourceAction')
@@ -313,11 +313,11 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       void cancelSourceApply(actionId).catch(() => {})
     }
     if (result === 'failed' && ['apply_source_connection_required', 'apply_source_sync_required', 'apply_source_tools_mismatch'].includes(reason ?? '')) {
-      setSourceNotice({ tone: 'neutral', message: 'Your source resources are saved. Complete the connection step below, then renew consent to finish installation.' })
+      setSourceNotice({ tone: 'neutral', message: 'Your connector resources are saved. Complete the connection step below, then renew consent to finish installation.' })
     } else if (result === 'failed') {
       setSourceNotice({ tone: 'neutral', message: `Cloudflare approved the request, but your gateway could not complete the installation${reason === null ? '' : ` (${reason})`}. Check the action status below before authorizing again.` })
     } else if (result === 'revocation_unconfirmed') {
-      setSourceNotice({ tone: 'neutral', message: 'The source was installed, but the temporary Cloudflare permission could not be confirmed revoked. Review active OAuth grants in your Cloudflare profile.' })
+      setSourceNotice({ tone: 'neutral', message: 'The connector was installed, but the temporary Cloudflare permission could not be confirmed revoked. Review active OAuth grants in your Cloudflare profile.' })
     }
   }, [cancelSourceApply])
 
@@ -428,7 +428,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
           actions: current.actions.filter((action) => action.sourceId !== sourceId),
           blockingAction: current.blockingAction?.kind === 'source' && current.blockingAction.sourceId === sourceId
             ? null : current.blockingAction } : current)
-        setSourceNotice({ tone: 'success', message: 'Source removed.' })
+        setSourceNotice({ tone: 'success', message: 'Connector removed.' })
       } finally {
         await Promise.all([refreshSources().catch(() => {}), refreshSourceActions().catch(() => {})])
       }
@@ -439,7 +439,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       try {
         const next = await apiRef.current.removeSource(current.revision, sourceId)
         setSources((current) => current && current.revision > next.revision ? current : next)
-        setSourceNotice({ tone: 'success', message: source?.status === 'draft' ? 'Draft deleted.' : 'Source removed from your gateway. Its upstream service and data are unchanged.' })
+        setSourceNotice({ tone: 'success', message: source?.status === 'draft' ? 'Draft deleted.' : 'Connector removed from your gateway. Its upstream service and data are unchanged.' })
         setExternalChangeVersion((version) => version + 1)
       } finally {
         await refreshSources().catch(() => {})
@@ -480,7 +480,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
         return { ...prepared, handoffUrl }
       } catch (cause) {
         await refreshSources().catch(() => {})
-        throw cause instanceof GatewayApiError ? cause : new Error('Source authorization could not be confirmed. Check status before trying again.')
+        throw cause instanceof GatewayApiError ? cause : new Error('Connector authorization could not be confirmed. Check status before trying again.')
       } finally {
         await refreshSourceActions().catch(() => {})
       }

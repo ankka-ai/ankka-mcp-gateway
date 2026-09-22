@@ -14,8 +14,8 @@ describe('gateway product language', () => {
   })
 
   it.each([
-    ['/', 'Sources'],
-    ['/sources', 'Sources'],
+    ['/', 'Connectors'],
+    ['/sources', 'Connectors'],
     ['/settings', 'Settings'],
   ])('addresses the team directly on %s', async (path, heading) => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
@@ -49,7 +49,7 @@ describe('gateway product language', () => {
       expect(screen.getByRole('button', { name: 'Copy MCP URL' })).toBeInTheDocument()
       expect(screen.queryByText('Your account stays in control')).not.toBeInTheDocument()
       // No standing warning in our own terms next to the product's primary action.
-      expect(container.textContent).not.toMatch(/Before installing|source provisioning|runtime release|recover any source action/iu)
+      expect(container.textContent).not.toMatch(/Before installing|connector provisioning|runtime release|recover any connector action/iu)
     }
     if (path === '/settings') {
       expect(screen.getByText('Preserves your configuration and Durable Object state.')).toBeInTheDocument()
@@ -68,7 +68,7 @@ describe('gateway product language', () => {
     })
     render(<GatewayProvider api={api}><RouterProvider router={router} /></GatewayProvider>)
 
-    await screen.findByRole('heading', { name: 'Sources', level: 1 })
+    await screen.findByRole('heading', { name: 'Connectors', level: 1 })
     expect(within(screen.getByRole('complementary')).queryByRole('link', { name: /Update available/ })).not.toBeInTheDocument()
   })
 })

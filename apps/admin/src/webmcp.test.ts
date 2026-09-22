@@ -52,7 +52,7 @@ const members: TeamMember[] = [
   { email: 'teammate@example.com', sourceIds: [] },
 ]
 const sourceDraft = {
-  label: 'Example source', url: 'https://source.example.com/mcp',
+  label: 'Example connector', url: 'https://source.example.com/mcp',
   authMode: 'none', enabledTools: ['search'],
 }
 
@@ -70,14 +70,14 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
   const sources: ManagedSources = {
     schemaVersion: 1, revision: 4, applyMode: 'oauth_per_action', installationEnabled,
     sources: [{
-      id: sourceId, label: 'Example source', url: 'https://source.example.com/mcp',
+      id: sourceId, label: 'Example connector', url: 'https://source.example.com/mcp',
       authMode: 'none', onBehalfOfUser: false, enabledTools: ['search'], status: 'installed',
     }],
   }
   const team: Team = {
     schemaVersion: 1, revision: 7, editingEnabled: false, editingDisabledReason: 'managed_in_cloudflare',
     managementCredentialConfigured: false, members, adminEmails: ['operator@example.com'],
-    sources: [{ id: sourceId, label: 'Example source', enabledTools: ['search'], status: 'installed' }],
+    sources: [{ id: sourceId, label: 'Example connector', enabledTools: ['search'], status: 'installed' }],
     pendingAction: null, proposedMembers: null,
   }
   const teamAction: TeamAction = {
@@ -102,7 +102,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     current: { release: 'gateway-v1.0.0', artifactSha256: digest },
     available: {
       release: 'gateway-v1.0.1', artifactSha256: nextDigest, sourceCommit: 'a'.repeat(40),
-      classification: { kind: 'normal', updaterProtocol: 2, changes: ['Worker code'], excludes: ['source credentials'] },
+      classification: { kind: 'normal', updaterProtocol: 2, changes: ['Worker code'], excludes: ['connector credentials'] },
       notes: ['Synthetic signed update'],
     },
     rollback: { available: true, release: 'gateway-v0.9.9', artifactSha256: previousDigest, dataRollback: false },
@@ -326,7 +326,7 @@ describe('exact signed runtime target', () => {
   })
 })
 
-describe('source pause and current state', () => {
+describe('connector pause and current state', () => {
   function recordedAction(state: SourceActions['actions'][number]['state'], canCancel = false): SourceActions {
     return { schemaVersion: 1, blockingAction: state === 'succeeded' || state === 'failed' ? null : { kind: 'source', actionId, sourceId }, actions: [{
       schemaVersion: 1, actionId, sourceId, issuedAt: '2030-01-01T00:00:00.000Z', expiresAt,
@@ -366,7 +366,7 @@ describe('source pause and current state', () => {
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
 
-  it.each(['runtime', 'teardown', 'team'] as const)('identifies an unrelated %s action without starting source consent', async (kind) => {
+  it.each(['runtime', 'teardown', 'team'] as const)('identifies an unrelated %s action without starting connector consent', async (kind) => {
     const { api, call, sources } = fixture()
     api.getSources.mockResolvedValue({ ...sources, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
     api.getSourceActions.mockResolvedValue({ schemaVersion: 1, actions: [], blockingAction: { kind, actionId: otherActionId } })
@@ -403,7 +403,7 @@ describe('source pause and current state', () => {
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
 
-  it('discloses source grants and lifecycle restrictions before agent actions', () => {
+  it('discloses connector grants and lifecycle restrictions before agent actions', () => {
     const { tool, api } = fixture()
     expect(tool('apply_mcp_source').description).toContain('denied to everyone')
     expect(tool('apply_mcp_source').description).toContain('explicit Team grant')
@@ -413,7 +413,7 @@ describe('source pause and current state', () => {
     expectNoApiCalls(api)
   })
 
-  it('omits source writes when installation is disabled', () => {
+  it('omits connector writes when installation is disabled', () => {
     const { tools, api } = fixture(false)
     expect(tools.map((tool) => tool.name).sort()).toEqual(names.filter((name) => !['save_mcp_source_draft', 'apply_mcp_source'].includes(name)).sort())
     expectNoApiCalls(api)
@@ -428,14 +428,14 @@ describe('source pause and current state', () => {
     expect(api.getStatus).not.toHaveBeenCalled()
   })
 
-  it('reports direct source completion without prompting for consent', async () => {
+  it('reports direct connector completion without prompting for consent', async () => {
     const { api, call, sources } = fixture()
     api.getSources.mockResolvedValue({ ...sources, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
     api.prepareSourceAction.mockResolvedValue({ schemaVersion: 1, actionId, status: 'succeeded', expiresAt: '2030-01-01T00:00:00.000Z' })
     expect(await call('apply_mcp_source', { sourceId })).toMatchObject({ ok: true, result: { actionId, status: 'succeeded' } })
   })
 
-  it('uses the fresh source revision for a draft and never changes the live Portal directly', async () => {
+  it('uses the fresh connector revision for a draft and never changes the live Portal directly', async () => {
     const { api, call, sources } = fixture()
     api.getSources.mockResolvedValue({ ...sources, revision: 12 })
     expect(await call('save_mcp_source_draft', sourceDraft)).toMatchObject({ ok: true })
@@ -443,14 +443,14 @@ describe('source pause and current state', () => {
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
 
-  it('uses the fresh source revision for an exact draft handoff', async () => {
+  it('uses the fresh connector revision for an exact draft handoff', async () => {
     const { api, call, sources } = fixture()
     api.getSources.mockResolvedValue({ ...sources, revision: 13, sources: sources.sources.map((source) => ({ ...source, status: 'draft' })) })
     expect(await call('apply_mcp_source', { sourceId })).toMatchObject({ ok: true, result: { actionId } })
     expect(api.prepareSourceAction).toHaveBeenCalledExactlyOnceWith(13, sourceId)
   })
 
-  it('rejects unknown source write arguments and duplicate tool names before requests', async () => {
+  it('rejects unknown connector write arguments and duplicate tool names before requests', async () => {
     for (const input of [{ ...sourceDraft, token: syntheticSensitiveText }, { ...sourceDraft, enabledTools: ['search', 'search'] }]) {
       const { api, call } = fixture()
       expect(await call('save_mcp_source_draft', input)).toMatchObject({ ok: false, error: { code: 'webmcp_input_invalid' } })
@@ -508,7 +508,7 @@ describe('recorded actions and cancellation', () => {
     expect(api.prepareTeamAction).not.toHaveBeenCalled()
   })
 
-  it('uses only the normal source cancellation API and preserves server denial', async () => {
+  it('uses only the normal connector cancellation API and preserves server denial', async () => {
     const { api, call, sourceAction } = fixture()
     api.getSourceActions.mockResolvedValue({ schemaVersion: 1, actions: [{
       ...sourceAction, status: 'authorization_required', state: 'authorization_required',

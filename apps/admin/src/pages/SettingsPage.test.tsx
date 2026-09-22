@@ -98,7 +98,7 @@ describe('SettingsPage rollback', () => {
     const client = api()
     client.getUpdate = vi.fn(async () => excluded)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    expect(await screen.findByText('You can no longer roll back to gateway-v0.9.9. A source was installed or Team access was changed after the update, and the older version cannot work with those changes.')).toBeVisible()
+    expect(await screen.findByText('You can no longer roll back to gateway-v0.9.9. A connector was installed or Team access was changed after the update, and the older version cannot work with those changes.')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Rollback' })).not.toBeInTheDocument()
     expect(client.prepareRuntimeAction).not.toHaveBeenCalled()
   })
@@ -115,7 +115,7 @@ describe('SettingsPage rollback', () => {
     client.getUpdate = vi.fn<GatewayAdminApi['getUpdate']>().mockResolvedValueOnce(restorable).mockResolvedValue(excluded)
     const pages = createRouter({ routeTree, history: createMemoryHistory({ initialEntries: ['/sources'] }) })
     render(<GatewayProvider api={client}><RouterProvider router={pages} /></GatewayProvider>)
-    await screen.findByRole('heading', { name: 'Sources', level: 1 })
+    await screen.findByRole('heading', { name: 'Connectors', level: 1 })
     await waitFor(() => expect(client.getUpdate).toHaveBeenCalledTimes(1))
     await act(() => pages.navigate({ to: '/settings' }))
     expect(await screen.findByText(/You can no longer roll back to gateway-v0\.9\.9\./u)).toBeVisible()
@@ -202,7 +202,7 @@ describe('SettingsPage management token', () => {
     [{ ...verified, status: 'unconfirmed', token: 'unconfirmed', portals: 'not_checked', accessPolicies: 'not_checked' }, [
       'Cloudflare did not answer the token check, so nothing is proven yet. Try again in a moment.']],
     [{ ...verified, status: 'busy', token: 'not_checked', portals: 'not_checked', accessPolicies: 'not_checked' }, [
-      'A source installation, update, removal, Team change or token change is unfinished, so nothing was checked. Verify again when it has finished.']],
+      'A connector installation, update, removal, Team change or token change is unfinished, so nothing was checked. Verify again when it has finished.']],
     [{ ...verified, status: 'missing', token: 'missing', portals: 'not_checked', accessPolicies: 'not_checked' }, [
       'Your gateway has no management token.']],
   ]

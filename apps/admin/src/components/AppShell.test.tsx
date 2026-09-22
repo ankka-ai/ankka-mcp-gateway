@@ -64,7 +64,7 @@ describe('AppShell during a removal', () => {
     const pendingStatus = new Promise<GatewayStatus>(resolve => { finishStatus = resolve })
     const client = api({ getStatus: vi.fn(() => pendingStatus), getSourceActions: vi.fn(async (): Promise<SourceActions> => ({ schemaVersion: 1, actions: [], blockingAction: null })) })
     const { container } = open(client, path)
-    const title = path === '/team' ? 'Team' : path === '/settings' ? 'Settings' : 'Sources'
+    const title = path === '/team' ? 'Team' : path === '/settings' ? 'Settings' : 'Connectors'
     expect(await screen.findByText(`Loading ${title}…`)).toHaveAttribute('role', 'status')
     expect(screen.getByRole('heading', { name: title, level: 1 })).toBeInTheDocument()
     expect(screen.getAllByRole('navigation', { name: 'Gateway management' })).toHaveLength(2)

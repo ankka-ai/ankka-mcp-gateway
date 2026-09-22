@@ -428,3 +428,16 @@ resource identifiers, raw provider responses, or credential-bearing
 screenshots.
 
 Report security issues through [private vulnerability reporting](../SECURITY.md).
+
+### Source icons
+
+The Sources list uses optional MCP server icon metadata (`serverInfo.icons` or
+`io.modelcontextprotocol/serverInfo` response metadata). Icons are fetched
+separately from dashboard data through an administrator-authenticated route
+that accepts only a saved source ID. No source credentials or browser cookies
+are forwarded. Remote artwork must use HTTPS on the MCP endpoint's own origin;
+redirects and cross-origin artwork are rejected. Embedded base64 artwork is
+also supported. The gateway bounds image bytes and raster dimensions, checks
+image types, and restricts SVG to simple artwork. Icon responses are privately
+cached for five minutes. Missing, protected, unsupported, or broken icons keep
+the source's initial; there is no third-party favicon service or website scrape.

@@ -40,10 +40,10 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
   }
 }
 
-describe('source installation recovery', () => {
+describe('connector installation recovery', () => {
   afterEach(cleanup)
 
-  it('adds Gateway Management through normal discovery and source draft APIs', async () => {
+  it('adds Gateway Management through normal discovery and connector draft APIs', async () => {
     const user = userEvent.setup()
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
     api.getSources = vi.fn(async () => sources)
@@ -60,7 +60,7 @@ describe('source installation recovery', () => {
     }))
     expect(api.discoverSource).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/api/mcp`)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
-    expect(await screen.findByText(/Assign Gateway Management in Team/)).toBeVisible()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Add Gateway Management' })).not.toBeInTheDocument())
   })
 
   it('removes a failed BigQuery setup and its status card without starting another authorization', async () => {
@@ -82,17 +82,17 @@ describe('source installation recovery', () => {
     })
     const page = render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
-    await user.click(within(card).getByRole('button', { name: 'Remove source' }))
+    await user.click(within(card).getByRole('button', { name: 'Remove connector' }))
     await waitFor(() => expect(screen.queryByRole('article')).not.toBeInTheDocument())
     expect(api.removeSourceDraft).toHaveBeenCalledExactlyOnceWith(4, draft.id)
-    expect(screen.getByText('Source removed.')).toBeVisible()
+    expect(screen.getByText('Connector removed.')).toBeVisible()
     expect(screen.queryByRole('button', { name: draft.label })).not.toBeInTheDocument()
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
     expect(api.resumeBigQuery).not.toHaveBeenCalled()
     expect(api.cancelSourceAction).not.toHaveBeenCalled()
     page.unmount()
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     expect(screen.queryByText('BigQuery setup failed')).not.toBeInTheDocument()
   })
 
@@ -114,11 +114,11 @@ describe('source installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const first = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
     const second = await screen.findByRole('article', { name: `Installation of ${other.label}` })
-    await waitFor(() => expect(within(second).getByRole('button', { name: 'Remove source' })).toBeEnabled())
+    await waitFor(() => expect(within(second).getByRole('button', { name: 'Remove connector' })).toBeEnabled())
     expect(within(second).getByText(/no Google key upload is needed/)).toBeVisible()
-    await user.click(within(first).getByRole('button', { name: 'Remove source' }))
+    await user.click(within(first).getByRole('button', { name: 'Remove connector' }))
     expect(api.removeSourceDraft).toHaveBeenCalledExactlyOnceWith(4, draft.id)
-    await user.click(within(second).getByRole('button', { name: 'Remove source' }))
+    await user.click(within(second).getByRole('button', { name: 'Remove connector' }))
     await waitFor(() => expect(api.prepareBigQueryRemoval).toHaveBeenCalledExactlyOnceWith(5, other.id))
     expect(api.removeSourceDraft).toHaveBeenCalledTimes(1)
     expect(api.resumeBigQuery).not.toHaveBeenCalled()
@@ -141,13 +141,13 @@ describe('source installation recovery', () => {
     expect(screen.queryByRole('button', { name: 'Continue BigQuery setup' })).not.toBeInTheDocument()
   })
 
-  it('removes an unused draft from its source details', async () => {
+  it('removes an unused draft from its connector details', async () => {
     const user = userEvent.setup()
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
     api.removeSourceDraft = vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_conflict'))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await user.click(await screen.findByRole('button', { name: draft.label }))
-    await user.click(screen.getByRole('button', { name: 'Remove source' }))
+    await user.click(screen.getByRole('button', { name: 'Remove connector' }))
     await waitFor(() => expect(api.removeSourceDraft).toHaveBeenCalledExactlyOnceWith(4, draft.id))
     expect(screen.getByRole('button', { name: draft.label })).toBeVisible()
   })
@@ -159,12 +159,12 @@ describe('source installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
     expect(screen.getByText('Waiting for Cloudflare')).toBeVisible()
-    expect(screen.queryByText('Source installation status')).not.toBeInTheDocument()
-    expect(screen.getByRole('table', { name: 'Source list' })).toContainElement(card)
-    expect(within(card).getByText(`Action: ${action.actionId}`)).toBeVisible()
-    expect(card.querySelectorAll('time')).toHaveLength(2)
+    expect(screen.queryByText('Connector installation status')).not.toBeInTheDocument()
+    expect(screen.getByRole('table', { name: 'Connector list' })).toContainElement(card)
+    expect(within(card).queryByText(`Action: ${action.actionId}`)).not.toBeInTheDocument()
+    expect(card.querySelectorAll('time')).toHaveLength(0)
     expect(screen.queryByText('Saved draft')).not.toBeInTheDocument()
-    const apply = screen.getByRole('button', { name: 'Install source' })
+    const apply = screen.getByRole('button', { name: 'Install connector' })
     expect(apply).toBeDisabled()
     await user.click(apply)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
@@ -186,9 +186,9 @@ describe('source installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
     expect(screen.getByText('Authorization expired before work began')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
     await user.click(within(card).getByRole('button', { name: 'Cancel installation' }))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Install source' })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Install connector' })).toBeEnabled())
     expect(api.cancelSourceAction).toHaveBeenCalledWith(action.actionId)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
     expect(screen.queryByRole('button', { name: 'Cancel installation' })).not.toBeInTheDocument()
@@ -200,10 +200,10 @@ describe('source installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByRole('article', { name: `Installation of ${draft.label}` })
     expect(screen.getByText(state === 'applying' ? 'Applying and verifying' : 'Recovery required')).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Cancel installation' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Resume installation' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Remove source' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove connector' })).not.toBeInTheDocument()
     expect(screen.queryByText(/nothing changed|start a fresh authorization/i)).not.toBeInTheDocument()
   })
 
@@ -214,7 +214,7 @@ describe('source installation recovery', () => {
     api.prepareSourceAction = vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_action_conflict'))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const renew = await screen.findByRole('button', { name: 'Resume installation' })
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
     await user.click(renew)
     await waitFor(() => expect(api.prepareSourceAction).toHaveBeenCalledExactlyOnceWith(sources.revision, draft.id, action.actionId))
     expect(api.cancelSourceAction).not.toHaveBeenCalled()
@@ -234,10 +234,10 @@ describe('source installation recovery', () => {
   })
 
   it.each([
-    ['source_connection_required', 'Connect your source'],
-    ['source_sync_required', 'Sync source tools'],
-    ['source_tools_mismatch', 'Review source tools'],
-  ])('explains %s and links the recorded source without offering a new installation', async (failureCode, label) => {
+    ['source_connection_required', 'Connect your connector'],
+    ['source_sync_required', 'Sync connector tools'],
+    ['source_tools_mismatch', 'Review connector tools'],
+  ])('explains %s and links the recorded connector without offering a new installation', async (failureCode, label) => {
     const connectionUrl = `https://dash.cloudflare.com/${'1'.repeat(32)}/one/access-controls/ai-controls/mcp-server/edit/synthetic-source`
     const action = pendingAction({ state: 'recovery_required', status: 'recovery_required',
       canCancel: false, canRenew: true, failureCode, connectionUrl })
@@ -245,9 +245,9 @@ describe('source installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const card = await screen.findByRole('article', { name: `Installation of ${draft.label}` })
     expect(screen.getByText(label)).toBeVisible()
-    expect(within(card).getByRole('link', { name: 'Open source in Cloudflare' })).toHaveAttribute('href', connectionUrl)
+    expect(within(card).getByRole('link', { name: 'Open connector in Cloudflare' })).toHaveAttribute('href', connectionUrl)
     expect(within(card).getByRole('button', { name: 'Resume installation' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
     expect(screen.queryByText('Recovery required')).not.toBeInTheDocument()
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
@@ -257,7 +257,7 @@ describe('source installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText(/Only the administrator who started/)
     expect(screen.queryByRole('button', { name: 'Cancel installation' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
   })
 
   it('reconciles a late successful installation on Check status instead of offering a second install', async () => {
@@ -271,27 +271,27 @@ describe('source installation recovery', () => {
     await screen.findByRole('article', { name: `Installation of ${draft.label}` })
     completed = true
     await user.click(screen.getByRole('button', { name: 'Check status' }))
-    const sourceRow = await within(screen.getByRole('table', { name: 'Source list' }))
+    const sourceRow = await within(screen.getByRole('table', { name: 'Connector list' }))
       .findByRole('row', { name: new RegExp(`${draft.label} Public Installed`, 'u') })
     expect(within(sourceRow).getByText('Installed')).toBeVisible()
-    expect(screen.queryByRole('button', { name: 'Install source' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Install connector' })).not.toBeInTheDocument()
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
 
-  it('names a different pending source and blocks all draft Apply buttons', async () => {
+  it('names a different pending connector and blocks all draft Apply buttons', async () => {
     const other = { ...draft, id: 'source-3333333333333333', label: 'Company knowledge' }
     const api = actionApi(actionSnapshot(pendingAction({ sourceId: other.id })))
     api.getSources = vi.fn(async () => ({ ...sources, sources: [draft, other] }))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByRole('article', { name: `Installation of ${other.label}` })
-    for (const button of screen.getAllByRole('button', { name: 'Install source' })) expect(button).toBeDisabled()
+    for (const button of screen.getAllByRole('button', { name: 'Install connector' })) expect(button).toBeDisabled()
   })
 
   it('identifies an unrelated lifecycle action without suggesting cancellation', async () => {
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: { kind: 'runtime', actionId: `action_${'b'.repeat(32)}` } })
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText(/update or rollback action is blocking/)
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Cancel installation' })).not.toBeInTheDocument()
   })
 
@@ -300,17 +300,17 @@ describe('source installation recovery', () => {
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
     api.getSourceActions = vi.fn().mockRejectedValueOnce(new GatewayApiError(503, 'source_actions_unavailable')).mockResolvedValue({ schemaVersion: 1, actions: [], blockingAction: null })
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    await screen.findByText(/Applying sources is disabled until status can be checked/)
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+    await screen.findByText(/Applying connectors is disabled until status can be checked/)
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Check status' }))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Install source' })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Install connector' })).toBeEnabled())
   })
 })
 
 describe('SourcesPage', () => {
   afterEach(cleanup)
 
-  it.each([false, true])('disables source addition and draft application while retaining existing sources (empty=%s)', async (empty) => {
+  it.each([false, true])('disables connector addition and draft application while retaining existing connectors (empty=%s)', async (empty) => {
     const user = userEvent.setup()
     const current: ManagedSources = {
       ...sources, installationEnabled: false,
@@ -333,7 +333,7 @@ describe('SourcesPage', () => {
     expect(add).toBeDisabled()
     await user.click(add)
     expect(screen.queryByRole('textbox', { name: 'MCP URL' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Install source' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Install connector' })).not.toBeInTheDocument()
     if (empty) {
       expect(screen.getByRole('button', { name: 'Add your first connector' })).toBeDisabled()
     } else {
@@ -367,7 +367,7 @@ describe('SourcesPage', () => {
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const card = (await screen.findByRole('heading', { name: 'Add your management token' })).closest('section')
-    expect(card).toHaveTextContent('Add sources and manage team access with a Cloudflare API token.')
+    expect(card).toHaveTextContent('Add connectors and manage team access with a Cloudflare API token.')
     expect(card).toHaveTextContent('This token can edit all Access policies in your Cloudflare account. It stays in your gateway and never passes through Ankka.')
     expect(card).toHaveTextContent('Your setup token was not saved. Add it again.')
     expect(screen.getByText('Saved drafts are retained. They can be installed once your gateway has the token.')).toBeVisible()
@@ -375,7 +375,7 @@ describe('SourcesPage', () => {
     expect(screen.queryByRole('link', { name: 'Settings' })).not.toBeInTheDocument()
     expect(screen.queryByText(/Saved drafts are retained but cannot be applied/u)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add connector' })).toBeDisabled()
-    if (empty) expect(screen.getByText('Your gateway needs its management token before it can install a source.')).toBeVisible()
+    if (empty) expect(screen.getByText('Your gateway needs its management token before it can install a connector.')).toBeVisible()
     await user.click(screen.getByRole('button', { name: 'Add management token' }))
     expect(api.prepareManagementCredentialAction).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(window.location.hash).toBe(`#${'a'.repeat(40)}`))
@@ -389,7 +389,7 @@ describe('SourcesPage', () => {
       getSources: vi.fn(async () => current), getTeam: vi.fn(async () => { throw new GatewayApiError(503, 'team_unavailable') }),
     }
     render(<GatewayProvider api={unreadable}><SourcesPage /></GatewayProvider>)
-    expect(await screen.findByText(/Source installation needs a working management token\. Check it in/u)).toBeVisible()
+    expect(await screen.findByText(/Connector installation needs a working management token\. Check it in/u)).toBeVisible()
     expect(screen.getByRole('link', { name: 'Settings' })).toHaveAttribute('href', '/settings')
     expect(screen.queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
     cleanup()
@@ -400,7 +400,7 @@ describe('SourcesPage', () => {
     expect(installing.getTeam).not.toHaveBeenCalled()
   })
 
-  it('reads its sources again when the token arrived after the dashboard loaded, instead of calling installation paused', async () => {
+  it('reads its connectors again when the token arrived after the dashboard loaded, instead of calling installation paused', async () => {
     const disabled: ManagedSources = { ...sources, applyMode: 'account_token', installationEnabled: false, sources: [draft] }
     const api: GatewayAdminApi = {
       ...actionApi({ schemaVersion: 1, actions: [], blockingAction: null }),
@@ -417,11 +417,11 @@ describe('SourcesPage', () => {
     expect(screen.queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
   })
 
-  it('names an open token change as what source installation waits for', async () => {
+  it('names an open token change as what connector installation waits for', async () => {
     const pointer = { kind: 'management_credential' as const, actionId: `action_${'m'.repeat(32)}` }
     render(<GatewayProvider api={actionApi({ schemaVersion: 1, actions: [], blockingAction: pointer })}><SourcesPage /></GatewayProvider>)
-    expect(await screen.findByText(/A gateway management token action is blocking source installation\./u)).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Install source' })).toBeDisabled()
+    expect(await screen.findByText(/A gateway management token action is blocking connector installation\./u)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
   })
 
   it('shows the protected BigQuery catalogue but blocks connection and keeps all tools unselected', async () => {
@@ -444,25 +444,25 @@ describe('SourcesPage', () => {
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     expect(screen.queryByText(/roll ?back|provisioning|runtime release|removing your gateway/iu)).not.toBeInTheDocument()
     screen.getByRole('button', { name: 'Add connector' }).focus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
-    expect(screen.getByText(/New sources start with nobody assigned/)).toBeInTheDocument()
-    await user.type(screen.getByLabelText('Source name'), 'GA4 example')
+    expect(screen.getByText(/New connectors start with nobody assigned/)).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Connector name'), 'GA4 example')
     await user.type(screen.getByLabelText('MCP URL'), 'https://bigquery.googleapis.com/mcp')
-    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('without an admin credential flow')
     expect(screen.getByText('OAuth protected')).toBeInTheDocument()
     expect(screen.queryByText('Public endpoint')).not.toBeInTheDocument()
-    expect(screen.queryByText(/Connect this source as a gateway operator/u)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Connect this connector as a gateway operator/u)).not.toBeInTheDocument()
     expect(screen.getByText('Synthetic read query.')).toBeInTheDocument()
     for (const checkbox of screen.getAllByRole('checkbox')) expect(checkbox).not.toBeChecked()
     await user.click(screen.getByRole('button', { name: 'Select shown' }))
     expect(screen.getByRole('button', { name: 'Save draft' })).toBeDisabled()
     const form = screen.getByRole('button', { name: 'Save draft' }).closest('form')
-    if (!form) throw new Error('Expected source form')
+    if (!form) throw new Error('Expected connector form')
     fireEvent.submit(form)
     expect(saveSourceDraft).not.toHaveBeenCalled()
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
@@ -496,7 +496,7 @@ describe('SourcesPage', () => {
     }
 
     render(<GatewayProvider api={api}><SourcesPage catalog={SYNTHETIC_SOURCE_CATALOG} /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     screen.getByRole('button', { name: 'Add connector' }).focus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
@@ -509,18 +509,18 @@ describe('SourcesPage', () => {
 
     expect(screen.getByRole('dialog', { name: `Set up ${preset.displayName}` })).toBeVisible()
     expect(screen.queryByRole('dialog', { name: 'Connector library' })).not.toBeInTheDocument()
-    expect(screen.getByLabelText('Source name')).toHaveValue(preset.displayName)
+    expect(screen.getByLabelText('Connector name')).toHaveValue(preset.displayName)
     expect(screen.getByLabelText('MCP URL')).toHaveValue(preset.implementation.deployment.url)
     expect(screen.getByLabelText('MCP URL')).toHaveAttribute('readonly')
     expect(screen.getByLabelText('Catalog-recommended tools')).toHaveTextContent('properties.list')
     expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument()
 
     expect(screen.getByText(/recommendations are preselected when you choose its tools, after you have connected it/u)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
     expect(api.discoverSource).toHaveBeenCalledWith(preset.implementation.deployment.url)
     // A sign-in preset takes the same flow as a custom one: no names are typed or prefilled, and the draft has none.
-    expect(await screen.findByText('This source needs sign-in, so its tools can only be listed after you connect it.')).toBeInTheDocument()
-    expect(screen.getByText(/The catalog recommends 2 tools for this source\. Those that exist in its real list are preselected when you choose\./u)).toBeInTheDocument()
+    expect(await screen.findByText('This connector needs sign-in, so its tools can only be listed after you connect it.')).toBeInTheDocument()
+    expect(screen.getByText(/The catalog recommends 2 tools for this connector\. Those that exist in its real list are preselected when you choose\./u)).toBeInTheDocument()
     expect(screen.queryByRole('textbox', { name: 'Exact tool names' })).not.toBeInTheDocument()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
 
@@ -560,12 +560,12 @@ describe('SourcesPage', () => {
     }
 
     render(<GatewayProvider api={api}><SourcesPage catalog={SYNTHETIC_SOURCE_CATALOG} /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     screen.getByRole('button', { name: 'Add connector' }).focus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Connector library' }))
     await user.click(screen.getByRole('button', { name: `Select ${preset.displayName}` }))
-    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('authentication no longer matches')
     expect(screen.queryByRole('button', { name: 'Save draft' })).not.toBeInTheDocument()
@@ -593,13 +593,13 @@ describe('SourcesPage', () => {
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     screen.getByRole('button', { name: 'Add connector' }).focus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
-    await user.type(screen.getByLabelText('Source name'), 'Company knowledge')
+    await user.type(screen.getByLabelText('Connector name'), 'Company knowledge')
     await user.type(screen.getByLabelText('MCP URL'), 'https://knowledge.example.com/mcp')
-    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
     expect(await screen.findByText('Search documents.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
 
@@ -617,7 +617,7 @@ describe('SourcesPage', () => {
     const saveSourceDraft = vi.fn()
     const discoverSource = vi.fn(async (url): Promise<SourceDiscovery> => {
       inspectionCount += 1
-      if (inspectionCount > 1) throw new Error('The source could not be reached.')
+      if (inspectionCount > 1) throw new Error('The connector could not be reached.')
       return {
         schemaVersion: 1,
         status: 'discovered',
@@ -642,18 +642,18 @@ describe('SourcesPage', () => {
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     screen.getByRole('button', { name: 'Add connector' }).focus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
-    await user.type(screen.getByLabelText('Source name'), 'Company knowledge')
+    await user.type(screen.getByLabelText('Connector name'), 'Company knowledge')
     await user.type(screen.getByLabelText('MCP URL'), 'https://knowledge.example.com/mcp')
-    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
 
     expect(await screen.findByText('Search documents.')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save draft' })).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('could not be reached')
     expect(screen.queryByText('Search documents.')).not.toBeInTheDocument()
@@ -709,15 +709,15 @@ describe('SourcesPage', () => {
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     screen.getByRole('button', { name: 'Add connector' }).focus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
-    fireEvent.change(screen.getByLabelText('Source name'), { target: { value: 'Large read API' } })
+    fireEvent.change(screen.getByLabelText('Connector name'), { target: { value: 'Large read API' } })
     fireEvent.change(screen.getByLabelText('MCP URL'), {
       target: { value: 'https://catalogue-read.example.com/mcp' },
     })
-    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
 
     expect(await screen.findByText(`Showing ${toolCount} of ${toolCount} tools; 0 selected.`)).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Filter tools'), {
@@ -747,7 +747,7 @@ describe('SourcesPage', () => {
     expect(screen.getByText(`${toolCount} exact tools`)).toBeInTheDocument()
   }, 15_000)
 
-  it('says why a sign-in source lists no tools and what happens next, and saves it without any', async () => {
+  it('says why a sign-in connector lists no tools and what happens next, and saves it without any', async () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 5 }))
     const api: GatewayAdminApi = {
@@ -772,20 +772,20 @@ describe('SourcesPage', () => {
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     screen.getByRole('button', { name: 'Add connector' }).focus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
-    await user.type(screen.getByLabelText('Source name'), 'Protected read API')
+    await user.type(screen.getByLabelText('Connector name'), 'Protected read API')
     await user.type(screen.getByLabelText('MCP URL'), 'https://protected.example.com/mcp')
-    await user.click(screen.getByRole('button', { name: 'Inspect source' }))
-    expect(await screen.findByText('This source needs sign-in, so its tools can only be listed after you connect it.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
+    expect(await screen.findByText('This connector needs sign-in, so its tools can only be listed after you connect it.')).toBeInTheDocument()
     expect(screen.getByText('OAuth protected')).toBeInTheDocument()
     const next = within(screen.getByLabelText('What happens next')).getAllByRole('listitem').map((item) => item.textContent)
     expect(next).toEqual([
-      'Save this draft and install it. The gateway creates the source with nothing enabled and nobody assigned, and does not attach it to your Portal.',
-      'Connect the source once in Cloudflare, as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.',
-      'Come back to this page. It lists the source’s real tools and you choose which to allow. Only those are attached.',
+      'Save this draft and install it. The gateway creates the connector with nothing enabled and nobody assigned, and does not attach it to your Portal.',
+      'Connect the connector once in Cloudflare, as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.',
+      'Come back to this page. It lists the connector’s real tools and you choose which to allow. Only those are attached.',
     ])
     // This gateway has nothing a rollback could restore, so saving decides nothing and says nothing about it.
     expect(screen.queryByText(/no longer roll back/u)).not.toBeInTheDocument()
@@ -794,7 +794,7 @@ describe('SourcesPage', () => {
     expect(screen.queryByRole('textbox', { name: 'Exact tool names' })).not.toBeInTheDocument()
     expect(screen.queryByText(/One exact tool per line/u)).not.toBeInTheDocument()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
-    expect(screen.getByText('This draft is saved with no tools. You choose them after connecting the source.')).toBeInTheDocument()
+    expect(screen.getByText('This draft is saved with no tools. You choose them after connecting the connector.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
 
     expect(saveSourceDraft).toHaveBeenCalledWith(4, {
@@ -818,13 +818,13 @@ describe('Add BigQuery setup', () => {
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
     const custom = await screen.findByRole('dialog', { name: 'Add custom connector' })
     expect(within(custom).queryByText('Provider setup guides')).not.toBeInTheDocument()
-    await user.type(within(custom).getByLabelText('Source name'), 'My connector')
+    await user.type(within(custom).getByLabelText('Connector name'), 'My connector')
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(addConnector).toHaveFocus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
-    expect(screen.getByLabelText('Source name')).toHaveValue('My connector')
+    expect(screen.getByLabelText('Connector name')).toHaveValue('My connector')
     await user.click(screen.getByRole('button', { name: 'Connector library' }))
     expect(screen.getAllByRole('dialog')).toHaveLength(1)
     await user.click(screen.getByRole('button', { name: 'View Linear connector' }))
@@ -932,15 +932,15 @@ describe('the rollback sentence beside the install control', () => {
   const idle: SourceActions = { schemaVersion: 1, actions: [], blockingAction: null }
   const sentence = 'After this you can no longer roll back to gateway-v0.9.9.'
 
-  it('says so in plain words directly beside Install source, and nowhere else', async () => {
+  it('says so in plain words directly beside Install connector, and nowhere else', async () => {
     const api = actionApi(idle)
     api.getSources = vi.fn(async () => ({ ...sources, installEndsRollbackTo: 'gateway-v0.9.9', sources: [draft] }))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    const install = await screen.findByRole('button', { name: 'Install source' })
+    const install = await screen.findByRole('button', { name: 'Install connector' })
     expect(install).toHaveAccessibleDescription(sentence)
     expect(screen.getAllByText(sentence)).toHaveLength(1)
     expect(install.parentElement).toContainElement(screen.getByText(sentence))
-    expect(screen.queryByText(/provisioning|runtime release|recover any source action|removing your gateway/iu)).not.toBeInTheDocument()
+    expect(screen.queryByText(/provisioning|runtime release|recover any connector action|removing your gateway/iu)).not.toBeInTheDocument()
   })
 
   it.each([
@@ -951,7 +951,7 @@ describe('the rollback sentence beside the install control', () => {
     const api = actionApi(idle)
     api.getSources = vi.fn(async () => ({ ...sources, ...reported, sources: [draft] }))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    const control = await screen.findByRole('button', { name: /Install source|Installation unavailable/u })
+    const control = await screen.findByRole('button', { name: /Install connector|Installation unavailable/u })
     expect(control).not.toHaveAccessibleDescription()
     expect(screen.queryByText(/roll ?back/iu)).not.toBeInTheDocument()
   })
@@ -969,8 +969,8 @@ describe('the rollback sentence beside the install control', () => {
     })
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     expect(await screen.findByText(sentence)).toBeVisible()
-    await user.click(screen.getByRole('button', { name: 'Install source' }))
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Install source' })).not.toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: 'Install connector' }))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Install connector' })).not.toBeInTheDocument())
     expect(screen.queryByText(/roll ?back/iu)).not.toBeInTheDocument()
   })
 
@@ -982,7 +982,7 @@ describe('the rollback sentence beside the install control', () => {
     const resume = await screen.findByRole('button', { name: 'Resume installation' })
     expect(screen.getAllByText(sentence)).toHaveLength(1)
     expect(resume.parentElement).toContainElement(screen.getByText(sentence))
-    expect(screen.getByRole('button', { name: 'Install source' })).not.toHaveAccessibleDescription()
+    expect(screen.getByRole('button', { name: 'Install connector' })).not.toHaveAccessibleDescription()
   })
 
   it('says the same before a BigQuery setup continues to Cloudflare', async () => {
@@ -1001,7 +1001,7 @@ describe('the rollback sentence beside the install control', () => {
   })
 })
 
-describe('individual source removal', () => {
+describe('individual connector removal', () => {
   afterEach(cleanup)
 
   it.each(['source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'source_tools_required', 'source_tools_chosen'])(
@@ -1015,11 +1015,11 @@ describe('individual source removal', () => {
       api.getSourceActions = vi.fn(async () => removed ? { schemaVersion: 1 as const, actions: [], blockingAction: null } : actionSnapshot(action))
       api.removeSource = vi.fn(async () => { removed = true; return api.getSources() })
       render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-      await user.click(await screen.findByRole('button', { name: 'Remove source' }))
+      await user.click(await screen.findByRole('button', { name: 'Remove connector' }))
       expect(api.removeSource).not.toHaveBeenCalled()
       expect(screen.getByText(`Remove “${draft.label}” from your gateway?`)).toBeVisible()
-      await user.click(screen.getByRole('button', { name: 'Remove source' }))
-      await screen.findByText('No sources yet')
+      await user.click(screen.getByRole('button', { name: 'Remove connector' }))
+      await screen.findByText('No connectors yet')
       expect(api.removeSource).toHaveBeenCalledExactlyOnceWith(4, draft.id)
       expect(api.removeSourceDraft).not.toHaveBeenCalled()
       expect(api.prepareSourceAction).not.toHaveBeenCalled()
@@ -1054,12 +1054,12 @@ describe('individual source removal', () => {
     return { api, setSources(value: Partial<ManagedSources>) { current = { ...current, ...value } } }
   }
 
-  it('requires confirmation and refreshes the source list after removal', async () => {
+  it('requires confirmation and refreshes the connector list after removal', async () => {
     const user = userEvent.setup()
     const { api } = removalApi()
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await user.click(await screen.findByRole('button', { name: draft.label }))
-    const label = 'Remove source'
+    const label = 'Remove connector'
     await user.click(screen.getByRole('button', { name: label }))
     expect(api.removeSource).not.toHaveBeenCalled()
     expect(screen.getByText(`Remove “${draft.label}” from your gateway?`)).toBeVisible()
@@ -1067,9 +1067,9 @@ describe('individual source removal', () => {
     expect(api.removeSource).not.toHaveBeenCalled()
     await user.click(screen.getByRole('button', { name: label }))
     await user.click(screen.getByRole('button', { name: label }))
-    await screen.findByText('No sources yet')
+    await screen.findByText('No connectors yet')
     expect(api.removeSource).toHaveBeenCalledExactlyOnceWith(sources.revision, draft.id)
-    expect(screen.getByText('Source removed from your gateway. Its upstream service and data are unchanged.')).toBeVisible()
+    expect(screen.getByText('Connector removed from your gateway. Its upstream service and data are unchanged.')).toBeVisible()
   })
 
   it('opens saved removal progress on a fresh page and resumes it', async () => {
@@ -1083,7 +1083,7 @@ describe('individual source removal', () => {
     await waitFor(() => expect(api.removeSource).toHaveBeenCalledExactlyOnceWith(sources.revision, draft.id))
   })
 
-  it('keeps the source visible and shows recovery after an uncertain response', async () => {
+  it('keeps the connector visible and shows recovery after an uncertain response', async () => {
     const user = userEvent.setup()
     const { api, setSources } = removalApi()
     api.removeSource = vi.fn(async () => {
@@ -1092,8 +1092,8 @@ describe('individual source removal', () => {
     })
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await user.click(await screen.findByRole('button', { name: draft.label }))
-    await user.click(screen.getByRole('button', { name: 'Remove source' }))
-    await user.click(screen.getByRole('button', { name: 'Remove source' }))
+    await user.click(screen.getByRole('button', { name: 'Remove connector' }))
+    await user.click(screen.getByRole('button', { name: 'Remove connector' }))
     await screen.findByRole('button', { name: 'Continue removal' })
     expect(screen.getByRole('alert')).toHaveTextContent('Removal could not be confirmed')
     expect(screen.getByRole('button', { name: draft.label })).toBeVisible()
@@ -1111,8 +1111,8 @@ describe('individual source removal', () => {
       blockingAction: { kind: 'team', actionId: `action_${'b'.repeat(32)}` } }))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await user.click(await screen.findByRole('button', { name: draft.label }))
-    if (reason === 'other-action') expect(screen.getByRole('button', { name: 'Remove source' })).toBeDisabled()
-    else expect(screen.queryByRole('button', { name: 'Remove source' })).not.toBeInTheDocument()
+    if (reason === 'other-action') expect(screen.getByRole('button', { name: 'Remove connector' })).toBeDisabled()
+    else expect(screen.queryByRole('button', { name: 'Remove connector' })).not.toBeInTheDocument()
     if (reason === 'no-token') expect(screen.getByText(/Add a management token in/u)).toBeVisible()
     if (reason === 'managed-bigquery') expect(screen.getByText(/Individual removal of managed BigQuery bridges/u)).toBeVisible()
     expect(api.removeSource).not.toHaveBeenCalled()

@@ -1,4 +1,5 @@
 import { Button } from './Button'
+import { SourceIcon } from './SourceIcon'
 import { SourceRemoval } from './SourceRemoval'
 import { CaretDown, CaretRight, Check, Clock, MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
@@ -48,7 +49,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
   return (
     <div>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex gap-1" role="group" aria-label="Filter sources">
+        <div className="flex gap-1" role="group" aria-label="Filter connectors">
           {filters.map(({ value, label }) => (
             <Button
               key={value}
@@ -67,8 +68,8 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
           <MagnifyingGlass aria-hidden="true" size={16} className="shrink-0 text-kumo-subtle" />
           <input
             type="search"
-            aria-label="Search sources"
-            placeholder="Search sources"
+            aria-label="Search connectors"
+            placeholder="Search connectors"
             className="min-h-10 min-w-0 w-full rounded-sm bg-transparent text-base text-kumo-default placeholder:text-kumo-subtle sm:min-h-9 sm:text-sm"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
@@ -76,10 +77,10 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
         </label>
       </div>
 
-      <table className="w-full table-fixed border-collapse text-left text-sm" aria-label="Source list">
+      <table className="w-full table-fixed border-collapse text-left text-sm" aria-label="Connector list">
         <thead className="text-kumo-subtle">
           <tr className="border-b border-kumo-line">
-            <th scope="col" className="w-[55%] px-3 py-3 font-normal sm:w-[45%]">Source</th>
+            <th scope="col" className="w-[55%] px-3 py-3 font-normal sm:w-[45%]">Connector</th>
             <th scope="col" className="hidden w-[25%] px-3 py-3 font-normal sm:table-cell">Connection</th>
             <th scope="col" className="px-3 py-3 font-normal">Status</th>
           </tr>
@@ -104,9 +105,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                       aria-controls={isExpanded ? sourceDetailsId : undefined}
                       onClick={() => setExpanded(isExpanded ? null : source.id)}
                     >
-                      <span aria-hidden="true" className="flex size-8 shrink-0 items-center justify-center rounded-lg border border-kumo-line bg-kumo-overlay text-xs font-semibold text-kumo-subtle">
-                        {source.label.slice(0, 1).toLocaleUpperCase()}
-                      </span>
+                      <SourceIcon key={`${source.id}:${source.url}`} source={source} />
                       <span className="min-w-0 flex-1 break-words">{source.label}</span>
                       {isExpanded ? <CaretDown aria-hidden="true" size={14} className="shrink-0 text-kumo-subtle" /> : <CaretRight aria-hidden="true" size={14} className="shrink-0 text-kumo-subtle" />}
                     </button>
@@ -129,7 +128,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                           aria-describedby={installationEnabled && installNote ? `${sourceDetailsId}-install-note` : undefined}
                           onClick={() => onAuthorize(source.id)}
                         >
-                          {installationEnabled ? 'Install source' : 'Installation unavailable'}
+                          {installationEnabled ? 'Install connector' : 'Installation unavailable'}
                         </Button>
                         {installationEnabled && installNote ? (
                           <p id={`${sourceDetailsId}-install-note`} className="basis-full text-xs leading-5 text-kumo-subtle">{installNote}</p>
@@ -150,14 +149,14 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                       <code className="mt-2 block select-all break-all text-xs text-kumo-default">{source.url}</code>
                       <p className="mt-4 text-xs font-medium text-kumo-subtle">{source.enabledTools.length === 0
                         // Only a sign-in source can be saved without tools: its real list exists once it is connected.
-                        ? 'No tools chosen yet. Nothing is enabled; you choose from the source’s real list after connecting it.'
+                        ? 'No tools chosen yet. Nothing is enabled; you choose from the connector’s real list after connecting it.'
                         : `${source.enabledTools.length} exact tool${source.enabledTools.length === 1 ? '' : 's'}`}</p>
                       <div className="mt-2 flex max-h-52 flex-wrap gap-2 overflow-y-auto pr-1" role="region" aria-label={`${source.label} allowed tools`} tabIndex={0}>
                         {source.enabledTools.map((tool) => <code key={tool} className="tool-chip break-all">{tool}</code>)}
                       </div>
                       {source.status === 'draft' && canRemove?.(source.id) && onRemoveDraft ? (
                         <Button variant="secondary-destructive" className="pressable mt-4" disabled={isBusy || removeDisabled}
-                          onClick={() => onRemoveDraft(source.id)}>Remove source</Button>
+                          onClick={() => onRemoveDraft(source.id)}>Remove connector</Button>
                       ) : null}
                       {source.status === 'installed' && removalEnabled && onRemove && onRefresh ? <SourceRemoval
                         source={source}
@@ -176,7 +175,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
             )
           })}
           {visibleSources.length === 0 ? (
-            <tr><td colSpan={3} className="px-3 py-10 text-center text-kumo-subtle">{query ? 'No matching sources.' : filter === 'installed' ? 'No installed sources.' : filter === 'draft' ? 'No drafts.' : 'No sources yet.'}</td></tr>
+            <tr><td colSpan={3} className="px-3 py-10 text-center text-kumo-subtle">{query ? 'No matching connectors.' : filter === 'installed' ? 'No installed connectors.' : filter === 'draft' ? 'No drafts.' : 'No connectors yet.'}</td></tr>
           ) : null}
         </tbody>
       </table>

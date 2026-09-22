@@ -48,7 +48,7 @@ export function AddUserDialog({ members, disabled, onAdd }: AddUserDialogProps) 
         <Dialog.Backdrop className="fixed inset-0 z-40 bg-black/65" />
         <Dialog.Popup initialFocus={input} className="fixed top-1/2 left-1/2 z-50 max-h-[calc(100dvh-2rem)] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border border-kumo-line bg-kumo-overlay p-6 text-kumo-default shadow-xl">
           <Dialog.Title className="text-lg font-semibold text-kumo-strong">Add user</Dialog.Title>
-          <Dialog.Description className="mt-2 text-sm text-kumo-subtle">New users start with no sources.</Dialog.Description>
+          <Dialog.Description className="mt-2 text-sm text-kumo-subtle">New users start with no connectors.</Dialog.Description>
           <form onSubmit={submit} className="mt-5">
             <label htmlFor={inputId} className="block text-sm font-medium">Email</label>
             <input ref={input} id={inputId} type="email" autoComplete="off" required maxLength={254} className="text-input mt-2 w-full" placeholder="teammate@example.com" value={email} aria-invalid={Boolean(error)} aria-describedby={error ? errorId : undefined} onChange={(event) => { setEmail(event.target.value); setError(null) }} />

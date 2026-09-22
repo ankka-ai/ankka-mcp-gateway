@@ -1,0 +1,4 @@
+{
+  "extends": "../read-only-connectors/tsconfig.json",
+  "include": ["src/**/*.ts", "test/**/*.ts", "worker-configuration.d.ts"]
+}

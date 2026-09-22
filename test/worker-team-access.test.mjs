@@ -2168,7 +2168,7 @@ test('removal refused for an unfinished source installation says so through the 
   await dashboardClient(gateway, async (dashboard) => {
     await assert.rejects(dashboard.prepareTeardownAction(), (error) => {
       assert.equal(error.code, 'teardown_action_conflict');
-      assert.match(error.message, /^Finish or cancel any unfinished source installation, update or Team change, or wait for an open removal authorization to expire/u);
+      assert.match(error.message, /^Finish or cancel any unfinished connector installation, update or Team change, or wait for an open removal authorization to expire/u);
       return true;
     });
   });
@@ -3938,6 +3938,30 @@ test('individual source removal refuses a resource recreated after a verified de
 
 const MANAGEMENT_ID = 'source-616e6b6b616d6370';
 const MANAGEMENT_AUDIENCE = 'synthetic-management-source-audience';
+
+test('API source management requires the optional binding, live assignment and exact tool allowlist', () => fixture(async (gateway) => {
+  const seen = [];
+  gateway.env.API_SOURCE_RUNTIME = { fetch: async (request) => {
+    assert.equal(request.url, 'https://api-source-runtime.invalid/manage');
+    assert.deepEqual([...request.headers.keys()], ['content-type']);
+    const command = await request.json();
+    seen.push(command);
+    return Response.json({ revision: 2, operation: command.operation });
+  } };
+  await installManagementSource(gateway, ['get_api_source_runtime', 'save_api_source_draft']);
+  const listed = await managementRpc(gateway, 'tools/list', {});
+  assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), ['get_api_source_runtime', 'save_api_source_draft']);
+  const definitionJson = '{\n"label":"Synthetic API",\n"tools":[]\n}';
+  const saved = await managementRpc(gateway, 'tools/call', { name: 'save_api_source_draft', arguments: { revision: 1, definitionJson } });
+  assert.equal(saved.body.result.structuredContent.ok, true);
+  assert.deepEqual(seen, [{ operation: 'save', revision: 1, definitionJson }]);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'activate_api_source', arguments: { revision: 2 } })).body.error.code, -32602);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_api_source_runtime' }, { email: MEMBER })).response.status, 401);
+  delete gateway.env.API_SOURCE_RUNTIME;
+  assert.deepEqual((await managementRpc(gateway, 'tools/list', {})).body.result.tools, []);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_api_source_runtime' })).body.error.code, -32602);
+  assert.equal(seen.length, 1);
+}));
 
 async function installManagementSource(gateway, enabledTools = null, recover = null) {
   const discovery = await (await gateway.api('/api/sources/discover', { method: 'POST', body: { url: `${MANAGEMENT_ORIGIN}/api/mcp` } })).json();

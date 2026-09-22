@@ -12,7 +12,7 @@ export function managementTokenChoiceSentence(choice: ManagementCredentialChoice
   return 'No management token was added during setup.'
 }
 
-export const MANAGEMENT_ACCESS_PURPOSE = 'Add sources and manage team access with a Cloudflare API token.'
+export const MANAGEMENT_ACCESS_PURPOSE = 'Add connectors and manage team access with a Cloudflare API token.'
 export const MANAGEMENT_ACCESS_REACH = 'This token can edit all Access policies in your Cloudflare account. It stays in your gateway and never passes through Ankka.'
 export const MANAGEMENT_ACCESS_STEPS = 'Create the token first as a Cloudflare account Administrator or Super Administrator. The next approval expires after a few minutes.'
 

@@ -1,0 +1,24 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "ankka-api-source-runtime",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": {
+    "bindings": [{ "name": "SOURCE", "class_name": "ApiSource" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ApiSource"] }],
+  "vars": {
+    "PUBLIC_ORIGIN": "https://api-source.example.com",
+    "ACCESS_TEAM_DOMAIN": "team.cloudflareaccess.com",
+    "ACCESS_AUD": "configure-in-your-account",
+    "CONNECTION_JSON": "{}"
+  },
+  "observability": {
+    "logs": { "enabled": false, "invocation_logs": false },
+    "traces": { "enabled": false, "head_sampling_rate": 0 }
+  }
+}

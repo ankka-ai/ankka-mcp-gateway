@@ -1,0 +1,25 @@
+{
+  "name": "@ankka/api-source-runtime",
+  "version": "0.1.0-alpha.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "scripts": {
+    "types": "wrangler types --include-runtime false --strict-vars false",
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && wrangler deploy --dry-run --outdir dist",
+    "test": "vitest run",
+    "dev": "wrangler dev --local"
+  },
+  "dependencies": {
+    "@cloudflare/codemode": "0.5.1",
+    "jose": "6.2.10",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "~5.20260827.1",
+    "typescript": "7.0.2",
+    "vitest": "~4.1.9",
+    "wrangler": "~4.127.0"
+  }
+}

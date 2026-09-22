@@ -56,7 +56,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
 
 function Probe() {
   const { hasLoaded, isLoading, status: current, sources: currentSources } = useGateway()
-  return <div><span>{isLoading ? 'loading' : 'settled'}</span><span>{hasLoaded ? 'loaded' : 'not loaded'}</span><span>{current?.gateway.name ?? 'no gateway'}</span><span>{currentSources?.sources.length ?? 0} sources</span></div>
+  return <div><span>{isLoading ? 'loading' : 'settled'}</span><span>{hasLoaded ? 'loaded' : 'not loaded'}</span><span>{current?.gateway.name ?? 'no gateway'}</span><span>{currentSources?.sources.length ?? 0} connectors</span></div>
 }
 
 function SaveProbe() {
@@ -74,7 +74,7 @@ function PausedSourceProbe() {
   return <div>
     <span>{hasLoaded ? 'ready' : 'loading'}</span><span>{sourceNotice?.message}</span><span>{error}</span>
     <button type="button" onClick={() => { void saveSourceDraft({ label: 'Knowledge', url: 'https://knowledge.example.com/mcp', authMode: 'none', enabledTools: ['search'] }).catch(() => {}) }}>Save blocked draft</button>
-    <button type="button" onClick={() => { void prepareSourceApply('source-1111111111111111').catch(() => {}) }}>Prepare blocked source</button>
+    <button type="button" onClick={() => { void prepareSourceApply('source-1111111111111111').catch(() => {}) }}>Prepare blocked connector</button>
   </div>
 }
 
@@ -98,10 +98,10 @@ function SourceActionsProbe() {
     <span>{sourceActions?.actions[0]?.canCancel ? 'can cancel' : 'cannot cancel'}</span>
     <span>{isCheckingSourceActions ? 'checking' : 'not checking'}</span>
     <span>{sourceActionsPollingPaused ? 'polling paused' : 'polling active'}</span>
-    <span>{currentSources?.sources[0]?.status ?? 'no installed source'}</span>
+    <span>{currentSources?.sources[0]?.status ?? 'no installed connector'}</span>
     <span>{sourceActionsError}</span><span>{error}</span>
     <button type="button" onClick={() => { void refreshSourceActions().catch(() => {}) }}>Check status</button>
-    <button type="button" onClick={() => { void prepareSourceApply(pendingAction.sourceId).catch(() => {}) }}>Prepare source</button>
+    <button type="button" onClick={() => { void prepareSourceApply(pendingAction.sourceId).catch(() => {}) }}>Prepare connector</button>
     <button type="button" onClick={() => { void cancelSourceApply(pendingAction.actionId).catch(() => {}) }}>Cancel authorization</button>
   </div>
 }
@@ -120,27 +120,27 @@ describe('GatewayProvider', () => {
     window.history.replaceState(null, '', `/sources?sourceRemoval=${pendingAction.actionId}&sourceRemovalResult=${result}`)
     const service = api()
     render(<GatewayProvider api={service}><PausedSourceProbe /></GatewayProvider>)
-    await screen.findByText(result === 'applied' ? 'Source and BigQuery bridge removed.'
+    await screen.findByText(result === 'applied' ? 'Connector and BigQuery bridge removed.'
       : 'BigQuery removal did not finish. Its cleanup records are saved. Use Continue removal to authorize another attempt.')
     expect(window.location.search).toBe('')
     expect(service.cancelSourceAction).not.toHaveBeenCalled()
     expect(service.prepareSourceAction).not.toHaveBeenCalled()
   })
 
-  it('hydrates the production status, source, and update contracts', async () => {
+  it('hydrates the production status, connector, and update contracts', async () => {
     const client = api()
     render(<GatewayProvider api={client}><Probe /></GatewayProvider>)
     expect(screen.getByText('loading')).toBeInTheDocument()
     expect(await screen.findByText('Example Gateway')).toBeInTheDocument()
     expect(screen.getByText('loaded')).toBeInTheDocument()
-    expect(screen.getByText('0 sources')).toBeInTheDocument()
+    expect(screen.getByText('0 connectors')).toBeInTheDocument()
     expect(client.getStatus).toHaveBeenCalledTimes(1)
     expect(client.getSources).toHaveBeenCalledTimes(1)
     expect(client.getUpdate).toHaveBeenCalledTimes(1)
     expect(client.getSourceActions).toHaveBeenCalledTimes(1)
   })
 
-  it('saves against the hydrated customer-owned source revision', async () => {
+  it('saves against the hydrated customer-owned connector revision', async () => {
     const user = userEvent.setup()
     const saveSourceDraft = vi.fn(async () => ({ ...sources, revision: 8 }))
     render(<GatewayProvider api={api({ saveSourceDraft })}><SaveProbe /></GatewayProvider>)
@@ -150,7 +150,7 @@ describe('GatewayProvider', () => {
     expect(saveSourceDraft).toHaveBeenCalledWith(7, expect.objectContaining({ label: 'Knowledge' }))
   })
 
-  it('does not replace a newer saved source revision with an older delayed reload', async () => {
+  it('does not replace a newer saved connector revision with an older delayed reload', async () => {
     const user = userEvent.setup()
     let resolveRead: (value: ManagedSources) => void = () => { throw new Error('Read not initialized') }
     const staleRead = new Promise<ManagedSources>((resolve) => { resolveRead = resolve })
@@ -169,11 +169,11 @@ describe('GatewayProvider', () => {
 
   it('surfaces an observational refresh failure in the existing dashboard error state', async () => {
     const user = userEvent.setup()
-    const client = api({ getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockRejectedValueOnce(new Error('Saved sources could not be refreshed.')) })
+    const client = api({ getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockRejectedValueOnce(new Error('Saved connectors could not be refreshed.')) })
     render(<GatewayProvider api={client}><Probe /><ExternalRefreshProbe /></GatewayProvider>)
     await screen.findByText('loaded')
     await user.click(screen.getByRole('button', { name: 'External refresh' }))
-    expect(await screen.findByText('Saved sources could not be refreshed.')).toBeVisible()
+    expect(await screen.findByText('Saved connectors could not be refreshed.')).toBeVisible()
     expect(client.saveSourceDraft).not.toHaveBeenCalled()
   })
 
@@ -194,14 +194,14 @@ describe('GatewayProvider', () => {
     expect(client.prepareRuntimeAction).not.toHaveBeenCalled()
   })
 
-  it('blocks programmatic draft save and authorization before either API request when source addition is paused', async () => {
+  it('blocks programmatic draft save and authorization before either API request when connector addition is paused', async () => {
     const user = userEvent.setup()
     const client = api({ getSources: vi.fn(async () => ({ ...sources, installationEnabled: false })) })
     render(<GatewayProvider api={client}><PausedSourceProbe /></GatewayProvider>)
     await screen.findByText('ready')
     await user.click(screen.getByRole('button', { name: 'Save blocked draft' }))
     expect(await screen.findByText(SOURCE_ADDITION_PAUSED_MESSAGE)).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Prepare blocked source' }))
+    await user.click(screen.getByRole('button', { name: 'Prepare blocked connector' }))
     expect(client.saveSourceDraft).not.toHaveBeenCalled()
     expect(client.prepareSourceAction).not.toHaveBeenCalled()
   })
@@ -228,8 +228,8 @@ describe('GatewayProvider', () => {
     firstTab.unmount()
     render(<GatewayProvider api={client}><SourceActionsProbe /></GatewayProvider>)
     await screen.findByText('authorization_required')
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Prepare source' })) })
-    expect(screen.getByText(/A source installation is already pending/)).toBeVisible()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Prepare connector' })) })
+    expect(screen.getByText(/A connector installation is already pending/)).toBeVisible()
     expect(client.prepareSourceAction).not.toHaveBeenCalled()
     expect(client.getSourceAction).not.toHaveBeenCalled()
     expect(client.getSourceActions).toHaveBeenCalledTimes(3)
@@ -285,7 +285,7 @@ describe('GatewayProvider', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('reconciles late success into installed sources and stops polling', async () => {
+  it('reconciles late success into installed connectors and stops polling', async () => {
     vi.useFakeTimers()
     const succeeded: SourceActions = { ...pendingActions, blockingAction: null, actions: [{ ...pendingAction, state: 'succeeded', status: 'succeeded', canCancel: false }] }
     const client = api({
@@ -359,7 +359,7 @@ describe('GatewayProvider', () => {
       cancelSourceAction: vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_action_recovery_required')),
     })
     render(<GatewayProvider api={client}><SourceActionsProbe /></GatewayProvider>)
-    await screen.findByText(/Source provisioning may have started/)
+    await screen.findByText(/Connector provisioning may have started/)
     expect(screen.getByText('applying')).toBeVisible()
     expect(screen.getByText(pendingAction.actionId)).toBeVisible()
     expect(client.cancelSourceAction).toHaveBeenCalledExactlyOnceWith(pendingAction.actionId)
@@ -375,22 +375,22 @@ describe('GatewayProvider', () => {
     })
     render(<GatewayProvider api={client}><SourceActionsProbe /></GatewayProvider>)
     await screen.findByText('not checking')
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Prepare source' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Prepare connector' })) })
     expect(screen.getByText('authorization_required')).toBeVisible()
     expect(client.prepareSourceAction).toHaveBeenCalledExactlyOnceWith(7, pendingAction.sourceId)
     expect(client.getSourceActions).toHaveBeenCalledTimes(3)
     expect(window.location.hash).toBe('')
   })
 
-  it('preserves the precise stale-draft error while refreshing sources and actions after a conflict', async () => {
+  it('preserves the precise stale-draft error while refreshing connectors and actions after a conflict', async () => {
     const client = api({
       getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockResolvedValue({ ...sources, revision: 9 }),
       prepareSourceAction: vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })),
     })
     render(<GatewayProvider api={client}><SourceActionsProbe /></GatewayProvider>)
     await screen.findByText('not checking')
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Prepare source' })) })
-    expect(screen.getByText(/The saved source draft changed/)).toBeVisible()
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Prepare connector' })) })
+    expect(screen.getByText(/The saved connector draft changed/)).toBeVisible()
     expect(client.getSources).toHaveBeenCalledTimes(2)
     expect(client.getSourceActions).toHaveBeenCalledTimes(3)
   })
@@ -401,14 +401,14 @@ describe('GatewayProvider', () => {
     render(<GatewayProvider api={client}><SourceActionsProbe /></GatewayProvider>)
     await screen.findByText('authorization_required')
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check status' })) })
-    expect(screen.getByText(/Source action status is temporarily unavailable/)).toBeVisible()
+    expect(screen.getByText(/Connector action status is temporarily unavailable/)).toBeVisible()
     expect(screen.getByText(pendingAction.actionId)).toBeVisible()
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Prepare source' })) })
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Prepare connector' })) })
     expect(client.prepareSourceAction).not.toHaveBeenCalled()
     expect(screen.queryByText('synthetic-private-provider-error')).not.toBeInTheDocument()
   })
 
-  it('discovers source actions after an external WebMCP change', async () => {
+  it('discovers connector actions after an external WebMCP change', async () => {
     const client = api({ getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>()
       .mockResolvedValueOnce(emptyActions).mockResolvedValue(pendingActions) })
     render(<GatewayProvider api={client}><SourceActionsProbe /><ExternalRefreshProbe /></GatewayProvider>)
