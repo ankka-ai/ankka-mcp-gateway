@@ -196,6 +196,14 @@ permanently, and the gateway, never the dashboard, works out both answers:
 
 ## Built-in API sources
 
+Existing v0.1 gateways update to `gateway-v0.1.82` first, then check for updates
+again to install `gateway-v0.2.0`. The bridge carries the old signed deployment
+contract and binding set while accepting the exact new contract. It retains
+configuration, secrets, sources and Team access; no fresh installation is needed.
+API-source tools become available with the second update. The bridge and newer
+runtimes identify their supported contract when checking for updates so the
+hosted channel can keep older gateways on the compatible first step.
+
 The API-source release includes the runtime in the final gateway Worker. Final
 installation and runtime updates provide `API_LOADER` automatically. Updates
 inherit `ANKKA_API_CONNECTIONS` when configured as a secret, without fetching its

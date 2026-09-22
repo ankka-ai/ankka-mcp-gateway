@@ -9,6 +9,10 @@ Notable public product and repository changes are recorded here.
   Retrying an interrupted save advances to unfinished policies without replaying
   completed writes; the complete policy graph is still verified before success.
 
+- Add the v0.1.82 compatibility bridge for built-in API sources. Existing gateways
+  keep their configuration, credentials, sources and Team access while updating
+  in two steps to v0.2.0; no fresh installation is required.
+
 - Include agent-authored API sources in the gateway runtime by default. Gateway
   Management can save, test, activate and disable JavaScript tools for configured
   API connections; ordinary Portal source installation and Team access govern
@@ -358,6 +362,10 @@ Notable public product and repository changes are recorded here.
   changes still block automatic teardown and rollback to older releases.
 
 ## Unreleased
+
+- Add the v0.1.82 compatibility bridge for built-in API sources. Existing gateways
+  keep their configuration, credentials, sources and Team access while updating
+  in two steps to v0.2.0; no fresh installation is required.
 
 - Restore source onboarding with an exact deny-Everyone initial policy and no
   implicit Team assignments. Operator connection and a later explicit Team

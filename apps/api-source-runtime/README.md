@@ -12,6 +12,10 @@ Worker, using the existing `AdminState` SQLite namespace and the fixed
 service binding. Each configured connection has its own source definition,
 revision, and ordinary MCP endpoint.
 
+Existing v0.1 gateways upgrade through `gateway-v0.1.82`, then check for updates
+again for v0.2.0. The bridge preserves the gateway and its configuration without
+enabling API sources until the second update.
+
 Installation includes the runtime; updates recreate its loader and inherit the
 account-owned connection secret without reading it. Gateway removal deletes the
 Worker, its secrets, and the existing storage namespace. Source removal uses the

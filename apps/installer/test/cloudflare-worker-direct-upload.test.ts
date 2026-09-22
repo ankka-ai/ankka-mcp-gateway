@@ -615,6 +615,24 @@ describe('Cloudflare Worker direct upload prerequisite', () => {
     expect(sequence.callCount()).toBe(5);
   });
 
+  it('publishes and recovers a clean bridge version without an API loader', async () => {
+    const fixture = await releaseFixture();
+    const release = { ...fixture.release, release: 'gateway-v0.1.82' };
+    const prepared = await prepareVerifiedWorkerRelease(prepareInput(release));
+    const worker: WorkerSubmission = { kind: 'worker', accountId: ACCOUNT_ID, workerName: WORKER_NAME, workerId: WORKER_ID };
+    const plan = await prepareWorkerVersionMutation(prepared, worker, COMPLETION_JWT, 'clean');
+    const body = v.parse(versionSubmitBodySchema, plan.ephemeral.body);
+    expect(body.bindings.some((binding) => binding.name === 'API_LOADER')).toBe(false);
+    const submit = sequencedTransport([() => success({ id: VERSION_ID }, 201)]);
+    const submission = await submitWorkerVersionMutation(plan.ephemeral, plan.recovery, call(submit.transport));
+    const recovered = await recoveryClone(plan.recovery);
+    const version = versionResultFromBody(plan.ephemeral.body, { echoModuleContent: true });
+    const verify = sequencedTransport([() => success(version)]);
+    await expect(verifyWorkerVersionSubmission(recovered, submission, call(verify.transport))).resolves.toEqual(submission);
+    const wrong = sequencedTransport([() => success({ ...version, bindings: [...body.bindings, { name: 'API_LOADER', type: 'worker_loader' }] })]);
+    await expect(verifyWorkerVersionSubmission(recovered, submission, call(wrong.transport))).rejects.toMatchObject({ code: 'provider_mismatch' });
+  });
+
   it('builds distinct ready=true bootstrap and clean version contracts', async () => {
     const fixture = await releaseFixture();
     const prepared = await prepareVerifiedWorkerRelease(prepareInput(fixture.release));

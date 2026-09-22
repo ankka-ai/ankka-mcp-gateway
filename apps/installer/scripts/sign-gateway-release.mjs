@@ -248,6 +248,20 @@ export const APPROVED_CLOUDFLARE_CONTRACT = Object.freeze({
   }),
 });
 
+export const API_SOURCE_BRIDGE_RELEASE = 'gateway-v0.1.82';
+const { workerLoaders: _apiWorkerLoaders, ...legacyContract } = APPROVED_CLOUDFLARE_CONTRACT;
+export const LEGACY_CLOUDFLARE_CONTRACT = Object.freeze({
+  ...legacyContract,
+  publicBindings: Object.freeze({
+    ...legacyContract.publicBindings,
+    secrets: Object.freeze(legacyContract.publicBindings.secrets.filter((secret) => secret.name !== 'ANKKA_API_CONNECTIONS')),
+  }),
+});
+export function releaseCloudflareContract(release) {
+  return release === API_SOURCE_BRIDGE_RELEASE ? LEGACY_CLOUDFLARE_CONTRACT : APPROVED_CLOUDFLARE_CONTRACT;
+}
+
+
 const WORKER_CONTENT_TYPES = Object.freeze({
   '.js': 'application/javascript+module',
   '.mjs': 'application/javascript+module',
@@ -625,7 +639,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
     raw.release !== expectedRelease ||
     !v.is(STRING_SCHEMA, raw.sourceCommit) ||
     !COMMIT_PATTERN.test(raw.sourceCommit) ||
-    canonicalJson(raw.cloudflare) !== canonicalJson(APPROVED_CLOUDFLARE_CONTRACT) ||
+    canonicalJson(raw.cloudflare) !== canonicalJson(releaseCloudflareContract(expectedRelease)) ||
     !Array.isArray(raw.oauthScopeIds) ||
     raw.oauthScopeIds.length !== REQUIRED_OAUTH_SCOPES.length ||
     !raw.oauthScopeIds.every((scope, index) => scope === REQUIRED_OAUTH_SCOPES[index]) ||
@@ -683,7 +697,7 @@ function parseCanonicalManifest(bytes, expectedRelease) {
     serialized,
     manifest: Object.freeze({
       artifact: Object.freeze({ ...raw.artifact }),
-      cloudflare: APPROVED_CLOUDFLARE_CONTRACT,
+      cloudflare: releaseCloudflareContract(expectedRelease),
       components,
       controlPlaneOrigin: raw.controlPlaneOrigin,
       oauthScopeIds: REQUIRED_OAUTH_SCOPES,

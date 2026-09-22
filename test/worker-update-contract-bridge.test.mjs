@@ -5,6 +5,8 @@ import test from 'node:test';
 
 import {
   APPROVED_CLOUDFLARE_CONTRACT,
+  LEGACY_CLOUDFLARE_CONTRACT,
+  releaseCloudflareContract,
   RELEASE_ENVELOPE_SCHEMA_VERSION,
   RELEASE_SIGNATURE_CONTEXT,
   REQUIRED_OAUTH_SCOPES,
@@ -126,4 +128,19 @@ test('an alternate contract cannot replace the signed contract without a new sig
   ]) {
     assert.equal(await verifier.verifyUpdateEnvelope({ ...envelope, ...change }, environment), null);
   }
+});
+
+// Captured from public release commit bc37f31afc204d5952a031973243e7d5c89d3c1f.
+test('v0.1.82 retains the published v0.1.81 contract and the bridge accepts both signed generations', async () => {
+  const releasedContract = JSON.parse(await readFile(new URL('./fixtures/gateway-v0.1.81-cloudflare-contract.json', import.meta.url), 'utf8'));
+  assert.deepEqual(LEGACY_CLOUDFLARE_CONTRACT, releasedContract);
+  assert.deepEqual(releaseCloudflareContract('gateway-v0.1.82'), releasedContract);
+  assert.deepEqual(releaseCloudflareContract('gateway-v0.2.0'), runtimeContract);
+  for (const [release, contract] of [['gateway-v0.1.82', releasedContract], ['gateway-v0.2.0', runtimeContract]]) {
+    const manifest = { ...manifestFor(contract), release };
+    const { envelope, environment } = signedManifest(manifest);
+    assert.deepEqual(await verifier.verifyUpdateEnvelope(envelope, environment), manifest);
+  }
+  const { envelope, environment } = signedManifest(manifestFor(releasedContract));
+  assert.equal(await verifier.verifyUpdateEnvelope({ ...envelope, manifest: canonicalJson(manifestFor(runtimeContract)) }, environment), null);
 });

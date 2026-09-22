@@ -461,6 +461,7 @@ function uploadMetadata(
   target: CustomerRuntimeUpdateTarget,
   managementCredentialConfigured: boolean,
   apiConnectionsConfigured: boolean,
+  apiLoader: boolean,
 ): BoundaryObject {
   const inherited = ['ADMIN_STATE', 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY',
     ...(managementCredentialConfigured ? ['ANKKA_MANAGEMENT_TOKEN'] : []),
@@ -486,7 +487,7 @@ function uploadMetadata(
       }),
       jwt: completionJwt,
     }),
-    bindings: Object.freeze([...inherited, { name: 'API_LOADER', type: 'worker_loader' }, { name: 'ASSETS', type: 'assets' as const }, ...plain].sort((left, right) =>
+    bindings: Object.freeze([...inherited, ...(apiLoader ? [{ name: 'API_LOADER', type: 'worker_loader' }] : []), { name: 'ASSETS', type: 'assets' as const }, ...plain].sort((left, right) =>
       left.name < right.name ? -1 : left.name > right.name ? 1 : 0)),
     compatibility_date: COMPATIBILITY_DATE,
     compatibility_flags: Object.freeze([]),
@@ -508,9 +509,10 @@ async function uploadScript(
   completionJwt: string,
   managementCredentialConfigured: boolean,
   apiConnectionsConfigured: boolean,
+  apiLoader: boolean,
 ): Promise<void> {
   const form = new FormData();
-  form.append('metadata', new Blob([canonicalJson(uploadMetadata(prepared, completionJwt, input.target, managementCredentialConfigured, apiConnectionsConfigured))], {
+  form.append('metadata', new Blob([canonicalJson(uploadMetadata(prepared, completionJwt, input.target, managementCredentialConfigured, apiConnectionsConfigured, apiLoader))], {
     type: 'application/json',
   }), 'metadata.json');
   for (const module of prepared.modules) {
@@ -580,6 +582,8 @@ export async function runCustomerRuntimeUpdate(
       command: 'progress', stage: 'current_verified', fromVersionId: current.versionId, toVersionId: null,
     }, 'current_read');
     const bundle = await loadTargetBundle(input);
+    const apiLoader = Object.hasOwn(bundle.manifest.cloudflare, 'workerLoaders');
+    if (!apiLoader && current.apiConnectionsConfigured) fail('release_invalid', 'release_prepare');
     let prepared: PreparedVerifiedWorkerRelease;
     try {
       const direct = await adaptVerifiedReleaseBundleForWorkerDirectUpload(bundle);
@@ -611,7 +615,7 @@ export async function runCustomerRuntimeUpdate(
     }
     // From here on this object may restart on the new version at any moment.
     uploaded = true;
-    await uploadScript(input, prepared, completionJwt, current.managementCredentialConfigured, current.apiConnectionsConfigured);
+    await uploadScript(input, prepared, completionJwt, current.managementCredentialConfigured, current.apiConnectionsConfigured, apiLoader);
     return Object.freeze({ status: 'uploaded', fromVersionId: current.versionId });
   } catch (error) {
     const failure = error instanceof CustomerRuntimeUpdateError

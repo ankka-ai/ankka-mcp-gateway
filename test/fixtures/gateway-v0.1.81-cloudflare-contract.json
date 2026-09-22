@@ -1,0 +1,217 @@
+{
+  "assets": {
+    "binding": "ASSETS",
+    "notFoundHandling": "single-page-application",
+    "payloadDirectory": "payload/admin",
+    "runWorkerFirst": [
+      "/__ankka/*",
+      "/api/*"
+    ]
+  },
+  "compatibilityDate": "2026-08-08",
+  "compatibilityFlags": [],
+  "dependenciesInstrumentation": {
+    "enabled": false
+  },
+  "durableObjects": {
+    "bindings": [
+      {
+        "binding": "ADMIN_STATE",
+        "className": "AdminState"
+      }
+    ],
+    "exports": {
+      "AdminState": {
+        "storage": "sqlite",
+        "type": "durable-object"
+      }
+    }
+  },
+  "mainModule": "index.js",
+  "observability": {
+    "enabled": false
+  },
+  "previewUrls": false,
+  "publicBindings": {
+    "secrets": [
+      {
+        "lifecycle": "customer-worker",
+        "name": "ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY"
+      },
+      {
+        "lifecycle": "customer-managed-optional",
+        "name": "ANKKA_MANAGEMENT_TOKEN"
+      }
+    ],
+    "variables": [
+      "ADMIN_EMAILS",
+      "ANKKA_INSTALL_ID",
+      "ANKKA_GATEWAY_RELEASE",
+      "ANKKA_GATEWAY_RELEASE_SHA256",
+      "ANKKA_MANAGEMENT_HOSTNAME",
+      "ANKKA_UPDATE_CHANNEL",
+      "ANKKA_UPDATE_KEY_ID",
+      "ANKKA_UPDATE_PUBLIC_KEY",
+      "ANKKA_WORKERS_SUBDOMAIN",
+      "ANKKA_WORKER_NAME",
+      "CF_ACCESS_AUD",
+      "CF_ACCESS_ISSUER",
+      "CLOUDFLARE_ACCOUNT_ID",
+      "CLOUDFLARE_ZONE_ID",
+      "CLOUDFLARE_ZONE_NAME",
+      "ZERO_TRUST_READY"
+    ]
+  },
+  "sendMetrics": false,
+  "workersDev": false,
+  "workerVariants": {
+    "bootstrap": {
+      "assets": {
+        "binding": "ASSETS",
+        "notFoundHandling": "single-page-application",
+        "payloadDirectory": "payload/admin",
+        "runWorkerFirst": [
+          "/__ankka/*",
+          "/api/*"
+        ]
+      },
+      "component": "workerBootstrap",
+      "compatibilityDate": "2026-08-08",
+      "compatibilityFlags": [],
+      "dependenciesInstrumentation": {
+        "enabled": false
+      },
+      "durableObjects": {
+        "bindings": [
+          {
+            "binding": "ADMIN_STATE",
+            "className": "AdminState"
+          }
+        ],
+        "exports": {
+          "AdminState": {
+            "storage": "sqlite",
+            "type": "durable-object"
+          }
+        }
+      },
+      "mainModule": "index.js",
+      "observability": {
+        "enabled": false
+      },
+      "payloadDirectory": "payload/worker-bootstrap",
+      "previewUrls": false,
+      "publicBindings": {
+        "secrets": [
+          {
+            "lifecycle": "bootstrap-only",
+            "name": "ANKKA_BOOTSTRAP_NONCE"
+          },
+          {
+            "lifecycle": "customer-worker",
+            "name": "ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY"
+          }
+        ],
+        "variables": [
+          "ANKKA_BOOTSTRAP_CALLBACK",
+          "ANKKA_BOOTSTRAP_EXPIRES_AT",
+          "ANKKA_BOOTSTRAP_ID",
+          "ANKKA_BOOTSTRAP_SECRET_SHA256",
+          "ANKKA_GATEWAY_RELEASE",
+          "ANKKA_GATEWAY_RELEASE_SHA256",
+          "ANKKA_INSTALL_ID",
+          "ANKKA_INSTALLER_ORIGIN",
+          "ANKKA_MANAGEMENT_HOSTNAME",
+          "ANKKA_PLAN_HASH",
+          "ANKKA_PLAN_ID",
+          "ANKKA_UPDATE_CHANNEL",
+          "ANKKA_UPDATE_KEY_ID",
+          "ANKKA_UPDATE_PUBLIC_KEY",
+          "ANKKA_WORKER_NAME",
+          "CLOUDFLARE_ACCOUNT_ID",
+          "CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID",
+          "CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID",
+          "CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY"
+        ]
+      },
+      "sendMetrics": false,
+      "workersDev": false
+    },
+    "cleanup": {
+      "component": "workerCleanup",
+      "compatibilityDate": "2026-08-08",
+      "compatibilityFlags": [],
+      "dependenciesInstrumentation": {
+        "enabled": false
+      },
+      "durableObjects": {
+        "bindings": [
+          {
+            "binding": "ADMIN_STATE",
+            "className": "AdminState"
+          }
+        ],
+        "exports": {
+          "AdminState": {
+            "storage": "sqlite",
+            "type": "durable-object"
+          }
+        }
+      },
+      "mainModule": "index.js",
+      "observability": {
+        "enabled": false
+      },
+      "payloadDirectory": "payload/worker-cleanup",
+      "previewUrls": false,
+      "publicBindings": {
+        "secrets": [
+          {
+            "lifecycle": "uninstall-attempt",
+            "name": "ANKKA_UNINSTALL_NONCE"
+          }
+        ],
+        "variables": [
+          "ANKKA_GATEWAY_RELEASE",
+          "ANKKA_GATEWAY_RELEASE_SHA256",
+          "CLOUDFLARE_ACCOUNT_ID",
+          "CLOUDFLARE_ZONE_ID",
+          "CLOUDFLARE_ZONE_NAME",
+          "ZERO_TRUST_READY"
+        ]
+      },
+      "publicPath": "/__ankka/uninstall",
+      "sendMetrics": false,
+      "workersDev": false
+    },
+    "retirement": {
+      "component": "workerRetirement",
+      "compatibilityDate": "2026-08-08",
+      "compatibilityFlags": [],
+      "dependenciesInstrumentation": {
+        "enabled": false
+      },
+      "durableObjects": {
+        "bindings": [],
+        "exports": {
+          "AdminState": {
+            "state": "deleted",
+            "type": "durable-object"
+          }
+        }
+      },
+      "mainModule": "index.js",
+      "observability": {
+        "enabled": false
+      },
+      "payloadDirectory": "payload/worker-retirement",
+      "previewUrls": false,
+      "publicBindings": {
+        "secrets": [],
+        "variables": []
+      },
+      "sendMetrics": false,
+      "workersDev": false
+    }
+  }
+}

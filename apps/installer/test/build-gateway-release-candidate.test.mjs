@@ -14,6 +14,7 @@ import {
 } from '../scripts/build-gateway-release-candidate.mjs';
 import {
   APPROVED_CLOUDFLARE_CONTRACT,
+  LEGACY_CLOUDFLARE_CONTRACT,
   REQUIRED_OAUTH_SCOPES as SIGNER_SCOPES,
   canonicalJson,
   prepareSignedReleasePublishPlan,
@@ -21,6 +22,9 @@ import {
 import { REQUIRED_OAUTH_SCOPES } from '../src/constants';
 import {
   APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+  LEGACY_CLOUDFLARE_RELEASE_CONTRACT,
+  API_SOURCE_BRIDGE_RELEASE,
+  API_SOURCE_BRIDGE_RELEASE_SHA256,
   parseCanonicalReleaseManifest,
 } from '../src/release-manifest';
 import {
@@ -46,6 +50,8 @@ describe('build-gateway-release-candidate', () => {
   it('keeps the signer contract constants identical to the runtime contract', () => {
     expect(canonicalJson(APPROVED_CLOUDFLARE_CONTRACT)).toBe(canonicalJson(APPROVED_CLOUDFLARE_RELEASE_CONTRACT));
     expect([...SIGNER_SCOPES]).toEqual([...REQUIRED_OAUTH_SCOPES]);
+    expect(canonicalJson(LEGACY_CLOUDFLARE_CONTRACT)).toBe(canonicalJson(LEGACY_CLOUDFLARE_RELEASE_CONTRACT));
+    expect(sha256(API_SOURCE_BRIDGE_RELEASE)).toBe(API_SOURCE_BRIDGE_RELEASE_SHA256);
   });
 
   it('builds the canonical manifest for the exact committed payload bytes', async () => {
@@ -362,4 +368,14 @@ describe('build-gateway-release-candidate', () => {
       await checkout.cleanup();
     }
   });
+});
+
+it('builds a bridge candidate with the old deployment contract', async () => {
+  const checkout = await publicCheckout();
+  try {
+    const candidate = await buildReleaseCandidate({ controlPlaneOrigin: CONTROL_PLANE_ORIGIN, sourceDirectory: checkout.source, sourceCommit: checkout.commit, release: API_SOURCE_BRIDGE_RELEASE });
+    const parsed = parseCanonicalReleaseManifest(candidate.manifestBytes.toString('utf8'));
+    expect(parsed.cloudflare).toEqual(LEGACY_CLOUDFLARE_RELEASE_CONTRACT);
+    expect(Object.hasOwn(parsed.cloudflare, 'workerLoaders')).toBe(false);
+  } finally { await rm(checkout.source, { recursive: true, force: true }); }
 });
