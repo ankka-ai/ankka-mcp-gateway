@@ -22,10 +22,9 @@ Each Team load reads, in one overlapping round, the account's Access
 applications with their policies, the Portal, the management token and each
 team's Access group, and accepts membership only after every read succeeds.
 Cloudflare's application list carries each application's policies exactly as
-the per-application reads return them, current immediately after a write, so a
-load makes no request per source. Saves still read each application they
-change directly; policy writes and their verification keep their ordered
-journal.
+the per-application reads return them, current immediately after a write, so
+loads and saves read policies from it and make no request per source. Policy
+writes and their verification keep their ordered journal.
 Only the public Access signing keys are cached in Worker memory, for up to five
 minutes per issuer. A new key ID triggers a refresh, and failed refreshes never
 reuse expired keys. Every request still verifies its signature, issuer, audience,
@@ -223,12 +222,12 @@ recorded change after restoring the token or reconciling unexpected provider
 state. An ambiguous write is not undone by revoking its credential. Lifecycle
 floors continue to block incompatible rollback and legacy removal paths.
 
-Each save attempt has a 60-second provider deadline. Independent ownership reads
-overlap with at most four provider requests in flight; policy writes remain
-serial and are recorded before sending. A retry verifies the complete policy
-graph, skips policies already confirmed at the recorded target, and checks the
-complete graph again before completing. Saving Team access does not download a
-source's MCP tool catalogue.
+Each save attempt has a 60-second provider deadline. Every ownership check reads
+the application list and the Portal together; policy writes remain serial, are
+recorded before sending, and are checked before and after. A retry verifies the
+complete policy graph, skips policies already confirmed at the recorded target,
+and checks the complete graph again before completing. Saving Team access does
+not download a source's MCP tool catalogue.
 
 The retired `ANKKA_TEAM_MANAGEMENT_TOKEN` binding is not reused. Revoke any old
 preview token and remove its binding. See [Upgrade boundary](TEAM_UPGRADE.md)

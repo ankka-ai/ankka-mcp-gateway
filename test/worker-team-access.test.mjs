@@ -1813,7 +1813,7 @@ test('a failed Team read waits for every outstanding read and never returns a pa
   assert.equal(gateway.provider.puts().length, writes);
 }));
 
-test('a free save verification slot starts another source while an earlier source is still pending', async () => fixture(async (gateway) => {
+test('a free verification slot starts another source while an earlier source is still pending', async () => fixture(async (gateway) => {
   await addHistoricalInstalledSource(gateway);
   const before = await gateway.view();
   const slowId = app(gateway, 'mcp_portal').id;
@@ -1825,7 +1825,9 @@ test('a free save verification slot starts another source while an earlier sourc
   // A broken fixed-batch implementation must eventually unblock and fail the
   // assertion, rather than leave the test's simulated provider request hanging.
   const deadline = setTimeout(() => releaseSlow(), 1000);
-  gateway.provider.hook(async ({ record }) => {
+  gateway.provider.hook(async ({ record, state }) => {
+    // Without policies in the list, verification reads each application directly.
+    if (record.method === 'GET' && record.pathname.endsWith('/access/apps')) return envelope([...state.apps.values()]);
     if (record.pathname.endsWith(`/access/apps/${slowId}/policies`)) {
       await slow;
       slowFinished = true;
@@ -1845,10 +1847,11 @@ test('a free save verification slot starts another source while an earlier sourc
   } finally { clearTimeout(deadline); releaseSlow(); }
 }));
 
-test('a failed parallel save verification drains outstanding reads and writes nothing', async () => fixture(async (gateway) => {
+test('a failed parallel verification drains outstanding reads and writes nothing', async () => fixture(async (gateway) => {
   const before = await gateway.view();
   let active = 0;
-  gateway.provider.hook(async ({ record }) => {
+  gateway.provider.hook(async ({ record, state }) => {
+    if (record.method === 'GET' && record.pathname.endsWith('/access/apps')) return envelope([...state.apps.values()]);
     if (!record.pathname.endsWith('/policies')) return;
     active += 1;
     await nextTurn();
@@ -1885,7 +1888,7 @@ async function sevenSourceTeamRequest(gateway) {
     members: [...before.members, { email: NEW_PERSON, sourceIds: before.sources.map(({ id }) => id) }] };
 }
 
-test('a seven-source Team save overlaps reads but drains them before each serial write', async () => fixture(async (gateway) => {
+test('a seven-source Team save reads the list and Portal together and drains them before each serial write', async () => fixture(async (gateway) => {
   const input = await sevenSourceTeamRequest(gateway);
   let active = 0;
   let peak = 0;
@@ -1900,11 +1903,15 @@ test('a seven-source Team save overlaps reads but drains them before each serial
     await nextTurn();
     active -= 1;
   });
+  const baseline = gateway.provider.requests.length;
   const response = await gateway.api('/api/team-actions', { method: 'POST', body: input });
   assert.equal(response.status, 200, await response.clone().text());
   assert.equal(active, 0);
-  assert.equal(peak, 4);
+  assert.equal(peak, 2, 'the application list and Portal reads overlap');
   assert.equal(gateway.provider.puts().length, 8, 'one Portal policy and seven source policies');
+  const reads = gateway.provider.requests.slice(baseline).filter(({ method }) => method === 'GET');
+  assert.equal(reads.filter(({ pathname }) => /\/access\/apps\/[^/]+/u.test(pathname)).length, 0, 'no per-application reads');
+  assert.equal(reads.length, 1 + 2 + 4 * 8 + 2, 'the token, then one list and Portal read around the save and before and after each write');
 }));
 
 test('Team resumes a bounded seven-source save without spending every attempt on completed policies', async (context) => fixture(async (gateway) => {
@@ -1920,9 +1927,9 @@ test('Team resumes a bounded seven-source save without spending every attempt on
   });
   gateway.provider.hook(async ({ request, record }) => {
     // Deterministic slow-provider budget: every attempt can afford the full
-    // ownership graph and a few changes, but not all seven. Abort only reads,
+    // ownership graph and three changes, but not all eight. Abort only reads,
     // so every successful PUT must be recognized rather than sent again.
-    if (record.method === 'GET' && deadline && ++reads > 44) deadline.abort();
+    if (record.method === 'GET' && deadline && ++reads > 15) deadline.abort();
     await nextTurn();
     request.signal.throwIfAborted();
   });

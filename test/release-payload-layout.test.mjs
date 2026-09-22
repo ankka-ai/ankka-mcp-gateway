@@ -22,7 +22,7 @@ const COMPONENTS = Object.freeze({
 });
 const TREE_SHA256 = Object.freeze({
   installer: 'd577fa29afc7705693390bfdcbd3ed689fdbe643fe8ce998a6bbd54a86b4f2ba',
-  worker: '8d20c173b57eb18e030ca00e1a2e1a92f38f27652010e5870667e0a632e8a0ad',
+  worker: 'aacee3e2a44a43232cc56c73a54ae49692ad444374e64da5d5a2937065d8ad32',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
