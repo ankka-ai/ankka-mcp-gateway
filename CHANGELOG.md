@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Allow removal of unfinished MCP sources waiting for sign-in, synchronization,
+  or tool selection. Confirm cleanup from the installation details without
+  completing connection first; saved resource receipts and removal progress
+  remain available until cleanup is verified.
 - Add or replace the gateway's management token from Settings. A gateway that runs without the token (setup skipped
   it, the pasted value was lost before it was saved, the token was revoked, or the gateway predates the setup step)
   had one documented way to get it: create it by hand and add it as a Worker secret in Cloudflare. **Settings → Add

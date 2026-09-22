@@ -8,24 +8,29 @@ import { build } from 'esbuild';
 import { Miniflare } from 'miniflare';
 import { cloudflareProvider, installReadyGateway } from '../../../test/payload-lifecycle.mjs';
 
+import { pausedGateway } from './paused-source-fixture.mjs';
+
 const origin = 'https://manage.example.com';
 const sourcesKey = 'ankka-mcp-gateway/management-sources/v1';
 const removalKey = 'ankka-mcp-gateway/source-removal/v1';
 const teamKey = 'ankka-mcp-gateway/team-access/v1';
 
-test('installed source removal resumes its SQLite journal after restart and preserves the root receipt', async () => {
+for (const state of ['installed', 'connection-paused']) test(`${state} source removal resumes its SQLite journal after restart and preserves the root receipt`, async () => {
   let interrupt = true;
-  const provider = cloudflareProvider({ onRequest({ record, state }) {
+  const onRequest = ({ record, state }) => {
     if (interrupt && record.method === 'DELETE' && record.pathname.includes('/mcp/servers/')) {
       state.servers.delete(record.pathname.split('/').at(-1));
       return new Response(null, { status: 503 });
     }
-  } });
-  const gateway = await installReadyGateway({ provider });
+  };
+  const gateway = state === 'connection-paused' ? await pausedGateway({ onRequest })
+    : await installReadyGateway({ provider: cloudflareProvider({ onRequest }) });
+  const provider = gateway.provider;
   gateway.env.ANKKA_MANAGEMENT_TOKEN = 'synthetic-removal-token-never-store';
   const management = Object.fromEntries(await gateway.objects.get('v1:management').storage.list());
   const root = Object.fromEntries(await gateway.objects.get(`v1:${gateway.env.ANKKA_INSTALL_ID}`).storage.list());
   const { revision, sources: [source] } = management[sourcesKey];
+  assert.equal(source.status, state === 'connection-paused' ? 'draft' : 'installed');
   const bundle = await build({ entryPoints: [fileURLToPath(new URL('./installed-source-removal-worker.mjs', import.meta.url))],
     bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022', external: ['cloudflare:workers'] });
   const directory = await mkdtemp(join(tmpdir(), 'ankka-removal-runtime-'));
@@ -70,11 +75,12 @@ test('installed source removal resumes its SQLite journal after restart and pres
     const finished = await (await runtime.dispatchFetch(`${origin}/fixture/state`)).json();
     assert.deepEqual(finished[sourcesKey].sources, []);
     assert.equal(finished[removalKey], null);
+    if (state === 'connection-paused') assert.deepEqual(finished['ankka-mcp-gateway/source-actions/v1'].actions, []);
     assert.equal(finished[teamKey].members.every((member) => member.sourceIds.length === 0), true);
     assert.ok(!JSON.stringify(finished).includes(gateway.env.ANKKA_MANAGEMENT_TOKEN));
     assert.deepEqual(await (await runtime.dispatchFetch(`${origin}/fixture/state`, { headers: { 'x-fixture-root': 'true' } })).json(), root);
     assert.equal(provider.requests.filter((request) => request.method === 'DELETE' && request.pathname.includes('/mcp/servers/')).length, writesBefore);
-    assert.deepEqual(provider.state.portal.servers, []);
+    assert.deepEqual(provider.state.portal.servers ?? [], []);
     assert.equal(provider.state.servers.size, 0);
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
 });

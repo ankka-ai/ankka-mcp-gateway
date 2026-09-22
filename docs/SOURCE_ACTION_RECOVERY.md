@@ -70,6 +70,13 @@ failed or cancelled attempts with no write evidence, and for approvals the
 actor can cancel. Installed sources and any provisioning evidence require
 resource cleanup; this operation cannot discard their receipts.
 
+Connection-paused installations with complete receipts and no outstanding
+write offer confirmed cleanup through `DELETE /api/sources/<source-id>`.
+The initiating administrator uses the management token to remove the recorded
+resources without finishing provider sign-in or tool selection. This keeps
+the draft and installation action until the durable removal journal verifies
+cleanup. See [Removing a source](SOURCE_REMOVAL.md) for its recovery behavior.
+
 An unrelated source action does not block deleting an unused draft. The
 transaction advances unchanged actions bound to the previous source-collection
 revision, preserving their source identity and receipts for recovery.
