@@ -23,6 +23,8 @@ data and cannot deploy a gateway.
 Installation requires:
 
 - a Cloudflare account with an active zone (up to 100 active zones in the hosted setup);
+- **Workers Paid** on that account for v0.2 and later: the built-in API runtime
+  uses [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/pricing/);
 - Cloudflare Zero Trust configured for that account;
 - permission to create Workers, Durable Objects, DNS, Access applications and
   policies, and MCP Portal resources;

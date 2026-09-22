@@ -404,8 +404,12 @@ export function createDisabledTwoStageShell(): TwoStageDeployWorker {
 export function createTwoStageDeployRuntime(
   inputPin: PinnedR2Release,
   dependencies: TwoStageRuntimeDependencies = {},
+  compatibilityBridge?: Pick<PinnedR2Release, 'release' | 'artifactSha256'>,
 ): TwoStageDeployWorker {
   const pin = parseExactReleaseBundleIdentity(inputPin);
+  const bridge = compatibilityBridge === undefined ? null
+    : parseExactReleaseBundleIdentity({ ...pin, release: compatibilityBridge.release, artifactSha256: compatibilityBridge.artifactSha256 });
+  if (bridge !== null && bridge.release === pin.release) throw new DeployError(503, 'release_invalid');
   const now = dependencies.now ?? Date.now;
   const transport = dependencies.transport ?? boundFetch();
   const policy: HostedAbuseControlPolicy = dependencies.abuseControlPolicy ?? 'required';
@@ -414,6 +418,16 @@ export function createTwoStageDeployRuntime(
     dependencies.releaseBundleProvider ?? new PinnedR2ReleaseBundleProvider(pin),
     dependencies.createInstallerAssets ?? createSignedInstallerAssetIndex,
   );
+  async function discoveryBundle(env: TwoStageDeployEnv, request: Request): Promise<VerifiedReleaseBundle> {
+    if (bridge === null || request.headers.get('x-ankka-update-contract') === 'api-sources-v1') {
+      return (await loadSnapshot(env)).bundle;
+    }
+    // The bridge is code-pinned and verified under the current channel, origin
+    // and trust key. Request headers choose compatibility, never authority.
+    const legacy = await exactBundle(env, bridge.release, bridge.artifactSha256);
+    if (Object.hasOwn(legacy.manifest.cloudflare, 'workerLoaders')) throw new DeployError(503, 'release_invalid');
+    return legacy;
+  }
   const cleanupExecutor: TwoStageCleanupExecutor = dependencies.cleanupExecutor ?? Object.freeze({
     execute: async (input: HostedStage1CleanupInput): Promise<void> => {
       await executeHostedStage1Cleanup(input);
@@ -907,12 +921,14 @@ export function createTwoStageDeployRuntime(
       });
     }
     if (request.method === 'GET' && RELEASE_DESCRIPTOR_ROUTES.some((candidate) => candidate === path)) {
-      // Served from the pinned bundle alone, before any binding besides the
+      // Served from the selected pinned bundle before any binding besides the
       // bucket is read, so an installed Gateway can discover updates even
       // while the hosted install flow itself is unavailable.
-      const channel = buildPublicUpdateChannel((await loadSnapshot(env)).bundle);
+      const channel = buildPublicUpdateChannel(await discoveryBundle(env, request));
       if (path !== `/api/releases/${channel.channel}`) throw new DeployError(404, 'release_unavailable');
-      return json(channel);
+      const response = json(channel);
+      response.headers.set('vary', 'x-ankka-update-contract');
+      return response;
     }
     const releaseFile = RELEASE_FILE_ROUTE.exec(path);
     if (releaseFile !== null) {
@@ -921,13 +937,14 @@ export function createTwoStageDeployRuntime(
       // itself: it fetched the signed manifest first and verifies every file
       // against it, so this route needs no session, grant, or other binding.
       const [, channelName = '', filePath = ''] = releaseFile;
-      const snapshot = await loadSnapshot(env);
-      const channel = buildPublicUpdateChannel(snapshot.bundle);
-      const file = snapshot.bundle.payload.find((entry) => entry.path === filePath);
+      const bundle = await discoveryBundle(env, request);
+      const channel = buildPublicUpdateChannel(bundle);
+      const file = bundle.payload.find((entry) => entry.path === filePath);
       if (channelName !== channel.channel || file === undefined) throw new DeployError(404, 'release_unavailable');
       return new Response(file.bytes, {
         headers: {
           'cache-control': 'no-store',
+          vary: 'x-ankka-update-contract',
           'content-length': String(file.byteSize),
           'content-type': file.contentType,
           'x-content-type-options': 'nosniff',

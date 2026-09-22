@@ -73,8 +73,12 @@ The public GitHub Release mirrors the exact source commit and carries the
 signed envelope, sanitized verification record, SBOM, project license, and
 production third-party license bundle. GitHub Releases are immutable.
 
-The hosted release endpoint serves only the exact maintainer-approved release
-pinned into that build. Publishing a release does not activate the installer,
+The hosted installer uses the exact maintainer-approved release pinned into its
+build. For the v0.2 upgrade, update discovery additionally retains one immutable,
+code-pinned v0.1.82 bridge under the same signing key, channel and origin. Older
+gateways receive that bridge; gateways advertising `api-sources-v1` receive the
+current release. The header selects compatibility and grants no authority; both
+responses carry independently verified signatures and exact artifact identities. Publishing a release does not activate the installer,
 promote a channel, or update a gateway.
 
 Signing, publication, installer deployment, public activation, rollback, and

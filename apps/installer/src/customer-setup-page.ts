@@ -19,6 +19,7 @@ export function customerSetupPage(): Response {
 <div class="actions"><a class="button-link" href="https://dash.cloudflare.com/" target="_blank" rel="noopener noreferrer">Open Cloudflare ↗</a><a href="https://developers.cloudflare.com/fundamentals/manage-domains/add-site/" target="_blank" rel="noopener noreferrer">How to add a domain ↗</a></div>
 <a href="https://deploy.ankka.ai">Return to the installer</a><p class="domain-note">Domain activation can take time. This page does not refresh the domain list; start a new deployment once Cloudflare shows the domain as Active.</p>
 </section>
+<p>Installing v0.2 requires <strong>Cloudflare Workers Paid</strong> in your account for the built-in API runtime. Enable it in Cloudflare before finishing setup. <a href="https://developers.cloudflare.com/dynamic-workers/pricing/" target="_blank" rel="noopener noreferrer">View Cloudflare’s plan requirements ↗</a></p>
 <form id="setup" hidden>
 <div class="grid"><label>Gateway name<input id="name" autocomplete="organization" maxlength="80" required placeholder="Your team’s gateway"><small>Shown on your management page and in Cloudflare.</small></label>
 <label>Domain<select id="domain" required></select><small>Active domains available in the Cloudflare account you selected.</small></label></div>
