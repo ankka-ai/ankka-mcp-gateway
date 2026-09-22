@@ -11,6 +11,9 @@ Cloudflare account, not at Ankka.
 > repository contains the gateway runtime and hosted-installer source; live
 > deployment authority and credentials remain outside the public repository.
 
+Installing or upgrading to v0.2 requires **Cloudflare Workers Paid** for the
+built-in API runtime. See [Cloudflare’s Dynamic Workers requirements](https://developers.cloudflare.com/dynamic-workers/pricing/).
+
 [Try the local preview](#run-locally) ·
 [What Ankka adds](#what-ankka-adds-to-cloudflare-mcp-portals) ·
 [Common questions](#common-questions) · [Documentation](#documentation)

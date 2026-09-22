@@ -12,6 +12,11 @@ Worker, using the existing `AdminState` SQLite namespace and the fixed
 service binding. Each configured connection has its own source definition,
 revision, and ordinary MCP endpoint.
 
+**Cloudflare Workers Paid is required** for v0.2 and later because the built-in
+runtime uses [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/pricing/).
+Enable Workers Paid in your Cloudflare account before installing or upgrading;
+Ankka does not change your billing plan. The v0.1.82 bridge does not add this requirement.
+
 Existing v0.1 gateways upgrade through `gateway-v0.1.82`, then check for updates
 again for v0.2.0. The bridge preserves the gateway and its configuration without
 enabling API sources until the second update.
