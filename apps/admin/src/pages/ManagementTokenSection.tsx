@@ -1,17 +1,13 @@
-import { Disclosure } from '../components/Disclosure'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ManagementCredentialStatus, ManagementVerification } from '../api'
 import { useGateway } from '../GatewayContext'
 import { Button } from '../components/Button'
 import { LoadingIndicator } from '../components/LoadingIndicator'
 import {
-  MANAGEMENT_ACCESS_PURPOSE,
-  MANAGEMENT_ACCESS_REACH,
   ManagementTokenCard,
   ManagementTokenCreateLink,
   useManagementTokenStart,
 } from '../components/ManagementTokenCard'
-import { managementTokenName } from '../managementTokenLink'
 
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u
 const REASON = /^[a-z][a-z0-9_]{0,120}$/u
@@ -168,7 +164,6 @@ export function ManagementTokenSection() {
   }
 
   const missing = tokenState === 'read' && tokenStatus?.managementCredentialConfigured === false && arrival !== 'waiting'
-  const nameInCloudflare = managementTokenName(window.location.hostname)
   const status = tokenState === 'loading' ? 'Checking your management token…'
     : tokenState === 'unreadable'
       ? 'Your gateway could not read its management token status. Reload this page or verify management access.'
@@ -186,20 +181,13 @@ export function ManagementTokenSection() {
       {missing ? <ManagementTokenCard choice={tokenStatus?.managementCredentialChoice} className="mt-5" /> : (
         <div className="surface-card mt-5 space-y-4 p-5 text-sm leading-6 sm:p-6">
           <p role="status">{status}</p>
-          <p>{MANAGEMENT_ACCESS_PURPOSE}</p>
-          <p>{MANAGEMENT_ACCESS_REACH}</p>
           {arrival === 'waiting' || tokenState === 'loading' ? null : (
             <>
-              <p className="text-kumo-subtle">To replace it, create a new token first. Delete the old token in Cloudflare afterwards.</p>
               <ManagementTokenCreateLink />
               <div className="flex flex-wrap gap-3">
                 <Button variant="secondary" loading={verifying} onClick={() => void verify()}>Verify management access</Button>
                 <Button variant="secondary" loading={starting} disabled={verifying} onClick={() => void start()}>Replace management token</Button>
               </div>
-              <Disclosure className="text-kumo-subtle" label="Token details">
-                <p className="mt-3">Verification re-saves your gateway’s MCP Portal and Access policy unchanged to check both permissions.</p>
-                <p className="mt-2">Manage tokens in Cloudflare under Manage Account → Account API Tokens. Look for <strong>{nameInCloudflare}</strong>; the older creation date identifies the previous token. Replacing the token or removing your gateway does not delete it.</p>
-              </Disclosure>
             </>
           )}
           {verification === 'failed' ? <p role="alert" className="notice-banner notice-error">The check could not be run. Reload this page and try again.</p> : null}

@@ -94,11 +94,11 @@ describe('SettingsPage rollback', () => {
     expect(screen.queryByText(/no longer roll back/u)).not.toBeInTheDocument()
   })
 
-  it('offers no rollback button and says why once the recorded release can no longer be restored', async () => {
+  it('hides rollback when the recorded release can no longer be restored', async () => {
     const client = api()
     client.getUpdate = vi.fn(async () => excluded)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    expect(await screen.findByText('You can no longer roll back to gateway-v0.9.9. A connector was installed or Team access was changed after the update, and the older version cannot work with those changes.')).toBeVisible()
+    expect(await screen.findByText('Software updates')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Rollback' })).not.toBeInTheDocument()
     expect(client.prepareRuntimeAction).not.toHaveBeenCalled()
   })
@@ -118,7 +118,8 @@ describe('SettingsPage rollback', () => {
     await screen.findByRole('heading', { name: 'Connectors', level: 1 })
     await waitFor(() => expect(client.getUpdate).toHaveBeenCalledTimes(1))
     await act(() => pages.navigate({ to: '/settings' }))
-    expect(await screen.findByText(/You can no longer roll back to gateway-v0\.9\.9\./u)).toBeVisible()
+    await waitFor(() => expect(client.getUpdate).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Rollback' })).not.toBeInTheDocument())
     expect(screen.queryByRole('button', { name: 'Rollback' })).not.toBeInTheDocument()
     expect(client.getUpdate).toHaveBeenCalledTimes(2)
   })
@@ -169,7 +170,7 @@ describe('SettingsPage management token', () => {
     await waitFor(() => expect(window.location.hash).toBe(`#${'a'.repeat(40)}`))
   })
 
-  it('offers replacement through the same steps and says who deletes the old token, by its name', async () => {
+  it('offers token replacement and verification', async () => {
     const client = api()
     client.getManagementCredentialStatus = vi.fn(async () => withToken)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
@@ -177,10 +178,6 @@ describe('SettingsPage management token', () => {
     expect(client.getTeam).not.toHaveBeenCalled()
     expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
     expect(section().getByRole('button', { name: 'Verify management access' })).toBeEnabled()
-    const details = section().getByText('Token details').closest('details')
-    expect(details).not.toHaveAttribute('open')
-    expect(details).toHaveTextContent(`Look for Ankka gateway ${window.location.hostname}; the older creation date identifies the previous token.`)
-    expect(details).toHaveTextContent('Replacing the token or removing your gateway does not delete it.')
     expect(section().queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
   })
 
