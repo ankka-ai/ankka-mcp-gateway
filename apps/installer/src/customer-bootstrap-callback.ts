@@ -12,6 +12,7 @@ import {
   type CustomerCloudflareTransport,
   type EphemeralCustomerCloudflareGrant,
 } from './customer-cloudflare-grant';
+import { CustomerGatewayFreshPreflightError } from './cloudflare-gateway-fresh-preflight';
 import { CustomerStage2ConvergerError, type CustomerStage2ConvergerResult } from './customer-stage2-converger';
 import { CustomerBootstrapRequestError } from './customer-bootstrap-request';
 
@@ -73,6 +74,7 @@ function revocationFailureReason(error: Error): string {
  */
 function callbackFailureReason<Thrown>(error: Thrown): string | null {
   if (error instanceof CustomerStage2ConvergerError) return error.reason ?? `converge_${error.code}`;
+  if (error instanceof CustomerGatewayFreshPreflightError) return `preflight_${error.code}_${error.stage}`;
   if (error instanceof CustomerCloudflareGrantError) {
     return error.detail === null ? `grant_${error.code}` : `grant_${error.code}_${error.detail}`;
   }
@@ -103,6 +105,7 @@ async function settleIncomplete(input: {
   readonly attemptId: string;
   readonly failureCode: CustomerBootstrapCallbackFailureCode;
   readonly failureReason: string | null;
+  readonly cleanup?: 'removed' | 'recovery_required' | null;
   readonly persist: PersistTransition;
 }): Promise<CustomerBootstrapCallbackIncomplete> {
   const incomplete = markCustomerBootstrapIncomplete({
@@ -110,6 +113,7 @@ async function settleIncomplete(input: {
     attemptId: input.attemptId,
     failureCode: input.failureCode,
     failureReason: input.failureReason,
+    cleanup: input.cleanup ?? null,
   });
   await input.persist(input.current, incomplete);
   return Object.freeze({
@@ -226,6 +230,15 @@ export interface CustomerBootstrapContinueInput {
    * attempt is marked finalizing. Absent where the upload restarts nothing.
    */
   readonly armHandover?: (() => Promise<void>) | undefined;
+  /**
+   * Called with the grant still usable, before revocation. `keep` leaves the
+   * grant in memory so a bootstrap-only cleanup can run. `recovery` settles
+   * an actionable cleanup state. Absent: revoke and settle as before.
+   */
+  readonly onTerminalFailure?: ((input: {
+    readonly failureCode: CustomerBootstrapCallbackFailureCode;
+    readonly failureReason: string | null;
+  }) => Promise<'keep' | 'recovery' | 'revoke'>) | undefined;
 }
 
 export type CustomerBootstrapContinueResult =
@@ -242,7 +255,13 @@ export type CustomerBootstrapContinueResult =
     failureCode: null;
     failureReason: null;
   }>
-  | CustomerBootstrapCallbackResult;
+  | CustomerBootstrapCallbackResult
+  | Readonly<{
+    status: 'CLEANUP_PENDING';
+    state: CustomerBootstrapState;
+    failureCode: CustomerBootstrapCallbackFailureCode;
+    failureReason: string | null;
+  }>;
 
 /**
  * Runs one converger pass with the in-memory grant. A pass that stops at a
@@ -292,6 +311,35 @@ export async function continueCustomerBootstrapConvergence(
       failureCode: null,
       failureReason: null,
     });
+  }
+  if (failureCode !== null && !handedOver && !verified && input.onTerminalFailure !== undefined) {
+    const decision = await input.onTerminalFailure({ failureCode, failureReason });
+    if (decision === 'keep') {
+      return Object.freeze({
+        status: 'CLEANUP_PENDING',
+        state: current,
+        failureCode,
+        failureReason,
+      });
+    }
+    if (decision === 'recovery') {
+      try {
+        await input.grant.revoke({ clientId: input.publicClientId, transport: input.transport });
+      } catch (error) {
+        failureCode = 'revocation_unconfirmed';
+        failureReason ??= revocationFailureReason(error instanceof Error ? error : new Error('revoke_failed'));
+      } finally {
+        input.grant.discard();
+      }
+      return settleIncomplete({
+        current,
+        attemptId: input.attemptId,
+        failureCode,
+        failureReason,
+        cleanup: 'recovery_required',
+        persist: input.persist,
+      });
+    }
   }
   try {
     await input.grant.revoke({ clientId: input.publicClientId, transport: input.transport });
@@ -351,6 +399,7 @@ export async function executeCustomerBootstrapCallback(
       converge: input.converge,
     });
     if (next.status === 'HANDED_OVER') throw new Error('handover_without_arming');
+    if (next.status === 'CLEANUP_PENDING') throw new Error('cleanup_without_customer_worker');
     if (next.status !== 'CONVERGING') return next;
   }
   const stopped = await continueCustomerBootstrapConvergence({
@@ -365,7 +414,7 @@ export async function executeCustomerBootstrapCallback(
       throw new CustomerStage2ConvergerError('provider_mismatch', 'convergence_passes_exhausted');
     },
   });
-  if (stopped.status === 'CONVERGING' || stopped.status === 'HANDED_OVER') {
+  if (stopped.status === 'CONVERGING' || stopped.status === 'HANDED_OVER' || stopped.status === 'CLEANUP_PENDING') {
     throw new Error('convergence_passes_exhausted');
   }
   return stopped;

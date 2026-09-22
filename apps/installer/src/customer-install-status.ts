@@ -44,6 +44,11 @@ export const customerInstallStatusSchema = v.strictObject({
     }),
   ]), null),
   managementCredential: v.optional(customerManagementCredentialWordSchema),
+  /**
+   * Present only after a terminal setup failure. Omitted otherwise, so a
+   * readiness check that predates cleanup still reads the same answer.
+   */
+  cleanup: v.optional(v.picklist(['removing', 'removed', 'recovery_required'])),
 });
 
 export type CustomerInstallStatus = v.InferInput<typeof customerInstallStatusSchema>;

@@ -14,10 +14,13 @@ import {
   createCustomerStage2Journal,
   parseCustomerStage2Journal,
   prepareCustomerStage2Action,
+  customerStage2MutationsUnsent,
+  recordCustomerStage2Cleanup,
   releaseCustomerStage2Lease,
   submitCustomerStage2Action,
   verifyCustomerStage2Action,
 } from '../src/customer-stage2-journal';
+import { classifyCustomerBootstrapFailure } from '../src/customer-bootstrap-failure-cleanup';
 
 const NOW = 1_800_000_000_000;
 const ATTEMPT = `attempt_${'a'.repeat(24)}`;
@@ -147,6 +150,37 @@ describe('customer Stage 2 convergence journal', () => {
       attemptId: ATTEMPT,
       now: NOW + 3,
     })).toThrowError(/conflict/u);
+  });
+
+  it('records a secret-free cleanup word and classifies only an unsent journal as bootstrap-only', () => {
+    const journal = initial();
+    const workerId = journal.identity.workerId;
+    const namespaceId = journal.identity.namespaceId;
+    const versionId = journal.identity.bootstrapVersionId;
+    expect(customerStage2MutationsUnsent(journal)).toBe(true);
+    expect(classifyCustomerBootstrapFailure({ journal: null, workerId, namespaceId, versionId })).toBe('bootstrap_only');
+    expect(classifyCustomerBootstrapFailure({ journal, workerId, namespaceId, versionId })).toBe('bootstrap_only');
+    expect(classifyCustomerBootstrapFailure({ journal, workerId: null, namespaceId, versionId })).toBe('recovery_required');
+    expect(classifyCustomerBootstrapFailure({
+      journal, workerId: '8'.repeat(32), namespaceId, versionId,
+    })).toBe('recovery_required');
+    const removing = recordCustomerStage2Cleanup(journal, {
+      now: NOW + 1, phase: 'removing', reason: 'preflight_fresh_collision_dns_record_list',
+    });
+    expect(removing.cleanup).toEqual({ phase: 'removing', reason: 'preflight_fresh_collision_dns_record_list' });
+    expect(recordCustomerStage2Cleanup(journal, { now: NOW + 1, phase: 'removing', reason: 'raw provider text' }).cleanup?.reason).toBeNull();
+    const prepared = prepareCustomerStage2Action(journal, {
+      attemptId: ATTEMPT, now: NOW + 1, name: 'management_dns_record',
+      record: { schemaVersion: 1, kind: 'management_dns_record', requestHash: `sha256:${'9'.repeat(64)}` },
+    });
+    expect(classifyCustomerBootstrapFailure({ journal: prepared, workerId, namespaceId, versionId })).toBe('bootstrap_only');
+    const armed = armCustomerStage2Action(prepared, { attemptId: ATTEMPT, now: NOW + 2, name: 'management_dns_record' });
+    expect(classifyCustomerBootstrapFailure({ journal: armed, workerId, namespaceId, versionId })).toBe('recovery_required');
+    const removed = recordCustomerStage2Cleanup(removing, { now: NOW + 2, phase: 'removed', reason: null });
+    expect(() => recordCustomerStage2Cleanup(removed, { now: NOW + 3, phase: 'removing', reason: null })).toThrowError(/conflict/u);
+    const { cleanup, ...withoutCleanup } = journal;
+    expect(cleanup).toBeNull();
+    expect(parseCustomerStage2Journal(withoutCleanup)?.cleanup).toBeNull();
   });
 
   it('rejects out-of-order actions and credential-shaped durable fields', () => {

@@ -8,7 +8,12 @@ import {
   type HostedStage1Provision,
   type HostedStage1Secrets,
 } from '../src/hosted-stage1-bootstrap';
-import { executeHostedStage1Cleanup, type HostedStage1CleanupInput } from '../src/hosted-stage1-cleanup';
+import {
+  executeHostedStage1Cleanup,
+  removeExactBootstrapRoot,
+  type ExactBootstrapRoot,
+  type HostedStage1CleanupInput,
+} from '../src/hosted-stage1-cleanup';
 import {
   authorizeHostedStage1Bootstrap,
   authorizeHostedStage1Cleanup,
@@ -45,6 +50,7 @@ const CUSTOMER_CLIENT_ID = 'g'.repeat(32);
 const ISSUER_KEY_ID = 'ownership-key-v1';
 const ISSUER_PUBLIC_KEY = 'I'.repeat(43);
 const BOOTSTRAP_SOURCE = 'export class AdminState{};export default{fetch(){return new Response("bootstrap")}};';
+const RETIREMENT_SOURCE = 'export default{fetch(){return new Response(null,{status:410})}};';
 const encoder = new TextEncoder();
 
 function hex(bytes: Uint8Array): string {
@@ -88,8 +94,7 @@ async function releaseFixture(): Promise<VerifiedReleaseBundle> {
   const workerBootstrap = [await source('payload/worker-bootstrap/index.js', 'application/javascript+module', BOOTSTRAP_SOURCE)];
   const workerCleanup = [await source('payload/worker-cleanup/index.js', 'application/javascript+module',
     'export class AdminState{};export default{fetch(){return new Response("cleanup")}};')];
-  const workerRetirement = [await source('payload/worker-retirement/index.js', 'application/javascript+module',
-    'export default{fetch(){return new Response(null,{status:410})}};')];
+  const workerRetirement = [await source('payload/worker-retirement/index.js', 'application/javascript+module', RETIREMENT_SOURCE)];
   const all = Object.freeze([...admin, ...installer, ...workerBootstrap, ...workerCleanup, ...workerRetirement, ...worker]);
   const manifest = parseReleaseManifest({
     artifact: {
@@ -202,6 +207,8 @@ interface FakeAccount {
   namespaces: FakeNamespaceItem[];
   subdomainEnabled: boolean;
   stickyWorker: boolean;
+  workerReadFailures: number;
+  foreignScripts: { name: string; bindings: readonly Record<string, string>[] }[];
   events: string[];
 }
 
@@ -235,6 +242,10 @@ function transportFor(account: FakeAccount): (input: RequestInfo | URL, init?: R
     if (path === '/client/v4/accounts') {
       throw new Error('Workers-only cleanup must not list accounts');
     }
+    if (path.includes('/zones') || path.includes('/dns_records') || path.includes('/access/') || path.includes('/mcp/')) {
+      account.events.push(`untouched:${path}`);
+      throw new Error(`cleanup must not call ${path}`);
+    }
     expect(request.headers.get('authorization')).toBe(`Bearer ${ACCESS_TOKEN}`);
     if (!path.startsWith(prefix)) return new Response(null, { status: 404 });
     if (account.accountId !== ACCOUNT_ID) return Response.json({ success: false, errors: [], result: null }, { status: 403 });
@@ -242,6 +253,11 @@ function transportFor(account: FakeAccount): (input: RequestInfo | URL, init?: R
     const worker = account.worker;
     const name = account.workerName;
     if (request.method === 'GET' && (rest === `/workers/workers/${name}` || rest === `/workers/workers/${WORKER_ID}`)) {
+      if (account.workerReadFailures > 0) {
+        account.workerReadFailures -= 1;
+        account.events.push('worker-read-failed');
+        return new Response('unavailable', { status: 500 });
+      }
       account.events.push('worker-read');
       return worker === null ? new Response(null, { status: 404 }) : json(worker);
     }
@@ -301,7 +317,17 @@ function transportFor(account: FakeAccount): (input: RequestInfo | URL, init?: R
     }
     if (request.method === 'GET' && rest === '/workers/scripts') {
       account.events.push('scripts-list');
-      return page(worker === null ? [] : [{ id: worker.name }]);
+      return page([
+        ...(worker === null ? [] : [{ id: worker.name }]),
+        ...account.foreignScripts.map((script) => ({ id: script.name })),
+      ]);
+    }
+    if (request.method === 'GET' && rest.startsWith('/workers/scripts/') && rest.endsWith('/settings')) {
+      const scriptName = decodeURIComponent(rest.slice('/workers/scripts/'.length, -'/settings'.length));
+      const foreign = account.foreignScripts.find((script) => script.name === scriptName);
+      account.events.push('settings-read');
+      if (foreign === undefined) return new Response(null, { status: 404 });
+      return json({ bindings: foreign.bindings });
     }
     throw new Error(`unexpected transport ${request.method} ${request.url}`);
   };
@@ -364,6 +390,8 @@ async function fixture() {
     ],
     subdomainEnabled: true,
     stickyWorker: false,
+    workerReadFailures: 0,
+    foreignScripts: [],
     events: [],
   };
   const waits: number[] = [];
@@ -382,7 +410,7 @@ async function fixture() {
       waits.push(milliseconds);
     },
   };
-  return { account, input, waits, session, provisioned, workerName, secrets };
+  return { account, input, waits, session, provisioned, workerName, secrets, expected };
 }
 
 const MUTATIONS = ['subdomain-set:false', 'retire', 'delete'];
@@ -477,5 +505,122 @@ describe('hosted Stage 1 lost-cookie cleanup', () => {
     expect(f.account.events.filter((event) => MUTATIONS.includes(event))).toEqual(MUTATIONS);
     expect(f.waits.length).toBeGreaterThanOrEqual(7);
     expect(f.account.events.at(-1)).toBe('revoke');
+  });
+
+  it('does not delete a namespace another Worker binds, and does not call DNS, Access, or portal APIs', async () => {
+    const f = await fixture();
+    f.account.foreignScripts.push({
+      name: 'other-worker',
+      bindings: [{ type: 'durable_object_namespace', namespace_id: NAMESPACE_ID }],
+    });
+    const preserved = f.account.namespaces.map((item) => item.id);
+    await expect(executeHostedStage1Cleanup(f.input)).rejects.toMatchObject({ code: 'ambiguous', stage: 'worker_bindings' });
+    expect(f.account.events.filter((event) => MUTATIONS.includes(event))).toEqual([]);
+    expect(f.account.worker).not.toBeNull();
+    expect(f.account.namespaces.map((item) => item.id)).toEqual(preserved);
+    expect(f.account.events.some((event) => event.startsWith('untouched:'))).toBe(false);
+  });
+
+});
+
+function rootFor(f: Awaited<ReturnType<typeof fixture>>, disableSubdomain: boolean): ExactBootstrapRoot {
+  const provision = f.input.session.provision;
+  const plan = f.input.session.plan;
+  if (provision === null || plan === null) throw new Error('fixture missing root');
+  return {
+    plan,
+    accountId: provision.accountId,
+    bootstrapId: provision.bootstrapId,
+    bootstrapCallback: provision.bootstrapCallback,
+    bootstrapSecretCommitment: provision.bootstrapSecretCommitment,
+    capabilityExpiresAt: provision.capabilityExpiresAt,
+    workerId: provision.deployment.workerId,
+    workerName: provision.deployment.workerName,
+    namespaceId: provision.deployment.namespaceId,
+    namespaceName: provision.deployment.namespaceName,
+    versionId: provision.deployment.versionId,
+    bootstrapSourceSha256: provision.deployment.sourceSha256,
+    expectedBindings: f.expected,
+    retirementModule: new Blob([RETIREMENT_SOURCE], { type: 'application/javascript+module' }),
+    disableSubdomain,
+  };
+}
+
+describe('exact bootstrap root removal', () => {
+  it('treats a root that is already absent as finished without deleting anything else', async () => {
+    const f = await fixture();
+    f.account.worker = null;
+    f.account.namespaces = f.account.namespaces.filter((item) => item.id !== NAMESPACE_ID);
+    const removed = await removeExactBootstrapRoot({
+      accessToken: ACCESS_TOKEN,
+      transport: f.input.transport,
+      now: () => NOW + 100,
+      wait: f.input.wait,
+      root: rootFor(f, false),
+    });
+    expect(removed.retirementVersionId).toBeNull();
+    expect(f.account.events.filter((event) => MUTATIONS.includes(event))).toEqual([]);
+    expect(f.account.namespaces.map((item) => item.script)).toEqual(['other-worker']);
+  });
+
+  it('resumes after a retirement upload without sending it again', async () => {
+    const f = await fixture();
+    f.account.activeVersionId = RETIREMENT_VERSION_ID;
+    f.account.versions.set(RETIREMENT_VERSION_ID, {
+      id: RETIREMENT_VERSION_ID,
+      bindings: [],
+      modules: [{ name: 'index.js', content_type: 'application/javascript+module', content_base64: base64(RETIREMENT_SOURCE) }],
+    });
+    f.account.namespaces = f.account.namespaces.filter((item) => item.id !== NAMESPACE_ID);
+    const removed = await removeExactBootstrapRoot({
+      accessToken: ACCESS_TOKEN,
+      transport: f.input.transport,
+      now: () => NOW + 100,
+      wait: f.input.wait,
+      root: rootFor(f, false),
+    });
+    expect(removed.retirementVersionId).toBe(RETIREMENT_VERSION_ID);
+    expect(f.account.events).not.toContain('retire');
+    expect(f.account.events).not.toContain('subdomain-set:false');
+    expect(f.account.events).toContain('delete');
+    expect(f.account.worker).toBeNull();
+    expect(f.account.namespaces.map((item) => item.script)).toEqual(['other-worker']);
+    expect(f.account.subdomainEnabled).toBe(true);
+  });
+
+  it('makes no mutation when the provider read fails, so a later call can read back', async () => {
+    const f = await fixture();
+    f.account.workerReadFailures = 1;
+    await expect(removeExactBootstrapRoot({
+      accessToken: ACCESS_TOKEN,
+      transport: f.input.transport,
+      now: () => NOW + 100,
+      wait: f.input.wait,
+      root: rootFor(f, false),
+    })).rejects.toMatchObject({ code: 'provider_unknown', stage: 'worker_read' });
+    expect(f.account.events.filter((event) => MUTATIONS.includes(event))).toEqual([]);
+    expect(f.account.worker?.id).toBe(WORKER_ID);
+    expect(f.account.namespaces.some((item) => item.id === NAMESPACE_ID)).toBe(true);
+    expect(f.account.namespaces.some((item) => item.script === 'other-worker')).toBe(true);
+  });
+
+  it('refuses a retirement version that is not the signed module', async () => {
+    const f = await fixture();
+    f.account.activeVersionId = RETIREMENT_VERSION_ID;
+    f.account.versions.set(RETIREMENT_VERSION_ID, {
+      id: RETIREMENT_VERSION_ID,
+      bindings: [],
+      modules: [{ name: 'index.js', content_type: 'application/javascript+module', content_base64: base64('export default {}') }],
+    });
+    await expect(removeExactBootstrapRoot({
+      accessToken: ACCESS_TOKEN,
+      transport: f.input.transport,
+      now: () => NOW + 100,
+      wait: f.input.wait,
+      root: rootFor(f, false),
+    })).rejects.toMatchObject({ code: 'identity_mismatch', stage: 'deployment_read' });
+    expect(f.account.events.filter((event) => MUTATIONS.includes(event))).toEqual([]);
+    expect(f.account.worker).not.toBeNull();
+    expect(f.account.namespaces.some((item) => item.id === NAMESPACE_ID)).toBe(true);
   });
 });

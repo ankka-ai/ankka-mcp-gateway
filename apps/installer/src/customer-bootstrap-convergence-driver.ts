@@ -5,8 +5,10 @@ import {
 } from './customer-bootstrap-callback';
 import type { CustomerBootstrapStatePort } from './customer-bootstrap-router';
 import {
+  markCustomerBootstrapCleanupPending,
   markCustomerBootstrapIncomplete,
   parseCustomerBootstrapState,
+  type CustomerBootstrapCleanupPhase,
   type CustomerBootstrapState,
 } from './customer-bootstrap-state';
 import type {
@@ -19,6 +21,11 @@ import { CustomerStage2ConvergerError } from './customer-stage2-converger';
 export const CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS = 15 * 60 * 1_000;
 /** How long after arming the handover the final runtime is expected to run its first pass. */
 export const CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS = 8_000;
+/**
+ * Backup alarm for a bootstrap-only cleanup. The progress page normally
+ * finishes it first so it can show the result; this still runs if the page is gone.
+ */
+export const CUSTOMER_BOOTSTRAP_CLEANUP_ALARM_DELAY_MS = 15_000;
 
 export interface CustomerBootstrapConvergenceDriverPorts {
   readonly state: CustomerBootstrapStatePort;
@@ -28,6 +35,23 @@ export interface CustomerBootstrapConvergenceDriverPorts {
   readonly now: () => number;
   /** Arranges for the next pass to run in a fresh invocation after `delayMs`. */
   readonly schedule: (delayMs: number) => Promise<void>;
+  /**
+   * Present on the customer Worker. `bootstrap_only` means the installation
+   * record proves no final resource was sent. Anything uncertain, including
+   * a thrown read, is `recovery_required`.
+   */
+  readonly classifyTerminalFailure?: (input: {
+    readonly attemptId: string;
+    readonly failureReason: string | null;
+  }) => Promise<'bootstrap_only' | 'recovery_required'>;
+  /**
+   * Retires the recorded namespace and deletes the recorded Worker, then
+   * reads both back. Uses only the in-memory install grant.
+   */
+  readonly removeOwnedBootstrap?: (input: {
+    readonly grant: EphemeralCustomerCloudflareGrant;
+    readonly attemptId: string;
+  }) => Promise<'removed' | 'recovery_required'>;
 }
 
 export type CustomerBootstrapConvergenceStep = 'scheduled' | 'settled' | 'idle';
@@ -113,6 +137,14 @@ export class CustomerBootstrapConvergenceDriver {
       await this.ports.schedule(CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS);
       return 'scheduled';
     }
+    if (current.cleanup?.phase === 'removing') {
+      const outcome = await this.finishOwnedCleanup();
+      if (outcome === 'removing') {
+        await this.ports.schedule(CUSTOMER_BOOTSTRAP_CLEANUP_ALARM_DELAY_MS);
+        return 'scheduled';
+      }
+      return 'settled';
+    }
     const pending = this.#pending;
     if (pending === null || attemptId === null || pending.attemptId !== attemptId) {
       this.forget();
@@ -142,13 +174,37 @@ export class CustomerBootstrapConvergenceDriver {
         persist: (expected, next) => this.persist(expected, next),
         converge,
         armHandover: () => this.ports.schedule(CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS),
+        onTerminalFailure: this.ports.classifyTerminalFailure === undefined
+          ? undefined
+          : async ({ failureReason }) => {
+            try {
+              const decision = await this.ports.classifyTerminalFailure?.({
+                attemptId: pending.attemptId,
+                failureReason,
+              });
+              return decision === 'bootstrap_only' ? 'keep' : 'recovery';
+            } catch {
+              return 'recovery';
+            }
+          },
       });
     } catch {
       // A durable conflict or a thrown port: the grant is dropped so nothing
       // keeps it alive, and the attempt is named as stopped for a fresh start.
       this.forget();
-      await this.settle(current, attemptId, 'unexpected');
+      await this.settle(current, attemptId, 'unexpected', this.ports.classifyTerminalFailure === undefined ? null : 'recovery_required');
       return 'settled';
+    }
+    if (outcome.status === 'CLEANUP_PENDING') {
+      const removing = markCustomerBootstrapCleanupPending({
+        current: outcome.state,
+        attemptId: pending.attemptId,
+        failureCode: outcome.failureCode,
+        failureReason: outcome.failureReason,
+      });
+      await this.persist(outcome.state, removing);
+      await this.ports.schedule(CUSTOMER_BOOTSTRAP_CLEANUP_ALARM_DELAY_MS);
+      return 'scheduled';
     }
     if (outcome.status === 'CONVERGING') {
       await this.ports.schedule(0);
@@ -157,6 +213,54 @@ export class CustomerBootstrapConvergenceDriver {
     if (outcome.status === 'HANDED_OVER') this.#handedOverAt = this.ports.now();
     this.forget();
     return 'settled';
+  }
+
+  /**
+   * Finishes a bootstrap-only cleanup while the grant is still in memory.
+   * The progress page calls this so its response can report the result; the
+   * backup alarm calls it when the page does not.
+   */
+  async finishOwnedCleanup(): Promise<'removed' | 'recovery_required' | 'removing' | 'idle'> {
+    const current = await this.readConverging();
+    if (current === null || current.cleanup?.phase !== 'removing') {
+      const stored = await this.ports.state.read();
+      const parsed = stored === undefined || stored === null ? null : parseCustomerBootstrapState(stored);
+      if (parsed?.cleanup?.phase === 'removed') return 'removed';
+      if (parsed?.cleanup?.phase === 'recovery_required') return 'recovery_required';
+      return 'idle';
+    }
+    const pending = this.#pending;
+    const attemptId = current.oauth?.attemptId ?? null;
+    if (pending === null || attemptId === null || pending.attemptId !== attemptId ||
+        this.ports.removeOwnedBootstrap === undefined) {
+      this.forget();
+      await this.settle(current, attemptId, current.failureReason ?? 'grant_lost', 'recovery_required');
+      return 'recovery_required';
+    }
+    let outcome: 'removed' | 'recovery_required' | 'removing' = 'recovery_required';
+    try {
+      outcome = await this.ports.removeOwnedBootstrap({ grant: pending.grant, attemptId });
+    } catch {
+      // An interrupted or uncertain deletion stays retryable while this grant
+      // is still in memory. The next call reads the provider back first.
+      if (this.ports.now() - pending.startedAt <= CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS) return 'removing';
+      outcome = 'recovery_required';
+    }
+    let failureCode: 'provider_recovery_required' | 'revocation_unconfirmed' = 'provider_recovery_required';
+    try {
+      await pending.grant.revoke({ clientId: this.ports.publicClientId, transport: this.ports.transport });
+    } catch {
+      failureCode = 'revocation_unconfirmed';
+    } finally {
+      this.forget();
+    }
+    try {
+      await this.settle(current, attemptId, current.failureReason ?? 'unexpected', outcome, failureCode);
+    } catch {
+      // The namespace may already be gone, so the result cannot be stored.
+      // The caller still reports the read-back outcome.
+    }
+    return outcome;
   }
 
   private releaseRetention(): void {
@@ -187,14 +291,17 @@ export class CustomerBootstrapConvergenceDriver {
     current: CustomerBootstrapState,
     attemptId: string | null,
     reason: string,
+    cleanup: CustomerBootstrapCleanupPhase | null = null,
+    failureCode: 'provider_recovery_required' | 'revocation_unconfirmed' = 'revocation_unconfirmed',
   ): Promise<void> {
     if (attemptId === null) return;
     try {
       const incomplete = markCustomerBootstrapIncomplete({
         current,
         attemptId,
-        failureCode: 'revocation_unconfirmed',
+        failureCode,
         failureReason: reason,
+        cleanup,
       });
       await this.persist(current, incomplete);
     } catch {

@@ -326,8 +326,11 @@ const OPERATION_AUTHORITY: Readonly<Record<FixedCloudflareOperation, FixedCloudf
         'access-identity-providers', 'access-applications', 'access-policies', 'mcp-servers',
         'mcp-portals', 'dns-records'],
       ['same-installation-bootstrap', 'same-installation-incomplete', 'receipt-owned'],
+      // Bootstrap deletion uses the workers-scripts.write scope the install consent
+      // already includes. It does not add a scope or a standing cleanup credential.
       ['create-final-resources', 'resume-final-resource-convergence', 'publish-worker-release',
-        'activate-worker-release', 'disable-workers-dev'],
+        'activate-worker-release', 'disable-workers-dev',
+        'delete-bootstrap-worker', 'delete-bootstrap-admin-state-namespace'],
       ['exact-release-active', 'ownership-receipt-complete', 'management-access-enforced',
         'portal-converged', 'source-set-converged', 'bootstrap-surface-dead',
         'workers-dev-disabled'],

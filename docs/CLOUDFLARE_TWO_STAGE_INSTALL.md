@@ -630,6 +630,14 @@ evidence that a token was stored.
 
 - A partial write, token-exchange failure, invocation loss, or unconfirmed
   revocation leaves the installation `INCOMPLETE` and requires fresh OAuth.
+- A terminal failure whose journal and ownership certificate prove that only
+  the bootstrap Worker and AdminState namespace were created removes those two
+  resources with the install grant still held for that attempt, then revokes
+  it. The progress page stays open and says whether removal finished. A
+  hostname that already belonged to something else is left in place. If the
+  journal shows a later resource may exist, ownership does not match, or the
+  grant is gone, the page asks you to remove that install with a fresh
+  approval instead of deleting by name.
 - A stale or duplicate callback fails its atomic revision check before token
   exchange.
 - `READY` is one-way. Bootstrap capability, session, and PKCE attempts are

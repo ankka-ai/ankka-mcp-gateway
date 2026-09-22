@@ -135,6 +135,14 @@ const journalSchema = v.strictObject({
   lease: v.union([leaseSchema, v.null()]),
   actions: v.pipe(v.array(actionSchema), v.maxLength(CUSTOMER_STAGE2_ACTION_ORDER.length)),
   completedAt: v.union([safeInteger, v.null()]),
+  /** Recorded when a terminal failure is classified. Absent on journals stored before it existed. */
+  cleanup: v.optional(v.union([
+    v.null(),
+    v.strictObject({
+      phase: v.picklist(['removing', 'removed', 'recovery_required']),
+      reason: v.union([v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,159}$/u)), v.null()]),
+    }),
+  ]), null),
 });
 
 export type CustomerStage2Identity = v.InferOutput<typeof identitySchema>;
@@ -276,6 +284,7 @@ export function createCustomerStage2Journal(input: {
     lease: { attemptId: input.attemptId, acquiredAt: input.now, expiresAt: input.leaseExpiresAt },
     actions: [],
     completedAt: null,
+    cleanup: null,
   };
   return requireJournal(candidate);
 }
@@ -320,6 +329,27 @@ export function releaseCustomerStage2Lease(
   const journal = requireJournal(value);
   assertLease(journal, input.attemptId, input.now);
   return next(journal, { lease: null }, input.now);
+}
+
+/** True when no action has been armed or sent, so the only owned resources are the bootstrap Worker and namespace. */
+export function customerStage2MutationsUnsent(journal: CustomerStage2Journal): boolean {
+  const parsed = requireJournal(journal);
+  return parsed.completedAt === null && parsed.actions.every((action) => action.phase === 'prepared');
+}
+
+export function recordCustomerStage2Cleanup(
+  value: CustomerStage2Journal,
+  input: {
+    readonly now: number;
+    readonly phase: 'removing' | 'removed' | 'recovery_required';
+    readonly reason: string | null;
+  },
+): CustomerStage2Journal {
+  const journal = requireJournal(value);
+  if (journal.completedAt !== null) fail('complete');
+  if (journal.cleanup?.phase === 'removed') fail('conflict');
+  const reason = input.reason !== null && /^[a-z][a-z0-9_]{0,159}$/u.test(input.reason) ? input.reason : null;
+  return next(journal, { cleanup: { phase: input.phase, reason } }, input.now);
 }
 
 export function customerStage2Action(

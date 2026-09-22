@@ -299,6 +299,13 @@ async function bundleBigQueryWorker(sourceRoot) {
   return result.outputFiles[0].text;
 }
 
+async function retirementModuleSource(sourceRoot) {
+  const file = path.join(sourceRoot, 'payload', 'worker-retirement', 'index.js');
+  const bytes = await readFile(file);
+  if (bytes.byteLength < 1 || bytes.byteLength > 64 * 1024) fail('retirement_module_missing');
+  return bytes.toString('utf8');
+}
+
 async function bundleCustomerWorker(sourceRoot, controlPlaneOrigin, variant, finalRuntimeSource) {
   if (esbuildRuntimeVersion !== EXPECTED_ESBUILD_VERSION) fail('worker_build_tool_invalid');
   const workerSource = await validatedWorkerSource(sourceRoot);
@@ -313,7 +320,10 @@ async function bundleCustomerWorker(sourceRoot, controlPlaneOrigin, variant, fin
       bundle: true,
       charset: 'utf8',
       define: variant === 'bootstrap'
-        ? { __ANKKA_FINAL_RUNTIME_SOURCE__: JSON.stringify(finalRuntimeSource) }
+        ? {
+          __ANKKA_FINAL_RUNTIME_SOURCE__: JSON.stringify(finalRuntimeSource),
+          __ANKKA_RETIREMENT_SOURCE__: JSON.stringify(await retirementModuleSource(sourceRoot)),
+        }
         : { __ANKKA_BIGQUERY_RUNTIME_SOURCE__: JSON.stringify(await bundleBigQueryWorker(sourceRoot)) },
       entryPoints: [entry],
       format: 'esm',
@@ -339,6 +349,16 @@ async function bundleCustomerWorker(sourceRoot, controlPlaneOrigin, variant, fin
   }
   const bytes = Buffer.from(output.contents);
   assertNormalizedText(bytes, 'application/javascript+module');
+  if (variant === 'bootstrap') {
+    const entryText = await readFile(entry, 'utf8');
+    if (entryText.includes('__ANKKA_RETIREMENT_SOURCE__')) {
+      const retirement = await retirementModuleSource(sourceRoot);
+      if (!retirement.includes('Inert final deployment') || !bytes.toString('utf8').includes('Inert final deployment')) {
+        bytes.fill(0);
+        fail('retirement_module_missing');
+      }
+    }
+  }
   if (variant === 'final') {
     const marker = `// ${CONTROL_PLANE_ORIGIN_MARKER}${controlPlaneOrigin}\n`;
     const text = bytes.toString('utf8');

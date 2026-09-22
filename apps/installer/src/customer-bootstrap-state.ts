@@ -34,6 +34,9 @@ const bootstrapOauthAttemptSchema = v.strictObject({
 });
 
 const failureReasonSchema = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9_]{0,159}$/u));
+const cleanupSchema = v.strictObject({
+  phase: v.picklist(['removing', 'removed', 'recovery_required']),
+});
 
 const customerBootstrapStateSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -55,9 +58,15 @@ const customerBootstrapStateSchema = v.strictObject({
   failureCode: v.union([bootstrapFailureCodeSchema, v.null()]),
   /** Secret-free detail behind failureCode; absent in states stored before it existed. */
   failureReason: v.optional(v.union([failureReasonSchema, v.null()]), null),
+  /**
+   * Set while a terminal setup failure is being removed, after that removal
+   * is proven, or when removal is not safe. Absent on states stored before it existed.
+   */
+  cleanup: v.optional(v.union([cleanupSchema, v.null()]), null),
   readyAt: v.union([v.pipe(v.number(), v.safeInteger()), v.null()]),
 });
 
+export type CustomerBootstrapCleanupPhase = v.InferOutput<typeof cleanupSchema>['phase'];
 export type CustomerBootstrapFailureCode = v.InferOutput<typeof bootstrapFailureCodeSchema>;
 export type CustomerBootstrapOauthAttempt = v.InferOutput<typeof bootstrapOauthAttemptSchema>;
 export type CustomerBootstrapState = v.InferOutput<typeof customerBootstrapStateSchema>;
@@ -108,7 +117,8 @@ function frozen(state: CustomerBootstrapState): CustomerBootstrapState {
   if (!parsed.success) invalid();
   const session = parsed.output.session === null ? null : Object.freeze(parsed.output.session);
   const oauth = parsed.output.oauth === null ? null : Object.freeze(parsed.output.oauth);
-  return Object.freeze({ ...parsed.output, session, oauth });
+  const cleanup = parsed.output.cleanup === null ? null : Object.freeze(parsed.output.cleanup);
+  return Object.freeze({ ...parsed.output, session, oauth, cleanup });
 }
 
 function randomToken(randomBytes?: BootstrapRandomBytes): string {
@@ -168,6 +178,7 @@ export function initialCustomerBootstrapState(input: {
     oauth: null,
     failureCode: null,
     failureReason: null,
+    cleanup: null,
     readyAt: null,
   });
 }
@@ -418,6 +429,7 @@ export function markCustomerBootstrapIncomplete(input: {
   readonly attemptId: string;
   readonly failureCode: CustomerBootstrapFailureCode;
   readonly failureReason?: string | null;
+  readonly cleanup?: CustomerBootstrapCleanupPhase | null;
 }): CustomerBootstrapState {
   const current = parseCustomerBootstrapState(input.current);
   if (!current || !ATTEMPT_ID.test(input.attemptId)) invalid();
@@ -432,6 +444,33 @@ export function markCustomerBootstrapIncomplete(input: {
     oauth: null,
     failureCode: input.failureCode,
     failureReason: v.is(failureReasonSchema, input.failureReason) ? input.failureReason : null,
+    cleanup: input.cleanup === undefined || input.cleanup === null ? null : { phase: input.cleanup },
+  });
+}
+
+/**
+ * Keeps the attempt open while automatic cleanup runs. The grant stays in
+ * memory; this record carries no credential.
+ */
+export function markCustomerBootstrapCleanupPending(input: {
+  readonly current: CustomerBootstrapState;
+  readonly attemptId: string;
+  readonly failureCode: CustomerBootstrapFailureCode;
+  readonly failureReason?: string | null;
+}): CustomerBootstrapState {
+  const current = parseCustomerBootstrapState(input.current);
+  if (!current || !ATTEMPT_ID.test(input.attemptId)) invalid();
+  if (current.status === 'READY') throw new CustomerBootstrapStateError('final');
+  if (current.status !== 'CONVERGING' || current.oauth?.attemptId !== input.attemptId ||
+      current.oauth.phase === 'finalizing') {
+    throw new CustomerBootstrapStateError('conflict');
+  }
+  return frozen({
+    ...current,
+    revision: current.revision + 1,
+    failureCode: input.failureCode,
+    failureReason: v.is(failureReasonSchema, input.failureReason) ? input.failureReason : null,
+    cleanup: { phase: 'removing' },
   });
 }
 

@@ -3,9 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { exactOperationScopes } from '../src/cloudflare-operation-authority';
 import {
   CustomerBootstrapConvergenceDriver,
+  CUSTOMER_BOOTSTRAP_CLEANUP_ALARM_DELAY_MS,
   CUSTOMER_BOOTSTRAP_CONVERGENCE_DEADLINE_MS,
   CUSTOMER_BOOTSTRAP_HANDOVER_ALARM_DELAY_MS,
 } from '../src/customer-bootstrap-convergence-driver';
+import { CustomerGatewayFreshPreflightError } from '../src/cloudflare-gateway-fresh-preflight';
 import { finalizeCustomerBootstrapHandover } from '../src/customer-bootstrap-handover';
 import type { CustomerBootstrapStatePort } from '../src/customer-bootstrap-router';
 import {
@@ -302,6 +304,108 @@ describe('customer bootstrap convergence driver', () => {
       failureReason: 'script_upload_rejected',
     });
     expect(await finalizeCustomerBootstrapHandover(state, NOW + 20)).toBe('idle');
+  });
+
+  it('keeps the grant for a bootstrap-only failure, then reports removal from the same attempt', async () => {
+    const converging = await convergingState();
+    const state = new MemoryState(converging.state);
+    const revocations = { count: 0 };
+    const delays: number[] = [];
+    let removals = 0;
+    const driver = new CustomerBootstrapConvergenceDriver({
+      state,
+      transport: transportCounting(revocations),
+      publicClientId: CLIENT_ID,
+      converge: async () => {
+        throw new CustomerGatewayFreshPreflightError('fresh_collision', 'dns_record_list');
+      },
+      classifyTerminalFailure: async () => 'bootstrap_only',
+      removeOwnedBootstrap: async ({ grant: held }) => {
+        held.assertUsable();
+        removals += 1;
+        return 'removed';
+      },
+      now: () => NOW + 10,
+      schedule: async (delayMs) => { delays.push(delayMs); },
+    });
+    await driver.start({ attemptId: converging.attemptId, grant: grant() });
+    expect(await driver.continue()).toBe('scheduled');
+    expect(driver.holdsGrant).toBe(true);
+    expect(revocations.count).toBe(0);
+    expect(delays).toContain(CUSTOMER_BOOTSTRAP_CLEANUP_ALARM_DELAY_MS);
+    expect(state.stored).toMatchObject({
+      status: 'CONVERGING',
+      failureCode: 'provider_recovery_required',
+      failureReason: 'preflight_fresh_collision_dns_record_list',
+      cleanup: { phase: 'removing' },
+    });
+    expect(await driver.finishOwnedCleanup()).toBe('removed');
+    expect(removals).toBe(1);
+    expect(revocations.count).toBe(1);
+    expect(driver.holdsGrant).toBe(false);
+    expect(state.stored).toMatchObject({
+      status: 'INCOMPLETE',
+      failureReason: 'preflight_fresh_collision_dns_record_list',
+      cleanup: { phase: 'removed' },
+    });
+  });
+
+  it('asks for a fresh removal when the failure may have created final resources', async () => {
+    const converging = await convergingState();
+    const state = new MemoryState(converging.state);
+    const revocations = { count: 0 };
+    let removed = false;
+    const driver = new CustomerBootstrapConvergenceDriver({
+      state,
+      transport: transportCounting(revocations),
+      publicClientId: CLIENT_ID,
+      converge: async () => { throw new CustomerStage2ConvergerError('provider_mismatch', 'portal_create'); },
+      classifyTerminalFailure: async () => 'recovery_required',
+      removeOwnedBootstrap: async () => { removed = true; return 'removed'; },
+      now: () => NOW + 10,
+      schedule: async () => undefined,
+    });
+    await driver.start({ attemptId: converging.attemptId, grant: grant() });
+    expect(await driver.continue()).toBe('settled');
+    expect(removed).toBe(false);
+    expect(revocations.count).toBe(1);
+    expect(driver.holdsGrant).toBe(false);
+    expect(state.stored).toMatchObject({
+      status: 'INCOMPLETE',
+      failureReason: 'portal_create',
+      cleanup: { phase: 'recovery_required' },
+    });
+  });
+
+  it('retries an interrupted removal while the grant is still in memory', async () => {
+    const converging = await convergingState();
+    const state = new MemoryState(converging.state);
+    const revocations = { count: 0 };
+    let attempts = 0;
+    const driver = new CustomerBootstrapConvergenceDriver({
+      state,
+      transport: transportCounting(revocations),
+      publicClientId: CLIENT_ID,
+      converge: async () => { throw new Error('provider_unavailable'); },
+      classifyTerminalFailure: async () => 'bootstrap_only',
+      removeOwnedBootstrap: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error('provider_unknown');
+        return 'removed';
+      },
+      now: () => NOW + 10,
+      schedule: async () => undefined,
+    });
+    await driver.start({ attemptId: converging.attemptId, grant: grant() });
+    expect(await driver.continue()).toBe('scheduled');
+    expect(await driver.finishOwnedCleanup()).toBe('removing');
+    expect(revocations.count).toBe(0);
+    expect(driver.holdsGrant).toBe(true);
+    expect(state.stored).toMatchObject({ status: 'CONVERGING', cleanup: { phase: 'removing' } });
+    expect(await driver.continue()).toBe('settled');
+    expect(attempts).toBe(2);
+    expect(revocations.count).toBe(1);
+    expect(state.stored).toMatchObject({ status: 'INCOMPLETE', cleanup: { phase: 'removed' } });
   });
 
   it('stays idle when the durable state is not converging', async () => {

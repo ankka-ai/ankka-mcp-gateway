@@ -35,6 +35,7 @@ import {
   CUSTOMER_INSTALL_CONTINUE_PATH,
   CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH,
   CUSTOMER_INSTALL_OAUTH_START_PATH,
+  CUSTOMER_INSTALL_CLEANUP_PATH,
   CUSTOMER_INSTALL_STATUS_PATH,
 } from './customer-install-paths';
 import {
@@ -133,6 +134,12 @@ export interface CustomerBootstrapRouterDependencies {
    * offered and its route does not exist.
    */
   readonly managementCredential?: CustomerManagementCredentialStep;
+  /**
+   * Finishes a bootstrap-only cleanup with the in-memory grant and reports
+   * whether the recorded Worker and namespace are gone. Absent outside the
+   * customer bootstrap Worker.
+   */
+  readonly finishBootstrapCleanup?: () => Promise<'removed' | 'recovery_required' | 'removing' | 'idle'>;
 }
 
 export interface CustomerBootstrapCallbackOutcome {
@@ -427,6 +434,26 @@ export function createCustomerBootstrapRouter(
         url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH;
       try {
         const current = await readState();
+        if (request.method === 'POST' && url.pathname === CUSTOMER_INSTALL_CLEANUP_PATH) {
+          if (dependencies.finishBootstrapCleanup === undefined) return notFound();
+          if (!sameOriginMutation(request)) return json({ schemaVersion: 1, error: 'forbidden' }, 403);
+          const secret = readSessionCookie(request);
+          if (secret === null) return json({ schemaVersion: 1, error: 'forbidden' }, 403);
+          await authenticatedSession(current, secret, now());
+          const outcome = await dependencies.finishBootstrapCleanup();
+          const stored = await dependencies.state.read();
+          const parsed = stored === undefined || stored === null ? null : parseCustomerBootstrapState(stored);
+          const cleanup = outcome === 'idle' ? parsed?.cleanup?.phase ?? null : outcome;
+          return json({
+            schemaVersion: 1,
+            status: parsed?.status ?? current.status,
+            cleanup,
+            failure: parsed?.failureCode
+              ? { code: parsed.failureCode, reason: parsed.failureReason ?? null }
+              : null,
+            safeToStartAgain: cleanup === 'removed',
+          });
+        }
         if (request.method === 'GET' && url.pathname === CUSTOMER_INSTALL_STATUS_PATH) {
           const status = publicCustomerBootstrapStatus(current);
           // The browser navigates to the management hostname on READY. Resolvers cache a missing name for the
