@@ -1,6 +1,7 @@
 import { GatewayApiError } from './api'
 import type {
   GatewayAdminApi,
+  InstalledSourceTools,
   GatewayStatus,
   ManagedSources,
   ManagementCredentialStatus,
@@ -22,6 +23,7 @@ import type {
   Team,
   TeamAction,
   TeamActionResult,
+  TeamGrant,
   TeamMember,
   TeardownAction,
 } from './api'
@@ -190,8 +192,10 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
         { email: 'analyst@example.com', sourceIds: [] },
       ],
       sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })),
+      teams: [],
       pendingAction: null,
       proposedMembers: null,
+      proposedTeams: null,
     }
     if (scenario === 'team-recovery' || scenario === 'team-legacy') {
       this.#team.pendingAction = { schemaVersion: 1, actionId: ACTION_ID, status: scenario === 'team-recovery' ? 'recovery_required' : 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: scenario === 'team-recovery' ? 'team_action_recovery_required' : null, canCancel: scenario === 'team-legacy' }
@@ -217,19 +221,22 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })) })
   }
 
-  async prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult> {
+  async prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult> {
     if (!this.#team.editingEnabled) throw new GatewayApiError(403, this.#team.editingDisabledReason === 'managed_in_cloudflare'
       ? 'team_editing_managed_in_cloudflare'
       : this.#team.editingDisabledReason === 'release_review_required' ? 'team_release_review_required' : 'team_action_conflict')
     if (expectedRevision !== this.#team.revision) throw new GatewayApiError(409, 'team_access_revision_conflict')
     const pending = this.#team.pendingAction
     const continuing = pending && ['authorization_required', 'applying', 'recovery_required'].includes(pending.status)
-    if (continuing && (pending.status === 'applying' || JSON.stringify(members) !== JSON.stringify(this.#team.proposedMembers))) throw new GatewayApiError(409, 'team_action_conflict')
+    if (continuing && (pending.status === 'applying' || JSON.stringify(members) !== JSON.stringify(this.#team.proposedMembers) ||
+        (teams !== undefined && JSON.stringify(teams) !== JSON.stringify(this.#team.proposedTeams ?? this.#team.teams)))) throw new GatewayApiError(409, 'team_action_conflict')
     const expiresAt = new Date(Date.now() + 600_000).toISOString()
     const action: TeamActionResult['action'] = { schemaVersion: 1, actionId: ACTION_ID, status: 'succeeded', expiresAt, failureCode: null, canCancel: false }
     this.#team.members = structuredClone(members)
+    if (teams !== undefined) this.#team.teams = structuredClone(teams)
     this.#team.revision += 1
     this.#team.proposedMembers = null
+    this.#team.proposedTeams = null
     this.#team.pendingAction = action
     return { schemaVersion: 1, action: structuredClone(action) }
   }
@@ -415,6 +422,33 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
 
   async authorizeSource(): Promise<SourceAuthorization> {
     throw new GatewayApiError(409, 'source_oauth_unavailable')
+  }
+
+  async getInstalledSourceTools(sourceId: string): Promise<InstalledSourceTools> {
+    const source = this.#sources.sources.find((candidate) => candidate.id === sourceId)
+    if (!source || source.status !== 'installed') throw new GatewayApiError(409, 'source_tools_unavailable')
+    const tools: InstalledSourceTools['tools'] = source.enabledTools.map((name) => ({
+      name, title: null, description: null, readOnlyHint: null, destructiveHint: null, openWorldHint: null,
+    }))
+    if (!source.enabledTools.includes('preview_export')) {
+      tools.push({ name: 'preview_export', title: null, description: 'A tool in Cloudflare’s synced list that is not allowed yet.', readOnlyHint: true, destructiveHint: false, openWorldHint: false })
+    }
+    return { schemaVersion: 1, sourceId, revision: this.#sources.revision, state: 'ready', tools, enabledTools: [...source.enabledTools], pendingTools: null }
+  }
+
+  async updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[]): Promise<ManagedSources> {
+    const source = this.#sources.sources.find((candidate) => candidate.id === sourceId)
+    if (!source || source.status !== 'installed') throw new GatewayApiError(409, 'source_tools_unavailable')
+    if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
+    const chosen = [...new Set(enabledTools)].sort()
+    if (chosen.length === 0 || chosen.length > 500) throw new GatewayApiError(400, 'source_tools_invalid')
+    const known = new Set((await this.getInstalledSourceTools(sourceId)).tools.map((tool) => tool.name))
+    if (chosen.some((name) => !known.has(name))) throw new GatewayApiError(409, 'source_tools_mismatch')
+    if (chosen.join('\u0000') !== [...source.enabledTools].sort().join('\u0000')) {
+      source.enabledTools = chosen
+      this.#sources.revision += 1
+    }
+    return structuredClone(this.#sources)
   }
 
   async chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {

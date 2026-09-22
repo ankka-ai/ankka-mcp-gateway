@@ -709,6 +709,12 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             draftLabel={(sourceId) => sourceDraftLabel(installationState(sourceId)?.shown)}
             installNote={blocker ? null : rollbackNote}
             onAuthorize={(sourceId) => void authorize(sourceId)}
+            onLoadSourceTools={(sourceId) => api.getInstalledSourceTools(sourceId)}
+            onSaveSourceTools={async (sourceId, revision, enabledTools) => {
+              await api.updateInstalledSourceTools(revision, sourceId, enabledTools)
+              await refreshSources()
+            }}
+            sourceToolsDisabled={isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || Boolean(blocker && blocker.kind !== 'source_removal')}
             canRemove={canRemoveDraft}
             removeDisabled={isCheckingSourceActions || resumingBigQuery}
             onRemoveDraft={(sourceId) => void removeSource(sourceId).catch(() => {})}

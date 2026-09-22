@@ -34,7 +34,7 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
     removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-    discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+    discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   }
@@ -324,7 +324,7 @@ describe('SourcesPage', () => {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
@@ -362,7 +362,7 @@ describe('SourcesPage', () => {
       getTeam: vi.fn(async () => ({
         schemaVersion: 1 as const, revision: 1, editingEnabled: false, editingDisabledReason: 'management_credential_missing' as const,
         managementCredentialConfigured: false, managementCredentialChoice: 'provided' as const, members: [], adminEmails: ['admin@example.com'],
-        sources: [], pendingAction: null, proposedMembers: null,
+        sources: [], pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null,
       })),
       prepareManagementCredentialAction: vi.fn(async () => prepared),
     }
@@ -408,7 +408,7 @@ describe('SourcesPage', () => {
       getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(disabled).mockResolvedValue({ ...disabled, installationEnabled: true }),
       getTeam: vi.fn(async () => ({
         schemaVersion: 1 as const, revision: 1, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
-        members: [], adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null,
+        members: [], adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null,
       })),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -440,7 +440,7 @@ describe('SourcesPage', () => {
           { name: 'execute_sql', description: 'Synthetic write query.', destructiveHint: true, defaultSelected: false },
         ],
       })),
-      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     }
@@ -490,7 +490,7 @@ describe('SourcesPage', () => {
       })),
       prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
       prepareSourceAction,
-      getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
@@ -554,7 +554,7 @@ describe('SourcesPage', () => {
         tools: [{ name: 'reports.read', defaultSelected: true }],
       })),
       prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
@@ -587,7 +587,7 @@ describe('SourcesPage', () => {
         tools: [{ name: 'search', title: 'Search', description: 'Search documents.', readOnlyHint: true, defaultSelected: true }],
       })),
       prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
@@ -636,7 +636,7 @@ describe('SourcesPage', () => {
       getUpdate: vi.fn(async () => update),
       discoverSource,
       prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
@@ -703,7 +703,7 @@ describe('SourcesPage', () => {
         })),
       })),
       prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
@@ -766,7 +766,7 @@ describe('SourcesPage', () => {
         tools: [],
       })),
       prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
-      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),

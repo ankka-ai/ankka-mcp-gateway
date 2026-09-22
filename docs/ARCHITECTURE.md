@@ -106,7 +106,11 @@ credential headers, embedded credentials, private-network endpoints, wildcard
 tools, and manually supplied bearer tokens are rejected.
 
 Saving a source changes gateway Durable Object state only. Applying it requires
-a new, short-lived Cloudflare authorization. A protected source defaults to
+a new, short-lived Cloudflare authorization. Changing the tools of a connector
+that is already installed is separate: Edit tools reads Cloudflare’s synced
+catalogue with the management token, and saving replaces that connector’s exact
+allowlist and its Portal tool configuration. Tools that were not already allowed
+stay off until you select them. A protected source defaults to
 `onBehalfOfUser: false`: a gateway operator connects it once, Cloudflare stores
 the source credential, and employees authenticate only to the Portal. The
 current dashboard does not expose per-user upstream authentication. Upstream

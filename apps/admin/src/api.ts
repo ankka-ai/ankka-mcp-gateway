@@ -178,6 +178,15 @@ const sourceActionToolsSchema = v.strictObject({
   state: v.picklist(['connection_required', 'sync_required', 'unsupported', 'ready']),
   tools: v.pipe(v.array(discoveredToolSchema), v.maxLength(500)),
 })
+const installedSourceToolsSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  sourceId: v.pipe(v.string(), v.regex(/^source-[a-f0-9]{16}$/u)),
+  revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
+  state: sourceActionToolsSchema.entries.state,
+  tools: sourceActionToolsSchema.entries.tools,
+  enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.maxLength(500)),
+  pendingTools: v.nullable(v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.minLength(1), v.maxLength(500))),
+})
 const sourceAuthorizationSchema = v.strictObject({
   schemaVersion: v.literal(1),
   authorizationUrl: v.pipe(v.string(), v.maxLength(16384), v.url(), v.check((value) => {
@@ -281,6 +290,13 @@ const teamMemberSchema = v.strictObject({
   sourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
 })
 const teamMembersSchema = v.array(teamMemberSchema)
+const teamGrantSchema = v.strictObject({
+  id: v.pipe(v.string(), v.regex(/^team-[a-f0-9]{16}$/u)),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
+  memberEmails: v.pipe(v.array(teamEmailSchema), v.maxLength(500)),
+  sourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
+})
+const teamGrantsSchema = v.pipe(v.array(teamGrantSchema), v.maxLength(16))
 const managementCredentialStatusSchema = v.strictObject({
   schemaVersion: v.literal(1),
   managementCredentialConfigured: v.boolean(),
@@ -306,8 +322,10 @@ const teamSchema = v.strictObject({
     enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.maxLength(500)),
     status: sourceStatusSchema,
   })), v.maxLength(TEAM_MAX_SOURCES)),
+  teams: v.optional(teamGrantsSchema, []),
   pendingAction: v.nullable(teamActionSchema),
   proposedMembers: v.nullable(teamMembersSchema),
+  proposedTeams: v.optional(v.nullable(teamGrantsSchema), null),
 })
 const managementPermissionSchema = v.picklist(['verified', 'permission_missing', 'drift', 'unconfirmed', 'not_checked'])
 /**
@@ -355,6 +373,7 @@ export type SourceActionState = v.InferOutput<typeof sourceActionStateSchema>
 export type SourceActionSummary = v.InferOutput<typeof sourceActionSummarySchema>
 export type SourceActionPointer = v.InferOutput<typeof sourceActionPointerSchema>
 export type SourceActionTools = v.InferOutput<typeof sourceActionToolsSchema>
+export type InstalledSourceTools = v.InferOutput<typeof installedSourceToolsSchema>
 export type SourceToolChoice = v.InferOutput<typeof sourceToolChoiceSchema>
 export type SourceActions = v.InferOutput<typeof sourceActionsSchema>
 export type SourceActionConflictReason = v.InferOutput<typeof sourceActionConflictReasonSchema>
@@ -363,6 +382,7 @@ export type RuntimeUpdate = v.InferOutput<typeof runtimeUpdateSchema>
 export type RuntimeAction = v.InferOutput<typeof runtimeActionSchema>
 export type TeardownAction = v.InferOutput<typeof teardownActionSchema>
 export type TeamMember = v.InferOutput<typeof teamMemberSchema>
+export type TeamGrant = v.InferOutput<typeof teamGrantSchema>
 export type Team = v.InferOutput<typeof teamSchema>
 export type TeamAction = v.InferOutput<typeof teamActionSchema>
 export type TeamActionResult = v.InferOutput<typeof teamActionResultSchema>
@@ -378,7 +398,7 @@ export interface GatewayAdminApi {
   prepareBigQueryRemoval(revision: number, sourceId: string): Promise<BigQueryPrepared>
   getSources(): Promise<ManagedSources>
   getTeam(): Promise<Team>
-  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
+  prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
   getUpdate(): Promise<RuntimeUpdate>
@@ -395,6 +415,10 @@ export interface GatewayAdminApi {
   authorizeSource(actionId: string, revision: number, sourceId: string): Promise<SourceAuthorization>
   /** Saves the tool choice as its own revision-bound step; the recorded installation is resumed separately. */
   chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice>
+  /** Cloudflare’s synced catalogue for an installed connector, plus the saved allowlist. New tools are not selected. */
+  getInstalledSourceTools(sourceId: string): Promise<InstalledSourceTools>
+  /** Replaces an installed connector’s allowlist and its Portal tool configuration. Assignments stay as they are. */
+  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[]): Promise<ManagedSources>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
   getRuntimeAction(actionId: string): Promise<RuntimeAction>
   prepareTeardownAction(): Promise<PreparedAction>
@@ -453,6 +477,7 @@ const ERROR_MESSAGES = new Map([
   ['team_editing_managed_in_cloudflare', 'Team access is managed directly in Cloudflare for this release. No gateway management credential is accepted.'],
   ['team_management_credential_missing', 'Add your management token in Settings, then retry.'],
   ['team_management_credential_invalid', 'Cloudflare rejected the management token. Verify management access in Settings to see what is missing, or replace the token there.'],
+  ['team_access_group_permission_missing', 'The management token cannot edit Cloudflare Access groups. Teams need Access group write in your Cloudflare account. Apps and Policies Edit does not include that permission.'],
   ['team_prepare_failed', 'The team access request could not be confirmed. Refresh to check whether a change was recorded before trying again.'],
   ['team_cancel_failed', 'Cancellation could not be confirmed. Refresh to check the recorded change before trying again.'],
   ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable after connector provisioning or team policy changes begin. A compatible removal release is required; do not discard the ownership or recovery records.'],
@@ -493,6 +518,10 @@ const ERROR_MESSAGES = new Map([
   ['source_tools_invalid', 'Select between 1 and 500 tools from the list, then try again.'],
   ['source_tools_unsupported', 'Cloudflare’s synced list for this connector cannot be offered here. Nothing was enabled.'],
   ['source_catalogue_unavailable', 'Cloudflare did not return this connector’s server record. Try again in a moment.'],
+  ['source_tools_pending', 'A tool update for this connector is already in progress. Refresh and save that same selection to finish it.'],
+  ['source_tools_recovery_required', 'The tool update could not be confirmed. Retry the same selection; the gateway continues from the saved progress.'],
+  ['source_portal_drift', 'The Portal configuration does not match this gateway’s record, so the tool selection was not saved. Review the connector in Cloudflare, then try again.'],
+  ['source_tool_edit_unavailable', 'This connector’s saved ownership could not be verified, so its tools were not changed. Refresh and try again.'],
   ['source_unreachable', 'The MCP endpoint could not be reached within the discovery deadline.'],
   ['source_url_invalid', 'Enter a public HTTPS MCP endpoint without credentials, query parameters, or a custom port.'],
   ['runtime_action_conflict', 'Another runtime action is active or the installed version changed.'],
@@ -597,10 +626,14 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
 
-  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult> {
+  prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult> {
+    const body: { schemaVersion: 1; expectedRevision: number; members: TeamMember[]; teams?: TeamGrant[] } = {
+      schemaVersion: 1, expectedRevision, members,
+    }
+    if (teams !== undefined) body.teams = teams
     return this.#request('/api/team-actions', teamActionResultSchema, {
       method: 'POST',
-      body: JSON.stringify({ schemaVersion: 1, expectedRevision, members }),
+      body: JSON.stringify(body),
     })
   }
 
@@ -680,6 +713,17 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
       method: 'POST',
       // The gateway accepts only a sorted list without repeats, the form it hashes.
       body: JSON.stringify({ schemaVersion: 1, revision, sourceId, enabledTools: [...new Set(enabledTools)].sort() }),
+    })
+  }
+
+  getInstalledSourceTools(sourceId: string): Promise<InstalledSourceTools> {
+    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, installedSourceToolsSchema)
+  }
+
+  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[]): Promise<ManagedSources> {
+    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, managedSourcesSchema, {
+      method: 'PUT',
+      body: JSON.stringify({ schemaVersion: 1, revision, enabledTools: [...new Set(enabledTools)].sort() }),
     })
   }
 

@@ -367,7 +367,7 @@ describe('HttpGatewayAdminApi', () => {
     const source = { id: 'source-1111111111111111', label: 'Knowledge', enabledTools: ['search'], status: 'installed' }
     const validTeam = {
       schemaVersion: 1, revision: 4, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
-      members: [person], adminEmails: ['admin@example.com'], sources: [source], pendingAction: null, proposedMembers: null,
+      members: [person], adminEmails: ['admin@example.com'], sources: [source], teams: [], pendingAction: null, proposedMembers: null, proposedTeams: null,
     }
     const members = Array.from({ length: 100 }, (_, index) => ({ email: `user${index}@example.com`, sourceIds: [] }))
     const largeTeam = { ...validTeam, members, proposedMembers: members, adminEmails: members.map(({ email }) => email) }
@@ -396,6 +396,7 @@ describe('HttpGatewayAdminApi', () => {
       ['team_editing_managed_in_cloudflare', 'managed directly in Cloudflare'],
       ['team_management_credential_missing', 'Add your management token in Settings'],
       ['team_management_credential_invalid', 'Verify management access in Settings'],
+      ['team_access_group_permission_missing', 'Access group write'],
       ['team_teardown_requires_compatible_release', 'Automatic removal is unavailable'],
     ] as const) {
       vi.stubGlobal('fetch', vi.fn(async () => Response.json({ error: code, detail: 'private provider detail' }, { status: 409 })))
@@ -634,6 +635,30 @@ describe('the tool choice of a sign-in connector', () => {
     expect(error.message).toMatch(wording)
     expect(error.message).not.toContain('synthetic-sensitive')
   })
+
+  it('reads an installed connector’s synced tools and saves the explicit selection', async () => {
+    const listed = {
+      schemaVersion: 1, sourceId, revision: 4, state: 'ready', pendingTools: null,
+      enabledTools: ['records_search'],
+      tools: [
+        { name: 'records_export', ...bare },
+        { name: 'records_search', ...bare, description: 'Search records.', readOnlyHint: true, destructiveHint: false },
+      ],
+    }
+    const saved = { schemaVersion: 1, revision: 5, applyMode: 'account_token' as const, installationEnabled: false, sources: [] }
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(Response.json(listed))
+      .mockResolvedValueOnce(Response.json(saved))
+    vi.stubGlobal('fetch', fetch)
+    const api = new HttpGatewayAdminApi()
+    await expect(api.getInstalledSourceTools(sourceId)).resolves.toEqual(listed)
+    await expect(api.updateInstalledSourceTools(4, sourceId, ['records_search', 'records_export', 'records_export'])).resolves.toEqual(saved)
+    expect(fetch).toHaveBeenNthCalledWith(1, `/api/sources/${sourceId}/tools`, expect.not.objectContaining({ method: 'PUT' }))
+    expect(fetch).toHaveBeenNthCalledWith(2, `/api/sources/${sourceId}/tools`, expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ schemaVersion: 1, revision: 4, enabledTools: ['records_export', 'records_search'] }),
+    }))
+  })
 })
 
 // The gateway's own management token: added, replaced and verified from Settings. The token itself never reaches this client.
@@ -642,7 +667,7 @@ describe('the management token', () => {
   const actionId = `action_${'a'.repeat(32)}`
   const team = {
     schemaVersion: 1, revision: 4, editingEnabled: false, editingDisabledReason: 'management_credential_missing', managementCredentialConfigured: false,
-    members: [{ email: 'admin@example.com', sourceIds: [] }], adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null,
+    members: [{ email: 'admin@example.com', sourceIds: [] }], adminEmails: ['admin@example.com'], sources: [], teams: [], pendingAction: null, proposedMembers: null, proposedTeams: null,
   }
 
   it('accepts what setup recorded at its token step, absent, null or one of the two fixed words, and nothing looser', async () => {

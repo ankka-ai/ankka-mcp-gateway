@@ -96,4 +96,33 @@ describe('SourceList', () => {
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeInTheDocument()
     expect(onAuthorize).not.toHaveBeenCalled()
   })
+
+  it('fetches synced tools and saves only the explicit selection', async () => {
+    const user = userEvent.setup()
+    const bare = { title: null, description: null, readOnlyHint: null, destructiveHint: null, openWorldHint: null }
+    const onLoadSourceTools = vi.fn(async () => ({
+      schemaVersion: 1 as const, sourceId: sources[0].id, revision: 4, state: 'ready' as const, pendingTools: null,
+      enabledTools: ['fetch_document', 'search'],
+      tools: [
+        { name: 'export_document', ...bare, description: 'Export a page.', readOnlyHint: true, destructiveHint: false },
+        { name: 'fetch_document', ...bare },
+        { name: 'search', ...bare, description: 'Find a page.', readOnlyHint: true, destructiveHint: false },
+      ],
+    }))
+    const onSaveSourceTools = vi.fn(async () => {})
+    const { rerender } = render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await user.click(screen.getByRole('button', { name: 'Knowledge' }))
+    expect(screen.queryByRole('button', { name: 'Edit tools' })).not.toBeInTheDocument()
+
+    rerender(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} onLoadSourceTools={onLoadSourceTools} onSaveSourceTools={onSaveSourceTools} />)
+    await user.click(screen.getByRole('button', { name: 'Edit tools' }))
+    expect(onLoadSourceTools).toHaveBeenCalledExactlyOnceWith(sources[0].id)
+    expect(await screen.findByRole('checkbox', { name: /export_document/ })).not.toBeChecked()
+    expect(screen.getByRole('checkbox', { name: /^search/ })).toBeChecked()
+    expect(screen.getByText(/New tools stay off until you select them/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('checkbox', { name: /export_document/ }))
+    await user.click(screen.getByRole('button', { name: 'Save tools' }))
+    expect(onSaveSourceTools).toHaveBeenCalledExactlyOnceWith(sources[0].id, 4, ['export_document', 'fetch_document', 'search'])
+  })
 })

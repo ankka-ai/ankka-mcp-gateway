@@ -23,6 +23,8 @@ const MANAGEMENT_MCP_PATH = '/api/mcp';
 const MANAGEMENT_SOURCE_PATHS = [MANAGEMENT_MCP_PATH, '/__ankka/operation', '/__ankka/install/oauth/callback'];
 const TEAM_EMAIL = /^[^\s@]{1,64}@[A-Za-z0-9.-]{1,190}$/u;
 const TEAM_SOURCE_ID = /^[a-z][a-z0-9-]{0,31}$/u;
+const TEAM_ID = /^team-[a-f0-9]{16}$/u;
+const TEAM_MAX_TEAMS = 16;
 const TEAM_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const TEAM_TOOL = /^[A-Za-z0-9_.:/-]{1,128}$/u;
 const TEAM_ERROR_CODES = Object.freeze([
@@ -148,49 +150,139 @@ function teamMembers(values, context) {
   return members.sort((left, right) => teamCompare(left.email, right.email));
 }
 
+function teamSourceIds(values, context) {
+  if (!Array.isArray(values) || values.length > TEAM_MAX_SOURCES) teamFail();
+  const sourceIds = [];
+  for (const id of values) {
+    if (!teamText(id) || context.sources.get(id)?.installed !== true) teamFail();
+    sourceIds.push(id);
+  }
+  if (new Set(sourceIds).size !== sourceIds.length) teamFail();
+  return sourceIds.sort(teamCompare);
+}
+
+function teamGroupIds(values) {
+  if (!Array.isArray(values)) teamFail();
+  const ids = [];
+  for (const value of values) {
+    if (!teamText(value) || !TEAM_PROVIDER_ID.test(value)) teamFail();
+    ids.push(value);
+  }
+  if (new Set(ids).size !== ids.length) teamFail();
+  return ids.sort(teamCompare);
+}
+
+function teamDefinitions(values, context) {
+  if (!Array.isArray(values) || values.length > TEAM_MAX_TEAMS) teamFail();
+  const ids = new Set();
+  const teams = [];
+  for (const value of values) {
+    if (!teamKeys(value, ['id', 'name', 'memberEmails', 'sourceIds']) ||
+        !teamText(value.id) || !TEAM_ID.test(value.id) || ids.has(value.id) ||
+        !teamName(value.name, 80)) teamFail();
+    ids.add(value.id);
+    teams.push({
+      id: value.id,
+      name: value.name,
+      memberEmails: teamEmails(value.memberEmails),
+      sourceIds: teamSourceIds(value.sourceIds, context),
+    });
+  }
+  return teams.sort((left, right) => teamCompare(left.id, right.id));
+}
+
+function storedTeamRecords(values, context) {
+  if (!Array.isArray(values) || values.length > TEAM_MAX_TEAMS) teamFail('team_access_invalid_state');
+  const ids = new Set();
+  const teams = [];
+  try {
+    for (const value of values) {
+      if (!teamKeys(value, ['id', 'name', 'memberEmails', 'sourceIds', 'accessGroupId']) ||
+          !teamText(value.id) || !TEAM_ID.test(value.id) || ids.has(value.id) ||
+          !teamName(value.name, 80) ||
+          !(value.accessGroupId === null || (teamText(value.accessGroupId) && TEAM_PROVIDER_ID.test(value.accessGroupId)))) {
+        teamFail('team_access_invalid_state');
+      }
+      ids.add(value.id);
+      teams.push({
+        id: value.id,
+        name: value.name,
+        memberEmails: teamEmails(value.memberEmails),
+        sourceIds: teamSourceIds(value.sourceIds, context),
+        accessGroupId: value.accessGroupId,
+      });
+    }
+  } catch (error) {
+    if (error instanceof TeamAccessError && error.code === 'team_access_invalid_state') throw error;
+    teamFail('team_access_invalid_state');
+  }
+  return teams.sort((left, right) => teamCompare(left.id, right.id));
+}
+
+function publicTeam(team) {
+  return {
+    id: team.id, name: team.name, memberEmails: team.memberEmails, sourceIds: team.sourceIds,
+  };
+}
+
 export function normalizeTeamAccessRequest(value, context) {
   const current = teamContext(context);
-  if (!teamKeys(value, ['schemaVersion', 'expectedRevision', 'members']) ||
+  const requestKeys = ['expectedRevision', 'members', 'schemaVersion'];
+  if (teamRecord(value) && Object.hasOwn(value, 'teams')) requestKeys.push('teams');
+  if (!teamKeys(value, requestKeys) ||
       value.schemaVersion !== 1 || !Number.isSafeInteger(value.expectedRevision) ||
       value.expectedRevision < 0) teamFail();
   if (value.expectedRevision !== current.revision) teamFail('team_access_revision_conflict');
-  return teamFreeze({
+  const normalized = {
     schemaVersion: 1,
     expectedRevision: current.revision,
     members: teamMembers(value.members, current),
-  });
+  };
+  if (Object.hasOwn(value, 'teams')) normalized.teams = teamDefinitions(value.teams, current);
+  return teamFreeze(normalized);
 }
 
-export function teamPolicy(emails, name) {
+export function teamPolicy(emails, name, groupIds = []) {
   if (!teamName(name)) teamFail('team_access_invalid_target');
   const audience = teamEmails(emails);
+  const groups = teamGroupIds(groupIds);
+  const empty = audience.length === 0 && groups.length === 0;
   return teamFreeze({
     name,
-    decision: audience.length === 0 ? 'deny' : 'allow',
-    include: audience.length === 0
+    decision: empty ? 'deny' : 'allow',
+    include: empty
       ? [{ everyone: {} }]
-      : audience.map((email) => ({ email: { email } })),
+      : [
+          ...audience.map((email) => ({ email: { email } })),
+          ...groups.map((id) => ({ group: { id } })),
+        ],
     exclude: [],
     require: [],
   });
 }
 
-function teamPolicyAudience(policy) {
+function teamPolicySelectors(policy) {
   if (!teamRecord(policy) || !Array.isArray(policy.include) ||
       !Array.isArray(policy.exclude) || policy.exclude.length !== 0 ||
       !Array.isArray(policy.require) || policy.require.length !== 0) teamFail();
   if (policy.decision === 'deny') {
     if (policy.include.length !== 1 || !teamKeys(policy.include[0], ['everyone']) ||
         !teamKeys(policy.include[0].everyone, [])) teamFail();
-    return [];
+    return { emails: [], groupIds: [] };
   }
   if (policy.decision !== 'allow' || policy.include.length === 0) teamFail();
   const emails = [];
+  const groupIds = [];
   for (const rule of policy.include) {
-    if (!teamKeys(rule, ['email']) || !teamKeys(rule.email, ['email'])) teamFail();
-    emails.push(rule.email.email);
+    if (teamKeys(rule, ['email']) && teamKeys(rule.email, ['email'])) emails.push(rule.email.email);
+    else if (teamKeys(rule, ['group']) && teamKeys(rule.group, ['id'])) groupIds.push(rule.group.id);
+    else teamFail();
   }
-  return teamEmails(emails, 1);
+  return { emails: teamEmails(emails), groupIds: teamGroupIds(groupIds) };
+}
+
+function teamPolicyAudience(policy) {
+  return teamPolicySelectors(policy).emails;
 }
 
 function teamNeutralPolicyFields(policy) {
@@ -222,8 +314,10 @@ export function teamPolicyMatches(observed, expected, policyId) {
     if (!teamKeys(expected, expectedKeys) || !teamName(expected.name) ||
         (Object.hasOwn(expected, 'precedence') && (!Number.isSafeInteger(expected.precedence) ||
           expected.precedence < 0 || observed.precedence !== expected.precedence))) return false;
+    const observedSelectors = teamPolicySelectors(observed);
+    const expectedSelectors = teamPolicySelectors(expected);
     return observed.decision === expected.decision &&
-      JSON.stringify(teamPolicyAudience(observed)) === JSON.stringify(teamPolicyAudience(expected));
+      JSON.stringify(observedSelectors) === JSON.stringify(expectedSelectors);
   } catch {
     return false;
   }
@@ -240,12 +334,21 @@ function teamTarget(value, source = false) {
   return { ...value };
 }
 
+function previousTeamRecords(context, current) {
+  if (!Object.hasOwn(context, 'currentTeams') || context.currentTeams === undefined) return [];
+  try { return storedTeamRecords(context.currentTeams, current); }
+  catch { teamFail('team_access_invalid_state'); }
+}
+
 export function planTeamAccessChange(value, context) {
   const input = normalizeTeamAccessRequest(value, context);
   const current = teamContext(context);
   let previous;
-  try { previous = teamMembers(context.currentMembers, current); }
-  catch { teamFail('team_access_invalid_state'); }
+  let priorTeams;
+  try {
+    previous = teamMembers(context.currentMembers, current);
+    priorTeams = previousTeamRecords(context, current);
+  } catch { teamFail('team_access_invalid_state'); }
   const portalTarget = teamTarget(context.portalTarget);
   if (!Array.isArray(context.sourceTargets) || context.sourceTargets.length > TEAM_MAX_SOURCES) {
     teamFail('team_access_invalid_target');
@@ -259,24 +362,64 @@ export function planTeamAccessChange(value, context) {
   const targets = [portalTarget, ...sourceTargets];
   if (new Set(targets.map((target) => target.applicationId)).size !== targets.length ||
       new Set(targets.map((target) => target.policyId)).size !== targets.length) teamFail('team_access_invalid_target');
+  const nextTeams = Object.hasOwn(input, 'teams') ? input.teams : priorTeams.map(publicTeam);
+  const groupId = new Map(priorTeams.map((team) => [team.id, team.accessGroupId]));
+  const priorById = new Map(priorTeams.map((team) => [team.id, team]));
+  const groupChanges = [];
+  for (const team of nextTeams) {
+    const prior = priorById.get(team.id);
+    const id = prior?.accessGroupId ?? null;
+    if (team.memberEmails.length === 0) {
+      if (id) groupChanges.push({ op: 'delete', teamId: team.id, groupId: id });
+      continue;
+    }
+    if (!id) groupChanges.push({ op: 'create', teamId: team.id, memberEmails: team.memberEmails });
+    else if (!prior || JSON.stringify(prior.memberEmails) !== JSON.stringify(team.memberEmails)) {
+      groupChanges.push({ op: 'update', teamId: team.id, groupId: id, memberEmails: team.memberEmails });
+    }
+  }
+  for (const prior of priorTeams) {
+    if (!nextTeams.some((team) => team.id === prior.id) && prior.accessGroupId) {
+      groupChanges.push({ op: 'delete', teamId: prior.id, groupId: prior.accessGroupId });
+    }
+  }
+  groupChanges.sort((left, right) => teamCompare(left.teamId, right.teamId) || teamCompare(left.op, right.op));
+  const boundGroups = (teams, target) => {
+    const resolved = [];
+    const unresolved = [];
+    for (const team of teams) {
+      if (team.memberEmails.length === 0) continue;
+      const included = target.sourceId === undefined || team.sourceIds.includes(target.sourceId);
+      if (!included) continue;
+      const id = groupId.get(team.id) ?? null;
+      if (id) resolved.push(id);
+      else unresolved.push(team.id);
+    }
+    return { resolved: teamGroupIds(resolved), unresolved: unresolved.sort(teamCompare) };
+  };
   const policies = [];
   for (const target of targets) {
     const audience = (members) => members.filter((member) =>
       target.sourceId === undefined || member.sourceIds.includes(target.sourceId)).map((member) => member.email);
-    const before = teamPolicy(audience(previous), target.policyName);
-    const after = teamPolicy(audience(input.members), target.policyName);
-    policies.push({
+    const beforeGroups = boundGroups(priorTeams, target);
+    const afterGroups = boundGroups(nextTeams, target);
+    const entry = {
       kind: target.sourceId === undefined ? 'portal' : 'source',
       ...target,
-      before,
-      after,
-    });
+      before: teamPolicy(audience(previous), target.policyName, beforeGroups.resolved),
+      after: teamPolicy(audience(input.members), target.policyName, afterGroups.resolved),
+    };
+    if (afterGroups.unresolved.length > 0) entry.unresolvedTeamIds = afterGroups.unresolved;
+    policies.push(entry);
   }
-  const policyChanges = policies.filter((policy) => JSON.stringify(policy.before) !== JSON.stringify(policy.after));
+  const policyChanges = policies.filter((policy) => JSON.stringify(policy.before) !== JSON.stringify(policy.after) ||
+    policy.unresolvedTeamIds);
   const oldEmails = new Set(previous.map((member) => member.email));
   const newEmails = new Set(input.members.map((member) => member.email));
-  return teamFreeze({
-    nextState: { schemaVersion: 1, revision: current.revision + 1, members: input.members },
+  const nextState = { schemaVersion: 1, revision: current.revision + 1, members: input.members };
+  if (nextTeams.length > 0 || (Object.hasOwn(input, 'teams') && priorTeams.length > 0)) nextState.teams = nextTeams;
+  const plan = {
+    nextState,
     policies,
     policyChanges,
     summary: {
@@ -284,7 +427,9 @@ export function planTeamAccessChange(value, context) {
       removedPeople: previous.filter((member) => !newEmails.has(member.email)).length,
       changedSources: policyChanges.filter((change) => change.kind === 'source').length,
     },
-  });
+  };
+  if (groupChanges.length > 0) plan.groupChanges = groupChanges;
+  return teamFreeze(plan);
 }
 
 const API_ORIGIN = 'https://api.cloudflare.com';
@@ -333,6 +478,8 @@ const INTERNAL_MANAGEMENT_STATUS_PATH = '/management-credential/status';
 const STORAGE_KEY = 'ankka-mcp-gateway/uninstall-state/v1';
 const STATUS_KEY = 'ankka-mcp-gateway/public-status/v1';
 const SOURCE_REMOVAL_KEY = 'ankka-mcp-gateway/source-removal/v1';
+// One installed-source tool update. It exists only between the Portal write and the allowlist commit.
+const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
 const INTERNAL_SOURCE_REMOVAL_PATH = '/source-removal';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
 const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
@@ -2632,6 +2779,7 @@ function safeManagementControl(value) {
   if (!exactKeys(value, [
     'schemaVersion', 'installationId', 'accountId', 'zoneId', 'portal', 'audienceEmails', 'sourceOwnership',
     ...(Object.hasOwn(value ?? {}, 'removedInitialSource') ? ['removedInitialSource'] : []),
+    ...(Object.hasOwn(value ?? {}, 'receiptSourceToolBaseline') ? ['receiptSourceToolBaseline'] : []),
   ]) || value.schemaVersion !== 1 || !INSTALLATION_ID.test(value.installationId) ||
       !ACCOUNT_ID.test(value.accountId) || !ZONE_ID.test(value.zoneId) || !exactKeys(value.portal, [
         'id', 'name', 'hostname', 'marker',
@@ -2664,6 +2812,11 @@ function safeManagementControl(value) {
   }
   if (new Set(sourceOwnership.map((source) => source.sourceId)).size !== sourceOwnership.length ||
       new Set(sourceOwnership.map((source) => source.resources[0].provider.id)).size !== sourceOwnership.length) return null;
+  const receiptSourceToolBaseline = Object.hasOwn(value, 'receiptSourceToolBaseline')
+    ? safeReceiptSourceToolBaseline(value.receiptSourceToolBaseline) : undefined;
+  if (receiptSourceToolBaseline === null || (receiptSourceToolBaseline &&
+      !sourceOwnership.some((source) => source.sourceId === receiptSourceToolBaseline.sourceId) &&
+      receiptSourceToolBaseline.sourceId !== removedInitialSource?.id)) return null;
   const result = {
     schemaVersion: 1,
     installationId: value.installationId,
@@ -2674,6 +2827,7 @@ function safeManagementControl(value) {
     sourceOwnership: Object.freeze(sourceOwnership),
   };
   if (removedInitialSource) Object.assign(result, { removedInitialSource });
+  if (receiptSourceToolBaseline) Object.assign(result, { receiptSourceToolBaseline });
   return Object.freeze(result);
 }
 
@@ -3151,6 +3305,7 @@ function parseSourceActionPrepare(value) {
 
 async function prepareSourceAction(storage, input) {
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
+  if (await sourceToolEditBlocks(storage)) return sourceActionConflict('lifecycle_pending');
   const parsed = parseSourceActionPrepare(input);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
@@ -4011,6 +4166,278 @@ async function chooseSourceActionTools(storage, env, input) {
   return chosen(nextSources.revision);
 }
 
+function safeReceiptSourceToolBaseline(value) {
+  if (!exactKeys(value, ['sourceId', 'enabledTools']) || !SOURCE_ID.test(value.sourceId)) return null;
+  const enabledTools = exactSortedUniqueStrings(value.enabledTools, toolName, MAX_ENABLED_TOOLS_PER_SOURCE, 1);
+  if (!enabledTools) return null;
+  return Object.freeze({ sourceId: value.sourceId, enabledTools });
+}
+
+function safeSourceToolEdit(value) {
+  if (value === undefined || value === null) return null;
+  if (!exactKeys(value, ['schemaVersion', 'sourceId', 'fromRevision', 'enabledTools', 'phase', 'receiptBaseline']) ||
+      value.schemaVersion !== 1 || !SOURCE_ID.test(value.sourceId) ||
+      !Number.isSafeInteger(value.fromRevision) || value.fromRevision < 1 ||
+      !['portal_armed', 'portal_submitted'].includes(value.phase)) return false;
+  const enabledTools = exactSortedUniqueStrings(value.enabledTools, toolName, MAX_ENABLED_TOOLS_PER_SOURCE, 1);
+  const receiptBaseline = value.receiptBaseline === null ? null : safeReceiptSourceToolBaseline(value.receiptBaseline);
+  if (!enabledTools || (value.receiptBaseline !== null && !receiptBaseline) ||
+      (receiptBaseline && receiptBaseline.sourceId !== value.sourceId)) return false;
+  return Object.freeze({
+    schemaVersion: 1, sourceId: value.sourceId, fromRevision: value.fromRevision, enabledTools,
+    phase: value.phase, receiptBaseline,
+  });
+}
+
+/** True when a tool update is corrupt or belongs to a different source. A null source blocks every update. */
+async function sourceToolEditBlocks(storage, sourceId = null) {
+  const edit = safeSourceToolEdit(await storage.get(SOURCE_TOOL_EDIT_KEY));
+  if (edit === false) return true;
+  if (edit === null) return false;
+  return edit.sourceId !== sourceId;
+}
+
+function installedPortalMappings(control, sources) {
+  const anchor = control.sourceOwnership[0];
+  if (!anchor) return null;
+  return portalServerMappings(control, sources, { sourceId: anchor.sourceId, resources: anchor.resources });
+}
+
+function offeredInstalledCatalogue(source, catalogue) {
+  if (source.id !== MANAGEMENT_SOURCE_ID || catalogue.state !== 'ready') return catalogue;
+  const allowed = new Set(MANAGEMENT_MCP_TOOLS.map((tool) => tool.name));
+  return Object.freeze({
+    state: catalogue.state,
+    tools: Object.freeze(catalogue.tools.filter((tool) => allowed.has(tool.name))),
+  });
+}
+
+/**
+ * Recompute one added source's receipts after an allowlist change. Only the
+ * MCP server hash may move; a change to any other resource means this edit
+ * would rewrite identity or policy, which a tool selection must not do.
+ */
+async function reboundOwnershipForTools(control, source, ownership, enabledTools, installationId) {
+  const emptyAudienceHash = await sha256({ emails: [] });
+  const audienceHash = await sha256({ emails: control.audienceEmails });
+  const managementHash = source.id === MANAGEMENT_SOURCE_ID && source.initialManager
+    ? await sha256({ emails: [source.initialManager] }) : null;
+  const sourceIdentityHash = ownership.resources[2]?.identityHash;
+  if (sourceIdentityHash !== audienceHash && sourceIdentityHash !== emptyAudienceHash && sourceIdentityHash !== managementHash) return null;
+  const length = ownership.resources.length;
+  const currentDesired = (await buildDesiredResources(
+    teardownSettings(control, source, source.id), installationId, sourceIdentityHash === emptyAudienceHash,
+  )).slice(0, length);
+  const nextDesired = (await buildDesiredResources(
+    teardownSettings(control, { ...source, enabledTools }, source.id), installationId, sourceIdentityHash === emptyAudienceHash,
+  )).slice(0, length);
+  if (currentDesired.length !== length || nextDesired.length !== length || currentDesired[0]?.kind !== 'mcp_server') return null;
+  for (let index = 0; index < length; index += 1) {
+    const stored = ownership.resources[index];
+    if (stored.kind !== currentDesired[index].kind || stored.kind !== nextDesired[index].kind ||
+        stored.desiredHash !== currentDesired[index].desiredHash) return null;
+    if (index === 0) {
+      if (currentDesired[0].key !== nextDesired[0].key) return null;
+      continue;
+    }
+    if (nextDesired[index].desiredHash !== currentDesired[index].desiredHash ||
+        canonicalJson(nextDesired[index].desired) !== canonicalJson(currentDesired[index].desired)) return null;
+  }
+  return ownership.resources.map((resource, index) => (
+    index === 0 ? { ...resource, desiredHash: nextDesired[0].desiredHash } : resource
+  ));
+}
+
+async function readInstalledSourceCatalogue(env, control, serverId) {
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const server = await providerCall(
+    `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`,
+    token, { signal: AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS) },
+  );
+  if (server.status === 'auth') return sourceToolsRefusal(409, 'management_credential_required');
+  if (server.status !== 'ok' || !isRecord(server.result) || server.result.id !== serverId) {
+    return sourceToolsRefusal(502, 'source_catalogue_unavailable');
+  }
+  return syncedSourceCatalogue(server.result);
+}
+
+function installedSourceToolsView(source, sources, catalogue, edit) {
+  return fixedJson(200, {
+    schemaVersion: 1, sourceId: source.id, revision: sources.revision, state: catalogue.state, tools: catalogue.tools,
+    enabledTools: source.enabledTools,
+    pendingTools: edit?.sourceId === source.id ? edit.enabledTools : null,
+  });
+}
+
+async function loadInstalledSource(storage, env, sourceId, actorEmail) {
+  if (!SOURCE_ID.test(sourceId) || !normalizedActor(actorEmail) ||
+      !await managementOperationActorAllowed(storage, env, actorEmail)) {
+    return sourceToolsRefusal(403, 'access_required');
+  }
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  const edit = safeSourceToolEdit(await storage.get(SOURCE_TOOL_EDIT_KEY));
+  if (!sources || !control || edit === false) {
+    return sourceToolsRefusal(edit === false ? 409 : 503, edit === false ? 'source_tools_recovery_required' : 'sources_unavailable');
+  }
+  const source = sources.sources.find((candidate) => candidate.id === sourceId);
+  if (!source) return sourceToolsRefusal(404, 'source_not_found');
+  return Object.freeze({ sources, control, source, edit });
+}
+
+async function readInstalledSourceTools(storage, env, sourceId, actorEmail) {
+  const loaded = await loadInstalledSource(storage, env, sourceId, actorEmail);
+  if (loaded instanceof Response) return loaded;
+  const { sources, control, source, edit } = loaded;
+  if (source.status !== 'installed') return sourceToolsRefusal(409, 'source_tools_unavailable');
+  const serverId = control.sourceOwnership.find((entry) => entry.sourceId === source.id)?.resources[0]?.provider?.id;
+  if (!safeProviderId(serverId)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  const catalogue = await readInstalledSourceCatalogue(env, control, serverId);
+  if (catalogue instanceof Response) return catalogue;
+  return installedSourceToolsView(source, sources, offeredInstalledCatalogue(source, catalogue), edit);
+}
+
+async function updateInstalledSourceTools(storage, env, sourceId, input, actorEmail) {
+  const enabledTools = exactKeys(input, ['schemaVersion', 'revision', 'enabledTools']) && input.schemaVersion === 1 &&
+      Number.isSafeInteger(input.revision) && input.revision >= 1
+    ? exactSortedUniqueStrings(input.enabledTools, toolName, MAX_ENABLED_TOOLS_PER_SOURCE, 1) : null;
+  if (!enabledTools) return sourceToolsRefusal(400, 'source_tools_invalid');
+  const loaded = await loadInstalledSource(storage, env, sourceId, actorEmail);
+  if (loaded instanceof Response) return loaded;
+  const { sources, control, source } = loaded;
+  let edit = loaded.edit;
+  if (input.revision !== sources.revision) return fixedJson(409, { schemaVersion: 1, error: 'source_conflict', revision: sources.revision });
+  if (edit && edit.fromRevision !== sources.revision) return sourceToolsRefusal(409, 'source_tools_recovery_required');
+  if (source.status !== 'installed') return sourceToolsRefusal(409, 'source_tools_unavailable');
+  const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
+  if (!ownership) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  if (await recordedLifecycleBlocks(storage, Date.now(), null, true, null, source.id) || await teamActionBlocksLifecycle(storage)) {
+    return sourceActionConflict('lifecycle_pending');
+  }
+  if (edit && edit.sourceId === source.id && canonicalJson(edit.enabledTools) !== canonicalJson(enabledTools)) {
+    return sourceToolsRefusal(409, 'source_tools_pending');
+  }
+  if (!edit && canonicalJson(source.enabledTools) === canonicalJson(enabledTools)) return fixedJson(200, sources);
+  const serverId = ownership.resources[0]?.provider?.id;
+  if (!safeProviderId(serverId)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  const environment = parseManagementEnvironment(env);
+  const evidence = environment && await rootTeardownAuthority(storage, environment, control.installationId, env);
+  const root = evidence && {
+    schemaVersion: 1, status: 'ready', installationId: control.installationId, receipt: evidence.root.receipt, teardown: null,
+  };
+  const layout = root && teardownResources(root, control.sourceOwnership, false, control.removedInitialSource ?? null);
+  if (!environment || !root || !layout) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  const aliasesReceipt = layout.receiptSourceOwner === source.id;
+  const catalogue = await readInstalledSourceCatalogue(env, control, serverId);
+  if (catalogue instanceof Response) return catalogue;
+  const offered = offeredInstalledCatalogue(source, catalogue);
+  if (offered.state !== 'ready') return sourceToolsRefusal(409, SOURCE_CATALOGUE_REFUSALS[offered.state]);
+  if (enabledTools.some((name) => !offered.tools.some((tool) => tool.name === name))) {
+    return sourceToolsRefusal(409, 'source_tools_mismatch');
+  }
+  const nextBaseline = edit?.receiptBaseline ?? (aliasesReceipt && !control.receiptSourceToolBaseline
+    ? { sourceId: source.id, enabledTools: [...source.enabledTools] } : control.receiptSourceToolBaseline ?? null);
+  const nextResources = aliasesReceipt ? ownership.resources
+    : await reboundOwnershipForTools(control, source, ownership, enabledTools, control.installationId);
+  if (!nextResources) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  const nextControlValue = {
+    ...control,
+    sourceOwnership: control.sourceOwnership.map((entry) => (
+      entry.sourceId === source.id ? { sourceId: entry.sourceId, resources: nextResources } : entry
+    )),
+  };
+  if (nextBaseline) nextControlValue.receiptSourceToolBaseline = nextBaseline;
+  const nextSources = safeManagementSources({
+    ...sources, revision: sources.revision + 1,
+    sources: sources.sources.map((candidate) => candidate.id === source.id ? { ...candidate, enabledTools } : candidate),
+  });
+  const nextControl = safeManagementControl(nextControlValue);
+  if (!nextSources || !nextControl || !await teardownAuthorityState(root, nextControl, nextSources, environment)) {
+    return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  }
+  const before = installedPortalMappings(control, sources);
+  const after = before?.map((mapping) => mapping.server_id === serverId ? Object.freeze({
+    ...mapping, updated_tools: enabledTools.map((name) => Object.freeze({ name, enabled: true })),
+  }) : mapping);
+  if (!before || !after || before.filter((mapping) => mapping.server_id === serverId).length !== 1) {
+    return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  }
+  const introducingBaseline = Boolean(nextBaseline) && !control.receiptSourceToolBaseline;
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const portalPath = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`;
+  const signal = AbortSignal.timeout(30_000);
+  const portal = await providerCall(portalPath, token, { signal });
+  const matchesBefore = portal.status === 'ok' && portalExact(portal.result, control, before);
+  const matchesAfter = portal.status === 'ok' && portalExact(portal.result, control, after);
+  if (!edit && portal.status !== 'ok') return sourceToolsRefusal(502, 'source_catalogue_unavailable');
+  if (!edit && !matchesBefore && !matchesAfter) return sourceToolsRefusal(409, 'source_portal_drift');
+  if (edit && (portal.status !== 'ok' || (!matchesBefore && !matchesAfter))) {
+    return sourceToolsRefusal(409, 'source_tools_recovery_required');
+  }
+  if (!matchesAfter) {
+    if (!edit) {
+      if (introducingBaseline && !await armSourceCompatibility(storage, env)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+      edit = safeSourceToolEdit({
+        schemaVersion: 1, sourceId: source.id, fromRevision: sources.revision, enabledTools,
+        phase: 'portal_submitted', receiptBaseline: introducingBaseline ? nextBaseline : null,
+      });
+      if (!edit) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+      await storage.put(SOURCE_TOOL_EDIT_KEY, edit);
+    } else if (introducingBaseline && !await armSourceCompatibility(storage, env)) {
+      return sourceToolsRefusal(409, 'source_tools_recovery_required');
+    } else if (edit.phase !== 'portal_submitted') {
+      edit = { ...edit, phase: 'portal_submitted' };
+      await storage.put(SOURCE_TOOL_EDIT_KEY, edit);
+    }
+    const written = await providerCall(portalPath, token, { method: 'PUT', signal, body: canonicalJson({
+      name: control.portal.name, hostname: control.portal.hostname, description: control.portal.marker,
+      code_mode: 'default_on', secure_web_gateway: false,
+      servers: after.map((mapping) => ({ ...mapping, id: mapping.server_id })),
+    }) });
+    if (written.status !== 'ok') return sourceToolsRefusal(409, 'source_tools_recovery_required');
+    const verified = await providerCall(portalPath, token, { signal });
+    if (verified.status !== 'ok' || !portalExact(verified.result, control, after)) {
+      return sourceToolsRefusal(409, 'source_tools_recovery_required');
+    }
+  } else if (introducingBaseline && !await armSourceCompatibility(storage, env)) {
+    return sourceToolsRefusal(409, edit ? 'source_tools_recovery_required' : 'source_tool_edit_unavailable');
+  }
+  await storage.put({ [SOURCES_KEY]: nextSources, [CONTROL_KEY]: nextControl, [SOURCE_TOOL_EDIT_KEY]: null });
+  return fixedJson(200, nextSources);
+}
+
+async function handleInstalledSourceTools(request, env, authorizedAccess = null) {
+  if (!['GET', 'PUT'].includes(request.method)) {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, PUT' });
+  }
+  const access = authorizedAccess ?? await managementActor(request, env);
+  if (access.response) return access.response;
+  if (request.method === 'PUT' && !sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const sourceId = new URL(request.url).pathname.split('/').at(-2);
+  if (!SOURCE_ID.test(sourceId)) return sourceToolsRefusal(404, 'not_found');
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return sourceToolsRefusal(503, 'sources_unavailable');
+  let body = null;
+  if (request.method === 'PUT') {
+    body = await readJsonInput(request, REQUEST_LIMIT_BYTES);
+    if (!body) return sourceToolsRefusal(400, 'source_tools_invalid');
+  }
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid/sources/${sourceId}/tools`, {
+      method: request.method,
+      headers: { 'content-type': 'application/json', 'x-ankka-actor-email': access.actorEmail },
+      body: request.method === 'PUT' ? canonicalJson(body) : undefined,
+    }));
+    if (request.method === 'GET' || response.status !== 200) return response;
+    const sources = safeManagementSources(await response.json());
+    return sources ? fixedJson(200, await publicSources(sources, stub, env)) : sourceToolsRefusal(503, 'sources_unavailable');
+  } catch {
+    return sourceToolsRefusal(409, 'source_tools_recovery_required');
+  }
+}
+
 // Source OAuth runs entirely in the customer's Worker. Only the short-lived
 // PKCE attempt is retained here; provider tokens go straight to Cloudflare.
 function sourceOauthFailure(code = 'source_oauth_unavailable') {
@@ -4349,7 +4776,7 @@ async function saveRuntimeUpdates(storage, state) {
 }
 
 async function prepareRuntimeAction(storage, environment, input) {
-  if (await sourceRemovalBlocks(storage) || await currentTeardownLocksRuntime(storage, Date.now())) return null;
+  if (await sourceRemovalBlocks(storage) || await sourceToolEditBlocks(storage) || await currentTeardownLocksRuntime(storage, Date.now())) return null;
   // A token change gives this Worker a new version; an update must not read its bindings around that write.
   if (await credentialActionBlocksLifecycle(storage, Date.now())) return null;
   if (await teamActionBlocksLifecycle(storage) || !await teamRuntimeReleaseAllowed(storage, input?.to?.release)) return null;
@@ -4742,7 +5169,14 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
     ? control.removedInitialSource ?? null
     : installedSources.find((source) => source.id === layout.receiptSourceOwner) ?? null;
   if (!control.removedInitialSource && (layout.receiptSourceOwner !== null) !== (receiptSource !== null)) return null;
-  const rootSettings = teardownSettings(control, receiptSource, 'company-context');
+  // The receipt-owned source's live allowlist can change. Teardown keeps deriving
+  // the immutable root receipt from the tools that receipt was built with.
+  let receiptSubject = receiptSource;
+  if (control.receiptSourceToolBaseline) {
+    if (!receiptSource || control.receiptSourceToolBaseline.sourceId !== receiptSource.id) return null;
+    receiptSubject = { ...receiptSource, enabledTools: control.receiptSourceToolBaseline.enabledTools };
+  }
+  const rootSettings = teardownSettings(control, receiptSubject, 'company-context');
   const rootDesired = await buildDesiredResources(rootSettings, root.installationId);
   if (rootDesired.length !== root.receipt.resources.length ||
       root.receipt.desiredHash !== await sha256({
@@ -5316,7 +5750,7 @@ async function rootTeardownAuthority(storage, environment, installationId, env, 
 }
 
 async function prepareTeardownAction(storage, environment, input, env, currentPolicies = false, managed = null) {
-  if (await credentialActionBlocksLifecycle(storage, Date.now())) return null;
+  if (await credentialActionBlocksLifecycle(storage, Date.now()) || await sourceToolEditBlocks(storage)) return null;
   const currentState = currentPolicies ? await currentTeardownState(storage, env, managed) : null;
   if (currentPolicies ? currentState === null : await teamTeardownBlocked(storage)) return null;
   if (!exactKeys(input, [
@@ -5583,10 +6017,16 @@ async function finishSourceRemoval(storage, env, source, control, sources, initi
   const rawActions = await storage.get(ACTIONS_KEY);
   const actions = rawActions === undefined ? null : safeSourceActions(rawActions);
   if (!nextSources || !nextControl || !team || (rawActions !== undefined && !actions)) return null;
-  const nextTeam = safeTeamState({ ...team, revision: team.revision + 1, pendingAction: null,
+  const nextTeamRecord = { ...team, revision: team.revision + 1, pendingAction: null,
     members: team.members.map((member) => ({ ...member, sourceIds: member.sourceIds.filter((id) => id !== source.id) })),
     sourceBaselines: team.sourceBaselines.filter((id) => id !== source.id),
-  }, nextControl, nextSources, accessConfiguration(env).emails, serviceActorOf(accessConfiguration(env)));
+  };
+  if (team.teams) {
+    nextTeamRecord.teams = team.teams.map((entry) => ({
+      ...entry, sourceIds: entry.sourceIds.filter((id) => id !== source.id),
+    }));
+  }
+  const nextTeam = safeTeamState(nextTeamRecord, nextControl, nextSources, accessConfiguration(env).emails, serviceActorOf(accessConfiguration(env)));
   if (!nextTeam) return null;
   const writes = { [CONTROL_KEY]: nextControl, [SOURCES_KEY]: nextSources,
     [TEAM_KEY]: nextTeam, [SOURCE_REMOVAL_KEY]: null,
@@ -6079,6 +6519,7 @@ export class AdminState {
       }
       if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'PUT') {
         if (await sourceRemovalBlocks(this.state.storage)) return sourceRemovalRefusal('source_removal_pending');
+        if (await sourceToolEditBlocks(this.state.storage)) return sourceActionConflict('lifecycle_pending');
         if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
         if (await teamActionBlocksLifecycle(this.state.storage)) return fixedJson(409, {
           schemaVersion: 1, error: 'team_action_conflict',
@@ -6127,6 +6568,15 @@ export class AdminState {
         }
         await this.state.storage.put(SOURCES_KEY, updated);
         return fixedJson(200, updated);
+      }
+      const installedTools = /^\/sources\/(source-[a-f0-9]{16})\/tools$/u.exec(url.pathname);
+      if (installedTools && (request.method === 'GET' || request.method === 'PUT')) {
+        const actorEmail = normalizedActor(request.headers.get('x-ankka-actor-email'));
+        if (!actorEmail) return sourceToolsRefusal(403, 'access_required');
+        if (request.method === 'GET') {
+          return readInstalledSourceTools(this.state.storage, this.env, installedTools[1], actorEmail);
+        }
+        return updateInstalledSourceTools(this.state.storage, this.env, installedTools[1], await readJsonInput(request, REQUEST_LIMIT_BYTES), actorEmail);
       }
       return fixedJson(404, { schemaVersion: 1, error: 'not_found' });
     };
@@ -6859,35 +7309,50 @@ function safeTeamAction(value, context) {
       !HASH.test(value.actionKeyHash) || !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
       !HASH.test(value.planHash) || !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
       (value.failureCode !== null && !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)) ||
-      !Array.isArray(value.journal) || value.journal.length > 34) return null;
+      !Array.isArray(value.journal) || value.journal.length > 64) return null;
   try {
     normalizeTeamAccessRequest(value.request, { ...context,
       revision: value.status === 'succeeded' ? context.revision - 1 : context.revision });
   } catch { return null; }
-  const ids = new Set();
+  const policyIds = new Set();
+  const teamIds = new Set();
   for (const entry of value.journal) {
-    if (!exactKeys(entry, ['policyId', 'phase']) || !safeProviderId(entry.policyId) ||
-        !['send_armed', 'verified'].includes(entry.phase) || ids.has(entry.policyId)) return null;
-    ids.add(entry.policyId);
+    if (exactKeys(entry, ['policyId', 'phase'])) {
+      if (!safeProviderId(entry.policyId) || !['send_armed', 'verified'].includes(entry.phase) ||
+          policyIds.has(entry.policyId)) return null;
+      policyIds.add(entry.policyId);
+      continue;
+    }
+    if (!exactKeys(entry, ['groupId', 'phase', 'teamId']) || !isText(entry.teamId) || !TEAM_ID.test(entry.teamId) ||
+        !(entry.groupId === null || safeProviderId(entry.groupId)) ||
+        !['send_armed', 'verified'].includes(entry.phase) || teamIds.has(entry.teamId)) return null;
+    teamIds.add(entry.teamId);
   }
   if (value.status === 'failed' && value.journal.length > 0) return null;
   return Object.freeze(structuredClone(value));
 }
 
 function safeTeamState(value, control, sources, admins, serviceActor = null) {
-  if (!exactKeys(value, ['schemaVersion', 'revision', 'members', 'sourceBaselines', 'minimumRuntimeRelease', 'teardownDisabled', 'pendingAction']) ||
+  const keys = ['members', 'minimumRuntimeRelease', 'pendingAction', 'revision', 'schemaVersion', 'sourceBaselines', 'teardownDisabled'];
+  if (isRecord(value) && Object.hasOwn(value, 'teams')) keys.push('teams');
+  if (!exactKeys(value, keys) ||
       value.schemaVersion !== 1 || !isBoolean(value.teardownDisabled) ||
       (value.minimumRuntimeRelease !== null && !updateSemver(value.minimumRuntimeRelease)) ||
       value.teardownDisabled !== (value.minimumRuntimeRelease !== null)) return null;
   const context = { revision: value.revision, adminEmails: admins, serviceActor, sources: teamSources(sources) };
   let normalized;
-  try { normalized = normalizeTeamAccessRequest({ schemaVersion: 1, expectedRevision: value.revision, members: value.members }, context); }
-  catch { return null; }
+  let teams;
+  try {
+    normalized = normalizeTeamAccessRequest({ schemaVersion: 1, expectedRevision: value.revision, members: value.members }, context);
+    if (Object.hasOwn(value, 'teams')) teams = storedTeamRecords(value.teams, teamContext(context));
+  } catch { return null; }
   const baselines = exactSortedUniqueStrings(value.sourceBaselines, (id) =>
     SOURCE_ID.test(id) && control.sourceOwnership.some((source) => source.sourceId === id) ? id : null, 32, 0);
   const pendingAction = value.pendingAction === null ? null : safeTeamAction(value.pendingAction, context);
   if (!baselines || (value.pendingAction !== null && !pendingAction)) return null;
-  return Object.freeze({ ...value, members: normalized.members, sourceBaselines: baselines, pendingAction });
+  const state = { ...value, members: normalized.members, sourceBaselines: baselines, pendingAction };
+  if (teams) state.teams = teams;
+  return Object.freeze(state);
 }
 
 async function readTeamState(storage, env) {
@@ -6947,7 +7412,8 @@ async function otherLifecycleBlocksSource(storage, now, currentActionId, current
 }
 
 /** An unfinished source installation, update or removal, as their own journals record it. */
-async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true, currentSourceActionId = currentActionId) {
+async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true, currentSourceActionId = currentActionId, allowToolEditSourceId = null) {
+  if (await sourceToolEditBlocks(storage, allowToolEditSourceId)) return true;
   const removal = safeSourceRemoval(await storage.get(SOURCE_REMOVAL_KEY));
   if (removal === false || (removal && removal.actionId !== currentActionId)) return true;
   for (const key of [...(includeSources ? [ACTIONS_KEY] : []), UPDATES_KEY, TEARDOWNS_KEY]) {
@@ -7312,6 +7778,113 @@ async function verifyManagementAccess(storage, env) {
   return answer(status, 'active', portals, accessPolicies);
 }
 
+const TEAM_INSTALLATION_ID = /^acg-[0-9a-f]{24}$/u;
+
+function teamGroupName(installationId, teamId) {
+  if (!isText(installationId) || !TEAM_INSTALLATION_ID.test(installationId) || !isText(teamId) || !TEAM_ID.test(teamId)) return null;
+  return `ankka-${installationId}-${teamId}`;
+}
+
+function teamGroupEmails(include) {
+  if (!Array.isArray(include)) return null;
+  const emails = [];
+  for (const rule of include) {
+    if (!isRecord(rule) || Object.keys(rule).length !== 1 || !isRecord(rule.email) ||
+        Object.keys(rule.email).length !== 1 || !isText(rule.email.email)) return null;
+    const email = rule.email.email.trim().toLowerCase();
+    if (email.length > 254 || !TEAM_EMAIL.test(email)) return null;
+    emails.push(email);
+  }
+  if (new Set(emails).size !== emails.length) return null;
+  return emails.sort(compareText);
+}
+
+function teamGroupShapeOk(observed, name) {
+  if (!isRecord(observed) || observed.name !== name) return false;
+  if (observed.exclude != null && (!Array.isArray(observed.exclude) || observed.exclude.length !== 0)) return false;
+  if (observed.require != null && (!Array.isArray(observed.require) || observed.require.length !== 0)) return false;
+  return teamGroupEmails(observed.include) !== null;
+}
+
+function teamGroupRecordMatches(observed, name, emails) {
+  const found = teamGroupShapeOk(observed, name) ? teamGroupEmails(observed.include) : null;
+  return found !== null && canonicalJson(found) === canonicalJson([...emails].sort(compareText));
+}
+
+function teamGroupBody(name, emails) {
+  return {
+    name,
+    include: emails.map((email) => ({ email: { email } })),
+    exclude: [],
+    require: [],
+  };
+}
+
+function journalReplacing(journal, entry) {
+  const id = entry.policyId ?? entry.teamId;
+  return [...journal.filter((item) => (item.policyId ?? item.teamId) !== id), entry];
+}
+
+function teamGroupBindings(journal) {
+  const bindings = new Map();
+  for (const entry of journal) {
+    if (entry.teamId && entry.phase === 'verified' && entry.groupId) bindings.set(entry.teamId, entry.groupId);
+  }
+  return bindings;
+}
+
+function bindTeamPlan(plan, bindings) {
+  const policies = [];
+  for (const policy of plan.policies) {
+    if (!policy.unresolvedTeamIds?.length) {
+      policies.push(policy);
+      continue;
+    }
+    const extra = [];
+    for (const teamId of policy.unresolvedTeamIds) {
+      const groupId = bindings.get(teamId);
+      if (!groupId) return null;
+      extra.push(groupId);
+    }
+    const selectors = teamPolicySelectors(policy.after);
+    const after = teamPolicy(selectors.emails, policy.policyName, [...selectors.groupIds, ...extra]);
+    const next = { ...policy, after };
+    delete next.unresolvedTeamIds;
+    policies.push(next);
+  }
+  return {
+    ...plan,
+    policies,
+    policyChanges: policies.filter((policy) => canonicalJson(policy.before) !== canonicalJson(policy.after)),
+  };
+}
+
+function teamsWithGroupIds(nextTeams, priorTeams, journal) {
+  const bindings = teamGroupBindings(journal);
+  const removed = new Set(journal.filter((entry) => entry.teamId && entry.phase === 'verified' && entry.groupId === null)
+    .map((entry) => entry.teamId));
+  const prior = new Map((priorTeams ?? []).map((team) => [team.id, team.accessGroupId ?? null]));
+  return nextTeams.map((team) => ({
+    ...publicTeam(team),
+    accessGroupId: team.memberEmails.length === 0 || removed.has(team.id)
+      ? null : bindings.get(team.id) ?? prior.get(team.id) ?? null,
+  }));
+}
+
+async function readOwnedTeamGroup(context, token, team) {
+  const name = teamGroupName(context.control.installationId, team.id);
+  if (!name || !team.accessGroupId) return null;
+  const account = context.environment.accountId;
+  const response = await providerCall(`/accounts/${account}/access/groups/${encodeURIComponent(team.accessGroupId)}`,
+    token, { signal: context.signal });
+  if (!teamProviderOk(context, response)) return null;
+  const group = response.result;
+  if (!isRecord(group) || group.id !== team.accessGroupId ||
+      (Object.hasOwn(group, 'account_id') && group.account_id !== account) ||
+      !teamGroupShapeOk(group, name)) return null;
+  return teamGroupEmails(group.include);
+}
+
 async function teamSnapshot(storage, env) {
   let state = await readTeamState(storage, env);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
@@ -7327,39 +7900,66 @@ async function teamSnapshot(storage, env) {
     context.signal = AbortSignal.timeout(30_000);
     const plan = planGatewayTeamAccess({ schemaVersion: 1, expectedRevision: state.revision,
       members: state.members }, context.planner);
-    const audiences = await verifyTeamPolicies(context, plan, managementCredential(env), [], null, true);
+    const token = managementCredential(env);
+    const audiences = await verifyTeamPolicies(context, plan, token, [], null, true);
     if (!audiences) return null;
+    const audienceOf = (policy) => audiences.get(policy.policyId);
     const portal = plan.policies.find((policy) => policy.kind === 'portal');
-    const emails = audiences.get(portal.policyId);
+    const emails = audienceOf(portal).emails;
     if (admins.some((email) => !emails.includes(email))) return null;
     const sourcePolicies = plan.policies.filter((policy) => policy.kind === 'source');
     const nativeMismatch = plan.policies.filter((policy) => policy.kind === 'management').some((policy) => {
       const source = sourcePolicies.find((entry) => entry.sourceId === policy.sourceId);
-      return !source || canonicalJson(audiences.get(policy.policyId)) !== canonicalJson(
-        [...new Set([...context.control.audienceEmails, ...audiences.get(source.policyId)])].sort(compareText));
+      if (!source) return true;
+      const live = audienceOf(policy);
+      const sourceLive = audienceOf(source);
+      return canonicalJson(live.emails) !== canonicalJson(
+        [...new Set([...context.control.audienceEmails, ...sourceLive.emails])].sort(compareText)) ||
+        canonicalJson(live.groupIds) !== canonicalJson(sourceLive.groupIds);
     });
-    const inconsistent = nativeMismatch || sourcePolicies.some((policy) => audiences.get(policy.policyId).some((email) => !emails.includes(email)));
+    const expectedGroups = (policy) => (state.teams ?? []).filter((team) => team.accessGroupId && team.memberEmails.length > 0 &&
+      (policy.kind === 'portal' || (policy.sourceId && team.sourceIds.includes(policy.sourceId))))
+      .map((team) => team.accessGroupId).sort(compareText);
+    let teams = state.teams?.map((team) => ({ ...team }));
+    let groupMismatch = plan.policies.some((policy) => canonicalJson([...audienceOf(policy).groupIds].sort(compareText)) !==
+      canonicalJson(expectedGroups(policy)));
+    if (!groupMismatch && teams?.some((team) => team.accessGroupId)) {
+      for (const team of teams) {
+        if (!team.accessGroupId) continue;
+        const liveEmails = await readOwnedTeamGroup(context, token, team);
+        if (!liveEmails) { groupMismatch = true; break; }
+        team.memberEmails = liveEmails;
+      }
+    }
+    const inconsistent = nativeMismatch || groupMismatch || sourcePolicies.some((policy) =>
+      audienceOf(policy).emails.some((email) => !emails.includes(email)));
     if (inconsistent && (!state.pendingAction || ['failed', 'succeeded'].includes(state.pendingAction.status))) return null;
     // A partially applied proposal may temporarily disagree across policies.
     // Keep it resumable, but do not label the saved roster as a live snapshot.
     if (!inconsistent) {
       members = emails.map((email) => ({ email, sourceIds: sourcePolicies
-        .filter((policy) => audiences.get(policy.policyId).includes(email)).map((policy) => policy.sourceId).sort(compareText) }));
+        .filter((policy) => audienceOf(policy).emails.includes(email)).map((policy) => policy.sourceId).sort(compareText) }));
       observedAt = new Date().toISOString();
     }
+    const teamsChanged = teams && canonicalJson(teams.map(publicTeam)) !== canonicalJson((state.teams ?? []).map(publicTeam));
     if ((!state.pendingAction || ['succeeded', 'failed'].includes(state.pendingAction.status)) &&
-        canonicalJson(members) !== canonicalJson(state.members)) {
+        (canonicalJson(members) !== canonicalJson(state.members) || teamsChanged)) {
       state = { ...state, revision: state.revision + 1, members, pendingAction: null };
+      if (teams) state.teams = teams;
       await storage.put(TEAM_KEY, state);
     }
   }
+  const proposedTeams = state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status) &&
+    Object.hasOwn(state.pendingAction.request, 'teams') ? state.pendingAction.request.teams : null;
   return { schemaVersion: 1, revision: state.revision, members, adminEmails: admins,
     observedAt,
     sources: sources.sources.map((source) => ({ id: source.id, label: source.label,
       enabledTools: source.enabledTools, status: source.status })),
+    teams: (state.teams ?? []).map(publicTeam),
     pendingAction: state.pendingAction ? publicTeamAction(state.pendingAction) : null,
     proposedMembers: state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
       ? state.pendingAction.request.members : null,
+    proposedTeams,
     managementCredentialConfigured: configured,
     managementCredentialChoice: await managementCredentialChoice(storage),
     editingEnabled: configured && !blocked,
@@ -7372,12 +7972,17 @@ function planGatewayTeamAccess(value, context) {
     const target = teamTarget(value, true);
     const source = plan.policies.find((policy) => policy.kind === 'source' && policy.sourceId === target.sourceId);
     if (!source || plan.policies.some((policy) => policy.applicationId === target.applicationId || policy.policyId === target.policyId)) teamFail('team_access_invalid_target');
-    const audience = (policy) => [...new Set([...context.managementAuthenticationEmails, ...teamPolicyAudience(policy)])].sort(compareText);
-    return { kind: 'management', ...target,
-      before: teamPolicy(audience(source.before), target.policyName), after: teamPolicy(audience(source.after), target.policyName) };
+    const selectors = (policy) => teamPolicySelectors(policy);
+    const audience = (policy) => [...new Set([...context.managementAuthenticationEmails, ...selectors(policy).emails])].sort(compareText);
+    const entry = { kind: 'management', ...target,
+      before: teamPolicy(audience(source.before), target.policyName, selectors(source.before).groupIds),
+      after: teamPolicy(audience(source.after), target.policyName, selectors(source.after).groupIds) };
+    if (source.unresolvedTeamIds) entry.unresolvedTeamIds = source.unresolvedTeamIds;
+    return entry;
   });
   return teamFreeze({ ...plan, policies: [...plan.policies, ...native],
-    policyChanges: [...plan.policyChanges, ...native.filter((policy) => canonicalJson(policy.before) !== canonicalJson(policy.after))] });
+    policyChanges: [...plan.policyChanges, ...native.filter((policy) => canonicalJson(policy.before) !== canonicalJson(policy.after) ||
+      policy.unresolvedTeamIds)] });
 }
 
 async function teamRuntimeContext(storage, env) {
@@ -7405,7 +8010,7 @@ async function teamRuntimeContext(storage, env) {
   const nativeTargets = control.sourceOwnership.filter((source) => nativeSourceId(source.sourceId)).map((source) => target(source.resources[4], source.sourceId));
   return { team, control, sources, environment, authority,
     planner: { revision: team.revision, adminEmails: admins, serviceActor: serviceActorOf(accessConfiguration(env)), sources: teamSources(sources),
-      currentMembers: team.members, portalTarget: portal, sourceTargets,
+      currentMembers: team.members, currentTeams: team.teams ?? [], portalTarget: portal, sourceTargets,
       nativeTargets, managementAuthenticationEmails: control.audienceEmails } };
 }
 
@@ -7425,13 +8030,19 @@ async function prepareTeamAction(storage, env, input) {
   // Resume only the exact retained proposal, including legacy OAuth proposals.
   // Keep its write journal: a lost response never proves a write rolled back.
   // The Durable Object queue serializes preparation and execution together.
-  if (unfinished && canonicalJson(previous.request.members) !== canonicalJson(plan.nextState.members)) return null;
+  if (unfinished) {
+    const recordedTeams = Object.hasOwn(previous.request, 'teams') ? previous.request.teams : [];
+    const proposedTeams = Object.hasOwn(plan.nextState, 'teams') ? plan.nextState.teams : [];
+    if (canonicalJson(previous.request.members) !== canonicalJson(plan.nextState.members) ||
+        canonicalJson(recordedTeams) !== canonicalJson(proposedTeams)) return null;
+  }
   const planHash = await sha256({ plan, sourceRevision: context.sources.revision });
   if (unfinished && previous.planHash !== planHash) return null;
+  const request = { schemaVersion: 1, expectedRevision: context.team.revision, members: plan.nextState.members };
+  if (Object.hasOwn(plan.nextState, 'teams')) request.teams = plan.nextState.teams;
   const action = safeTeamAction({ schemaVersion: 1, actionId: unfinished ? previous.actionId : input.actionId, actorEmail: input.actorEmail,
     actionKeyHash: input.actionKeyHash, issuedAt: input.issuedAt, expiresAt: input.expiresAt,
-    status: 'authorization_required', failureCode: null, request: { schemaVersion: 1,
-      expectedRevision: context.team.revision, members: plan.nextState.members },
+    status: 'authorization_required', failureCode: null, request,
     sourceRevision: context.sources.revision, planHash, journal: unfinished ? previous.journal : [],
   }, context.planner);
   if (!action) return null;
@@ -7471,10 +8082,10 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
     const live = policies.result[0];
     if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return null;
     if (readAudience) {
-      let audience;
-      try { audience = teamPolicyAudience(live); } catch { return null; }
-      if (!teamPolicyMatches(live, teamPolicy(audience, policy.policyName), policy.policyId)) return null;
-      return audience;
+      let selectors;
+      try { selectors = teamPolicySelectors(live); } catch { return null; }
+      if (!teamPolicyMatches(live, teamPolicy(selectors.emails, policy.policyName, selectors.groupIds), policy.policyId)) return null;
+      return selectors;
     }
     const armed = journal.find((value) => value.policyId === policy.policyId);
     const before = teamPolicyMatches(live, policy.before, policy.policyId);
@@ -7522,7 +8133,9 @@ async function processTeamAction(env, storage, prepared, nowMs) {
       await otherLifecycleBlocksTeam(storage, nowMs)) return null;
   const plan = planGatewayTeamAccess(action.request, context.planner);
   if (action.sourceRevision !== context.sources.revision || action.planHash !== await sha256({ plan, sourceRevision: context.sources.revision }) ||
-      action.journal.some((entry) => !plan.policyChanges.some((policy) => policy.policyId === entry.policyId))) return null;
+      action.journal.some((entry) => entry.teamId
+        ? !(plan.groupChanges ?? []).some((change) => change.teamId === entry.teamId)
+        : !plan.policyChanges.some((policy) => policy.policyId === entry.policyId))) return null;
   let teamState = context.team;
   const persist = async (next) => {
     action = { ...action, ...next };
@@ -7531,6 +8144,7 @@ async function processTeamAction(env, storage, prepared, nowMs) {
   const fail = async (code) => {
     if (context.signal?.aborted) code = 'team_action_recovery_required';
     if (context.credentialRejected) code = 'team_management_credential_invalid';
+    if (context.groupPermissionRejected) code = 'team_access_group_permission_missing';
     await persist({ status: 'recovery_required', failureCode: code });
     return fixedJson(409, { schemaVersion: 1, error: code });
   };
@@ -7542,9 +8156,97 @@ async function processTeamAction(env, storage, prepared, nowMs) {
   // Bound the complete operation, including response body reads.
   context.signal = AbortSignal.timeout(Math.max(1, Math.min(60_000, action.expiresAt - Date.now())));
   await persist({ status: 'applying', failureCode: null });
-  let observed = await verifyTeamPolicies(context, plan, token, action.journal);
-  if (!observed) return fail('team_policy_drift');
-  for (const policy of plan.policyChanges) {
+  const groupChanges = plan.groupChanges ?? [];
+  const membershipOnly = plan.policyChanges.length === 0 && groupChanges.length > 0 &&
+    groupChanges.every((change) => change.op === 'update');
+  const account = context.environment.accountId;
+  const groupCollection = `/accounts/${account}/access/groups`;
+  const groupAccepted = (response) => {
+    if (response.status === 'auth') context.groupPermissionRejected = true;
+    return teamProviderOk(context, response);
+  };
+  const applyGroup = async (change) => {
+    const name = teamGroupName(context.control.installationId, change.teamId);
+    if (!name || Date.now() >= action.expiresAt || context.signal?.aborted) return null;
+    const armed = () => action.journal.find((entry) => entry.teamId === change.teamId);
+    if (change.op === 'create') {
+      const existing = armed();
+      if (existing?.phase === 'verified' && existing.groupId) return existing.groupId;
+      if (existing?.phase === 'send_armed') {
+        const listed = await providerList(groupCollection, token, {}, context.signal);
+        if (!groupAccepted(listed) || !Array.isArray(listed.result)) return null;
+        const matches = listed.result.filter((group) => isRecord(group) && group.name === name);
+        if (matches.length > 1) return null;
+        if (matches.length === 1) {
+          const group = matches[0];
+          if ((Object.hasOwn(group, 'account_id') && group.account_id !== account) || !safeProviderId(group.id) ||
+              !teamGroupRecordMatches(group, name, change.memberEmails)) return null;
+          await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: group.id, phase: 'verified' }) });
+          return group.id;
+        }
+      } else {
+        await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: null, phase: 'send_armed' }) });
+      }
+      const created = await providerCall(groupCollection, token, {
+        method: 'POST', body: canonicalJson(teamGroupBody(name, change.memberEmails)), signal: context.signal,
+      });
+      if (!groupAccepted(created) || !safeProviderId(created.result?.id) ||
+          (Object.hasOwn(created.result, 'account_id') && created.result.account_id !== account) ||
+          !teamGroupRecordMatches(created.result, name, change.memberEmails)) return null;
+      await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: created.result.id, phase: 'verified' }) });
+      return created.result.id;
+    }
+    if (change.op === 'update') {
+      if (armed()?.phase === 'verified') return change.groupId;
+      const live = await providerCall(`${groupCollection}/${encodeURIComponent(change.groupId)}`, token, { signal: context.signal });
+      if (!groupAccepted(live) || live.result?.id !== change.groupId ||
+          (Object.hasOwn(live.result, 'account_id') && live.result.account_id !== account) ||
+          !teamGroupShapeOk(live.result, name)) return null;
+      if (teamGroupRecordMatches(live.result, name, change.memberEmails)) {
+        await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'verified' }) });
+        return change.groupId;
+      }
+      await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'send_armed' }) });
+      const updated = await providerCall(`${groupCollection}/${encodeURIComponent(change.groupId)}`, token, {
+        method: 'PUT', body: canonicalJson(teamGroupBody(name, change.memberEmails)), signal: context.signal,
+      });
+      if (!groupAccepted(updated) || updated.result?.id !== change.groupId ||
+          !teamGroupRecordMatches(updated.result, name, change.memberEmails)) return null;
+      await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'verified' }) });
+      return change.groupId;
+    }
+    if (armed()?.phase === 'verified' && armed()?.groupId === null) return true;
+    const live = await providerCall(`${groupCollection}/${encodeURIComponent(change.groupId)}`, token, { signal: context.signal });
+    if (live.status === 'absent' && armed()?.phase === 'send_armed') {
+      await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: null, phase: 'verified' }) });
+      return true;
+    }
+    if (!groupAccepted(live) || live.result?.id !== change.groupId || !teamGroupShapeOk(live.result, name)) return null;
+    await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'send_armed' }) });
+    const removed = await providerCall(`${groupCollection}/${encodeURIComponent(change.groupId)}`, token, {
+      method: 'DELETE', signal: context.signal,
+    });
+    if (removed.status !== 'absent' && (!groupAccepted(removed) ||
+        (removed.result !== null && removed.result?.id !== change.groupId))) return null;
+    await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: null, phase: 'verified' }) });
+    return true;
+  };
+  let observed = null;
+  if (!membershipOnly) {
+    observed = await verifyTeamPolicies(context, plan, token, action.journal);
+    if (!observed) return fail('team_policy_drift');
+  }
+  for (const change of groupChanges.filter((change) => change.op !== 'delete')) {
+    if (await applyGroup(change) == null) return fail('team_action_recovery_required');
+  }
+  const pendingGroups = plan.policies.some((policy) => policy.unresolvedTeamIds?.length);
+  const executable = pendingGroups ? bindTeamPlan(plan, teamGroupBindings(action.journal)) : plan;
+  if (!executable) return fail('team_action_recovery_required');
+  if (pendingGroups) {
+    observed = await verifyTeamPolicies(context, executable, token, action.journal);
+    if (!observed) return fail('team_policy_drift');
+  }
+  for (const policy of executable.policyChanges) {
     // The complete graph read just proved this journaled write is still exact.
     // Retrying must advance to unfinished targets instead of spending another
     // deadline rechecking every completed write. The final graph read still
@@ -7556,7 +8258,7 @@ async function processTeamAction(env, storage, prepared, nowMs) {
       }
       continue;
     }
-    const fresh = await verifyTeamPolicies(context, plan, token, action.journal, policy.policyId);
+    const fresh = await verifyTeamPolicies(context, executable, token, action.journal, policy.policyId);
     if (!fresh) return fail('team_policy_drift');
     observed.set(policy.policyId, fresh.get(policy.policyId));
     if (Date.now() >= action.expiresAt || context.signal.aborted) return fail('team_action_recovery_required');
@@ -7574,16 +8276,24 @@ async function processTeamAction(env, storage, prepared, nowMs) {
     }
     // Verify this target after each write, then the entire graph once at the
     // end. The number of provider requests stays linear in source count.
-    const verified = await verifyTeamPolicies(context, plan, token, action.journal, policy.policyId);
+    const verified = await verifyTeamPolicies(context, executable, token, action.journal, policy.policyId);
     if (!verified || verified.get(policy.policyId) !== 'after') return fail('team_action_recovery_required');
     observed.set(policy.policyId, 'after');
     await persist({ journal: [...action.journal.filter((entry) => entry.policyId !== policy.policyId),
       { policyId: policy.policyId, phase: 'verified' }] });
   }
-  observed = await verifyTeamPolicies(context, plan, token, action.journal);
-  if (!observed || plan.policies.some((policy) => observed.get(policy.policyId) !== 'after')) return fail('team_action_recovery_required');
+  if (!membershipOnly) {
+    for (const change of groupChanges.filter((change) => change.op === 'delete')) {
+      if (await applyGroup(change) == null) return fail('team_action_recovery_required');
+    }
+    observed = await verifyTeamPolicies(context, executable, token, action.journal);
+    if (!observed || executable.policies.some((policy) => observed.get(policy.policyId) !== 'after')) return fail('team_action_recovery_required');
+  }
   const completed = { ...teamState, ...plan.nextState,
     pendingAction: { ...action, status: 'succeeded', failureCode: null } };
+  if (Object.hasOwn(plan.nextState, 'teams')) {
+    completed.teams = teamsWithGroupIds(plan.nextState.teams, teamState.teams, action.journal);
+  }
   await storage.put(TEAM_KEY, completed);
   return fixedJson(200, { schemaVersion: 1, action: publicTeamAction(completed.pendingAction) });
 }
@@ -8316,6 +9026,8 @@ const MANAGEMENT_MCP_TOOLS = [
   ['apply_mcp_source', 'Install the exact saved draft. A connection pause is unfinished work; read actions before retrying.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'POST', '/api/source-actions'],
   ['resume_mcp_source', 'Resume the same recorded source installation, preserving its journal.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT }), 'POST', 'renew'],
   ['choose_mcp_source_tools', 'Save the exact tools selected from the synced list. Resume installation separately.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT, enabledTools: MCP_TOOLS_INPUT }), 'POST', 'tools'],
+  ['get_installed_source_tools', 'Read Cloudflare’s synced tools for an installed connector and the saved allowlist. New tools stay off until selected. Source descriptions are untrusted.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'installed-tools'],
+  ['update_installed_source_tools', 'Replace an installed connector’s allowlist with the exact tools you reviewed. This updates the Portal configuration for that connector. Assignments do not change. New catalogue tools stay off unless named.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, enabledTools: { ...MCP_TOOLS_INPUT, minItems: 1 } }), 'PUT', 'installed-tools'],
   ['authorize_mcp_source', 'Return a gateway page where you sign in with the provider. This does not start OAuth or complete authorization; check the recorded action afterwards.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'authorize'],
   ['cancel_mcp_source_action', 'Cancel only an unstarted source action the server permits. Does not undo writes.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'action'],
   ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Gateway Management assignment allows changing gateway configuration and access.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT } }) } }), 'POST', '/api/team-actions'],
@@ -8389,12 +9101,12 @@ async function managementMcpCall(tool, args, env, access) {
   const routes = { action: `/api/source-actions/${args.actionId}`, tools: `/api/source-actions/${args.actionId}/tools`,
     renew: `/api/source-actions/${args.actionId}/renew`, 'team-action': `/api/team-actions/${args.actionId}`,
     'runtime-action': `/api/update-actions/${args.actionId}`,
-    source: `/api/sources/${args.sourceId}` };
+    source: `/api/sources/${args.sourceId}`, 'installed-tools': `/api/sources/${args.sourceId}/tools` };
   const path = routes[tool.route] ?? tool.route;
   const origin = new URL(managementSourceUrl(env)).origin;
   const body = tool.route === '/api/sources/discover' ? { ...args } : { schemaVersion: 1, ...args };
   delete body.actionId;
-  if (tool.route === 'source') delete body.sourceId;
+  if (tool.route === 'source' || tool.route === 'installed-tools') delete body.sourceId;
   const init = { method: tool.method, headers: { 'content-type': 'application/json', origin } };
   if (tool.method !== 'GET') init.body = canonicalJson(body);
   const request = new Request(`${origin}${path}`, init);
@@ -8403,6 +9115,7 @@ async function managementMcpCall(tool, args, env, access) {
   if (path === '/api/sources/discover') return handleSourceDiscovery(request, env, access);
   if (path === '/api/sources') return handleSources(request, env, access);
   if (tool.route === 'source') return handleSourceRemoval(request, env, access);
+  if (tool.route === 'installed-tools') return handleInstalledSourceTools(request, env, access);
   if (path.startsWith('/api/source-actions')) return handleSourceActions(request, env, access);
   if (path.startsWith('/api/team')) return handleTeam(request, env, access);
   if (path.startsWith('/api/update-actions')) return handleRuntimeActions(request, env, access);
@@ -8556,6 +9269,7 @@ export default {
     if (url.pathname === '/api/status') return handleStatus(request, env);
     if (url.pathname === '/api/update') return handleRuntimeUpdate(request, env);
     if (url.pathname === '/api/sources/discover') return handleSourceDiscovery(request, env);
+    if (/^\/api\/sources\/source-[a-f0-9]{16}\/tools$/u.test(url.pathname)) return handleInstalledSourceTools(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}$/u.test(url.pathname)) return handleSourceRemoval(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/icon$/u.test(url.pathname)) return handleSourceIcon(request, env);
     if (url.pathname === '/api/sources') return handleSources(request, env);

@@ -339,3 +339,108 @@ test('removing one person cannot transfer their former source permissions to a r
   assert.ok(plan.policies.filter((entry) => entry.kind === 'source').every((entry) => entry.after.decision === 'deny'));
   assert.deepEqual(plan.nextState.members, [{ email: ADMIN, sourceIds: [] }, { email: PERSON, sourceIds: [] }]);
 });
+
+const FINANCE = 'team-0123456789abcdef';
+const LEGAL = 'team-fedcba9876543210';
+const FINANCE_GROUP = 'synthetic-finance-group';
+const LEGAL_GROUP = 'synthetic-legal-group';
+
+function storedTeam(id, name, memberEmails, sourceIds, accessGroupId) {
+  return { id, name, memberEmails, sourceIds, accessGroupId };
+}
+
+function teamInput(teams, members = [{ email: ADMIN, sourceIds: ['erp'] }]) {
+  return { ...request(members), teams };
+}
+
+test('a membership change updates one group and does not rewrite connector policies', () => {
+  const current = context();
+  current.currentTeams = [storedTeam(FINANCE, 'Finance', [PERSON], ['erp'], FINANCE_GROUP)];
+  const plan = planTeamAccessChange(teamInput([{
+    id: FINANCE, name: 'Finance', memberEmails: ['other@example.com', PERSON], sourceIds: ['erp'],
+  }]), current);
+  assert.deepEqual(plan.groupChanges, [{
+    op: 'update', teamId: FINANCE, groupId: FINANCE_GROUP, memberEmails: ['other@example.com', PERSON],
+  }]);
+  assert.deepEqual(plan.policyChanges, []);
+  const portal = plan.policies.find((policy) => policy.kind === 'portal');
+  assert.deepEqual(portal.after.include.at(-1), { group: { id: FINANCE_GROUP } });
+  assert.equal(Object.hasOwn(planTeamAccessChange(request(), context()), 'groupChanges'), false);
+  assert.equal(Object.hasOwn(planTeamAccessChange(request(), context()).nextState, 'teams'), false);
+  assert.equal(Object.hasOwn(planTeamAccessChange(teamInput([]), context()).nextState, 'teams'), false);
+});
+
+test('an allowlist edit changes only the affected connector policy', () => {
+  const current = context();
+  current.currentTeams = [storedTeam(FINANCE, 'Finance', [PERSON], ['erp'], FINANCE_GROUP)];
+  const plan = planTeamAccessChange(teamInput([{
+    id: FINANCE, name: 'Finance', memberEmails: [PERSON], sourceIds: ['wiki'],
+  }]), current);
+  assert.equal(plan.groupChanges, undefined);
+  assert.deepEqual(plan.policyChanges.map((policy) => policy.sourceId), ['erp', 'wiki']);
+  const erp = plan.policies.find((policy) => policy.sourceId === 'erp');
+  const wiki = plan.policies.find((policy) => policy.sourceId === 'wiki');
+  assert.equal(erp.after.include.some((rule) => rule.group), false);
+  assert.deepEqual(wiki.after.include.at(-1), { group: { id: FINANCE_GROUP } });
+  assert.equal(JSON.stringify(plan.policies.find((policy) => policy.kind === 'portal').before),
+    JSON.stringify(plan.policies.find((policy) => policy.kind === 'portal').after));
+});
+
+test('overlapping teams union group rules and a removed team leaves the other grant and a direct email', () => {
+  const current = context();
+  current.currentMembers = [{ email: ADMIN, sourceIds: ['erp'] }, { email: PERSON, sourceIds: ['erp'] }];
+  current.currentTeams = [
+    storedTeam(FINANCE, 'Finance', [PERSON], ['erp', 'wiki'], FINANCE_GROUP),
+    storedTeam(LEGAL, 'Legal', [PERSON], ['erp'], LEGAL_GROUP),
+  ];
+  const kept = planTeamAccessChange(teamInput([
+    { id: FINANCE, name: 'Finance', memberEmails: [PERSON], sourceIds: ['erp', 'wiki'] },
+    { id: LEGAL, name: 'Legal', memberEmails: [], sourceIds: ['erp'] },
+  ], current.currentMembers), current);
+  const erp = kept.policies.find((policy) => policy.sourceId === 'erp').after.include;
+  assert.deepEqual(erp.filter((rule) => rule.email).map((rule) => rule.email.email), [ADMIN, PERSON]);
+  assert.deepEqual(erp.filter((rule) => rule.group).map((rule) => rule.group.id), [FINANCE_GROUP]);
+  assert.deepEqual(kept.groupChanges.map((change) => change.op), ['delete']);
+  const removed = planTeamAccessChange(teamInput([
+    { id: LEGAL, name: 'Legal', memberEmails: [PERSON], sourceIds: ['erp'] },
+  ], current.currentMembers), current);
+  const after = removed.policies.find((policy) => policy.sourceId === 'erp').after.include;
+  assert.ok(after.some((rule) => rule.email?.email === PERSON));
+  assert.deepEqual(after.filter((rule) => rule.group).map((rule) => rule.group.id), [LEGAL_GROUP]);
+});
+
+test('a new team waits for its group on the portal and the selected connectors', () => {
+  const plan = planTeamAccessChange(teamInput([{
+    id: FINANCE, name: 'Finance', memberEmails: [PERSON], sourceIds: ['wiki'],
+  }]), context());
+  assert.deepEqual(plan.groupChanges, [{ op: 'create', teamId: FINANCE, memberEmails: [PERSON] }]);
+  const portal = plan.policies.find((policy) => policy.kind === 'portal');
+  const wiki = plan.policies.find((policy) => policy.sourceId === 'wiki');
+  const erp = plan.policies.find((policy) => policy.sourceId === 'erp');
+  assert.deepEqual(portal.unresolvedTeamIds, [FINANCE]);
+  assert.deepEqual(wiki.unresolvedTeamIds, [FINANCE]);
+  assert.equal(erp.unresolvedTeamIds, undefined);
+  assert.equal(wiki.after.include.some((rule) => rule.group), false);
+  assert.throws(() => normalizeTeamAccessRequest(teamInput([{
+    id: FINANCE, name: 'Finance', memberEmails: [PERSON], sourceIds: ['*'],
+  }]), context()), code('team_access_invalid_request'));
+});
+
+test('renaming a team does not change its group or connector policies', () => {
+  const current = context();
+  current.currentTeams = [storedTeam(FINANCE, 'Finance', [PERSON], ['erp'], FINANCE_GROUP)];
+  const plan = planTeamAccessChange(teamInput([{
+    id: FINANCE, name: 'Finance readers', memberEmails: [PERSON], sourceIds: ['erp'],
+  }]), current);
+  assert.equal(plan.groupChanges, undefined);
+  assert.deepEqual(plan.policyChanges, []);
+  assert.equal(plan.nextState.teams[0].name, 'Finance readers');
+});
+
+test('an expected group rule matches that group and rejects a different one', () => {
+  const expected = teamPolicy([ADMIN], 'ERP people', [FINANCE_GROUP]);
+  assert.equal(teamPolicyMatches(observed(expected), expected, 'erp-policy'), true);
+  assert.equal(teamPolicyMatches(observed(teamPolicy([ADMIN], 'ERP people', [LEGAL_GROUP])), expected, 'erp-policy'), false);
+  assert.equal(teamPolicyMatches(observed(teamPolicy([ADMIN], 'ERP people')), expected, 'erp-policy'), false);
+});
+

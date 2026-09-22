@@ -1,10 +1,11 @@
 import { Button } from './Button'
 import { DisclosureTrigger } from './Disclosure'
 import { SourceIcon } from './SourceIcon'
+import { InstalledSourceToolsEditor } from './InstalledSourceTools'
 import { SourceRemoval } from './SourceRemoval'
 import { Check, Clock, MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
-import type { ManagedSource } from '../api'
+import type { InstalledSourceTools, ManagedSource } from '../api'
 
 const filters = [
   { value: 'all', label: 'All' },
@@ -33,9 +34,12 @@ interface SourceListProps {
   canRemove?(sourceId: string): boolean
   removeDisabled?: boolean
   onRemoveDraft?(sourceId: string): void
+  onLoadSourceTools?(sourceId: string): Promise<InstalledSourceTools>
+  onSaveSourceTools?(sourceId: string, revision: number, enabledTools: string[]): Promise<void>
+  sourceToolsDisabled?: boolean
 }
 
-export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft }: SourceListProps) {
+export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, sourceToolsDisabled = false }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -154,6 +158,14 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                       {source.status === 'draft' && canRemove?.(source.id) && onRemoveDraft ? (
                         <Button variant="secondary-destructive" className="pressable mt-4" disabled={isBusy || removeDisabled}
                           onClick={() => onRemoveDraft(source.id)}>Remove connector</Button>
+                      ) : null}
+                      {source.status === 'installed' && onLoadSourceTools && onSaveSourceTools ? (
+                        <InstalledSourceToolsEditor
+                          source={source}
+                          disabled={isBusy || sourceToolsDisabled}
+                          onLoad={onLoadSourceTools}
+                          onSave={onSaveSourceTools}
+                        />
                       ) : null}
                       {source.status === 'installed' && removalEnabled && onRemove && onRefresh ? <SourceRemoval
                         source={source}

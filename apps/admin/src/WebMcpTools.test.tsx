@@ -46,7 +46,7 @@ function fixtureApi(): GatewayAdminApi {
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
-    getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), prepareRuntimeAction: vi.fn(),
+    getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
   }
@@ -124,7 +124,7 @@ describe('WebMcpTools', () => {
       prepareSourceAction: vi.fn(),
       getSourceAction: vi.fn(),
       getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
-      cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+      cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
       prepareRuntimeAction: vi.fn(),
       getRuntimeAction: vi.fn(),
       prepareTeardownAction,
@@ -181,16 +181,16 @@ describe('WebMcpTools', () => {
     const { registered, signals, modelContext } = modelContextFixture()
     document.modelContext = modelContext
     const mounted = render(<StrictMode><GatewayProvider api={api}><WebMcpTools /></GatewayProvider></StrictMode>)
-    await waitFor(() => expect(registered.size).toBe(17))
+    await waitFor(() => expect(registered.size).toBe(19))
     window.dispatchEvent(new Event('pagehide'))
     expect(registered.size).toBe(0)
     expect(signals.every((signal) => signal.aborted)).toBe(true)
     window.dispatchEvent(new Event('pageshow'))
-    await waitFor(() => expect(registered.size).toBe(17))
+    await waitFor(() => expect(registered.size).toBe(19))
     mounted.unmount()
     expect(registered.size).toBe(0)
     const remounted = render(<GatewayProvider api={api}><WebMcpTools /></GatewayProvider>)
-    await waitFor(() => expect(registered.size).toBe(17))
+    await waitFor(() => expect(registered.size).toBe(19))
     remounted.unmount()
     expect(registered.size).toBe(0)
   })

@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { GatewayApiError, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type TeamActionResult, type RuntimeUpdate, type Team, type TeamAction } from '../api'
+import { GatewayApiError, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type TeamActionResult, type RuntimeUpdate, type Team, type TeamAction, type TeamGrant, type TeamMember } from '../api'
 import { GatewayProvider } from '../GatewayContext'
 import { createPreviewGatewayAdminApi } from '../preview-api'
 import { TeamPage } from './TeamPage'
@@ -26,6 +26,8 @@ const team: Team = {
   ],
   pendingAction: null,
   proposedMembers: null,
+  teams: [],
+  proposedTeams: null,
 }
 
 function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
@@ -33,7 +35,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(async () => structuredClone(team)), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-    discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(),
+    discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
     ...overrides,
@@ -237,7 +239,7 @@ describe('TeamPage', () => {
     expect(prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, [
       { email: 'admin@example.com', sourceIds: [] },
       { email: 'analyst@example.com', sourceIds: [sourceId] },
-    ])
+    ], [])
     expect(screen.queryByText(/Team access saved and verified in Cloudflare/)).not.toBeInTheDocument()
   })
 
@@ -253,7 +255,7 @@ describe('TeamPage', () => {
     expect(accessCheckbox(screen.getByRole('group', { name: 'admin@example.com' }))).toBeDisabled()
     expect(screen.queryByRole('button', { name: 'Add user' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Resume recorded change' }))
-    expect(prepareTeamAction).toHaveBeenCalledWith(7, proposedMembers)
+    expect(prepareTeamAction).toHaveBeenCalledWith(7, proposedMembers, [])
   })
 
   it('does not permit a recovery action when its recorded proposal cannot be retrieved', async () => {
@@ -320,7 +322,7 @@ describe('TeamPage', () => {
     renderTeam(client)
     await screen.findByRole('group', { name: 'admin@example.com' })
     expect(screen.queryByText(/Team access saved and verified in Cloudflare/)).not.toBeInTheDocument()
-    expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, team.members)
+    expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, team.members, [])
   })
 
   it('applies an entire batch with one local Save and reloads the verified roster without a hosted handoff', async () => {
@@ -348,7 +350,7 @@ describe('TeamPage', () => {
     expect(screen.getByText(/Team access saved and verified in Cloudflare/)).toBeInTheDocument()
     expect(screen.queryByText('No unsaved changes')).not.toBeInTheDocument()
     expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument()
-    expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, members)
+    expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, members, [])
     expect(client.prepareSourceAction).not.toHaveBeenCalled()
     expect(client.getStatus).toHaveBeenCalledTimes(1)
     expect(getTeam).toHaveBeenCalledTimes(2)
@@ -402,7 +404,7 @@ describe('TeamPage', () => {
     expect(accessCheckbox(screen.getByRole('group', { name: 'admin@example.com' }))).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Save recorded change' }))
     expect(await screen.findByText(/Team access saved and verified in Cloudflare/)).toBeInTheDocument()
-    expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, proposedMembers)
+    expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, proposedMembers, [])
     expect(client.getTeamAction).not.toHaveBeenCalled()
     expect(window.location.search).toBe('')
   })
@@ -648,5 +650,43 @@ describe('TeamPage', () => {
     expect(await screen.findByText(/Team access saved and verified in Cloudflare/)).toBeVisible()
     expect(accessCheckbox(person)).toBeChecked()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+
+  it('keeps direct grants until you move the ones a team already covers', async () => {
+    const user = userEvent.setup()
+    const prepareTeamAction = vi.fn<(revision: number, members: TeamMember[], teams?: TeamGrant[]) => Promise<never>>(() => new Promise(() => {}))
+    renderTeam(api({ prepareTeamAction }))
+    await screen.findByRole('group', { name: 'analyst@example.com' })
+    await user.click(screen.getByRole('button', { name: 'Create team' }))
+    expect(screen.getByText(/A connector you add later stays closed until you add it to this team/)).toBeVisible()
+    await user.type(screen.getByLabelText('Name'), 'Finance')
+    await user.type(screen.getByLabelText('Members'), 'analyst@example.com')
+    await user.click(screen.getByRole('button', { name: 'Add' }))
+    await user.click(screen.getByRole('checkbox', { name: 'Company knowledge' }))
+    await user.click(screen.getByRole('button', { name: 'Save team' }))
+    const teamRow = screen.getByRole('group', { name: 'Finance' })
+    expect(teamRow).toHaveTextContent('analyst@example.com')
+    expect(screen.getByRole('group', { name: 'analyst@example.com' })).toHaveTextContent('Effective access: Company knowledge (Finance)')
+    await toggleAccess(user, screen.getByRole('group', { name: 'analyst@example.com' }), /Company knowledge/)
+    expect(screen.getByRole('group', { name: 'analyst@example.com' })).toHaveTextContent('Effective access: Company knowledge (Direct, Finance)')
+    await user.click(screen.getByRole('button', { name: 'Move covered direct grants into this team' }))
+    expect(screen.getByRole('group', { name: 'analyst@example.com' })).toHaveTextContent('No connectors selected.')
+    expect(screen.getByRole('group', { name: 'analyst@example.com' })).toHaveTextContent('Effective access: Company knowledge (Finance)')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(prepareTeamAction).toHaveBeenCalledOnce()
+    const savedCall = prepareTeamAction.mock.calls[0]
+    if (!savedCall) throw new Error('expected a team save')
+    const [, members, teams] = savedCall
+    if (!teams?.[0]) throw new Error('expected a team grant')
+    expect(members).toEqual([
+      { email: 'admin@example.com', sourceIds: [] },
+      { email: 'analyst@example.com', sourceIds: [] },
+    ])
+    expect(teams).toEqual([{
+      id: teams[0].id,
+      name: 'Finance',
+      memberEmails: ['analyst@example.com'],
+      sourceIds: [sourceId],
+    }])
   })
 })
