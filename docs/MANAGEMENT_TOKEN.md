@@ -202,7 +202,10 @@ provider authority of a stolen token.
 
 Individual [source removal](SOURCE_REMOVAL.md) uses the same account-owned
 token for a fixed, receipt-checked Portal update and deletion of that source's
-MCP server, Access policy and Access application. Draft deletion requires no
+MCP server, Access policy and Access application. Editing the tools of an
+installed connector uses it the same way: one read of Cloudflare’s synced
+catalogue, then one receipt-checked Portal update for that connector’s
+allowlist. Draft deletion requires no
 provider credential. Managed BigQuery bridge deletion is not a routine token
 operation: its Worker and stored Google key require separate authorization.
 
@@ -270,6 +273,16 @@ belongs to the disposable-account qualification below.
 | GET account token verification | The account token itself; no token-management permission requested |
 | GET account/zone Access apps, exact app and attached policies; POST source app/policy; PUT attached Team policy | Access: Apps and Policies Write |
 | GET/POST MCP servers; GET/PUT the exact owned Portal | MCP Portals Write |
+
+Named teams add Cloudflare Access group create, update, and delete. Cloudflare's
+group create and update methods list **Access: Organizations, Identity
+Providers, and Groups Write**, which also covers organization settings and
+identity providers. The permission catalog also lists a narrower **Access:
+Groups Write**. The template above stays `access` and `mcp_portals` until a
+live check shows which key is sufficient. Do not add identity-provider or
+organization write to make a team save pass. A group call that Cloudflare
+refuses is `team_access_group_permission_missing` on the Team page. Apps and
+Policies Edit does not include group writes. See [Named teams](TEAM_ACCESS.md#named-teams).
 
 Cloudflare documents [Apps and Policies Write for attached policy updates](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/applications/subresources/policies/methods/update/)
 and [MCP Portals Write for server creation](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/ai_controls/subresources/mcp/subresources/servers/methods/create/).

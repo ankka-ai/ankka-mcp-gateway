@@ -18,8 +18,12 @@ has synthetic provider tests; it still requires deployed Cloudflare qualificatio
 ## Operations and consent
 
 The source exposes status, URL-source discovery and installation, tool selection,
-source removal, Team assignments, source OAuth diagnostics, signed update and
-rollback review and consent handoffs. It calls the same handlers, ownership
+editing the allowlist of an installed connector, source removal, Team assignments,
+source OAuth diagnostics, signed update and rollback review and consent handoffs.
+`get_installed_source_tools` and `update_installed_source_tools` use the same
+handlers as Edit tools. They appear in an agent’s tool list only after the
+installed Gateway Management allowlist includes them. The dashboard can edit
+tools without that allowlist entry. The source calls the same handlers, ownership
 checks, revision checks, action journals, and recovery rules as the dashboard.
 It has no arbitrary HTTP, Cloudflare API, shell, account-selection, or credential
 input tool. Connector-specific provisioning, including BigQuery setup, continues

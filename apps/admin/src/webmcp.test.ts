@@ -28,6 +28,7 @@ const syntheticSensitiveText = 'synthetic-sensitive-value-never-display'
 
 const names = [
   'get_gateway_status', 'get_gateway_capabilities', 'list_mcp_sources',
+  'get_installed_source_tools', 'update_installed_source_tools',
   'discover_mcp_source', 'save_mcp_source_draft', 'apply_mcp_source',
   'get_mcp_source_action', 'cancel_mcp_source_action', 'get_gateway_team',
   'list_mcp_source_actions',
@@ -78,7 +79,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     schemaVersion: 1, revision: 7, editingEnabled: false, editingDisabledReason: 'managed_in_cloudflare',
     managementCredentialConfigured: false, members, adminEmails: ['operator@example.com'],
     sources: [{ id: sourceId, label: 'Example connector', enabledTools: ['search'], status: 'installed' }],
-    pendingAction: null, proposedMembers: null,
+    pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null,
   }
   const teamAction: TeamAction = {
     schemaVersion: 1, actionId, status: 'authorization_required', expiresAt,
@@ -130,7 +131,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     getSourceAction: vi.fn(async (_actionId: string) => sourceAction),
     cancelSourceAction: vi.fn<GatewayAdminApi['cancelSourceAction']>(async () => ({ ...sourceAction, status: 'failed' })),
     getSourceActionTools: vi.fn<GatewayAdminApi['getSourceActionTools']>(),
-    authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn<GatewayAdminApi['chooseSourceActionTools']>(),
+    authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn<GatewayAdminApi['chooseSourceActionTools']>(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
     prepareRuntimeAction: vi.fn<GatewayAdminApi['prepareRuntimeAction']>(async (operation) => ({ ...prepared, operation })),
     getRuntimeAction: vi.fn(async (_actionId: string) => runtimeAction),
     prepareTeardownAction: vi.fn(async () => prepared),
@@ -208,10 +209,10 @@ describe('Gateway WebMCP tool contracts', () => {
     expect(refresh).not.toHaveBeenCalled()
   })
 
-  it('offers exactly nineteen non-generic tools when installation is enabled', () => {
+  it('offers exactly twenty-one non-generic tools when installation is enabled', () => {
     const { tools } = fixture()
     expect(tools.map((tool) => tool.name).sort()).toEqual([...names].sort())
-    expect(new Set(tools.map((tool) => tool.name)).size).toBe(19)
+    expect(new Set(tools.map((tool) => tool.name)).size).toBe(21)
     for (const tool of tools) {
       expect(tool.inputSchema.additionalProperties).toBe(false)
       for (const forbidden of ['token', 'headers', 'accountId', 'apiPath', 'actor', 'role', 'credential']) {
@@ -223,7 +224,7 @@ describe('Gateway WebMCP tool contracts', () => {
 
   it('does not label immediate writes or action preparation as read-only or idempotent', () => {
     const { tool } = fixture()
-    for (const name of ['cancel_gateway_team_action', 'cancel_mcp_source_action', 'save_mcp_source_draft', 'apply_mcp_source', 'apply_gateway_update', 'rollback_gateway_update', 'review_gateway_teardown']) {
+    for (const name of ['cancel_gateway_team_action', 'cancel_mcp_source_action', 'save_mcp_source_draft', 'apply_mcp_source', 'update_installed_source_tools', 'apply_gateway_update', 'rollback_gateway_update', 'review_gateway_teardown']) {
       expect(tool(name).annotations).toMatchObject({ readOnlyHint: false, idempotentHint: false })
     }
     for (const name of ['rollback_gateway_update', 'review_gateway_teardown']) {
@@ -258,7 +259,7 @@ describe('Gateway WebMCP tool contracts', () => {
       },
       runtimeActions: { authorization: 'fresh_cloudflare_oauth' },
       sourceAuthenticationManagement: { available: false },
-      installedSourceAllowlistEditing: { available: false },
+      installedSourceAllowlistEditing: { available: true },
       dataCapabilityMode: 'read_only',
     } })
     expect(JSON.stringify(result)).not.toContain('operator@example.com')

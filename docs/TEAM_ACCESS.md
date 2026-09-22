@@ -152,6 +152,52 @@ The gateway checks membership at the displayed observation time. It cannot
 promise continuously fresh state or represent the effective permissions of an
 already-connected client.
 
+<a id="named-teams"></a>
+
+## Named teams
+
+A team is a name, the people on it, and the connectors it grants. Saving a team
+does not replace anyone's direct connector grants. Effective access is the
+combination of those direct grants and every team that includes both that
+person and the connector. Removing someone from one team leaves their direct
+grants and their other teams in place. Existing installations are not
+converted: direct grants stay until you choose **Move covered direct grants
+into this team**, which drops only the direct grants that team already covers.
+The page shows the draft before you save, and effective access does not change.
+
+**All installed connectors** selects every connector installed now. A connector
+you add later stays closed until you add it to the team. There is no wildcard.
+
+A team with no members has no Cloudflare Access group and appears on no policy.
+The first member creates one group. Its provider name is
+`ankka-<installation id>-<team id>`, not the name you see in the gateway.
+Renaming a team does not call Cloudflare. Groups are never chosen by display
+name. A group whose id, stable name, account, or include rules do not match is
+drift.
+
+The Portal policy includes a group for every team that has members, so a later
+membership edit updates that one group and does not rewrite the Portal or each
+connector policy. Changing which connectors a team grants updates only the
+policies whose audience changed. An empty audience stays a deny policy.
+
+A team can include the Gateway Management connector. That grants the connector
+the same way a direct assignment does. It does not make someone a dashboard
+administrator. Administrators stay on the fixed administrator list.
+
+Creating, updating, and deleting a group is journaled like a policy write.
+If a create response is lost, resume lists groups and adopts the one exact
+stable name. Policy updates finish before a group is deleted.
+
+Group writes need Access group permission in your Cloudflare account. The
+[management token template](MANAGEMENT_TOKEN.md#the-template-link) does not
+request it. A refused group call is `team_access_group_permission_missing`.
+Apps and Policies Edit does not include that permission. See
+[Customer-owned management credential](MANAGEMENT_TOKEN.md).
+
+A membership change still does not end an existing Portal session by itself.
+Use [Session and acceptance limits](#revocation-and-acceptance) when someone
+must lose access immediately.
+
 <a id="recovery-and-lifecycle-limits"></a>
 
 ## Recovery and lifecycle limits

@@ -47,11 +47,45 @@ function envelope(result, status = 200) {
 // only an existing policy below its existing application, never create a target.
 function teamProvider() {
   let hook;
+  const groups = new Map();
+  let groupSerial = 0;
+  let dropCreate = false;
+  const groupRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/groups`;
+  const storeGroup = (id, body) => {
+    const stored = {
+      id, account_id: ACCOUNT_ID, name: body.name,
+      include: structuredClone(body.include),
+      exclude: structuredClone(body.exclude ?? []),
+      require: structuredClone(body.require ?? []),
+    };
+    groups.set(id, stored);
+    return stored;
+  };
   const provider = cloudflareProvider({
     async onRequest(context) {
       const intercepted = await hook?.(context);
       if (intercepted instanceof Response) return intercepted;
       const { record, state } = context;
+      if (record.pathname === groupRoot || record.pathname.startsWith(`${groupRoot}/`)) {
+        if (record.pathname === groupRoot && record.method === 'GET') return envelope([...groups.values()]);
+        if (record.pathname === groupRoot && record.method === 'POST') {
+          const stored = storeGroup(`synthetic-access-group-${groupSerial += 1}`, record.body);
+          if (dropCreate) {
+            dropCreate = false;
+            return Response.json({ success: false, errors: [], messages: [], result: null }, { status: 500 });
+          }
+          return envelope(stored);
+        }
+        const groupId = decodeURIComponent(record.pathname.slice(groupRoot.length + 1));
+        if (!groupId.includes('/')) {
+          if (record.method === 'GET') return groups.has(groupId) ? envelope(groups.get(groupId)) : envelope(null, 404);
+          if (record.method === 'PUT') return groups.has(groupId) ? envelope(storeGroup(groupId, record.body)) : envelope(null, 404);
+          if (record.method === 'DELETE') {
+            if (!groups.delete(groupId)) return envelope(null, 404);
+            return new Response(null, { status: 204 });
+          }
+        }
+      }
       if (record.pathname === `/client/v4/accounts/${ACCOUNT_ID}/tokens/verify`) return envelope({ status: 'active' });
       if (record.method === 'POST' && record.pathname.endsWith('/access/apps')) {
         const destinations = record.body.destinations ?? [];
@@ -76,7 +110,9 @@ function teamProvider() {
   });
   return {
     ...provider,
+    groups,
     hook(next) { hook = next; },
+    dropNextGroupCreate() { dropCreate = true; },
     puts() { return provider.requests.filter(({ method }) => method === 'PUT'); },
   };
 }
@@ -4491,4 +4527,361 @@ test('built-in API sources install, isolate data access, update Team policies an
   assert.equal(removed.status, 200, await removed.clone().text());
   assert.equal(gateway.provider.state.apps.has(native.id), false);
   assert.equal((await rpc('tools/list')).status, 401);
+}));
+
+const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
+
+async function installAdditionalSource(gateway) {
+  const prepared = await prepareNewSource(gateway);
+  const applied = await gateway.apply(prepared, {}, null);
+  assert.equal(applied.status, 200, await applied.clone().text());
+  const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+    .find((entry) => entry.sourceId === prepared.source.id);
+  return { ...prepared, serverId: ownership.resources[0].provider.id, ownership };
+}
+
+function installedToolsPath(sourceId) {
+  return `/api/sources/${sourceId}/tools`;
+}
+
+function putInstalledTools(gateway, sourceId, revision, enabledTools, options = {}) {
+  return gateway.api(installedToolsPath(sourceId), {
+    method: 'PUT', body: { schemaVersion: 1, revision, enabledTools }, ...options,
+  });
+}
+
+test('editing installed tools fetches the synced list and saves only the explicit selection', async () => fixture(async (gateway) => {
+  const current = await (await gateway.api('/api/sources')).json();
+  const drafted = await gateway.api('/api/sources', { method: 'PUT', body: {
+    schemaVersion: 1, revision: current.revision,
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+  } });
+  assert.equal(drafted.status, 200, await drafted.clone().text());
+  const draftBody = await drafted.json();
+  const draft = draftBody.sources.find((source) => source.url === NEW_SOURCE_URL);
+  const draftBaseline = gateway.provider.requests.length;
+  await refused(await putInstalledTools(gateway, draft.id, draftBody.revision, ['company_lookup']), 409, 'source_tools_unavailable');
+  assertNoMutation(gateway.provider, draftBaseline);
+
+  const authorized = await authorizeNewSource(gateway, draft.id, draftBody.revision);
+  const applied = await gateway.apply(authorized, {}, null);
+  assert.equal(applied.status, 200, await applied.clone().text());
+  const ownershipBefore = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+    .find((entry) => entry.sourceId === draft.id);
+  const installed = { source: draft, serverId: ownershipBefore.resources[0].provider.id, ownership: ownershipBefore };
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  server.tools.push({ name: 'company_export', inputSchema: { type: 'object' } });
+  const receiptBefore = canonicalJson(gateway.storage.snapshot());
+  const teamBefore = gateway.managementStorage.snapshot(TEAM_KEY);
+  const hashBefore = installed.ownership.resources[0].desiredHash;
+  const otherResources = canonicalJson(installed.ownership.resources.slice(1));
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const readBaseline = gateway.provider.requests.length;
+  const listed = await gateway.api(installedToolsPath(installed.source.id));
+  assert.equal(listed.status, 200, await listed.clone().text());
+  const catalogue = await listed.json();
+  assert.equal(catalogue.state, 'ready');
+  assert.deepEqual(catalogue.tools.map((tool) => tool.name), ['company_export', 'company_lookup']);
+  assert.deepEqual(catalogue.enabledTools, ['company_lookup']);
+  assert.equal(catalogue.pendingTools, null);
+  assert.equal(catalogue.revision, revision);
+  assertNoMutation(gateway.provider, readBaseline);
+
+  await refused(await putInstalledTools(gateway, installed.source.id, revision - 1, ['company_export', 'company_lookup']), 409, 'source_conflict');
+  await refused(await putInstalledTools(gateway, installed.source.id, revision, ['company_export', 'missing_tool']), 409, 'source_tools_mismatch');
+  await refused(await putInstalledTools(gateway, installed.source.id, revision, []), 400, 'source_tools_invalid');
+  gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+  await refused(await gateway.serviceApi(installedToolsPath(installed.source.id)), 403, 'service_operation_denied');
+  await refused(await gateway.serviceApi(installedToolsPath(installed.source.id), {
+    method: 'PUT', body: { schemaVersion: 1, revision, enabledTools: ['company_lookup'] },
+  }), 403, 'service_operation_denied');
+  delete gateway.env.ANKKA_SERVICE_CLIENT_ID;
+  await refused(await gateway.api(installedToolsPath(installed.source.id), { email: MEMBER }), 401, 'access_required');
+  const same = await putInstalledTools(gateway, installed.source.id, revision, ['company_lookup']);
+  assert.equal(same.status, 200, await same.clone().text());
+  assert.equal((await same.json()).revision, revision);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY) ?? null, null);
+
+  const saved = await putInstalledTools(gateway, installed.source.id, revision, ['company_export', 'company_lookup']);
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const sources = await saved.json();
+  assert.equal(sources.revision, revision + 1);
+  assert.deepEqual(sources.sources.find((source) => source.id === installed.source.id).enabledTools, ['company_export', 'company_lookup']);
+  assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, [
+    { name: 'company_export', enabled: true }, { name: 'company_lookup', enabled: true },
+  ]);
+  const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+    .find((entry) => entry.sourceId === installed.source.id);
+  assert.notEqual(ownership.resources[0].desiredHash, hashBefore);
+  assert.equal(canonicalJson(ownership.resources.slice(1)), otherResources);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), receiptBefore);
+  const teamAfter = gateway.managementStorage.snapshot(TEAM_KEY);
+  assert.equal(teamAfter.revision, teamBefore.revision);
+  assert.deepEqual(teamAfter.members, teamBefore.members);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY), null);
+
+  const removed = await putInstalledTools(gateway, installed.source.id, sources.revision, ['company_lookup']);
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, [{ name: 'company_lookup', enabled: true }]);
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY).sources
+    .find((source) => source.id === installed.source.id).enabledTools, ['company_lookup']);
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  const tokenBaseline = gateway.provider.requests.length;
+  await refused(await gateway.api(installedToolsPath(installed.source.id)), 409, 'management_credential_required');
+  assert.equal(gateway.provider.requests.length, tokenBaseline);
+}));
+
+test('an installed tool update resumes after a lost Portal write and refuses drift before it starts', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  gateway.provider.state.servers.get(installed.serverId).tools.push({ name: 'company_export', inputSchema: { type: 'object' } });
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const selection = ['company_export', 'company_lookup'];
+  gateway.provider.state.portal.servers = gateway.provider.state.portal.servers.map((mapping) => (
+    mapping.server_id === installed.serverId ? { ...mapping, updated_tools: [{ name: 'company_other', enabled: true }] } : mapping
+  ));
+  const drifted = gateway.provider.requests.length;
+  await refused(await putInstalledTools(gateway, installed.source.id, revision, selection), 409, 'source_portal_drift');
+  assertNoMutation(gateway.provider, drifted);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY) ?? null, null);
+  gateway.provider.state.portal.servers = gateway.provider.state.portal.servers.map((mapping) => (
+    mapping.server_id === installed.serverId ? { ...mapping, updated_tools: [{ name: 'company_lookup', enabled: true }] } : mapping
+  ));
+
+  gateway.provider.hook(({ record }) => record.method === 'PUT' && record.pathname.includes('/mcp/portals/') ? envelope(null, 503) : undefined);
+  await refused(await putInstalledTools(gateway, installed.source.id, revision, selection), 409, 'source_tools_recovery_required');
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY).phase, 'portal_submitted');
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).revision, revision);
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'PUT' || !record.pathname.includes('/mcp/portals/')) return undefined;
+    state.portal = { id: state.portal.id, ...record.body, servers: record.body.servers.map((mapping) => ({ ...mapping, server_id: mapping.id })) };
+    throw new Error('lost portal response');
+  });
+  await refused(await putInstalledTools(gateway, installed.source.id, revision, selection), 409, 'source_tools_recovery_required');
+  assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, [
+    { name: 'company_export', enabled: true }, { name: 'company_lookup', enabled: true },
+  ]);
+  gateway.provider.hook(undefined);
+  const portalWrites = gateway.provider.requests.filter((request) => request.method === 'PUT' && request.pathname.includes('/mcp/portals/')).length;
+  const resumed = await putInstalledTools(gateway, installed.source.id, revision, selection);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.json()).revision, revision + 1);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY), null);
+  assert.equal(gateway.provider.requests.filter((request) => request.method === 'PUT' && request.pathname.includes('/mcp/portals/')).length, portalWrites);
+}));
+
+test('an installed tool update waits for other lifecycle work and blocks new work while it is open', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  const initial = gateway.managementStorage.snapshot(SOURCES_KEY).sources
+    .find((source) => source.enabledTools.includes('company_prepare'));
+  await refused(await putInstalledTools(gateway, initial.id, gateway.managementStorage.snapshot(SOURCES_KEY).revision,
+    ['company_prepare', 'company_search']), 409, 'source_action_conflict', 'lifecycle_pending');
+
+  const installed = await gateway.apply(prepared, {}, null);
+  assert.equal(installed.status, 200, await installed.clone().text());
+  const source = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((entry) => entry.id === prepared.source.id);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  await gateway.managementStorage.put(SOURCE_REMOVAL_KEY, {
+    schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, sourceId: source.id,
+    sourceHash: `sha256:${'a'.repeat(64)}`, resourcesHash: `sha256:${'b'.repeat(64)}`, step: 0, pending: false,
+  });
+  await refused(await putInstalledTools(gateway, source.id, revision, ['company_lookup']), 409, 'source_action_conflict', 'lifecycle_pending');
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY) ?? null, null);
+  await gateway.managementStorage.put(SOURCE_REMOVAL_KEY, null);
+
+  await gateway.managementStorage.put(SOURCE_TOOL_EDIT_KEY, {
+    schemaVersion: 1, sourceId: source.id, fromRevision: revision,
+    enabledTools: ['company_export', 'company_lookup'], phase: 'portal_armed', receiptBaseline: null,
+  });
+  await refused(await gateway.api('/api/sources', { method: 'PUT', body: {
+    schemaVersion: 1, revision,
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+  } }), 409, 'source_action_conflict', 'lifecycle_pending');
+  await refused(await gateway.api('/api/team-actions', { method: 'POST', body: { schemaVersion: 1, expectedRevision: 1, members: [] } }), 409, 'team_action_conflict');
+  await recordUpdateFrom(gateway);
+  await refused(await prepareRollback(gateway), 409, 'runtime_action_conflict');
+  await refused(await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 } }), 409, 'teardown_action_conflict');
+  await refused(await gateway.api(installedToolsPath(source.id), { method: 'DELETE', body: { schemaVersion: 1, revision } }), 405, 'method_not_allowed');
+  const removal = await gateway.api(`/api/sources/${source.id}`, { method: 'DELETE', body: { schemaVersion: 1, revision } });
+  assert.equal(removal.status, 409);
+  await refused(await putInstalledTools(gateway, source.id, revision, ['company_lookup']), 409, 'source_tools_pending');
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY).sourceId, source.id);
+}));
+
+test('editing the receipt-owned connector keeps gateway teardown derivable', async () => fixture(async (gateway) => {
+  await gateway.view();
+  const source = gateway.managementStorage.snapshot(SOURCES_KEY).sources
+    .find((entry) => entry.enabledTools.includes('company_prepare'));
+  const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+    .find((entry) => entry.sourceId === source.id);
+  const serverId = ownership.resources[0].provider.id;
+  gateway.provider.state.servers.get(serverId).tools.push({ name: 'company_archive', inputSchema: { type: 'object' } });
+  const resourcesBefore = canonicalJson(ownership.resources);
+  const receiptBefore = canonicalJson(gateway.storage.snapshot());
+  const teamBefore = gateway.managementStorage.snapshot(TEAM_KEY);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const saved = await putInstalledTools(gateway, source.id, revision, ['company_archive', 'company_prepare', 'company_search']);
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const control = gateway.managementStorage.snapshot(CONTROL_KEY);
+  const owned = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
+  assert.equal(canonicalJson(owned.resources), resourcesBefore);
+  assert.deepEqual(control.receiptSourceToolBaseline, {
+    sourceId: source.id, enabledTools: ['company_prepare', 'company_search'],
+  });
+  assert.deepEqual(portalMapping(gateway, serverId).updated_tools, [
+    { name: 'company_archive', enabled: true }, { name: 'company_prepare', enabled: true }, { name: 'company_search', enabled: true },
+  ]);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), receiptBefore);
+  const teamAfter = gateway.managementStorage.snapshot(TEAM_KEY);
+  assert.equal(teamAfter.revision, teamBefore.revision);
+  assert.deepEqual(teamAfter.members, teamBefore.members);
+
+  const again = await putInstalledTools(gateway, source.id, revision + 1, ['company_archive', 'company_prepare']);
+  assert.equal(again.status, 200, await again.clone().text());
+  const kept = gateway.managementStorage.snapshot(CONTROL_KEY);
+  assert.deepEqual(kept.receiptSourceToolBaseline.enabledTools, ['company_prepare', 'company_search']);
+  assert.equal(canonicalJson(kept.sourceOwnership.find((entry) => entry.sourceId === source.id).resources), resourcesBefore);
+  assert.equal((await gateway.currentTeardown(5)).prepared.status, 200);
+  await gateway.managementStorage.delete(TEARDOWNS_KEY);
+
+  const removed = await removeSource(gateway, source.id);
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.deepEqual(gateway.managementStorage.snapshot(CONTROL_KEY).receiptSourceToolBaseline.enabledTools, ['company_prepare', 'company_search']);
+  assert.equal((await gateway.currentTeardown(6)).prepared.status, 200);
+}));
+
+const FINANCE_TEAM = 'team-0123456789abcdef';
+const LEGAL_TEAM = 'team-fedcba9876543210';
+
+function installedSourceId(view) {
+  const source = view.sources.find((entry) => entry.status === 'installed');
+  assert.ok(source);
+  return source.id;
+}
+
+function sourceAccessPolicy(gateway, sourceId) {
+  const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+    .find((entry) => entry.sourceId === sourceId);
+  const resource = ownership.resources[2];
+  return gateway.provider.state.policies.get(resource.provider.parentId)
+    .find((item) => item.id === resource.provider.id);
+}
+
+function ruleEmails(entry) {
+  return entry.include.filter((rule) => rule.email).map((rule) => rule.email.email);
+}
+
+function ruleGroups(entry) {
+  return entry.include.filter((rule) => rule.group).map((rule) => rule.group.id);
+}
+
+test('a named team creates one Access group and a later membership edit does not rewrite policies', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const sourceId = installedSourceId(before);
+  const team = { id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [sourceId] };
+  const baseline = gateway.provider.requests.length;
+  const created = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members, teams: [team],
+  } });
+  assert.equal(created.status, 200, await created.clone().text());
+  const duringCreate = gateway.provider.requests.slice(baseline);
+  assert.equal(duringCreate.filter(({ method, pathname }) => method === 'POST' && pathname.endsWith('/access/groups')).length, 1);
+  assert.equal(duringCreate.filter(({ method, pathname }) => method === 'PUT' && pathname.includes('/policies/')).length, 2);
+  const saved = await gateway.view();
+  assert.doesNotMatch(JSON.stringify(saved), /accessGroupId|synthetic-access-group/);
+  assert.deepEqual(saved.teams, [team]);
+  const groupId = [...gateway.provider.groups.values()][0].id;
+  assert.ok(ruleGroups(policy(gateway, 'mcp_portal')).includes(groupId));
+  assert.ok(ruleGroups(sourceAccessPolicy(gateway, sourceId)).includes(groupId));
+  const membershipBaseline = gateway.provider.requests.length;
+  const nextTeam = { ...team, memberEmails: [MEMBER, NEW_PERSON].sort() };
+  const membership = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: saved.revision, members: saved.members, teams: [nextTeam],
+  } });
+  assert.equal(membership.status, 200, await membership.clone().text());
+  const added = gateway.provider.requests.slice(membershipBaseline);
+  assert.deepEqual(added.map(({ method, pathname }) => `${method} ${pathname}`), [
+    `GET /client/v4/accounts/${ACCOUNT_ID}/tokens/verify`,
+    `GET /client/v4/accounts/${ACCOUNT_ID}/access/groups/${groupId}`,
+    `PUT /client/v4/accounts/${ACCOUNT_ID}/access/groups/${groupId}`,
+  ]);
+}));
+
+test('a lost Access group create resumes from the stable group name', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const body = {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members,
+    teams: [{ id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [installedSourceId(before)] }],
+  };
+  gateway.provider.dropNextGroupCreate();
+  const lost = await gateway.api('/api/team-actions', { method: 'POST', body });
+  assert.equal(lost.status, 409, await lost.clone().text());
+  assert.deepEqual(await lost.json(), { schemaVersion: 1, error: 'team_action_recovery_required' });
+  assert.equal(gateway.provider.groups.size, 1);
+  const resumed = await gateway.api('/api/team-actions', { method: 'POST', body });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal(gateway.provider.groups.size, 1);
+  assert.equal(gateway.provider.requests.filter(({ method, pathname }) => method === 'POST' && pathname.endsWith('/access/groups')).length, 1);
+  const saved = await gateway.view();
+  assert.equal(saved.teams[0].name, 'Finance');
+  assert.doesNotMatch(JSON.stringify(saved), /synthetic-access-group/);
+}));
+
+test('a refused Access group write reports the missing group permission', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const baseline = gateway.provider.requests.length;
+  gateway.provider.hook(async ({ record }) => {
+    if (record.method === 'POST' && record.pathname.endsWith('/access/groups')) {
+      return Response.json({ success: false, errors: [{ code: 10000 }], messages: [], result: null }, { status: 403 });
+    }
+  });
+  const response = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members,
+    teams: [{ id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [installedSourceId(before)] }],
+  } });
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_access_group_permission_missing' });
+  assert.equal(gateway.provider.groups.size, 0);
+  assert.equal(gateway.provider.requests.slice(baseline).filter(({ method, pathname }) => method === 'PUT' && pathname.includes('/policies/')).length, 0);
+}));
+
+test('removing one team keeps the other group and a direct grant, and moving that grant keeps the group', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const sourceId = installedSourceId(before);
+  const finance = { id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [sourceId] };
+  const legal = { id: LEGAL_TEAM, name: 'Legal', memberEmails: [NEW_PERSON], sourceIds: [sourceId] };
+  const created = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision,
+    members: [...before.members, { email: NEW_PERSON, sourceIds: [sourceId] }],
+    teams: [finance, legal],
+  } });
+  assert.equal(created.status, 200, await created.clone().text());
+  const saved = await gateway.view();
+  const financeId = [...gateway.provider.groups.values()].find((group) => group.name.endsWith(FINANCE_TEAM)).id;
+  const legalId = [...gateway.provider.groups.values()].find((group) => group.name.endsWith(LEGAL_TEAM)).id;
+  const removalBaseline = gateway.provider.requests.length;
+  const removed = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: saved.revision, members: saved.members,
+    teams: [finance, { ...legal, memberEmails: [] }],
+  } });
+  assert.equal(removed.status, 200, await removed.clone().text());
+  const removalRequests = gateway.provider.requests.slice(removalBaseline);
+  const deleteAt = removalRequests.findIndex(({ method, pathname }) => method === 'DELETE' && pathname.includes('/access/groups/'));
+  const lastPolicyPut = removalRequests.findLastIndex(({ method, pathname }) => method === 'PUT' && pathname.includes('/policies/'));
+  assert.ok(lastPolicyPut >= 0 && deleteAt > lastPolicyPut);
+  const afterRemoval = sourceAccessPolicy(gateway, sourceId);
+  assert.ok(ruleEmails(afterRemoval).includes(NEW_PERSON));
+  assert.ok(ruleGroups(afterRemoval).includes(financeId));
+  assert.equal(ruleGroups(afterRemoval).includes(legalId), false);
+  assert.equal(gateway.provider.groups.has(legalId), false);
+  const current = await gateway.view();
+  const moved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: current.revision,
+    members: current.members.map((member) => member.email === NEW_PERSON ? { ...member, sourceIds: [] } : member),
+    teams: [finance, { ...legal, memberEmails: [] }],
+  } });
+  assert.equal(moved.status, 200, await moved.clone().text());
+  const afterMove = sourceAccessPolicy(gateway, sourceId);
+  assert.equal(ruleEmails(afterMove).includes(NEW_PERSON), false);
+  assert.ok(ruleGroups(afterMove).includes(financeId));
+  assert.ok(ruleGroups(policy(gateway, 'mcp_portal')).includes(financeId));
 }));

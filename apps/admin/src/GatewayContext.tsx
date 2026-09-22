@@ -28,6 +28,7 @@ import {
   type Team,
   type TeamAction,
   type TeamActionResult,
+  type TeamGrant,
   type TeamMember,
   type TeardownAction,
   validHandoffUrl,
@@ -74,7 +75,7 @@ interface GatewayContextValue {
   verifyManagementAccess(): Promise<ManagementVerification>
   getManagementCredentialStatus(): Promise<ManagementCredentialStatus>
   getTeam(): Promise<Team>
-  prepareTeamAction(expectedRevision: number, members: TeamMember[]): Promise<TeamActionResult>
+  prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
 }
@@ -511,9 +512,11 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     getManagementCredentialStatus,
     getTeam,
     getTeamAction,
-    prepareTeamAction: (expectedRevision, members) => runBusy(async () => {
+    prepareTeamAction: (expectedRevision, members, teams) => runBusy(async () => {
       try {
-        return await apiRef.current.prepareTeamAction(expectedRevision, members)
+        return await (teams === undefined
+          ? apiRef.current.prepareTeamAction(expectedRevision, members)
+          : apiRef.current.prepareTeamAction(expectedRevision, members, teams))
       } catch (cause) {
         throw cause instanceof GatewayApiError ? cause : new GatewayApiError(502, 'team_prepare_failed')
       }
