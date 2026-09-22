@@ -15,7 +15,7 @@ enforces the exact versions on every pull request.
 nvm install   # or: fnm install / mise install
 nvm use
 npm ci
-npm run check
+npm run check:fast
 ```
 
 Use `npm ci` for normal setup and verification. Use `npm install` only when
@@ -23,8 +23,9 @@ intentionally changing dependencies, and commit the manifest and lockfile
 changes together.
 
 While iterating, `npm run check:fast` runs the lint, typecheck, public
-boundary, and unit-test subset in well under a minute. `npm run check` is the
-full release gate and matches what continuous integration runs.
+boundary, and unit-test subset in well under a minute. Run focused tests for
+the behavior you change. The full `npm run check` release gate runs in
+continuous integration.
 
 For local interface work, run:
 
@@ -85,9 +86,10 @@ or existing document paths. Those are compatibility contracts, not labels.
 - Record transferred or vendored material in [ORIGINS.md](ORIGINS.md) and
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-Before opening a pull request, run `npm run check` from a clean checkout and
+Before opening a pull request, run `npm run check:fast` from a clean checkout and
 describe any effect on credential custody, authorization, telemetry, updates,
-rollback, or removal.
+rollback, or removal. Continuous integration runs the full `npm run check`
+gate, and that status must pass before merge.
 
 Use the repository's issue forms for bug reports and feature proposals. Keep
 all reports synthetic and follow [the code of conduct](CODE_OF_CONDUCT.md).
