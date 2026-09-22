@@ -13,6 +13,15 @@ Notable public product and repository changes are recorded here.
   removal that armed or sent any deletion still needs a fresh authorization to
   continue.
 
+- Fix named teams on connectors the gateway serves itself, and on removal. A
+  team that granted Gateway Management or a built-in API connector made that
+  connector refuse everyone, including people assigned directly; the Worker now
+  reads the team's own Access group on each request. Removing a connector that
+  a team grants now works. Removing the gateway asks you to delete your teams
+  first; before, it failed after authorization and then blocked Team changes.
+  A team save refused for the missing Access group permission changes no
+  policy, and you can now cancel it.
+
 - Unify expand/collapse controls and checkboxes across connector tools, Team
   access and setup forms. Simplify Settings copy and release status, remove the
   redundant connector status button, and refresh the README introduction.

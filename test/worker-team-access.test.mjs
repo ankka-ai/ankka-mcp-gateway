@@ -4565,11 +4565,21 @@ test('built-in API sources install, isolate data access, update Team policies an
     sourceIds: member.sourceIds.filter((id) => id !== source.id),
   })))).status, 200);
   assert.equal((await rpc('tools/call', { name: 'getStock' })).status, 401);
+  // A team grants the same connector through its Access group, and removal keeps the team.
+  const direct = await gateway.view();
+  const stock = { id: 'team-1234567890abcdef', name: 'Stock', memberEmails: [MEMBER], sourceIds: [source.id] };
+  const granted = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: direct.revision, members: direct.members, teams: [stock],
+  } });
+  assert.equal(granted.status, 200, await granted.clone().text());
+  assert.equal((await rpc('tools/call', { name: 'getStock', arguments: {} })).body.result.isError, false);
+  assert.equal((await rpc('tools/call', { name: 'getStock' }, NEW_PERSON)).status, 401);
   const sources = await (await gateway.api('/api/sources')).json();
   const removed = await gateway.api(`/api/sources/${source.id}`, { method: 'DELETE', body: { schemaVersion: 1, revision: sources.revision } });
   assert.equal(removed.status, 200, await removed.clone().text());
   assert.equal(gateway.provider.state.apps.has(native.id), false);
   assert.equal((await rpc('tools/list')).status, 401);
+  assert.deepEqual((await gateway.view()).teams, [{ ...stock, sourceIds: [] }]);
 }));
 
 const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
@@ -5068,14 +5078,20 @@ test('a lost Access group create resumes from the stable group name', async () =
   assert.doesNotMatch(JSON.stringify(saved), /synthetic-access-group/);
 }));
 
-test('a refused Access group write reports the missing group permission', async () => fixture(async (gateway) => {
-  const before = await gateway.view();
-  const baseline = gateway.provider.requests.length;
+function refuseGroupWrites(gateway) {
+  const refusal = { refuse: true };
   gateway.provider.hook(async ({ record }) => {
-    if (record.method === 'POST' && record.pathname.endsWith('/access/groups')) {
+    if (refusal.refuse && record.method === 'POST' && record.pathname.endsWith('/access/groups')) {
       return Response.json({ success: false, errors: [{ code: 10000 }], messages: [], result: null }, { status: 403 });
     }
   });
+  return refusal;
+}
+
+test('a refused Access group write reports the missing group permission and can be cancelled', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const baseline = gateway.provider.requests.length;
+  refuseGroupWrites(gateway);
   const response = await gateway.api('/api/team-actions', { method: 'POST', body: {
     schemaVersion: 1, expectedRevision: before.revision, members: before.members,
     teams: [{ id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [installedSourceId(before)] }],
@@ -5084,6 +5100,36 @@ test('a refused Access group write reports the missing group permission', async 
   assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_access_group_permission_missing' });
   assert.equal(gateway.provider.groups.size, 0);
   assert.equal(gateway.provider.requests.slice(baseline).filter(({ method, pathname }) => method === 'PUT' && pathname.includes('/policies/')).length, 0);
+  // Cloudflare refused the only write, so no write evidence remains to reconcile.
+  assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY).pendingAction.journal, []);
+  const { pendingAction } = await gateway.view();
+  assert.equal(pendingAction.status, 'recovery_required');
+  assert.equal(pendingAction.canCancel, true);
+  const cancelled = await gateway.api(`/api/team-actions/${pendingAction.actionId}`, { method: 'DELETE' });
+  assert.equal(cancelled.status, 200, await cancelled.clone().text());
+  assert.equal((await cancelled.json()).failureCode, 'team_action_cancelled');
+  const sources = await (await gateway.api('/api/sources')).json();
+  const saved = await gateway.api('/api/sources', { method: 'PUT', body: { schemaVersion: 1, revision: sources.revision,
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] } } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+}));
+
+test('a change refused for the group permission resumes once the same token can write groups', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const sourceId = installedSourceId(before);
+  const refusal = refuseGroupWrites(gateway);
+  const body = {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members,
+    teams: [{ id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [sourceId] }],
+  };
+  assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body })).status, 409);
+  refusal.refuse = false;
+  const resumed = await gateway.api('/api/team-actions', { method: 'POST', body });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal(gateway.provider.groups.size, 1);
+  const groupId = [...gateway.provider.groups.values()][0].id;
+  assert.ok(ruleGroups(sourceAccessPolicy(gateway, sourceId)).includes(groupId));
+  assert.ok(ruleGroups(policy(gateway, 'mcp_portal')).includes(groupId));
 }));
 
 test('removing one team keeps the other group and a direct grant, and moving that grant keeps the group', async () => fixture(async (gateway) => {
@@ -5126,4 +5172,105 @@ test('removing one team keeps the other group and a direct grant, and moving tha
   assert.equal(ruleEmails(afterMove).includes(NEW_PERSON), false);
   assert.ok(ruleGroups(afterMove).includes(financeId));
   assert.ok(ruleGroups(policy(gateway, 'mcp_portal')).includes(financeId));
+}));
+
+test('a team grants Gateway Management through its Access group, read live on every request', () => fixture(async (gateway) => {
+  const { source } = await installManagementSource(gateway);
+  const view = await gateway.view();
+  const operations = { id: FINANCE_TEAM, name: 'Operations', memberEmails: [MEMBER], sourceIds: [source.id] };
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: view.revision, members: view.members, teams: [operations],
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const status = async (email) => (await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} }, { email })).response.status;
+  assert.equal(await status(ADMIN), 200);
+  assert.equal(await status(MEMBER), 200);
+  assert.equal(await status(NEW_PERSON), 401);
+  // A manager assigned through the team can change assignments; the team stays.
+  const read = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_team', arguments: {} }, { email: MEMBER });
+  const current = read.body.result.structuredContent.result;
+  const change = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: {
+    expectedRevision: current.revision, members: [...current.members, { email: NEW_PERSON, sourceIds: [] }],
+  } }, { email: MEMBER });
+  assert.equal(change.body.result.structuredContent.ok, true, JSON.stringify(change.body));
+  // Moving the seat edits only the group, and the next request reads it.
+  const after = await gateway.view();
+  assert.deepEqual(after.teams, [operations]);
+  const baseline = gateway.provider.requests.length;
+  const moved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: after.revision, members: after.members, teams: [{ ...operations, memberEmails: [NEW_PERSON] }],
+  } });
+  assert.equal(moved.status, 200, await moved.clone().text());
+  assert.equal(gateway.provider.requests.slice(baseline).filter(({ method, pathname }) => method === 'PUT' && pathname.includes('/policies/')).length, 0);
+  assert.equal(await status(MEMBER), 401);
+  assert.equal(await status(NEW_PERSON), 200);
+}));
+
+test('Gateway Management accepts only Access groups this gateway created for its teams', () => fixture(async (gateway) => {
+  const { source, application, portalApplication } = await installManagementSource(gateway);
+  const status = async (email) => (await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} }, { email })).response.status;
+  const policies = () => [application, portalApplication].map((app) => gateway.provider.state.policies.get(app.id)[0]);
+  gateway.provider.groups.set('foreign-group', { id: 'foreign-group', account_id: ACCOUNT_ID, name: 'Finance',
+    include: [{ email: { email: MEMBER } }], exclude: [], require: [] });
+  for (const entry of policies()) entry.include.push({ group: { id: 'foreign-group' } });
+  assert.equal(await status(ADMIN), 401);
+  assert.equal(await status(MEMBER), 401);
+  for (const entry of policies()) entry.include = entry.include.filter((rule) => !rule.group);
+  assert.equal(await status(ADMIN), 200);
+  const view = await gateway.view();
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: view.revision, members: view.members,
+    teams: [{ id: FINANCE_TEAM, name: 'Finance', memberEmails: [MEMBER], sourceIds: [source.id] }],
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(await status(MEMBER), 200);
+  // The group keeps its recorded id but no longer carries the stable name.
+  const owned = [...gateway.provider.groups.values()].find((group) => group.name.endsWith(FINANCE_TEAM));
+  owned.name = 'Finance';
+  assert.equal(await status(MEMBER), 401);
+  assert.equal(await status(ADMIN), 401);
+}));
+
+test('removing a connector that a team grants keeps the team and its Access group', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const sourceId = installedSourceId(before);
+  const team = { id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [sourceId] };
+  const created = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members, teams: [team],
+  } });
+  assert.equal(created.status, 200, await created.clone().text());
+  const groupId = [...gateway.provider.groups.values()][0].id;
+  assert.ok(ruleGroups(sourceAccessPolicy(gateway, sourceId)).includes(groupId));
+  const removed = await removeSource(gateway, sourceId);
+  assert.equal(removed.status, 200, await removed.clone().text());
+  const after = await gateway.view();
+  assert.deepEqual(after.teams, [{ ...team, sourceIds: [] }]);
+  assert.equal(gateway.provider.groups.has(groupId), true);
+  assert.ok(ruleGroups(policy(gateway, 'mcp_portal')).includes(groupId));
+}));
+
+test('full removal waits until no team holds an Access group', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const team = { id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [installedSourceId(before)] };
+  const created = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members, teams: [team],
+  } });
+  assert.equal(created.status, 200, await created.clone().text());
+  const refused = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, currentTeardown: true });
+  assert.equal(refused.status, 409);
+  assert.deepEqual(await refused.json(), { schemaVersion: 1, error: 'teardown_teams_present' });
+  assert.equal((await gateway.currentTeardown()).prepared.status, 409);
+  // Nothing was recorded, so the Team page can still delete the team and its group.
+  const saved = await gateway.view();
+  assert.equal(saved.editingEnabled, true);
+  const deleted = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: saved.revision, members: saved.members, teams: [],
+  } });
+  assert.equal(deleted.status, 200, await deleted.clone().text());
+  assert.equal(gateway.provider.groups.size, 0);
+  const teardown = await gateway.currentTeardown(5);
+  assert.equal(teardown.prepared.status, 200, await teardown.prepared.clone().text());
+  assert.equal((await teardown.send('prove')).status, 200);
+  const applied = await teardown.send('apply');
+  assert.equal(applied.status, 200, await applied.clone().text());
 }));

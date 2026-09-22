@@ -281,10 +281,6 @@ function teamPolicySelectors(policy) {
   return { emails: teamEmails(emails), groupIds: teamGroupIds(groupIds) };
 }
 
-function teamPolicyAudience(policy) {
-  return teamPolicySelectors(policy).emails;
-}
-
 function teamNeutralPolicyFields(policy) {
   const metadata = ['id', 'uid', 'account_id', 'created_at', 'updated_at', 'precedence'];
   const body = ['name', 'decision', 'include', 'exclude', 'require'];
@@ -5496,13 +5492,14 @@ function teardownPolicyMatches(value, desired, settings, currentPolicies = false
   if (currentPolicies) {
     // Assignment changes do not transfer ownership. The immutable locator and
     // exact marked name still bind the policy to this installation. Only the
-    // supported email or deny-everyone policy shapes may have changed.
+    // supported email, team group or deny-everyone policy shapes may have changed.
     const name = `${sourcePolicyKind(desired.kind)
       ? settings.sources[0]?.label : settings.connect.name} users [${marker(
       desired.desired.metadata.installationId, desired.key,
     )}]`;
     try {
-      return teamPolicyMatches(value, teamPolicy(teamPolicyAudience(value), name), value?.id);
+      const selectors = teamPolicySelectors(value);
+      return teamPolicyMatches(value, teamPolicy(selectors.emails, name, selectors.groupIds), value?.id);
     } catch { return false; }
   }
   if (desired.kind === 'management_access_policy') return policyMatches(value, desired, settings);
@@ -6584,6 +6581,10 @@ export class AdminState {
       // The current gateway coordinator uses these internal-only routes. Old
       // hosted handoffs cannot opt into the new receipt-owned policy matcher.
       if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/prepare-current` && request.method === 'POST') {
+        // Removal deletes the policies that name a team's Access group, not the group itself.
+        if (teamGroupOwners(await readTeamState(this.state.storage, this.env)).size > 0) {
+          return fixedJson(409, { schemaVersion: 1, error: 'teardown_teams_present' });
+        }
         const environment = parseManagementEnvironment(this.env);
         const input = await request.json().catch(() => null);
         const action = environment ? await prepareTeardownAction(
@@ -8053,6 +8054,14 @@ function teamGroupBindings(journal) {
   return bindings;
 }
 
+/** Group id to team id for groups this gateway created: saved teams, and any an unfinished change verified. */
+function teamGroupOwners(team) {
+  const owners = new Map();
+  for (const entry of team?.teams ?? []) if (entry.accessGroupId) owners.set(entry.accessGroupId, entry.id);
+  for (const [teamId, groupId] of teamGroupBindings(team?.pendingAction?.journal ?? [])) owners.set(groupId, teamId);
+  return owners;
+}
+
 function bindTeamPlan(plan, bindings) {
   const policies = [];
   for (const policy of plan.policies) {
@@ -8385,6 +8394,14 @@ async function processTeamAction(env, storage, prepared, nowMs) {
     if (response.status === 'auth') context.groupPermissionRejected = true;
     return teamProviderOk(context, response);
   };
+  // Cloudflare refuses a write without the group permission before applying it.
+  // Forget the entry this attempt armed, so a change with no other write can still
+  // be cancelled. An entry armed by an earlier attempt keeps its unknown outcome.
+  const disarmRefused = async (response, teamId, previous) => {
+    if (response.status === 'auth' && previous === undefined) {
+      await persist({ journal: action.journal.filter((entry) => entry.teamId !== teamId) });
+    }
+  };
   const applyGroup = async (change) => {
     const name = teamGroupName(context.control.installationId, change.teamId);
     if (!name || Date.now() >= action.expiresAt || context.signal?.aborted) return null;
@@ -8410,6 +8427,7 @@ async function processTeamAction(env, storage, prepared, nowMs) {
       const created = await providerCall(groupCollection, token, {
         method: 'POST', body: canonicalJson(teamGroupBody(name, change.memberEmails)), signal: context.signal,
       });
+      await disarmRefused(created, change.teamId, existing);
       if (!groupAccepted(created) || !safeProviderId(created.result?.id) ||
           (Object.hasOwn(created.result, 'account_id') && created.result.account_id !== account) ||
           !teamGroupRecordMatches(created.result, name, change.memberEmails)) return null;
@@ -8426,10 +8444,12 @@ async function processTeamAction(env, storage, prepared, nowMs) {
         await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'verified' }) });
         return change.groupId;
       }
+      const previous = armed();
       await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'send_armed' }) });
       const updated = await providerCall(`${groupCollection}/${encodeURIComponent(change.groupId)}`, token, {
         method: 'PUT', body: canonicalJson(teamGroupBody(name, change.memberEmails)), signal: context.signal,
       });
+      await disarmRefused(updated, change.teamId, previous);
       if (!groupAccepted(updated) || updated.result?.id !== change.groupId ||
           !teamGroupRecordMatches(updated.result, name, change.memberEmails)) return null;
       await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'verified' }) });
@@ -8442,10 +8462,12 @@ async function processTeamAction(env, storage, prepared, nowMs) {
       return true;
     }
     if (!groupAccepted(live) || live.result?.id !== change.groupId || !teamGroupRecordAccepted(live.result, name)) return null;
+    const previous = armed();
     await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'send_armed' }) });
     const removed = await providerCall(`${groupCollection}/${encodeURIComponent(change.groupId)}`, token, {
       method: 'DELETE', signal: context.signal,
     });
+    await disarmRefused(removed, change.teamId, previous);
     if (removed.status !== 'absent' && (!groupAccepted(removed) ||
         (removed.result !== null && removed.result?.id !== change.groupId))) return null;
     await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: null, phase: 'verified' }) });
@@ -9050,7 +9072,9 @@ async function handleTeardownActions(request, env, currentPolicies = false) {
     }));
   } catch { prepared = null; }
   if (!(prepared instanceof Response) || prepared.status !== 200) {
-    return fixedJson(409, { schemaVersion: 1, error: 'teardown_action_conflict' });
+    const refusal = prepared instanceof Response ? await prepared.json().catch(() => null) : null;
+    return fixedJson(409, { schemaVersion: 1,
+      error: refusal?.error === 'teardown_teams_present' ? refusal.error : 'teardown_action_conflict' });
   }
   const claim = canonicalJson({
     schemaVersion: 3,
@@ -9175,15 +9199,30 @@ async function managementSourceContext(storage, env, allowDraft = false, sourceI
         policies.status !== 'ok' || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
     const policy = action.resources[index + 1];
     const live = policies.result[0];
-    let emails;
-    try { emails = teamPolicyAudience(live); } catch { return null; }
-    if (!teamPolicyMatches(live, teamPolicy(emails, `${source.label} users [${policy.marker}]`), policy.provider.id)) return null;
-    return { aud: application.result.aud, emails };
+    let selectors;
+    try {
+      selectors = teamPolicySelectors(live);
+      if (!teamPolicyMatches(live, teamPolicy(selectors.emails, `${source.label} users [${policy.marker}]`, selectors.groupIds), policy.provider.id)) return null;
+    } catch { return null; }
+    return { aud: application.result.aud, ...selectors };
   };
   const [portal, native] = await Promise.all([read(1), read(3)]);
   if (!portal || !native || !oauthText(native.aud, 512) || canonicalJson(native.emails) !==
-      canonicalJson([...new Set([...control.audienceEmails, ...portal.emails])].sort(compareText))) return null;
-  return { endpoint: source.url, aud: native.aud, emails: portal.emails, enabledTools: source.enabledTools, installed: source.status === 'installed' };
+      canonicalJson([...new Set([...control.audienceEmails, ...portal.emails])].sort(compareText)) ||
+      canonicalJson(native.groupIds) !== canonicalJson(portal.groupIds)) return null;
+  // A team grants the source through its Access group. Read each member list live,
+  // and only from a group this gateway created and recorded for one of its teams.
+  let members = [];
+  if (portal.groupIds.length > 0) {
+    const owners = teamGroupOwners(await readTeamState(storage, env));
+    const groups = await Promise.all(portal.groupIds.map((groupId) => owners.has(groupId)
+      ? readOwnedTeamGroup({ control, environment, signal }, token, { id: owners.get(groupId), accessGroupId: groupId })
+      : null));
+    if (groups.some((emails) => emails === null)) return null;
+    members = groups.flat();
+  }
+  return { endpoint: source.url, aud: native.aud, emails: [...new Set([...portal.emails, ...members])].sort(compareText),
+    enabledTools: source.enabledTools, installed: source.status === 'installed' };
 }
 
 async function managementOperationActorAllowed(storage, env, actorEmail) {
