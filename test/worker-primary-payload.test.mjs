@@ -286,9 +286,8 @@ test('bounded provider reads cover the independent 32-source and 500-tool respon
     readFile(new URL('../payload/worker/index.js', import.meta.url), 'utf8'),
     readFile(new URL('../payload/worker-cleanup/index.js', import.meta.url), 'utf8'),
   ]);
-  for (const source of [primarySource, cleanupSource]) {
-    assert.match(source, /const PROVIDER_RESPONSE_LIMIT_BYTES = 4 \* 1024 \* 1024;/u);
-  }
+  assert.match(primarySource, /const PROVIDER_RESPONSE_LIMIT_BYTES = 8 \* 1024 \* 1024;/u);
+  assert.match(cleanupSource, /const PROVIDER_RESPONSE_LIMIT_BYTES = 4 \* 1024 \* 1024;/u);
 });
 
 test('primary provider reads accept a streamed response above the former 64 KiB cap', async () => {
@@ -317,14 +316,14 @@ test('primary provider reads accept a streamed response above the former 64 KiB 
   assert.ok(injectedBytes < 4 * 1024 * 1024);
 });
 
-test('primary provider reads cancel a 4 MiB+1 response before any provider mutation', async () => {
+test('primary provider reads cancel an 8 MiB+1 response before any provider mutation', async () => {
   let cancelled = false;
   const provider = cloudflareProvider({
     onRequest: ({ request }) => request.method === 'GET'
       ? new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
         headers: {
           'content-type': 'application/json',
-          'content-length': String((4 * 1024 * 1024) + 1),
+          'content-length': String((8 * 1024 * 1024) + 1),
         },
       })
       : undefined,

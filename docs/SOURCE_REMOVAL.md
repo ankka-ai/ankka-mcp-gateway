@@ -83,3 +83,9 @@ exercise confirmation, cancellation, recovery and capability restrictions.
 These tests do not qualify live provider permissions or deployed behavior;
 release promotion still requires the provider/deployed checks described in
 [Local runtime](LOCAL_RUNTIME.md).
+
+Cloudflare provider responses are bounded at 8 MiB, including streamed bodies.
+Synced MCP server records contain full tool schemas and can exceed 4 MiB even
+when the source has fewer than 500 tools. Removal reads the complete bounded
+record to verify ownership; an oversized or unreadable response never counts
+as absence and never authorizes deletion.

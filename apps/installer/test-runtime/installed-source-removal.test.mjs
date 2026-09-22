@@ -26,6 +26,13 @@ for (const state of ['installed', 'connection-paused']) test(`${state} source re
   const gateway = state === 'connection-paused' ? await pausedGateway({ onRequest })
     : await installReadyGateway({ provider: cloudflareProvider({ onRequest }) });
   const provider = gateway.provider;
+  if (state === 'connection-paused') {
+    const server = provider.state.servers.get(gateway.action.resources[0].provider.id);
+    Object.assign(server, { authentication_status: 'connected', status: 'ready', tools: Array.from({ length: 263 }, (_, index) => ({
+      name: `read_${index}`, inputSchema: { type: 'object', description: 'Synthetic schema documentation. '.repeat(800) },
+    })) });
+    assert.ok(Buffer.byteLength(JSON.stringify(server)) > 6 * 1024 * 1024);
+  }
   gateway.env.ANKKA_MANAGEMENT_TOKEN = 'synthetic-removal-token-never-store';
   const management = Object.fromEntries(await gateway.objects.get('v1:management').storage.list());
   const root = Object.fromEntries(await gateway.objects.get(`v1:${gateway.env.ANKKA_INSTALL_ID}`).storage.list());

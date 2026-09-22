@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Accept Cloudflare server records up to 8 MiB, including large synced tool
+  schemas, when reading source tools and verifying removal ownership. Sources
+  whose records exceeded the previous 4 MiB limit can now finish removal.
+
 - Allow removal of unfinished MCP sources waiting for sign-in, synchronization,
   or tool selection. Confirm cleanup from the installation details without
   completing connection first; saved resource receipts and removal progress
