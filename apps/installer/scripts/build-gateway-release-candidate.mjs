@@ -215,6 +215,8 @@ async function assertExactSourceCommit(sourceRoot, sourceCommit) {
     'payload',
     'apps/read-only-connectors/src',
     'apps/read-only-connectors/package.json',
+    'apps/api-source-runtime/src',
+    'apps/api-source-runtime/package.json',
   ]);
   if (status.trim().length > 0) fail('source_release_inputs_dirty');
 }
@@ -319,6 +321,8 @@ async function bundleCustomerWorker(sourceRoot, controlPlaneOrigin, variant, fin
       logLevel: 'silent',
       minify: false,
       platform: 'browser',
+      conditions: ['workerd', 'worker', 'browser'],
+      external: ['cloudflare:*', 'node:*'],
       sourcemap: false,
       target: 'es2022',
       treeShaking: true,

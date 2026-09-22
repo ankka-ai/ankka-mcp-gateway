@@ -3,6 +3,20 @@
 const TEAM_MAX_SOURCES = 32;
 // A reserved source identity, installed and assigned through the ordinary source lifecycle.
 const MANAGEMENT_SOURCE_ID = 'source-616e6b6b616d6370';
+// Reserved IDs distinguish gateway-hosted API sources throughout the receipt lifecycle.
+const API_SOURCE_ID = /^source-a9[a-f0-9]{14}$/u;
+const API_SOURCE_PATH = /^\/api\/api-sources\/([a-z][a-z0-9-]{0,31})\/mcp$/u;
+function nativeSourceId(id) { return id === MANAGEMENT_SOURCE_ID || API_SOURCE_ID.test(id); }
+function apiConnectionKey(url, env) {
+  const origin = managementSourceUrl(env);
+  if (!origin) return null;
+  const parsed = new URL(url);
+  return parsed.origin === new URL(origin).origin && !parsed.search && !parsed.hash
+    ? API_SOURCE_PATH.exec(parsed.pathname)?.[1] ?? null : null;
+}
+function nativeSourcePaths(source) {
+  return source.id === MANAGEMENT_SOURCE_ID ? MANAGEMENT_SOURCE_PATHS : [new URL(source.url).pathname];
+}
 // The signed deployment routes /api/* to the Worker before the dashboard SPA.
 const MANAGEMENT_MCP_PATH = '/api/mcp';
 // The existing customer-owned consent pages use the same source assignment.
@@ -1503,14 +1517,14 @@ async function buildDesiredResources(settings, installationId, sourceDefaultDeny
       defaultAction: 'deny', allow: sourceAllowPolicy,
     } },
   ];
-  if (managementSource) {
+  if (nativeSourceId(source?.id)) {
     const applicationKey = await stableResourceKey('management-app', installationId, source.id);
     const policyKey = await stableResourceKey('management-policy', installationId, source.id);
     const emails = [...new Set([...source.administratorEmails, ...allowedEmails])].sort(compareText);
     sourceSpecifications.push(
       { kind: 'management_access_application', key: applicationKey, desired: {
-        metadata, applicationType: 'self_hosted', hostname: new URL(source.url).host + MANAGEMENT_MCP_PATH,
-        paths: MANAGEMENT_SOURCE_PATHS,
+        metadata, applicationType: 'self_hosted', hostname: new URL(source.url).host + new URL(source.url).pathname,
+        paths: nativeSourcePaths(source),
       } },
       { kind: 'management_access_policy', key: policyKey, desired: {
         metadata, sourceApplicationResourceKey: applicationKey, defaultAction: 'deny',
@@ -1878,7 +1892,7 @@ function accessApplicationCandidate(value, kind, state) {
   const destinations = Array.isArray(value.destinations) ? value.destinations : [];
   if (kind === 'management_access_application') {
     const desired = resource(state, kind);
-    return value.name === marker(state.installationId, desired.key) || MANAGEMENT_SOURCE_PATHS.some((path) =>
+    return value.name === marker(state.installationId, desired.key) || nativeSourcePaths(state.settings.sources[0]).some((path) =>
       value.domain === new URL(state.settings.sources[0].url).host + path ||
       destinations.some((item) => item?.type === 'public' && item.uri === new URL(state.settings.sources[0].url).host + path));
   }
@@ -1886,7 +1900,7 @@ function accessApplicationCandidate(value, kind, state) {
     const server = locator(state, 'mcp_server');
     const desired = resource(state, kind);
     return value.name === marker(state.installationId, desired.key) ||
-      (desired.desired.hostname && MANAGEMENT_SOURCE_PATHS.some((path) => {
+      (desired.desired.hostname && nativeSourcePaths(state.settings.sources[0]).some((path) => {
         const hostname = new URL(state.settings.sources[0].url).host + path;
         return value.domain === hostname || destinations.some((item) => item?.type === 'public' && item.uri === hostname);
       })) || (
@@ -1910,8 +1924,8 @@ function accessApplicationIdentityMatches(value, kind, state) {
     const desired = resource(state, kind);
     return value.type === 'self_hosted' && value.name === marker(state.installationId, desired.key) &&
       value.domain === desired.desired.hostname && managedOauthMatches(value) &&
-      Array.isArray(value.destinations) && value.destinations.length === MANAGEMENT_SOURCE_PATHS.length &&
-      MANAGEMENT_SOURCE_PATHS.every((path) => value.destinations.some((item) => exactKeys(item, ['type', 'uri']) &&
+      Array.isArray(value.destinations) && value.destinations.length === nativeSourcePaths(state.settings.sources[0]).length &&
+      nativeSourcePaths(state.settings.sources[0]).every((path) => value.destinations.some((item) => exactKeys(item, ['type', 'uri']) &&
         item.type === 'public' && item.uri === new URL(state.settings.sources[0].url).host + path));
   }
   if (kind === 'source_access_application') {
@@ -2087,7 +2101,7 @@ async function createResource(state, kind, token) {
       body.type = 'self_hosted';
       body.destinations = [];
       body.domain = desired.desired.hostname;
-      for (const route of MANAGEMENT_SOURCE_PATHS) body.destinations.push({ type: 'public', uri: new URL(state.source.url).host + route });
+      for (const route of nativeSourcePaths(state.source)) body.destinations.push({ type: 'public', uri: new URL(state.source.url).host + route });
       body.oauth_configuration = { enabled: true, dynamic_client_registration: { enabled: true,
         allowed_uris: [...DEFAULT_OAUTH_CALLBACKS, `${new URL(state.source.url).origin}${SOURCE_OAUTH_CALLBACK}`,
           // Cloudflare's initial administrator sign-in has a distinct callback
@@ -2133,7 +2147,7 @@ async function createResource(state, kind, token) {
     };
     // A sign-in source is created before its tools can be chosen. It carries
     // no override then; the Portal mapping alone enables tools, later.
-    if (desired.desired.toolPolicy.allowedTools.length > 0 && state.source?.id !== MANAGEMENT_SOURCE_ID) {
+    if (desired.desired.toolPolicy.allowedTools.length > 0 && !nativeSourceId(state.source?.id)) {
       body.updated_tools = toolProjection(desired.desired.toolPolicy.allowedTools);
     }
     if (oauth) body.is_shared_oauth_callback_enabled = true;
@@ -2712,6 +2726,7 @@ function safeManagedSource(value) {
   if (authMode !== 'none' && authMode !== 'oauth') return null;
   const onBehalfOfUser = current ? value.onBehalfOfUser : authMode === 'oauth';
   if (!isBoolean(onBehalfOfUser) || (authMode === 'none' && onBehalfOfUser !== false)) return null;
+  if (API_SOURCE_ID.test(value.id) && (authMode !== 'oauth' || onBehalfOfUser !== true || !API_SOURCE_PATH.test(new URL(value.url).pathname))) return null;
   // A sign-in source is saved before its tools can be listed. Only such a
   // draft may have none; an installed source without tools is invalid state.
   const enabledTools = exactSortedUniqueStrings(
@@ -2822,17 +2837,22 @@ export function parseSourceSave(value) {
   });
 }
 
-export async function saveDraftSource(current, input, management = null) {
+export async function saveDraftSource(current, input, management = null, apiSource = false) {
   if (input.revision !== current.revision) return null;
   const existing = current.sources.find((source) => source.url === input.source.url);
   if (existing?.status === 'installed') return null;
-  const id = management ? MANAGEMENT_SOURCE_ID : existing?.id ?? `source-${(await sha256Hex(input.source.url)).slice(0, 16)}`;
+  const digest = await sha256Hex(input.source.url);
+  // Keep ordinary URL-derived IDs outside the reserved API prefix. The collision check below still applies.
+  const externalDigest = digest.startsWith('a9') ? `a8${digest.slice(2)}` : digest;
+  const id = management ? MANAGEMENT_SOURCE_ID : existing?.id ?? (apiSource ? `source-a9${digest.slice(0, 14)}` : `source-${externalDigest.slice(0, 16)}`);
+  if (!management && API_SOURCE_ID.test(id) !== apiSource) return null;
+  if (current.sources.some((candidate) => candidate.id === id && candidate.url !== input.source.url)) return null;
   const source = {
     id,
     label: input.source.label,
     url: input.source.url,
     authMode: input.source.authMode,
-    onBehalfOfUser: management !== null,
+    onBehalfOfUser: management !== null || apiSource,
     enabledTools: [...input.source.enabledTools],
     status: 'draft',
   };
@@ -2858,7 +2878,7 @@ const SOURCE_ACTION_RESOURCE_ORDER = Object.freeze([
 const MANAGEMENT_RESOURCE_ORDER = Object.freeze([...SOURCE_ACTION_RESOURCE_ORDER,
   'management_access_application', 'management_access_policy']);
 function sourceResourceOrder(sourceId) {
-  return sourceId === MANAGEMENT_SOURCE_ID ? MANAGEMENT_RESOURCE_ORDER : SOURCE_ACTION_RESOURCE_ORDER;
+  return nativeSourceId(sourceId) ? MANAGEMENT_RESOURCE_ORDER : SOURCE_ACTION_RESOURCE_ORDER;
 }
 function accessPolicyKind(kind) { return ['source_access_policy', 'portal_access_policy', 'management_access_policy'].includes(kind); }
 function accessApplicationKind(kind) { return ['source_access_application', 'portal_access_application', 'management_access_application'].includes(kind); }
@@ -2988,7 +3008,7 @@ function sourceActionCanRenew(action, actorEmail, now) {
       (action.bigquerySetupStarted === true && action.failureCode === 'bigquery_setup_required')) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
     sourceActionState(action, now) === 'recovery_required' &&
-    !(action.pending?.kind === 'source_access_application' && action.pending.provider === null && action.sourceId !== MANAGEMENT_SOURCE_ID);
+    !(action.pending?.kind === 'source_access_application' && action.pending.provider === null && !nativeSourceId(action.sourceId));
 }
 
 // The fixed reasons an installation waits before the Portal with all source
@@ -3389,7 +3409,7 @@ async function actionDesiredState(control, sources, action) {
       enabledTools: [...source.enabledTools],
     }],
   };
-  if (source.id === MANAGEMENT_SOURCE_ID) settings.sources[0].administratorEmails = [...control.audienceEmails];
+  if (nativeSourceId(source.id)) settings.sources[0].administratorEmails = [...control.audienceEmails];
   const desiredResources = (await buildDesiredResources(settings, control.installationId, true)).slice(0, sourceResourceOrder(source.id).length);
   return Object.freeze({
     installationId: control.installationId,
@@ -3673,7 +3693,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     if (action.pending) {
       const observed = await discoverResource(
         state, kind, parsed.claim.cloudflareAccessToken, action.pending.provider,
-        action.sourceId === MANAGEMENT_SOURCE_ID && accessApplicationKind(kind) && action.pending.provider === null,
+        nativeSourceId(action.sourceId) && accessApplicationKind(kind) && action.pending.provider === null,
       );
       if (observed.status === 'absent') {
         action = await persistSourceAction(storage, { ...action, pending: null });
@@ -4071,7 +4091,7 @@ async function ownedSourceOauthContext(storage, env, input) {
   }
   const context = await sourceToolChoiceContext(recorded, env, input.actorEmail);
   if (context instanceof Response) return context;
-  if (input.revision !== context.sources.revision || input.sourceId !== context.source.id || (context.source.onBehalfOfUser !== false && context.source.id !== MANAGEMENT_SOURCE_ID)) {
+  if (input.revision !== context.sources.revision || input.sourceId !== context.source.id || (context.source.onBehalfOfUser !== false && !nativeSourceId(context.source.id))) {
     return sourceActionConflict('draft_changed');
   }
   const token = managementCredential(env);
@@ -4663,7 +4683,7 @@ function teardownSettings(control, source, sourceId) {
     const configured = { id: sourceId, label: source.label, url: source.url,
       authentication: Object.freeze({ mode: source.authMode, onBehalfOfUser: source.onBehalfOfUser }),
       enabledTools: source.enabledTools };
-    if (source.id === MANAGEMENT_SOURCE_ID) configured.administratorEmails = [...control.audienceEmails];
+    if (nativeSourceId(source.id)) configured.administratorEmails = [...control.audienceEmails];
     sources.push(Object.freeze(configured));
   }
   return Object.freeze({
@@ -5722,7 +5742,7 @@ export class AdminState {
     // Source synchronization can call back while an OAuth mutation awaits Cloudflare.
     // This read must not wait for that mutation queue.
     if (request.method === 'GET' && requestUrl.pathname === '/management-mcp/access') {
-      return managementSourceContext(this.state.storage, this.env, requestUrl.search === '?draft=1')
+      return managementSourceContext(this.state.storage, this.env, requestUrl.searchParams.get('draft') === '1', requestUrl.searchParams.get('source') ?? MANAGEMENT_SOURCE_ID)
         .then((context) => context ? fixedJson(200, context) : sourceToolsRefusal(403, 'management_source_unavailable'));
     }
     // Status must remain available while a serialized mutation awaits the
@@ -6076,11 +6096,12 @@ export class AdminState {
           revision: current.revision,
         });
         const builtin = input.source.url === managementSourceUrl(this.env);
-        if (builtin) {
+        const apiSource = apiConnectionKey(input.source.url, this.env) !== null;
+        if (builtin || apiSource) {
           try { await verifyGatewaySource(input.source, this.env); } catch { return sourceToolsRefusal(400, 'source_invalid'); }
           if (!normalizedEmail(request.headers.get('x-ankka-actor-email'))) return sourceToolsRefusal(403, 'access_required');
         }
-        const updated = await saveDraftSource(current, input, builtin ? { actorEmail: request.headers.get('x-ankka-actor-email') } : null);
+        const updated = await saveDraftSource(current, input, builtin ? { actorEmail: request.headers.get('x-ankka-actor-email') } : null, apiSource);
         if (!updated) return fixedJson(413, {
           schemaVersion: 1,
           error: 'source_capacity_exceeded',
@@ -6088,7 +6109,7 @@ export class AdminState {
         });
         // Older runtimes cannot read an empty tool selection or the built-in
         // source identity. Arm compatibility before persisting either record.
-        if ((builtin || input.source.enabledTools.length === 0) &&
+        if ((builtin || apiSource || input.source.enabledTools.length === 0) &&
             !await armSourceCompatibility(this.state.storage, this.env)) {
           return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
         }
@@ -7300,10 +7321,11 @@ async function teamSnapshot(storage, env) {
     const emails = audiences.get(portal.policyId);
     if (admins.some((email) => !emails.includes(email))) return null;
     const sourcePolicies = plan.policies.filter((policy) => policy.kind === 'source');
-    const nativePolicy = plan.policies.find((policy) => policy.kind === 'management');
-    const nativeSource = sourcePolicies.find((policy) => policy.sourceId === MANAGEMENT_SOURCE_ID);
-    const nativeMismatch = nativePolicy && canonicalJson(audiences.get(nativePolicy.policyId)) !== canonicalJson(
-      [...new Set([...context.control.audienceEmails, ...audiences.get(nativeSource.policyId)])].sort(compareText));
+    const nativeMismatch = plan.policies.filter((policy) => policy.kind === 'management').some((policy) => {
+      const source = sourcePolicies.find((entry) => entry.sourceId === policy.sourceId);
+      return !source || canonicalJson(audiences.get(policy.policyId)) !== canonicalJson(
+        [...new Set([...context.control.audienceEmails, ...audiences.get(source.policyId)])].sort(compareText));
+    });
     const inconsistent = nativeMismatch || sourcePolicies.some((policy) => audiences.get(policy.policyId).some((email) => !emails.includes(email)));
     if (inconsistent && (!state.pendingAction || ['failed', 'succeeded'].includes(state.pendingAction.status))) return null;
     // A partially applied proposal may temporarily disagree across policies.
@@ -7334,15 +7356,16 @@ async function teamSnapshot(storage, env) {
 
 function planGatewayTeamAccess(value, context) {
   const plan = planTeamAccessChange(value, context);
-  if (!context.managementTarget) return plan;
-  const target = teamTarget(context.managementTarget, true);
-  const source = plan.policies.find((policy) => policy.kind === 'source' && policy.sourceId === MANAGEMENT_SOURCE_ID);
-  if (!source || plan.policies.some((policy) => policy.applicationId === target.applicationId || policy.policyId === target.policyId)) teamFail('team_access_invalid_target');
-  const audience = (policy) => [...new Set([...context.managementAuthenticationEmails, ...teamPolicyAudience(policy)])].sort(compareText);
-  const native = { kind: 'management', ...target,
-    before: teamPolicy(audience(source.before), target.policyName), after: teamPolicy(audience(source.after), target.policyName) };
-  return teamFreeze({ ...plan, policies: [...plan.policies, native],
-    policyChanges: canonicalJson(native.before) === canonicalJson(native.after) ? plan.policyChanges : [...plan.policyChanges, native] });
+  const native = (context.nativeTargets ?? (context.managementTarget ? [context.managementTarget] : [])).map((value) => {
+    const target = teamTarget(value, true);
+    const source = plan.policies.find((policy) => policy.kind === 'source' && policy.sourceId === target.sourceId);
+    if (!source || plan.policies.some((policy) => policy.applicationId === target.applicationId || policy.policyId === target.policyId)) teamFail('team_access_invalid_target');
+    const audience = (policy) => [...new Set([...context.managementAuthenticationEmails, ...teamPolicyAudience(policy)])].sort(compareText);
+    return { kind: 'management', ...target,
+      before: teamPolicy(audience(source.before), target.policyName), after: teamPolicy(audience(source.after), target.policyName) };
+  });
+  return teamFreeze({ ...plan, policies: [...plan.policies, ...native],
+    policyChanges: [...plan.policyChanges, ...native.filter((policy) => canonicalJson(policy.before) !== canonicalJson(policy.after))] });
 }
 
 async function teamRuntimeContext(storage, env) {
@@ -7367,11 +7390,11 @@ async function teamRuntimeContext(storage, env) {
   if (!portalResource) return null;
   const portal = target(portalResource);
   const sourceTargets = control.sourceOwnership.map((source) => target(source.resources[2], source.sourceId));
-  const native = control.sourceOwnership.find((source) => source.sourceId === MANAGEMENT_SOURCE_ID)?.resources[4];
+  const nativeTargets = control.sourceOwnership.filter((source) => nativeSourceId(source.sourceId)).map((source) => target(source.resources[4], source.sourceId));
   return { team, control, sources, environment, authority,
     planner: { revision: team.revision, adminEmails: admins, serviceActor: serviceActorOf(accessConfiguration(env)), sources: teamSources(sources),
       currentMembers: team.members, portalTarget: portal, sourceTargets,
-      managementTarget: native ? target(native, MANAGEMENT_SOURCE_ID) : null, managementAuthenticationEmails: control.audienceEmails } };
+      nativeTargets, managementAuthenticationEmails: control.audienceEmails } };
 }
 
 async function prepareTeamAction(storage, env, input) {
@@ -8146,6 +8169,16 @@ function managementSourceUrl(env) {
 }
 
 async function verifyGatewaySource(source, env) {
+  const connectionKey = apiConnectionKey(source.url, env);
+  if (connectionKey !== null) {
+    const response = await env.API_SOURCE_RUNTIME.fetch(new Request('https://api-source-runtime.invalid/manage', {
+      method: 'POST', body: JSON.stringify({ operation: 'catalogue', connectionKey }),
+    }));
+    const tools = response.ok ? await response.json() : null;
+    if (source.authMode !== 'oauth' || !Array.isArray(tools) || tools.length === 0 ||
+        source.enabledTools.some((name) => !tools.some((tool) => tool.name === name))) throw new SourceDiscoveryError(400, 'source_invalid');
+    return;
+  }
   if (source.url !== managementSourceUrl(env)) return verifyManagedSource(source);
   if (source.authMode !== 'oauth' || source.enabledTools.length === 0 ||
       source.enabledTools.some((name) => !MANAGEMENT_MCP_TOOLS.some((tool) => tool.name === name))) {
@@ -8154,14 +8187,14 @@ async function verifyGatewaySource(source, env) {
 }
 
 /** Live, receipt-owned assignment; no cached membership and no administrator-role requirement. */
-async function managementSourceContext(storage, env, allowDraft = false) {
+async function managementSourceContext(storage, env, allowDraft = false, sourceId = MANAGEMENT_SOURCE_ID) {
   const environment = parseManagementEnvironment(env);
   const token = managementCredential(env);
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
-  const source = sources?.sources.find((item) => item.id === MANAGEMENT_SOURCE_ID);
+  const source = sources?.sources.find((item) => item.id === sourceId);
   if (!environment || !token || !control || control.accountId !== environment.accountId ||
-      control.zoneId !== environment.zoneId || !source || source.url !== managementSourceUrl(env) ||
+      control.zoneId !== environment.zoneId || !source || !nativeSourceId(source.id) || (source.id === MANAGEMENT_SOURCE_ID ? source.url !== managementSourceUrl(env) : apiConnectionKey(source.url, env) === null) ||
       source.authMode !== 'oauth' || source.onBehalfOfUser !== true ||
       (source.status !== 'installed' && !allowDraft)) return null;
   const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
@@ -8198,7 +8231,7 @@ async function managementSourceContext(storage, env, allowDraft = false) {
   const [portal, native] = await Promise.all([read(1), read(3)]);
   if (!portal || !native || !oauthText(native.aud, 512) || canonicalJson(native.emails) !==
       canonicalJson([...new Set([...control.audienceEmails, ...portal.emails])].sort(compareText))) return null;
-  return { aud: native.aud, emails: portal.emails, enabledTools: source.enabledTools, installed: source.status === 'installed' };
+  return { endpoint: source.url, aud: native.aud, emails: portal.emails, enabledTools: source.enabledTools, installed: source.status === 'installed' };
 }
 
 async function managementOperationActorAllowed(storage, env, actorEmail) {
@@ -8207,15 +8240,16 @@ async function managementOperationActorAllowed(storage, env, actorEmail) {
   return context !== null && context.emails.includes(actorEmail);
 }
 
-async function managementSourceAccess(request, env, allowDraft = false, nowMs = Date.now(), allowAdministratorConsent = false) {
+async function managementSourceAccess(request, env, allowDraft = false, nowMs = Date.now(), allowAdministratorConsent = false, sourceId = MANAGEMENT_SOURCE_ID) {
   const endpoint = managementSourceUrl(env);
   if (!endpoint || new URL(request.url).origin !== new URL(endpoint).origin) return null;
   const stub = adminStateStub(env, 'v1:management');
   if (!stub || !request.headers.has('cf-access-jwt-assertion')) return null;
   try {
-    const response = await stub.fetch(new Request(`https://admin-state.invalid/management-mcp/access${allowDraft ? '?draft=1' : ''}`));
+    const response = await stub.fetch(new Request(`https://admin-state.invalid/management-mcp/access?source=${sourceId}${allowDraft ? '&draft=1' : ''}`));
     if (!response.ok) return null;
     const context = await response.json();
+    if (sourceId !== MANAGEMENT_SOURCE_ID && context.endpoint !== request.url) return null;
     const configuration = accessConfiguration(env);
     if (!configuration || !oauthText(context.aud, 512) || !Array.isArray(context.emails)) return null;
     const actor = await verifyAccessAssertion(request, { ...configuration, aud: context.aud,
@@ -8233,14 +8267,15 @@ const MCP_SOURCE_INPUT = { type: 'string', pattern: '^source-[a-f0-9]{16}$' };
 const MCP_REVISION_INPUT = { type: 'integer', minimum: 1 };
 const MCP_TOOLS_INPUT = { type: 'array', minItems: 0, maxItems: 500, uniqueItems: true,
   items: { type: 'string', pattern: '^[A-Za-z0-9_.:/-]{1,128}$' } };
+const MCP_API_CONNECTION_INPUT = { type: 'string', pattern: '^[a-z][a-z0-9-]{0,31}$' };
 const MCP_API_DEFINITION_INPUT = { type: 'string', maxLength: 24576, contentMediaType: 'application/json' };
 const MANAGEMENT_MCP_TOOLS = [
-  ['get_api_source_runtime', 'Read the optional API source runtime, authoring guide, connection, saved code and revision. No credentials are returned.', mcpObject(), 'POST', 'api-source:read'],
-  ['save_api_source_draft', 'Save secret-free agent-written JavaScript tools in the account-owned API runtime. Read get_api_source_runtime first. Does not activate code or change the connection.', mcpObject({ revision: MCP_REVISION_INPUT, definitionJson: MCP_API_DEFINITION_INPUT }), 'POST', 'api-source:save'],
-  ['test_api_source_draft', 'Test one draft tool with real bounded upstream reads. Returns private source data to this manager; does not store arguments or results. Test every tool before activation.', mcpObject({ revision: MCP_REVISION_INPUT, tool: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$' }, argumentsJson: { ...MCP_API_DEFINITION_INPUT, maxLength: 16384 } }), 'POST', 'api-source:test'],
-  ['activate_api_source', 'Activate the tested draft revision. This changes the behavior of existing tools for everyone assigned to this API source. Register/sync the returned MCP endpoint and explicitly select its tools through the ordinary source lifecycle.', mcpObject({ revision: MCP_REVISION_INPUT }), 'POST', 'api-source:activate'],
-  ['disable_api_source', 'Stop new calls to every tool in the optional API runtime. Already running reads may finish. Does not remove the Portal source or its resources.', mcpObject({ revision: MCP_REVISION_INPUT }), 'POST', 'api-source:disable'],
-  ['discard_api_source_draft', 'Discard the saved API source draft and its test markers; the active version remains available.', mcpObject({ revision: MCP_REVISION_INPUT }), 'POST', 'api-source:discard'],
+  ['get_api_source_runtime', 'Read configured API connections and the authoring guide; provide connectionKey to read its saved code and revision. No credentials are returned.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT }, []), 'POST', 'api-source:read'],
+  ['save_api_source_draft', 'Save secret-free agent-written JavaScript tools in the account-owned API runtime. Read get_api_source_runtime first. Does not activate code or change the connection.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT, revision: MCP_REVISION_INPUT, definitionJson: MCP_API_DEFINITION_INPUT }), 'POST', 'api-source:save'],
+  ['test_api_source_draft', 'Test one draft tool with real bounded upstream reads. Returns private source data to this manager; does not store arguments or results. Test every tool before activation.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT, revision: MCP_REVISION_INPUT, tool: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$' }, argumentsJson: { ...MCP_API_DEFINITION_INPUT, maxLength: 16384 } }), 'POST', 'api-source:test'],
+  ['activate_api_source', 'Activate the tested draft revision. This changes the behavior of existing tools for everyone assigned to this API source. Register/sync the returned MCP endpoint and explicitly select its tools through the ordinary source lifecycle.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT, revision: MCP_REVISION_INPUT }), 'POST', 'api-source:activate'],
+  ['disable_api_source', 'Stop new calls to every tool in this API source. Already running reads may finish. Does not remove the Portal source or its resources.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT, revision: MCP_REVISION_INPUT }), 'POST', 'api-source:disable'],
+  ['discard_api_source_draft', 'Discard the saved API source draft and its test markers; the active version remains available.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT, revision: MCP_REVISION_INPUT }), 'POST', 'api-source:discard'],
   ['get_gateway_status', 'Read gateway configuration and release; not a live source health test.', mcpObject(), 'GET', '/api/status'],
   ['list_mcp_sources', 'Read sources, exact tool allowlists and revisions.', mcpObject(), 'GET', '/api/sources'],
   ['list_mcp_source_actions', 'Read installation progress and permitted recovery. Unknown writes must not be replayed.', mcpObject(), 'GET', '/api/source-actions'],
@@ -8283,17 +8318,16 @@ function mcpInputMatches(value, schema) {
     (!schema.enum || schema.enum.includes(value));
 }
 
-function managementToolDefinitions(allowed = null, env = {}) {
-  return MANAGEMENT_MCP_TOOLS.filter((tool) => (allowed === null || allowed.includes(tool.name)) &&
-    (!tool.route.startsWith('api-source:') || env.API_SOURCE_RUNTIME))
+function managementToolDefinitions(allowed = null) {
+  return MANAGEMENT_MCP_TOOLS.filter((tool) => allowed === null || allowed.includes(tool.name))
     .map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
 }
 
 async function managementMcpCall(tool, args, env, access) {
   if (tool.route.startsWith('api-source:')) {
     if (!env.API_SOURCE_RUNTIME) return sourceToolsRefusal(503, 'api_source_runtime_unavailable');
-    // A fixed account-owned service binding; never forward the management grant,
-    // browser headers, source-provider credentials, or a caller-selected URL.
+    // Internal gateway dispatch; never forward the management grant, browser
+    // headers, source-provider credentials, or a caller-selected URL.
     return env.API_SOURCE_RUNTIME.fetch(new Request('https://api-source-runtime.invalid/manage', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ operation: tool.route.slice('api-source:'.length), ...args }),
@@ -8352,6 +8386,53 @@ async function managementMcpCall(tool, args, env, access) {
   return sourceToolsRefusal(404, 'not_found');
 }
 
+async function handleApiSourceMcp(request, env) {
+  const url = new URL(request.url);
+  const connectionKey = apiConnectionKey(request.url, env);
+  if (!connectionKey || url.search || url.hash) return sourceToolsRefusal(404, 'not_found');
+  if (request.headers.has('origin') && request.headers.get('origin') !== url.origin) return sourceToolsRefusal(403, 'origin_required');
+  if (request.method !== 'POST') return sourceToolsRefusal(405, 'method_not_allowed');
+  if (request.headers.get('content-type')?.split(';')[0].trim() !== 'application/json') return sourceToolsRefusal(415, 'content_type_required');
+  const message = await readJsonInput(request, 32 * 1024);
+  const id = isText(message?.id) && message.id.length <= 128 || Number.isSafeInteger(message?.id) ? message.id : null;
+  const rpc = (result) => fixedJson(200, { jsonrpc: '2.0', id, result });
+  const error = (code, text) => fixedJson(200, { jsonrpc: '2.0', id, error: { code, message: text } });
+  if (!isRecord(message) || message.jsonrpc !== '2.0' || !isText(message.method) ||
+      Object.keys(message).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key))) return error(-32600, 'Invalid request');
+  const sourceId = `source-a9${(await sha256Hex(request.url)).slice(0, 14)}`;
+  const discovery = message.method !== 'tools/call';
+  const access = await managementSourceAccess(request, env, discovery, Date.now(), discovery, sourceId);
+  if (!access) return fixedJson(401, { error: 'access_required' }, { 'www-authenticate':
+    `Bearer resource_metadata="${url.origin}/.well-known/cloudflare-access-protected-resource${url.pathname}"` });
+  if (!Object.hasOwn(message, 'id')) return message.method === 'notifications/initialized'
+    ? new Response(null, { status: 202, headers: PUBLIC_HEADERS }) : error(-32600, 'Invalid request');
+  if (id === null) return error(-32600, 'Invalid request');
+  if (message.method === 'initialize') return rpc({ protocolVersion: '2025-06-18', capabilities: { tools: {} },
+    serverInfo: { name: 'ankka-api-source', version: env.ANKKA_GATEWAY_RELEASE } });
+  if (message.method === 'ping') return rpc({});
+  const invoke = (command) => env.API_SOURCE_RUNTIME.fetch(new Request('https://api-source-runtime.invalid/manage', {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ...command, connectionKey }),
+  }));
+  try {
+    if (message.method === 'tools/list') {
+      const response = await invoke({ operation: 'catalogue' });
+      const tools = response.ok ? await response.json() : null;
+      if (!Array.isArray(tools)) return error(-32603, 'Source unavailable');
+      return rpc({ tools: tools.filter((tool) => !access.installed || access.enabledTools.includes(tool.name))
+        .map(({ name, description, inputSchema }) => ({ name, description, inputSchema,
+          annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true } })) });
+    }
+    if (message.method !== 'tools/call') return error(-32601, 'Method not found');
+    const params = message.params;
+    if (!isRecord(params) || !isText(params.name) || !access.enabledTools.includes(params.name) ||
+        Object.keys(params).some((key) => !['name', 'arguments', '_meta'].includes(key))) return error(-32602, 'Unknown tool or invalid arguments');
+    const response = await invoke({ operation: 'call', tool: params.name, argumentsJson: JSON.stringify(params.arguments ?? {}) });
+    const outcome = response.ok ? await response.json() : null;
+    if (!isRecord(outcome) || !isBoolean(outcome.ok)) return error(-32603, 'Source unavailable');
+    return rpc({ isError: !outcome.ok, content: [{ type: 'text', text: JSON.stringify(outcome.ok ? outcome.result : { error: outcome.error }) }] });
+  } catch { return error(-32603, 'Source unavailable'); }
+}
+
 async function handleManagementMcp(request, env) {
   const endpoint = managementSourceUrl(env);
   const url = new URL(request.url);
@@ -8387,7 +8468,7 @@ async function handleManagementMcp(request, env) {
   const params = message.params;
   if (!isRecord(params) || !isText(params.name) || Object.keys(params).some((key) => !['name', 'arguments', '_meta'].includes(key))) return error(-32602, 'Invalid params');
   const tool = MANAGEMENT_MCP_TOOLS.find((entry) => entry.name === params.name && access.enabledTools.includes(entry.name));
-  if (!tool || (tool.route.startsWith('api-source:') && !env.API_SOURCE_RUNTIME) || !mcpInputMatches(params.arguments ?? {}, tool.inputSchema)) return error(-32602, 'Unknown tool or invalid arguments');
+  if (!tool || !mcpInputMatches(params.arguments ?? {}, tool.inputSchema)) return error(-32602, 'Unknown tool or invalid arguments');
   let result;
   try {
     const response = await managementMcpCall(tool, params.arguments ?? {}, env, access);
@@ -8442,6 +8523,7 @@ async function managementMcpBrowser(request, env) {
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    if (API_SOURCE_PATH.test(url.pathname)) return handleApiSourceMcp(request, env);
     if (url.pathname === MANAGEMENT_MCP_PATH || url.pathname.startsWith(`${MANAGEMENT_MCP_PATH}/`)) return handleManagementMcp(request, env);
     if (url.pathname === SOURCE_OAUTH_CALLBACK) return handleSourceOauthCallback(request, env);
     if (url.pathname === BOOTSTRAP_PATH) return handleBootstrap(request, env);

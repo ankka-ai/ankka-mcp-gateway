@@ -27,6 +27,7 @@ function entrypoint(release: string) {
   });
   const context: ExecutionContext = Object.create(null);
   const env: Parameters<typeof worker.fetch>[1] = {
+    API_LOADER: { get: () => { throw new Error("unexpected execution"); }, load: () => { throw new Error("unexpected execution"); } },
     ADMIN_STATE: namespace, ADMIN_EMAILS: 'admin@example.com', ANKKA_INSTALL_ID: `acg-${'b'.repeat(24)}`,
     ANKKA_GATEWAY_RELEASE: release, ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'f'.repeat(64)}`,
     ANKKA_MANAGEMENT_HOSTNAME: 'manage.example.com', ANKKA_UPDATE_CHANNEL: 'canary', ANKKA_UPDATE_KEY_ID: 'synthetic',

@@ -18,7 +18,7 @@ dependency is required. Keep the direct Miniflare pin aligned when upgrading Wra
 
 ## Runtime coverage
 
-`api-source.test.mjs` separately exercises the opt-in API source prototype using
+`api-source.test.mjs` separately exercises the built-in API source runtime using
 real Dynamic Worker execution and SQLite. It checks draft/testing/activation,
 restart persistence without invocation data, blocked network access, exact
 operation restrictions, credential-echo rejection, request budgets and signed

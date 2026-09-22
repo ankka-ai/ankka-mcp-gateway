@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync } from 'node:crypto';
-import { readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -254,6 +254,15 @@ describe('build-gateway-release-candidate', () => {
       await writeFile(strayPath, 'stray');
       await expectFailure(buildReleaseCandidate(base), 'source_release_inputs_dirty');
       await rm(strayPath);
+
+      // Agent-authored runtime implementation is also a signed release input.
+      const apiRuntime = path.join(checkout.source, 'apps', 'api-source-runtime', 'src');
+      await mkdir(apiRuntime, { recursive: true });
+      const uncommittedRuntime = path.join(apiRuntime, 'gateway.ts');
+      await writeFile(uncommittedRuntime, 'export const changed = true;\n');
+      await expectFailure(buildReleaseCandidate(base), 'source_release_inputs_dirty');
+      await rm(uncommittedRuntime);
+
 
       // Even committed textual inputs must be canonical LF UTF-8 before their
       // raw bytes can enter a release digest.

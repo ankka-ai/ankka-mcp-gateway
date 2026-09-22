@@ -1,10 +1,10 @@
 # Gateway Management source
 
-An optional [agent-authored API source prototype](../apps/api-source-runtime/README.md)
-adds draft, test, activate, disable and discard tools when an account-owned
-`API_SOURCE_RUNTIME` service binding is configured. It is not provisioned by the
-signed installer. Its deployment boundary and remaining qualification are recorded
-in the prototype guide; ordinary management authorization and tool selection apply.
+[Agent-authored API sources](../apps/api-source-runtime/README.md) are built into
+the gateway release. Gateway Management always includes connection discovery,
+draft, test, activate, disable and discard tools. The runtime shares the gateway
+Worker and storage; no opt-in flag or separate service deployment is required.
+Ordinary management authorization and explicit tool selection still apply.
 
 Gateway Management exposes fixed gateway operations through the team's existing
 Cloudflare MCP Portal. Add it in **Sources**, install the draft, and assign it in

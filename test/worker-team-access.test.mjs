@@ -3939,7 +3939,7 @@ test('individual source removal refuses a resource recreated after a verified de
 const MANAGEMENT_ID = 'source-616e6b6b616d6370';
 const MANAGEMENT_AUDIENCE = 'synthetic-management-source-audience';
 
-test('API source management requires the optional binding, live assignment and exact tool allowlist', () => fixture(async (gateway) => {
+test('API source management is always advertised and requires live assignment and an exact tool allowlist', () => fixture(async (gateway) => {
   const seen = [];
   gateway.env.API_SOURCE_RUNTIME = { fetch: async (request) => {
     assert.equal(request.url, 'https://api-source-runtime.invalid/manage');
@@ -3952,14 +3952,14 @@ test('API source management requires the optional binding, live assignment and e
   const listed = await managementRpc(gateway, 'tools/list', {});
   assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), ['get_api_source_runtime', 'save_api_source_draft']);
   const definitionJson = '{\n"label":"Synthetic API",\n"tools":[]\n}';
-  const saved = await managementRpc(gateway, 'tools/call', { name: 'save_api_source_draft', arguments: { revision: 1, definitionJson } });
+  const saved = await managementRpc(gateway, 'tools/call', { name: 'save_api_source_draft', arguments: { connectionKey: 'inventory', revision: 1, definitionJson } });
   assert.equal(saved.body.result.structuredContent.ok, true);
-  assert.deepEqual(seen, [{ operation: 'save', revision: 1, definitionJson }]);
+  assert.deepEqual(seen, [{ operation: 'save', connectionKey: 'inventory', revision: 1, definitionJson }]);
   assert.equal((await managementRpc(gateway, 'tools/call', { name: 'activate_api_source', arguments: { revision: 2 } })).body.error.code, -32602);
   assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_api_source_runtime' }, { email: MEMBER })).response.status, 401);
   delete gateway.env.API_SOURCE_RUNTIME;
-  assert.deepEqual((await managementRpc(gateway, 'tools/list', {})).body.result.tools, []);
-  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_api_source_runtime' })).body.error.code, -32602);
+  assert.equal((await managementRpc(gateway, 'tools/list', {})).body.result.tools.length, 2);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_api_source_runtime' })).body.result.structuredContent.ok, false);
   assert.equal(seen.length, 1);
 }));
 
@@ -4332,4 +4332,75 @@ test('management assignment synchronizes both policies and resumes an interrupte
     assert.ok(!gateway.provider.state.policies.get(app.id)[0].include.some((entry) => entry.email?.email === NEW_PERSON));
   }
   assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: NEW_PERSON })).response.status, 401);
+}));
+
+test('built-in API sources install, isolate data access, update Team policies and remove with normal receipts', () => fixture(async (gateway) => {
+  const endpoint = `${MANAGEMENT_ORIGIN}/api/api-sources/inventory/mcp`;
+  const tool = { name: 'getStock', description: 'Read stock.', inputSchema: { type: 'object' } };
+  const invoked = [];
+  gateway.env.API_SOURCE_RUNTIME = { fetch: async (request) => {
+    const command = await request.json();
+    invoked.push(command);
+    return Response.json(command.operation === 'catalogue' ? [tool] : { ok: true, result: { quantity: 7 } });
+  } };
+  const current = await (await gateway.api('/api/sources')).json();
+  const savedResponse = await gateway.api('/api/sources', { method: 'PUT', body: {
+    schemaVersion: 1, revision: current.revision,
+    source: { label: 'Inventory', url: endpoint, authMode: 'oauth', enabledTools: ['getStock'] },
+  } });
+  assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
+  const saved = await savedResponse.json();
+  const source = saved.sources.find((item) => item.url === endpoint);
+  assert.match(source.id, /^source-a9[a-f0-9]{14}$/);
+  assert.equal(source.onBehalfOfUser, true);
+  const started = await gateway.api('/api/source-actions', { method: 'POST', body: {
+    schemaVersion: 1, revision: saved.revision, sourceId: source.id,
+  } });
+  assert.equal(started.status, 409, await started.clone().text());
+  const action = (await (await gateway.api('/api/source-actions')).json()).actions.find((entry) => entry.sourceId === source.id);
+  const server = [...gateway.provider.state.servers.values()].find((entry) => entry.hostname === endpoint);
+  assert.ok(server);
+  server.tools = [{ name: 'getStock' }]; server.status = 'ready'; server.authentication_status = 'authenticated';
+  const native = [...gateway.provider.state.apps.values()].find((entry) => entry.domain === 'manage.example.com/api/api-sources/inventory/mcp');
+  assert.ok(native);
+  native.aud = 'synthetic-inventory-audience';
+  assert.deepEqual(native.destinations, [{ type: 'public', uri: 'manage.example.com/api/api-sources/inventory/mcp' }]);
+  const rpc = async (method, params = {}, email = MEMBER, audience = native.aud) => {
+    const response = await worker.fetch(new Request(endpoint, { method: 'POST',
+      headers: await gateway.headers(email, audience), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    }), gateway.env);
+    return { status: response.status, body: await response.json() };
+  };
+  // Draft catalogue is available to the administrator for Portal synchronization, never tool execution.
+  assert.equal((await rpc('tools/list', {}, ADMIN)).status, 200);
+  assert.equal((await rpc('tools/call', { name: 'getStock' }, ADMIN)).status, 401);
+  const resumed = await gateway.api(`/api/source-actions/${action.actionId}/renew`, { method: 'POST', body: {
+    schemaVersion: 1, revision: saved.revision, sourceId: source.id,
+  } });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await rpc('tools/call', { name: 'getStock' })).status, 401);
+  const team = await gateway.view();
+  assert.ok(team);
+  const change = async (members) => gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: (await gateway.view()).revision, members,
+  } });
+  const assigned = await change(team.members.map((member) => ({ ...member,
+    sourceIds: member.email === MEMBER ? [...member.sourceIds, source.id].sort() : member.sourceIds,
+  })));
+  assert.equal(assigned.status, 200, await assigned.clone().text());
+  assert.equal((await rpc('tools/call', { name: 'getStock', arguments: {} })).body.result.isError, false);
+  assert.equal((await rpc('tools/call', { name: 'save_api_source_draft' })).body.error.code, -32602);
+  assert.equal((await rpc('tools/call', { name: 'getStock' }, MEMBER, MANAGEMENT_AUDIENCE)).status, 401);
+  assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: MEMBER, audience: native.aud })).response.status, 401);
+  assert.ok(invoked.some((command) => command.operation === 'call' && command.connectionKey === 'inventory'));
+  const revoked = await gateway.view();
+  assert.equal((await change(revoked.members.map((member) => ({ ...member,
+    sourceIds: member.sourceIds.filter((id) => id !== source.id),
+  })))).status, 200);
+  assert.equal((await rpc('tools/call', { name: 'getStock' })).status, 401);
+  const sources = await (await gateway.api('/api/sources')).json();
+  const removed = await gateway.api(`/api/sources/${source.id}`, { method: 'DELETE', body: { schemaVersion: 1, revision: sources.revision } });
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.equal(gateway.provider.state.apps.has(native.id), false);
+  assert.equal((await rpc('tools/list')).status, 401);
 }));

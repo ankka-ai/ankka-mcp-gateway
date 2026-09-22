@@ -196,6 +196,7 @@ interface CurrentRuntime {
   readonly versionId: string;
   readonly bindings: GatewayWorkerPlainTextBindings;
   readonly managementCredentialConfigured: boolean;
+  readonly apiConnectionsConfigured: boolean;
 }
 
 const finalVersionSchema = v.looseObject({
@@ -221,7 +222,7 @@ function parseFinalRuntimeBindings(value: BoundaryValue): GatewayWorkerPlainText
   const parsed = v.safeParse(finalVersionSchema, value);
   // Fixed bindings, then the optional management secret and the optional service identity.
   const fixedCount = EXACT_PLAIN_TEXT_BINDINGS.length + 3;
-  if (!parsed.success || parsed.output.bindings.length < fixedCount || parsed.output.bindings.length > fixedCount + 2 ||
+  if (!parsed.success || parsed.output.bindings.length < fixedCount || parsed.output.bindings.length > fixedCount + 4 ||
       Object.hasOwn(parsed.output, 'migrations') || Object.hasOwn(parsed.output, 'migration_tag')) return null;
   const byName = new Map<string, BoundaryObject>();
   for (const binding of parsed.output.bindings) {
@@ -233,9 +234,12 @@ function parseFinalRuntimeBindings(value: BoundaryValue): GatewayWorkerPlainText
   const assets = byName.get('ASSETS');
   const wrapKey = byName.get('ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY');
   const managementToken = byName.get('ANKKA_MANAGEMENT_TOKEN');
+  const apiConnections = byName.get('ANKKA_API_CONNECTIONS');
+  const apiLoader = byName.get('API_LOADER');
   const serviceClientId = byName.get('ANKKA_SERVICE_CLIENT_ID');
-  if ((managementToken !== undefined && managementToken.type !== 'secret_text') ||
-      byName.size !== fixedCount + (managementToken === undefined ? 0 : 1) + (serviceClientId === undefined ? 0 : 1)) return null;
+  if ((apiConnections !== undefined && apiConnections.type !== 'secret_text') ||
+      (apiLoader !== undefined && apiLoader.type !== 'worker_loader') || (managementToken !== undefined && managementToken.type !== 'secret_text') ||
+      byName.size !== fixedCount + (managementToken === undefined ? 0 : 1) + (serviceClientId === undefined ? 0 : 1) + (apiConnections === undefined ? 0 : 1) + (apiLoader === undefined ? 0 : 1)) return null;
   if (admin?.type !== 'durable_object_namespace' || admin.class_name !== 'AdminState' ||
       assets?.type !== 'assets' || wrapKey?.type !== 'secret_text') return null;
   const text = (name: GatewayWorkerPlainTextBindingName): string | null => {
@@ -313,7 +317,8 @@ async function readCurrentRuntime(input: CustomerRuntimeUpdateInput): Promise<Cu
   }
   const parsedVersion = v.parse(finalVersionSchema, version);
   const managementCredentialConfigured = parsedVersion.bindings.some((binding) => binding.name === 'ANKKA_MANAGEMENT_TOKEN');
-  return Object.freeze({ workerId: worker.id, versionId: active.versionId, bindings, managementCredentialConfigured });
+  const apiConnectionsConfigured = parsedVersion.bindings.some((binding) => binding.name === 'ANKKA_API_CONNECTIONS');
+  return Object.freeze({ workerId: worker.id, versionId: active.versionId, bindings, managementCredentialConfigured, apiConnectionsConfigured });
 }
 
 async function controlPlaneBytes(
@@ -455,9 +460,11 @@ function uploadMetadata(
   completionJwt: string,
   target: CustomerRuntimeUpdateTarget,
   managementCredentialConfigured: boolean,
+  apiConnectionsConfigured: boolean,
 ): BoundaryObject {
   const inherited = ['ADMIN_STATE', 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY',
-    ...(managementCredentialConfigured ? ['ANKKA_MANAGEMENT_TOKEN'] : [])].map((name) => Object.freeze({
+    ...(managementCredentialConfigured ? ['ANKKA_MANAGEMENT_TOKEN'] : []),
+    ...(apiConnectionsConfigured ? ['ANKKA_API_CONNECTIONS'] : [])].map((name) => Object.freeze({
     name,
     type: 'inherit' as const,
     version_id: 'latest',
@@ -479,7 +486,7 @@ function uploadMetadata(
       }),
       jwt: completionJwt,
     }),
-    bindings: Object.freeze([...inherited, { name: 'ASSETS', type: 'assets' as const }, ...plain].sort((left, right) =>
+    bindings: Object.freeze([...inherited, { name: 'API_LOADER', type: 'worker_loader' }, { name: 'ASSETS', type: 'assets' as const }, ...plain].sort((left, right) =>
       left.name < right.name ? -1 : left.name > right.name ? 1 : 0)),
     compatibility_date: COMPATIBILITY_DATE,
     compatibility_flags: Object.freeze([]),
@@ -500,9 +507,10 @@ async function uploadScript(
   prepared: PreparedVerifiedWorkerRelease,
   completionJwt: string,
   managementCredentialConfigured: boolean,
+  apiConnectionsConfigured: boolean,
 ): Promise<void> {
   const form = new FormData();
-  form.append('metadata', new Blob([canonicalJson(uploadMetadata(prepared, completionJwt, input.target, managementCredentialConfigured))], {
+  form.append('metadata', new Blob([canonicalJson(uploadMetadata(prepared, completionJwt, input.target, managementCredentialConfigured, apiConnectionsConfigured))], {
     type: 'application/json',
   }), 'metadata.json');
   for (const module of prepared.modules) {
@@ -603,7 +611,7 @@ export async function runCustomerRuntimeUpdate(
     }
     // From here on this object may restart on the new version at any moment.
     uploaded = true;
-    await uploadScript(input, prepared, completionJwt, current.managementCredentialConfigured);
+    await uploadScript(input, prepared, completionJwt, current.managementCredentialConfigured, current.apiConnectionsConfigured);
     return Object.freeze({ status: 'uploaded', fromVersionId: current.versionId });
   } catch (error) {
     const failure = error instanceof CustomerRuntimeUpdateError

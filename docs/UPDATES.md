@@ -193,3 +193,18 @@ permanently, and the gateway, never the dashboard, works out both answers:
   to `<release>`." **Save draft** carries the same sentence for a sign-in source,
   whose draft without tools is what sets the minimum; that save already answers
   `installEndsRollbackTo: null`.
+
+## Built-in API sources
+
+The API-source release includes the runtime in the final gateway Worker. Final
+installation and runtime updates provide `API_LOADER` automatically. Updates
+inherit `ANKKA_API_CONNECTIONS` when configured as a secret, without fetching its
+value; plaintext substitutes and unknown bindings are rejected. The signed
+release contract declares both bindings. No separate Worker, service binding,
+namespace, or feature switch is added.
+
+API source installation owns the same five resources as a native gateway source:
+the MCP server, Portal source application and policy, and the endpoint's Access
+application and policy. Team changes synchronize the source's two policies.
+Source removal removes those receipt-owned resources; full gateway removal also
+deletes the shared SQLite state and Worker secrets.
