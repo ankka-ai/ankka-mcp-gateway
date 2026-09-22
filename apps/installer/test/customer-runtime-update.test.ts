@@ -14,6 +14,7 @@ import { publishCustomerWorkerFinalRuntime } from '../src/customer-worker-self-u
 import { releaseSignatureCanonicalJson, type VerifiedReleaseBundle, type VerifiedReleasePayloadBlob } from '../src/release';
 import {
   APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+  LEGACY_CLOUDFLARE_RELEASE_CONTRACT,
   canonicalJson,
   parseReleaseManifest,
   type ReleaseComponent,
@@ -74,7 +75,7 @@ interface SignedRelease {
 }
 
 /** A complete release bundle signed with a key generated for this test. */
-async function signedRelease(releaseId = TO_RELEASE, signingKey?: CryptoKeyPair): Promise<SignedRelease> {
+async function signedRelease(releaseId = TO_RELEASE, signingKey?: CryptoKeyPair, legacy = false): Promise<SignedRelease> {
   const workerSource = `// ankka-control-plane-origin:${CONTROL_PLANE}\nexport class AdminState{};export default{fetch(){return new Response("${releaseId}")}};`;
   const admin = [
     await source('payload/admin/assets/admin-0badc0de.js', 'text/javascript; charset=utf-8', 'globalThis.__admin=35;'),
@@ -96,7 +97,7 @@ async function signedRelease(releaseId = TO_RELEASE, signingKey?: CryptoKeyPair)
       treeSha256: await sha256(canonicalJson(all.map((file) => file.record).sort((left, right) =>
         left.path < right.path ? -1 : left.path > right.path ? 1 : 0))),
     },
-    cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    cloudflare: legacy ? LEGACY_CLOUDFLARE_RELEASE_CONTRACT : APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
     controlPlaneOrigin: CONTROL_PLANE,
     components: {
       admin: await component(admin),
@@ -283,7 +284,7 @@ function input(fake: ProviderFake, release: SignedRelease, commands: CustomerRun
     channel: 'canary',
     updateKeyId: KEY_ID,
     updatePublicKey: release.publicKey,
-    target: { release: TO_RELEASE, artifactSha256: `sha256:${release.bundle.manifest.artifact.treeSha256}` },
+    target: { release: release.bundle.manifest.release, artifactSha256: `sha256:${release.bundle.manifest.artifact.treeSha256}` },
     transport: fake.transport,
     control: async (command) => {
       commands.push(command);
@@ -687,5 +688,30 @@ describe('gateway-local runtime update', () => {
     expect(commands.at(-1)).toEqual({
       command: 'fail', failureCode: 'runtime_current_read_provider_rejected', recoveryRequired: false,
     });
+  });
+});
+
+
+describe('API-source upgrade bridge', () => {
+  it('preserves state and management credentials through both contract hops', async () => {
+    const key = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+    for (const [from, to, legacy] of [
+      ['gateway-v0.1.81', 'gateway-v0.1.82', true],
+      ['gateway-v0.1.82', 'gateway-v0.2.0', false],
+    ] as const) {
+      const release = await signedRelease(to, key, legacy);
+      const fake = providerFake(release, { currentRelease: from, managementBinding: { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' } });
+      await runCustomerRuntimeUpdate(input(fake, release, [], []));
+      const upload = fake.requests.find((request) => request.method === 'PUT' && new URL(request.url).pathname.endsWith(`/scripts/${WORKER_NAME}`));
+      const metadata = upload?.form?.get('metadata');
+      if (!(metadata instanceof Blob)) throw new Error('missing metadata');
+      const body = JSON.parse(await metadata.text());
+      expect(body.bindings.filter((binding: {name: string}) => binding.name === 'API_LOADER')).toEqual(legacy ? [] : [{ name: 'API_LOADER', type: 'worker_loader' }]);
+      for (const name of ['ADMIN_STATE', 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', 'ANKKA_MANAGEMENT_TOKEN']) {
+        expect(body.bindings).toContainEqual({ name, type: 'inherit', version_id: 'latest' });
+      }
+      expect(body.migrations).toBeUndefined();
+      expect(fake.requests.filter((request) => new URL(request.url).origin === 'https://api.cloudflare.com' && request.method !== 'GET').every((request) => new URL(request.url).pathname.includes('/workers/'))).toBe(true);
+    }
   });
 });

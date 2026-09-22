@@ -29,7 +29,7 @@ import * as v from 'valibot';
 import { compileRelayOrigin } from './compiled-relay-origin.mjs';
 
 import {
-  APPROVED_CLOUDFLARE_CONTRACT,
+  releaseCloudflareContract,
   REQUIRED_OAUTH_SCOPES,
   canonicalJson,
   loadVerifiedPublicRelease,
@@ -517,7 +517,7 @@ export async function buildReleaseCandidate({ controlPlaneOrigin, sourceDirector
       fileCount: records.length,
       treeSha256: sha256Hex(Buffer.from(canonicalJson(records), 'utf8')),
     }),
-    cloudflare: APPROVED_CLOUDFLARE_CONTRACT,
+    cloudflare: releaseCloudflareContract(release),
     controlPlaneOrigin: parsedControlPlaneOrigin,
     components,
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,

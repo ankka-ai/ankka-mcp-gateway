@@ -203,6 +203,18 @@ async function input(transport: (input: RequestInfo | URL, init?: RequestInit) =
 }
 
 describe('customer Worker final self-update', () => {
+  it('installs the bridge with the old binding set and verifies its readback', async () => {
+    const provider = providerFixture();
+    const base = await input(provider.transport);
+    await expect(publishCustomerWorkerFinalRuntime({ ...base,
+      bindings: { ...base.bindings, ANKKA_GATEWAY_RELEASE: 'gateway-v0.1.82' },
+      previousVersionId: OLD_VERSION,
+    })).resolves.toMatchObject({ versionId: FINAL_VERSION });
+    const bindings = provider.uploadedMetadata()?.bindings;
+    expect(Array.isArray(bindings)).toBe(true);
+    expect(JSON.stringify(bindings)).not.toContain('API_LOADER');
+  });
+
   it('uploads and verifies a 4 MiB final runtime with inherited state', async () => {
     const source = 'a'.repeat(4 * 1024 * 1024);
     const provider = providerFixture({ source });

@@ -497,6 +497,15 @@ const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
     }),
   }),
 });
+const { workerLoaders: _apiWorkerLoaders, ...legacyUpdateContract } = APPROVED_UPDATE_CLOUDFLARE_CONTRACT;
+const LEGACY_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
+  ...legacyUpdateContract,
+  publicBindings: Object.freeze({
+    ...legacyUpdateContract.publicBindings,
+    secrets: Object.freeze(legacyUpdateContract.publicBindings.secrets.filter((secret) => secret.name !== 'ANKKA_API_CONNECTIONS')),
+  }),
+});
+
 const HASH = /^sha256:[a-f0-9]{64}$/u;
 const INSTALLATION_ID = /^acg-[a-f0-9]{24}$/u;
 const PLAN_ID = /^plan-[a-f0-9]{24}$/u;
@@ -1292,7 +1301,8 @@ async function parseSignedUpdateManifest(serialized) {
   ]) || value.schemaVersion !== 1 || !updateSemver(value.release) ||
       value.controlPlaneOrigin !== CONTROL_PLANE_ORIGIN ||
       !isText(value.sourceCommit) || !/^[a-f0-9]{40}$/u.test(value.sourceCommit) ||
-      canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) ||
+      (canonicalJson(value.cloudflare) !== canonicalJson(APPROVED_UPDATE_CLOUDFLARE_CONTRACT) &&
+      canonicalJson(value.cloudflare) !== canonicalJson(LEGACY_UPDATE_CLOUDFLARE_CONTRACT)) ||
       canonicalJson(value.oauthScopeIds) !== canonicalJson(UPDATE_OAUTH_SCOPES) ||
       !exactKeys(value.artifact, ['byteSize', 'fileCount', 'treeSha256']) ||
       !Number.isSafeInteger(value.artifact.byteSize) || value.artifact.byteSize < 1 ||
@@ -1385,7 +1395,7 @@ async function discoverRuntimeUpdate(env) {
   let response;
   try {
     response = await fetch(`${CONTROL_PLANE_ORIGIN}/api/releases/${environment.updateChannel}`, {
-      method: 'GET', headers: { accept: 'application/json' }, redirect: 'manual',
+      method: 'GET', headers: { accept: 'application/json', 'x-ankka-update-contract': 'api-sources-v1' }, redirect: 'manual',
     });
   } catch { return null; }
   if (!response.ok || response.redirected ||
@@ -8330,14 +8340,15 @@ function mcpInputMatches(value, schema) {
     (!schema.enum || schema.enum.includes(value));
 }
 
-function managementToolDefinitions(allowed = null) {
-  return MANAGEMENT_MCP_TOOLS.filter((tool) => allowed === null || allowed.includes(tool.name))
+function managementToolDefinitions(allowed = null, env = {}) {
+  return MANAGEMENT_MCP_TOOLS.filter((tool) => (allowed === null || allowed.includes(tool.name)) &&
+    (env.ANKKA_GATEWAY_RELEASE !== 'gateway-v0.1.82' || !tool.route.startsWith('api-source:')))
     .map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
 }
 
 async function managementMcpCall(tool, args, env, access) {
   if (tool.route.startsWith('api-source:')) {
-    if (!env.API_SOURCE_RUNTIME) return sourceToolsRefusal(503, 'api_source_runtime_unavailable');
+    if (!env.API_SOURCE_RUNTIME || env.ANKKA_GATEWAY_RELEASE === 'gateway-v0.1.82') return sourceToolsRefusal(503, 'api_source_runtime_unavailable');
     // Internal gateway dispatch; never forward the management grant, browser
     // headers, source-provider credentials, or a caller-selected URL.
     return env.API_SOURCE_RUNTIME.fetch(new Request('https://api-source-runtime.invalid/manage', {

@@ -233,7 +233,7 @@ export interface ReleaseManifest {
     readonly fileCount: number;
     readonly treeSha256: string;
   };
-  readonly cloudflare: typeof APPROVED_CLOUDFLARE_RELEASE_CONTRACT;
+  readonly cloudflare: typeof APPROVED_CLOUDFLARE_RELEASE_CONTRACT | typeof LEGACY_CLOUDFLARE_RELEASE_CONTRACT;
   /** Exact HTTPS origin compiled into the signed customer Worker payload. */
   readonly controlPlaneOrigin: string;
   readonly components: Readonly<Record<ReleaseComponentName, ReleaseComponent>>;
@@ -254,6 +254,23 @@ const releaseFileRecordSchema = v.strictObject({
   path: v.string(),
   sha256: v.string(),
 });
+
+// The bridge is intentionally published with the contract understood by v0.1.
+export const API_SOURCE_BRIDGE_RELEASE = 'gateway-v0.1.82';
+// Recovery journals retain hashes of public binding values.
+export const API_SOURCE_BRIDGE_RELEASE_SHA256 = 'de338265fb85dfa356042400689908f723f6bfa4d6fb25b1793d641e893f404d';
+const { workerLoaders: _apiWorkerLoaders, ...legacyContract } = APPROVED_CLOUDFLARE_RELEASE_CONTRACT;
+export const LEGACY_CLOUDFLARE_RELEASE_CONTRACT = Object.freeze({
+  ...legacyContract,
+  publicBindings: Object.freeze({
+    ...legacyContract.publicBindings,
+    secrets: Object.freeze(legacyContract.publicBindings.secrets.filter((secret) => secret.name !== 'ANKKA_API_CONNECTIONS')),
+  }),
+});
+export function releaseHasApiLoader(release: string): boolean {
+  return release !== API_SOURCE_BRIDGE_RELEASE;
+}
+
 const releaseComponentSchema = v.strictObject({
   byteSize: safeNonnegativeIntegerSchema,
   fileCount: safeNonnegativeIntegerSchema,
@@ -406,7 +423,8 @@ function scopesAreExact(input: readonly string[]): boolean {
 
 function cloudflareContractIsExact(input: v.InferOutput<typeof boundaryObjectSchema>): boolean {
   try {
-    return canonicalJson(input) === canonicalJson(APPROVED_CLOUDFLARE_RELEASE_CONTRACT);
+    return canonicalJson(input) === canonicalJson(APPROVED_CLOUDFLARE_RELEASE_CONTRACT) ||
+      canonicalJson(input) === canonicalJson(LEGACY_CLOUDFLARE_RELEASE_CONTRACT);
   } catch {
     return false;
   }
@@ -460,7 +478,8 @@ export function parseReleaseManifest<Input>(input: Input): ReleaseManifest {
       fileCount: value.artifact.fileCount,
       treeSha256: value.artifact.treeSha256,
     }),
-    cloudflare: APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
+    cloudflare: canonicalJson(value.cloudflare) === canonicalJson(LEGACY_CLOUDFLARE_RELEASE_CONTRACT)
+      ? LEGACY_CLOUDFLARE_RELEASE_CONTRACT : APPROVED_CLOUDFLARE_RELEASE_CONTRACT,
     controlPlaneOrigin,
     components,
     oauthScopeIds: REQUIRED_OAUTH_SCOPES,
