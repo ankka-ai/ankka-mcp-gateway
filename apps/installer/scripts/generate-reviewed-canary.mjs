@@ -337,8 +337,11 @@ async function readRegularJson(filename) {
 }
 
 function activeEntrypointSource(pin) {
+  const [major, minor] = pin.release.slice('gateway-v'.length).split('.').map(Number);
+  const bridge = pin.channel === 'stable' && (major > 0 || minor >= 2);
   return `import { TwoStageDeploySession } from './src/two-stage-deploy-session';\n` +
-    `import { createTwoStageDeployRuntime } from './src/two-stage-runtime';\n\n` +
+    `import { createTwoStageDeployRuntime } from './src/two-stage-runtime';\n` +
+    `import { API_SOURCE_UPGRADE_BRIDGE } from './src/api-source-upgrade-bridge';\n\n` +
     `const REVIEWED_CANARY_PIN = Object.freeze({\n` +
     `  schemaVersion: 1,\n` +
     `  channel: ${JSON.stringify(pin.channel)},\n` +
@@ -349,7 +352,7 @@ function activeEntrypointSource(pin) {
     `  artifactSha256: ${JSON.stringify(pin.artifactSha256)},\n` +
     `} as const);\n\n` +
     `export { TwoStageDeploySession };\n` +
-    `export default createTwoStageDeployRuntime(REVIEWED_CANARY_PIN);\n`;
+    `export default createTwoStageDeployRuntime(REVIEWED_CANARY_PIN, {}, ${bridge ? 'API_SOURCE_UPGRADE_BRIDGE' : 'undefined'});\n`;
 }
 
 function rollbackEntrypointSource() {

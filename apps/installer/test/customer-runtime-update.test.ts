@@ -312,7 +312,7 @@ const metadataSchema = v.looseObject({
   main_module: v.literal('index.js'),
 });
 
-async function historicalServer(retained: SignedRelease, promoted: SignedRelease) {
+async function historicalServer(retained: SignedRelease, promoted: SignedRelease, bridge = false) {
   const objects = new Map<string, { bytes: Uint8Array; contentType: string }>();
   const reads: string[] = [];
   for (const release of [retained, promoted]) {
@@ -343,7 +343,7 @@ async function historicalServer(retained: SignedRelease, promoted: SignedRelease
     schemaVersion: 1, channel: 'canary', controlPlaneOrigin: CONTROL_PLANE,
     release: promoted.bundle.manifest.release, artifactSha256: promoted.bundle.manifest.artifact.treeSha256,
     keyId: KEY_ID, publicKey: promoted.publicKey,
-  });
+  }, {}, bridge ? { release: retained.bundle.manifest.release, artifactSha256: retained.bundle.manifest.artifact.treeSha256 } : undefined);
   // SAFETY: public release reads must need only the bucket, never session or OAuth bindings.
   const env = { GATEWAY_RELEASE_BUCKET: bucket } as TwoStageDeployEnv;
   return {
@@ -714,4 +714,55 @@ describe('API-source upgrade bridge', () => {
       expect(fake.requests.filter((request) => new URL(request.url).origin === 'https://api.cloudflare.com' && request.method !== 'GET').every((request) => new URL(request.url).pathname.includes('/workers/'))).toBe(true);
     }
   });
+});
+
+
+it('keeps the bridge discoverable after v0.2 promotion and serves the latest runtime to capable gateways', async () => {
+  const key = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  const bridge = await signedRelease('gateway-v0.1.82', key, true);
+  const latest = await signedRelease('gateway-v0.2.0', key);
+  const server = await historicalServer(bridge, latest, true);
+  for (const advertised of [null, 'unknown', 'api-sources-v1']) {
+    const request = new Request(`${CONTROL_PLANE}/api/releases/canary`, { headers: advertised === null ? {} : { 'x-ankka-update-contract': advertised } });
+    const response = await server.fetch(request);
+    expect(response.status).toBe(200);
+    expect(response.headers.get('vary')).toBe('x-ankka-update-contract');
+    const descriptor = await response.json();
+    if (advertised === null) expect(server.reads.some((key) => key.includes('/gateway-v0.2.0/'))).toBe(false);
+    expect(descriptor).toMatchObject({ release: { id: advertised === 'api-sources-v1' ? 'gateway-v0.2.0' : 'gateway-v0.1.82' } });
+  }
+  for (const [headers, expected] of [[{}, bridge], [{ 'x-ankka-update-contract': 'api-sources-v1' }, latest]] as const) {
+    const response = await server.fetch(new Request(`${CONTROL_PLANE}/api/releases/canary/files/payload/worker/index.js`, { headers }));
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe(expected.workerSource);
+  }
+  // Both authorized targets remain addressable by immutable identity.
+  for (const release of [bridge, latest]) {
+    const response = await server.fetch(new Request(`${CONTROL_PLANE}/api/releases/canary/by-id/${release.bundle.manifest.release}/${release.bundle.manifest.artifact.treeSha256}`));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ release: { id: release.bundle.manifest.release } });
+  }
+  const fake = providerFake(latest, { currentRelease: 'gateway-v0.1.82', controlPlane: server.fetch });
+  await expect(runCustomerRuntimeUpdate(input(fake, latest, [], []))).resolves.toMatchObject({ status: 'uploaded' });
+});
+
+it('fails closed for an unavailable or substituted bridge while capable gateways retain current discovery', async () => {
+  const key = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, ['sign', 'verify']);
+  const bridge = await signedRelease('gateway-v0.1.82', key, true);
+  const latest = await signedRelease('gateway-v0.2.0', key);
+  for (const missing of [true, false]) {
+    const server = await historicalServer(bridge, latest, true);
+    const entry = `ankka-mcp-gateway/releases/canary/gateway-v0.1.82/release-envelope.json`;
+    if (missing) server.objects.delete(entry);
+    else {
+      const stored = server.objects.get(entry);
+      if (stored === undefined) throw new Error('missing fixture');
+      stored.bytes[0] = (stored.bytes[0] ?? 0) ^ 1;
+    }
+    const old = await server.fetch(new Request(`${CONTROL_PLANE}/api/releases/canary`));
+    expect(old.status).toBe(503);
+    const capable = await server.fetch(new Request(`${CONTROL_PLANE}/api/releases/canary`, { headers: { 'x-ankka-update-contract': 'api-sources-v1' } }));
+    expect(capable.status).toBe(200);
+    expect(await capable.json()).toMatchObject({ release: { id: 'gateway-v0.2.0' } });
+  }
 });

@@ -202,7 +202,11 @@ contract and binding set while accepting the exact new contract. It retains
 configuration, secrets, sources and Team access; no fresh installation is needed.
 API-source tools become available with the second update. The bridge and newer
 runtimes identify their supported contract when checking for updates so the
-hosted channel can keep older gateways on the compatible first step.
+hosted channel keeps older gateways on the compatible first step even after
+v0.2 is promoted. Discovery uses the fixed `x-ankka-update-contract:
+api-sources-v1` header, not a feature flag. Both steps use the same signing key
+and normal exact-release update flow. A missing or invalid bridge fails closed;
+new installations always use the current release.
 
 The API-source release includes the runtime in the final gateway Worker. Final
 installation and runtime updates provide `API_LOADER` automatically. Updates
