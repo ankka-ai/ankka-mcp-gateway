@@ -22,20 +22,18 @@ export function SourceAuthorization({ actionId, sourceId, revision, disabled }: 
   }
   return <div className="mt-3">
     <Button variant="primary" className="pressable" disabled={disabled || pending} onClick={() => void authorize()}>
-      {pending ? 'Opening authorization…' : 'Authorize source'}
+      {pending ? 'Opening authorization…' : 'Authorize connector'}
     </Button>
-    <p className="mt-2 text-xs leading-5 text-kumo-subtle">{sourceId === 'source-616e6b6b616d6370'
-      ? 'Sign in with your gateway identity to connect Gateway Management. Each person assigned this source uses their own sign-in.'
-      : 'Sign in with your provider to connect this source for your team. Credentials stay in your Cloudflare account. Providers that need manual OAuth setup can be connected using the Cloudflare link.'}</p>
+    {sourceId === 'source-616e6b6b616d6370' ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">Sign in with your gateway identity to connect Gateway Management. Each person assigned this connector uses their own sign-in.</p> : null}
     {error ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{error}</p> : null}
   </div>
 }
 
 const RESULTS = new Map([
-  ['connected', 'Source authorized. Check its tools below, then choose which to allow.'],
-  ['sync_pending', 'Source authorized. Cloudflare is still syncing its tools. Use Check again below; if syncing does not complete, open the source in Cloudflare.'],
-  ['cancelled', 'Source authorization was cancelled. You can try again when you are ready.'],
-  ['failed', 'Source authorization could not be completed. Start again from your source, or use the Cloudflare link for manual setup.'],
+  ['connected', 'Connector authorized. Check its tools below, then choose which to allow.'],
+  ['sync_pending', 'Connector authorized. Cloudflare is still syncing its tools. Use Check again below; if syncing does not complete, open the connector in Cloudflare.'],
+  ['cancelled', 'Connector authorization was cancelled. You can try again when you are ready.'],
+  ['failed', 'Connector authorization could not be completed. Start again from your connector, or use the Cloudflare link for manual setup.'],
 ])
 
 export function SourceAuthorizationResult() {

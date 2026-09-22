@@ -79,7 +79,7 @@ const PERMISSIONS = [
 function verificationLines(result: ManagementVerification): string[] {
   if (result.status === 'missing') return ['Your gateway has no management token.']
   if (result.status === 'busy') {
-    return ['A source installation, update, removal, Team change or token change is unfinished, so nothing was checked. Verify again when it has finished.']
+    return ['A connector installation, update, removal, Team change or token change is unfinished, so nothing was checked. Verify again when it has finished.']
   }
   if (result.token === 'rejected') return ['Cloudflare rejected the token: it was revoked, has expired, or belongs to another account. Replace it.']
   if (result.token !== 'active') return ['Cloudflare did not answer the token check, so nothing is proven yet. Try again in a moment.']

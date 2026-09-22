@@ -63,7 +63,7 @@ async function toggleAccess(user: ReturnType<typeof userEvent.setup>, member: HT
 describe('TeamPage', () => {
   afterEach(() => { cleanup(); window.history.replaceState(null, '', '/'); vi.restoreAllMocks(); vi.unstubAllEnvs() })
 
-  it('moves source selection into an access dialog with shared tool details and restores focus on close', async () => {
+  it('moves connector selection into an access dialog with shared tool details and restores focus on close', async () => {
     const user = userEvent.setup()
     const client = renderTeam()
     const person = await screen.findByRole('group', { name: 'analyst@example.com' })
@@ -82,10 +82,10 @@ describe('TeamPage', () => {
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(access).toHaveFocus()
-    expect(within(person).getByText('1 source selected')).toBeVisible()
+    expect(within(person).getByText('1 connector selected')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
     await user.click(screen.getByRole('button', { name: 'Discard unsaved changes' }))
-    expect(within(person).getByText('No sources selected.')).toBeVisible()
+    expect(within(person).getByText('No connectors selected.')).toBeVisible()
   })
 
   it('opens a focused add-user dialog and cancels without changing the team', async () => {
@@ -94,7 +94,7 @@ describe('TeamPage', () => {
     await screen.findByRole('group', { name: 'admin@example.com' })
     expect(screen.getByRole('heading', { name: 'Team members (2)' })).toBeInTheDocument()
     expect(screen.queryByText(/including administrators/)).not.toBeInTheDocument()
-    expect(screen.queryByText('Edit source access')).not.toBeInTheDocument()
+    expect(screen.queryByText('Edit connector access')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
     const trigger = screen.getByRole('button', { name: 'Add user' })
     await user.click(trigger)
@@ -119,7 +119,7 @@ describe('TeamPage', () => {
     expect(client.prepareTeamAction).not.toHaveBeenCalled()
   })
 
-  it('starts new users with no sources and keeps unsaved selections separate from saved access', async () => {
+  it('starts new users with no connectors and keeps unsaved selections separate from saved access', async () => {
     const user = userEvent.setup()
     const client = renderTeam()
     await screen.findByRole('group', { name: 'admin@example.com' })
@@ -149,7 +149,7 @@ describe('TeamPage', () => {
     expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument()
   })
 
-  it('edits administrator source access without changing roles', async () => {
+  it('edits administrator connector access without changing roles', async () => {
     const user = userEvent.setup()
     renderTeam()
     const administrator = await screen.findByRole('group', { name: 'admin@example.com' })
@@ -158,11 +158,11 @@ describe('TeamPage', () => {
     expect(screen.getByText('Administrator · role unchanged')).toBeInTheDocument()
   })
 
-  it('keeps existing-source permission controls usable while source addition is paused', async () => {
+  it('keeps existing-connector permission controls usable while connector addition is paused', async () => {
     const user = userEvent.setup()
     const client = renderTeam()
     const administrator = await screen.findByRole('group', { name: 'admin@example.com' })
-    expect(screen.getByText(/New-source installation is temporarily unavailable in this release/)).toBeInTheDocument()
+    expect(screen.getByText(/New-connector installation is temporarily unavailable in this release/)).toBeInTheDocument()
     const source = accessCheckbox(administrator, /Company knowledge/)
     expect(source).toBeEnabled()
     await toggleAccess(user, administrator, /Company knowledge/)
@@ -217,7 +217,7 @@ describe('TeamPage', () => {
     expect(client.prepareTeamAction).not.toHaveBeenCalled()
   })
 
-  it('shows a newly installed source without implicitly assigning it to anyone', async () => {
+  it('shows a newly installed connector without implicitly assigning it to anyone', async () => {
     const client = renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, sources: team.sources.map((source) => ({ ...source, status: 'installed' as const })) })) }))
     await screen.findByRole('group', { name: 'admin@example.com' })
     for (const email of ['admin@example.com', 'analyst@example.com']) expect(accessCheckbox(screen.getByRole('group', { name: email }), /Product catalogue/)).not.toBeChecked()
@@ -331,7 +331,7 @@ describe('TeamPage', () => {
     expect(accessCheckbox(person)).toBeDisabled()
     // One card says what the token is for, what it can reach, why it is missing here, and starts the way to add it.
     const card = screen.getByRole('heading', { name: 'Add your management token' }).closest('section')
-    expect(card).toHaveTextContent('Add sources and manage team access with a Cloudflare API token.')
+    expect(card).toHaveTextContent('Add connectors and manage team access with a Cloudflare API token.')
     expect(card).toHaveTextContent('This token can edit all Access policies in your Cloudflare account. It stays in your gateway and never passes through Ankka.')
     expect(card).toHaveTextContent(sentence)
     expect(screen.queryByRole('link', { name: 'Settings' })).not.toBeInTheDocument()
@@ -536,7 +536,7 @@ describe('TeamPage', () => {
 
   it('pauses editing for a pending lifecycle action without hiding team members', async () => {
     const client = renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, editingEnabled: false, editingDisabledReason: 'lifecycle_action_pending' as const })) }))
-    expect(await screen.findByText(/Another source, update, teardown, or management token action is in progress/)).toBeInTheDocument()
+    expect(await screen.findByText(/Another connector, update, teardown, or management token action is in progress/)).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     expect(client.prepareTeamAction).not.toHaveBeenCalled()

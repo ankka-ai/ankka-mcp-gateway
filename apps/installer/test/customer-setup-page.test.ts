@@ -117,12 +117,12 @@ describe('customer setup management token step', () => {
   it('says why the token is needed, who can create it, what it can reach, and that it can wait', async () => {
     const html = await customerSetupPage().text();
     expect(html).toContain('<h2 id="credential-heading">Management token</h2>');
-    expect(html).toContain('Adding a source or giving a teammate access writes to your Cloudflare account, and the approvals in this setup are temporary.');
+    expect(html).toContain('Adding a connector or giving a teammate access writes to your Cloudflare account, and the approvals in this setup are temporary.');
     expect(html).toContain('<strong>Access: Apps and Policies Edit</strong> and <strong>MCP Portals Edit</strong>');
     expect(html).toContain('Creating it needs a Super Administrator or Administrator of your Cloudflare account.');
     expect(html).toContain('Cloudflare cannot limit this token to your gateway: it can edit every Access policy in the account.');
     expect(html).toContain('It never passes through anything Ankka hosts.');
-    expect(html).toContain('Without the token, adding sources and managing team access stay disabled. You can add it later in Settings.');
+    expect(html).toContain('Without the token, adding connectors and managing team access stay disabled. You can add it later in Settings.');
     expect(html).toContain('<button id="credential-skip" type="button" class="secondary">Continue without a token</button>');
     // One paste field: not echoed, not remembered, and without a name no form submission could carry.
     const fields = [...html.matchAll(/<input\b[^>]*>/giu)].map((match) => match[0]).filter((field) => field.includes('credential'));
@@ -203,7 +203,7 @@ describe('customer setup management token step', () => {
       credentials: 'same-origin', cache: 'no-store',
     });
     expect(page.node('credential-value').value).toBe('');
-    expect(page.node('credential-note').textContent).toBe('Continuing without a management token. Adding sources and managing team access stay disabled until you add it in Settings.');
+    expect(page.node('credential-note').textContent).toBe('Continuing without a management token. Adding connectors and managing team access stay disabled until you add it in Settings.');
     expect(page.node('credential-change').textContent).toBe('Add a token after all');
     expect(page.texts()).not.toContain(PASTED_VALUE);
   });

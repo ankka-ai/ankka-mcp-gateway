@@ -12,11 +12,11 @@ const sources: [ManagedSource, ManagedSource] = [
 describe('SourceList', () => {
   afterEach(cleanup)
 
-  it('filters installed sources and drafts without changing them', async () => {
+  it('filters installed connectors and drafts without changing them', async () => {
     const user = userEvent.setup()
     const onAuthorize = vi.fn()
     render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
-    const filters = within(screen.getByRole('group', { name: 'Filter sources' }))
+    const filters = within(screen.getByRole('group', { name: 'Filter connectors' }))
 
     await user.click(filters.getByRole('button', { name: 'Installed' }))
     expect(filters.getByRole('button', { name: 'Installed' })).toHaveAttribute('aria-pressed', 'true')
@@ -33,7 +33,7 @@ describe('SourceList', () => {
     expect(onAuthorize).not.toHaveBeenCalled()
   })
 
-  it('keeps details collapsed until the source is expanded with the keyboard', async () => {
+  it('keeps details collapsed until the connector is expanded with the keyboard', async () => {
     const user = userEvent.setup()
     render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
     const source = screen.getByRole('button', { name: 'Knowledge' })
@@ -58,13 +58,13 @@ describe('SourceList', () => {
     const onAuthorize = vi.fn()
     const { rerender } = render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
 
-    await user.click(screen.getByRole('button', { name: 'Install source' }))
+    await user.click(screen.getByRole('button', { name: 'Install connector' }))
     expect(onAuthorize).toHaveBeenCalledExactlyOnceWith(sources[1].id)
 
     rerender(<SourceList sources={sources} installationEnabled={false} isBusy={false} onAuthorize={onAuthorize} />)
     expect(screen.getByRole('button', { name: 'Installation unavailable' })).toBeDisabled()
     rerender(<SourceList sources={sources} installationEnabled isBusy onAuthorize={onAuthorize} />)
-    expect(screen.getByRole('button', { name: /Install source/u })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Install connector/u })).toBeDisabled()
   })
 
   it('shows an empty filtered state without hiding the filters', async () => {
@@ -80,7 +80,7 @@ describe('SourceList', () => {
     const user = userEvent.setup()
     const onAuthorize = vi.fn()
     render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
-    const search = screen.getByRole('searchbox', { name: 'Search sources' })
+    const search = screen.getByRole('searchbox', { name: 'Search connectors' })
 
     await user.type(search, 'KNOWLEDGE')
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeInTheDocument()
@@ -90,7 +90,7 @@ describe('SourceList', () => {
     await user.type(search, 'catalogue.example.com')
     expect(screen.getByRole('button', { name: 'Catalogue' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Installed' }))
-    expect(screen.getByText('No matching sources.')).toBeInTheDocument()
+    expect(screen.getByText('No matching connectors.')).toBeInTheDocument()
 
     await user.clear(search)
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeInTheDocument()

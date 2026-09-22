@@ -28,6 +28,8 @@
     "src/**/*.ts",
     "test/**/*.ts",
     "test-runtime/**/*.ts",
+    "../api-source-runtime/worker-configuration.d.ts",
+    "../api-source-runtime/src/secrets.d.ts",
     "lifecycle/**/*.ts",
     "preview/**/*.ts",
     "vite.preview.config.ts"

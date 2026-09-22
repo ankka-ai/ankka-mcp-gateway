@@ -229,8 +229,8 @@ export function TeamPage() {
         <>
           {tokenMissing ? <ManagementTokenCard choice={team.managementCredentialChoice} /> : null}
           {tokenMissing && team.editingDisabledReason === 'management_credential_missing' ? <p role="status" className="mt-4 text-sm leading-6 text-kumo-subtle">Until your gateway has the token, you can still inspect the saved access configuration and shared tools.</p> : null}
-          {!team.editingEnabled && team.editingDisabledReason !== 'management_credential_missing' && team.editingDisabledReason !== 'managed_in_cloudflare' ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another source, update, teardown, or management token action is in progress. Finish or safely cancel that action, then refresh.' : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
-          {sources && sources.installationEnabled !== true && sources.applyMode !== 'account_token' ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed sources below.' : 'This restriction does not change saved access.'}</p> : null}
+          {!team.editingEnabled && team.editingDisabledReason !== 'management_credential_missing' && team.editingDisabledReason !== 'managed_in_cloudflare' ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another connector, update, teardown, or management token action is in progress. Finish or safely cancel that action, then refresh.' : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
+          {sources && sources.installationEnabled !== true && sources.applyMode !== 'account_token' ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed connectors below.' : 'This restriction does not change saved access.'}</p> : null}
           {needsRefresh ? <p role="status" className="notice-banner notice-warning mt-6">Editing is paused until the recorded state can be checked. Trying again reloads the saved configuration and discards unsaved selections; it does not resubmit a change.</p> : null}
           <section className="mt-7" aria-labelledby="edit-access-title">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -253,7 +253,7 @@ export function TeamPage() {
                   <div className="min-w-0">
                     <p className="break-all text-sm font-medium text-kumo-strong">{member.email}</p>
                     <p className="mt-1 text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Administrator · role unchanged' : 'Team member'}</p>
-                    <p className="mt-1 text-xs text-kumo-subtle">{member.sourceIds.length === 0 ? 'No sources selected.' : `${member.sourceIds.length} ${member.sourceIds.length === 1 ? 'source' : 'sources'} selected`}</p>
+                    <p className="mt-1 text-xs text-kumo-subtle">{member.sourceIds.length === 0 ? 'No connectors selected.' : `${member.sourceIds.length} ${member.sourceIds.length === 1 ? 'connector' : 'connectors'} selected`}</p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
                     <MemberAccessDialog member={member} sources={installed} disabled={disabled} onChange={sourceIds => {
@@ -266,7 +266,7 @@ export function TeamPage() {
               {displayedMembers.length === 0 && !recorded ? <p className="py-5 text-sm text-kumo-subtle">No users have been configured.</p> : null}
             </div>
 
-            {installed.length === 0 ? <p className="mt-3 text-sm text-kumo-subtle">{sources?.installationEnabled === true ? 'Install a source before granting source access.' : 'No installed sources are available to assign. New-source installation is paused.'}</p> : null}
+            {installed.length === 0 ? <p className="mt-3 text-sm text-kumo-subtle">{sources?.installationEnabled === true ? 'Install a connector before granting connector access.' : 'No installed connectors are available to assign. New-connector installation is paused.'}</p> : null}
 
             <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
               <Button variant="primary" className="pressable inline-flex items-center gap-2" loading={isBusy || saving} disabled={!team.editingEnabled || loading || saving || isBusy || needsRefresh || callbackId !== null || action?.status === 'applying' || (recorded ? team.proposedMembers === null : !changed)} onClick={() => void save()}>

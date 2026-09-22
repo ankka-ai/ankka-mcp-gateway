@@ -14,9 +14,9 @@ const worker = (id: string, label: string, source: string, description: string):
 const dashboard = (id: string, label: string, path: string, description: string, source: string): PreviewEntry => ({ id, group: 'Management dashboard', label, description, url: path, source: `apps/admin/src/${source}.tsx` })
 const components = (id: string, label: string, description: string): PreviewEntry => ({ id, group: 'Components', label, description, url: `/preview/components.html?preview=ready&group=${id}`, source: 'apps/admin/src/components/' })
 const sourceScenarios: [string, string][] = [
-  ['source-pending', 'Source · awaiting approval'], ['source-applying', 'Source · installing'],
-  ['source-expired', 'Source · approval expired'], ['source-recovery', 'Source · recovery required'],
-  ['source-completed', 'Source · completed'], ['source-lifecycle', 'Source · another action active'],
+  ['source-pending', 'Connector · awaiting approval'], ['source-applying', 'Connector · installing'],
+  ['source-expired', 'Connector · approval expired'], ['source-recovery', 'Connector · recovery required'],
+  ['source-completed', 'Connector · completed'], ['source-lifecycle', 'Connector · another action active'],
 ]
 
 export const catalog: PreviewEntry[] = [
@@ -36,7 +36,7 @@ export const catalog: PreviewEntry[] = [
   worker('progress', 'Finishing installation', 'customer-install-progress-page', 'The Worker is still converging. This preview stays in progress.'),
   worker('incomplete', 'Installation incomplete', 'customer-install-progress-page', 'Installation stopped before readiness.'),
   worker('denied', 'Approval rejected', 'customer-install-progress-page', 'Cloudflare did not approve the setup attempt.'),
-  worker('operation-loading', 'Preparing change approval', 'customer-operation-router', 'The shared source, update, and rollback authorization page.'),
+  worker('operation-loading', 'Preparing change approval', 'customer-operation-router', 'The shared connector, update, and rollback authorization page.'),
   worker('operation-error', 'Change approval error', 'customer-operation-router', 'A change authorization link could not be started.'),
   worker('recovery-loading', 'Preparing setup recovery', 'customer-gateway-entrypoint', 'Requesting a fresh setup approval.'),
   worker('recovery-error', 'Setup recovery error', 'customer-gateway-entrypoint', 'The retry state for setup recovery.'),
@@ -48,11 +48,11 @@ export const catalog: PreviewEntry[] = [
   worker('remove-stopped', 'Resource removal stopped', 'customer-teardown-router', 'Saved progress after a removal attempt stops.'),
   worker('remove-final-running', 'Final removal in progress', 'gateway-teardown-router', 'The final removal with the same shared progress treatment.'),
   worker('remove-final', 'Final removal', 'gateway-teardown-router', 'The hosted final-removal review and authorization.'),
-  dashboard('sources', 'Sources', '/sources?preview=ready', 'Installed sources, drafts, endpoint copy, filters, and source setup. Use Add connector to enter a custom MCP URL or browse the Connector library.', 'pages/SourcesPage'),
-  dashboard('empty', 'Sources · empty', '/sources?preview=empty', 'The gateway before a source is added.', 'pages/SourcesPage'),
-  ...sourceScenarios.map(([id, label]) => dashboard(id, label, `/sources?preview=${id}`, 'A recorded source action using the current source management UI.', 'pages/SourcesPage')),
+  dashboard('sources', 'Sources', '/sources?preview=ready', 'Installed connectors, drafts, endpoint copy, filters, and connector setup. Use Add connector to enter a custom MCP URL or browse the Connector library.', 'pages/SourcesPage'),
+  dashboard('empty', 'Connectors · empty', '/sources?preview=empty', 'The gateway before a connector is added.', 'pages/SourcesPage'),
+  ...sourceScenarios.map(([id, label]) => dashboard(id, label, `/sources?preview=${id}`, 'A recorded connector action using the current connector management UI.', 'pages/SourcesPage')),
   dashboard('team', 'Team', '/team?preview=ready', 'Saved membership and per-member access dialogs.', 'pages/TeamPage'),
-  dashboard('team-editable', 'Team · edit access', '/team?preview=team-editable', 'Assign sources in the access modal and save synthetic changes.', 'pages/TeamPage'),
+  dashboard('team-editable', 'Team · edit access', '/team?preview=team-editable', 'Assign connectors in the access modal and save synthetic changes.', 'pages/TeamPage'),
   dashboard('team-recovery', 'Team · recovery required', '/team?preview=team-recovery', 'An exact recorded access proposal that needs recovery.', 'pages/TeamPage'),
   dashboard('team-legacy', 'Team · recorded proposal', '/team?preview=team-legacy', 'A retained proposal that can be cancelled before writes.', 'pages/TeamPage'),
   dashboard('team-lifecycle', 'Team · action in progress', '/team?preview=team-lifecycle', 'Editing paused while another lifecycle action is active.', 'pages/TeamPage'),
@@ -61,7 +61,7 @@ export const catalog: PreviewEntry[] = [
   dashboard('update-running', 'Update · in progress', `/settings?preview=update-running&runtimeAction=${action}#software-updates-title`, 'The update status notice and shared matrix loader.', 'pages/SettingsPage'),
   dashboard('update-failed', 'Update · recovery required', `/settings?preview=update-failed&runtimeAction=${action}#software-updates-title`, 'A failed update with recovery guidance.', 'pages/SettingsPage'),
   dashboard('update-success', 'Update · completed', `/settings?preview=ready&runtimeAction=${action}#software-updates-title`, 'The successful runtime action notice.', 'pages/SettingsPage'),
-  dashboard('dashboard-loading', 'Dashboard loading', '/?preview=loading', 'Sources skeleton loading state with the dashboard navigation visible.', 'components/AppShell'),
+  dashboard('dashboard-loading', 'Dashboard loading', '/?preview=loading', 'Connectors skeleton loading state with the dashboard navigation visible.', 'components/AppShell'),
   dashboard('team-loading', 'Team loading', '/team?preview=loading', 'Team skeleton loading state.', 'components/AppShell'),
   dashboard('settings-loading', 'Settings loading', '/settings?preview=loading', 'Settings skeleton loading state.', 'components/AppShell'),
   dashboard('dashboard-error', 'Dashboard unavailable', '/?preview=error', 'The branded error screen and retry action.', 'components/AppShell'),
@@ -73,7 +73,7 @@ export const catalog: PreviewEntry[] = [
   components('feedback', 'Loaders, notices & badges', 'StatusPill, LoadingIndicator, and the dashboard’s existing notice styles.'),
   components('brand', 'Wordmark & page headers', 'The existing vector wordmark, dashboard header, and lifecycle layout.'),
   components('dialog', 'Add user dialog', 'Open the real dialog, try its validation, and add a synthetic team member.'),
-  components('sources-components', 'Endpoint & source list', 'GatewayEndpoint and SourceList with functional copy, search, filters, and expansion.'),
+  components('sources-components', 'Endpoint & connector list', 'GatewayEndpoint and SourceList with functional copy, search, filters, and expansion.'),
   components('bigquery-components', 'BigQuery setup form', 'The real BigQuery setup form with validation and synthetic responses.'),
   components('provider-guides', 'Provider connectors', 'Setup requirements and availability for each connector in the library.'),
 ]

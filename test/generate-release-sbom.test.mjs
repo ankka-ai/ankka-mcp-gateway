@@ -28,6 +28,7 @@ async function sourceFixture() {
     mkdir(path.join(source, 'apps/installer/scripts'), { recursive: true }),
     mkdir(path.join(source, 'apps/search-console-adapter'), { recursive: true }),
     mkdir(path.join(source, 'apps/read-only-connectors'), { recursive: true }),
+    mkdir(path.join(source, 'apps/api-source-runtime'), { recursive: true }),
   ]);
   for (const relative of [
     '.nvmrc',
@@ -39,6 +40,7 @@ async function sourceFixture() {
     'apps/installer/scripts/sign-gateway-release.mjs',
     'apps/search-console-adapter/package.json',
     'apps/read-only-connectors/package.json',
+    'apps/api-source-runtime/package.json',
   ]) {
     await copyFile(path.join(REPOSITORY_ROOT, relative), path.join(source, relative));
   }

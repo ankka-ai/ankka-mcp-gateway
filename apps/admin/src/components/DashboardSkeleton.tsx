@@ -1,7 +1,7 @@
 import { PageHeader } from './PageHeader'
 
 type DashboardPage = 'sources' | 'team' | 'settings'
-const titles = { sources: 'Sources', team: 'Team', settings: 'Settings' }
+const titles = { sources: 'Connectors', team: 'Team', settings: 'Settings' }
 
 function Placeholder({ className = '' }: { className?: string }) {
   return <div className={`dashboard-skeleton-block rounded-md ${className}`} />

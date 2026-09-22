@@ -28,15 +28,15 @@ export function syncedHintSummary(tools: DiscoveredTool[]): string {
   const hinted = tools.filter(hasHint).length
   const described = tools.some((tool) => Boolean(tool.description))
   if (hinted === 0) {
-    return `Cloudflare’s synced list for this source carries no read-only or destructive hints${described ? '' : ' and no descriptions'}, so none are shown. Check what each tool does in the source’s own documentation before you allow it.`
+    return `Cloudflare’s synced list for this connector carries no read-only or destructive hints${described ? '' : ' and no descriptions'}, so none are shown. Check what each tool does in the connector’s own documentation before you allow it.`
   }
-  return `Hints and descriptions are the source’s own claims, as Cloudflare synced them; ${tools.length - hinted} of ${tools.length} tools carry no hint. They help you review. They do not make a tool read-only.`
+  return `Hints and descriptions are the connector’s own claims, as Cloudflare synced them; ${tools.length - hinted} of ${tools.length} tools carry no hint. They help you review. They do not make a tool read-only.`
 }
 
 const WAITING = {
-  connection_required: 'This source needs authorization before its tools can be listed. After authorizing, check again. Nothing is enabled until you choose.',
-  sync_required: 'Cloudflare has not finished syncing the tools of this source. In Cloudflare, use Sync capabilities and resolve any connection error, then check again.',
-  unsupported: 'Cloudflare’s synced list for this source cannot be offered here: it has more than 500 tools, a repeated name, or a name the gateway does not accept. Nothing is enabled.',
+  connection_required: 'This connector needs authorization before its tools can be listed. After authorizing, check again. Nothing is enabled until you choose.',
+  sync_required: 'Cloudflare has not finished syncing the tools of this connector. In Cloudflare, use Sync capabilities and resolve any connection error, then check again.',
+  unsupported: 'Cloudflare’s synced list for this connector cannot be offered here: it has more than 500 tools, a repeated name, or a name the gateway does not accept. Nothing is enabled.',
 } satisfies Record<Exclude<SourceActionTools['state'], 'ready'>, string>
 
 /**
@@ -132,7 +132,7 @@ export function SourceToolChoice({ action, source, revision, recommendedTools, d
   return (
     <section className="mt-4 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4" aria-label={`Tools of ${source.label}`}>
       <h4 className="text-sm font-semibold text-kumo-strong">Choose the tools to allow</h4>
-      {offered === null && loading ? <p role="status" className="mt-2 text-xs leading-5 text-kumo-subtle">Reading this source’s tools from Cloudflare…</p> : null}
+      {offered === null && loading ? <p role="status" className="mt-2 text-xs leading-5 text-kumo-subtle">Reading this connector’s tools from Cloudflare…</p> : null}
       {offered !== null && offered.state !== 'ready' ? <p role="status" className="mt-2 max-w-[80ch] text-xs leading-5 text-kumo-subtle">{WAITING[offered.state]}</p> : null}
       {error ? <p role="alert" className="mt-2 text-xs leading-5 text-danger">{error}</p> : null}
       {offered?.state !== 'ready' ? (
@@ -140,13 +140,13 @@ export function SourceToolChoice({ action, source, revision, recommendedTools, d
       ) : (
         <>
           <p className="mt-2 max-w-[80ch] text-xs leading-5 text-kumo-subtle">
-            {tools.length} tool{tools.length === 1 ? '' : 's'} in Cloudflare’s synced list of this source.{preselected ? ' Catalog recommendations that exist are preselected for review.' : ''} Only the tools you select are attached; everything else stays disabled.
+            {tools.length} tool{tools.length === 1 ? '' : 's'} in Cloudflare’s synced list of this connector.{preselected ? ' Catalog recommendations that exist are preselected for review.' : ''} Only the tools you select are attached; everything else stays disabled.
           </p>
           <p className="mt-1 max-w-[80ch] text-xs leading-5 text-kumo-subtle">{syncedHintSummary(tools)}</p>
           {missingRecommended.length > 0 ? (
             <div className="mt-3 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4 text-xs leading-5 text-kumo-subtle" role="status">
               <strong className="block text-sm text-kumo-strong">Catalog recommendation changed</strong>
-              {missingRecommended.length} recommended exact tool{missingRecommended.length === 1 ? ' is' : 's are'} absent from this source’s real list.
+              {missingRecommended.length} recommended exact tool{missingRecommended.length === 1 ? ' is' : 's are'} absent from this connector’s real list.
               <div className="mt-2 flex flex-wrap gap-2">
                 {missingRecommended.map((tool) => <code key={tool} className="tool-chip">{tool}</code>)}
               </div>
@@ -168,8 +168,8 @@ export function SourceToolChoice({ action, source, revision, recommendedTools, d
             </Button>
             <span className="max-w-[60ch] text-xs leading-5 text-kumo-subtle">
               {selected.length === 0
-                ? 'Select at least one tool. Until then the source stays installed with nothing enabled.'
-                : 'The gateway saves this selection, then attaches the source with exactly these tools. Nobody is assigned access.'}
+                ? 'Select at least one tool. Until then the connector stays installed with nothing enabled.'
+                : 'The gateway saves this selection, then attaches the connector with exactly these tools. Nobody is assigned access.'}
             </span>
           </div>
         </>

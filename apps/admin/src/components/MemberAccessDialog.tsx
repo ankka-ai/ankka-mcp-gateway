@@ -27,7 +27,7 @@ export function MemberAccessDialog({ member, sources, disabled, onChange }: Memb
             </div>
             <Dialog.Close render={<Button variant="ghost" aria-label="Close member access" />}><X size={20} aria-hidden="true" /></Dialog.Close>
           </div>
-          <Dialog.Description className="mt-4 text-sm leading-6 text-kumo-subtle">Select sources to grant access to their tools. Tools are shared per source.</Dialog.Description>
+          <Dialog.Description className="mt-4 text-sm leading-6 text-kumo-subtle">Select connectors to grant access to their tools. Tools are shared per connector.</Dialog.Description>
         </header>
         <div className="overflow-y-auto overscroll-contain px-5 sm:px-6">
           {sources.map(source => <div key={source.id} className="border-b border-kumo-line py-4 last:border-0">
@@ -44,7 +44,7 @@ export function MemberAccessDialog({ member, sources, disabled, onChange }: Memb
               </ul>
             </details>
           </div>)}
-          {sources.length === 0 ? <p className="py-6 text-sm text-kumo-subtle">No installed sources to assign.</p> : null}
+          {sources.length === 0 ? <p className="py-6 text-sm text-kumo-subtle">No installed connectors to assign.</p> : null}
         </div>
         <footer className="flex shrink-0 items-center justify-between gap-4 border-t border-kumo-line p-5 sm:px-6">
           <p className="text-xs leading-5 text-kumo-subtle">{disabled ? 'Access is currently read-only.' : 'Save on the Team page to apply your changes.'}</p>

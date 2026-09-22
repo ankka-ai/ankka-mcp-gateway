@@ -28,7 +28,7 @@ export interface NativeConnectorRecipe {
 }
 
 export const NATIVE_RECIPE_RESEARCH_DATE = '2026-08-30'
-export const NATIVE_RECIPE_NOTICE = 'Setup guidance only. These connections have not passed the gateway canary or catalog release review. No source draft or tool permission is created.'
+export const NATIVE_RECIPE_NOTICE = 'Setup guidance only. These connections have not passed the gateway canary or catalog release review. No connector draft or tool permission is created.'
 export const NATIVE_RECIPE_STATUS_LABELS: Readonly<Record<NativeRecipeStatus, string>> = Object.freeze({
   compatibility_pending: 'Compatibility pending',
   manual_setup: 'Manual setup needed',
@@ -159,7 +159,7 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     description: 'Read repository contents, issues and pull requests through GitHub’s read-only endpoint.',
     status: 'manual_setup', endpoint: 'https://api.githubcopilot.com/mcp/readonly',
     authentication: 'oauth_manual_client',
-    upstreamControls: ['Keep the provider /readonly endpoint; never fall back to the read-write base URL.', 'Restrict the GitHub app or source identity to the repositories and read permissions your team needs.'],
+    upstreamControls: ['Keep the provider /readonly endpoint; never fall back to the read-write base URL.', 'Restrict the GitHub app or connector identity to the repositories and read permissions your team needs.'],
     requiredScopes: [], scopeNote: 'App permissions depend on the chosen GitHub App or OAuth App; no universal read-only OAuth scope is assumed.',
     documentedReadTools: ['get_file_contents', 'issue_read', 'pull_request_read'],
     blockers: [MANUAL_AUTH_BLOCKER, CANARY_BLOCKER, CATALOG_BLOCKER],
@@ -171,7 +171,7 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     description: 'Read projects, issues, merge requests and pipelines from GitLab.com.',
     status: 'compatibility_pending', endpoint: 'https://gitlab.com/api/v4/mcp',
     authentication: 'oauth_dynamic_registration',
-    upstreamControls: ['Establish a provider-side identity or grant that denies all mutations, not only protected-branch writes.', 'Enable native MCP only for the intended GitLab group and source identity.'],
+    upstreamControls: ['Establish a provider-side identity or grant that denies all mutations, not only protected-branch writes.', 'Enable native MCP only for the intended GitLab group and connector identity.'],
     requiredScopes: [], scopeNote: 'A native MCP-specific read-only grant has not been established; ordinary project membership is insufficient proof.',
     documentedReadTools: ['get_commit', 'get_issue', 'get_merge_request', 'get_pipeline', 'get_repository_file', 'list_pipelines'],
     blockers: ['The native server includes writes and no complete read-only connection boundary has been verified.', CANARY_BLOCKER, CATALOG_BLOCKER],
@@ -196,12 +196,12 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     description: 'Read spreadsheet metadata and bounded cell ranges through Google’s hosted MCP server.',
     status: 'manual_setup', endpoint: 'https://sheetsmcp.googleapis.com/mcp/v1',
     authentication: 'oauth_manual_client',
-    upstreamControls: ['Use spreadsheets.readonly and a source identity limited to approved spreadsheets.', 'Request bounded ranges; do not enable batch updates or write-capable Google scopes.'],
+    upstreamControls: ['Use spreadsheets.readonly and a connector identity limited to approved spreadsheets.', 'Request bounded ranges; do not enable batch updates or write-capable Google scopes.'],
     requiredScopes: ['https://www.googleapis.com/auth/spreadsheets.readonly'],
     scopeNote: 'Verify this least-privilege scope works for the chosen read tools; do not automatically add drive.file or spreadsheets write access.',
     documentedReadTools: ['get_spreadsheet', 'get_values'],
     blockers: [MANUAL_AUTH_BLOCKER, CANARY_BLOCKER, CATALOG_BLOCKER],
-    setupSteps: ['Review Google Workspace MCP setup and spreadsheet visibility for the shared source identity.', 'Wait for supported shared manual OAuth before registering a gateway connection.', 'Canary metadata and one small cell range, then review the exact two-tool allowlist.'],
+    setupSteps: ['Review Google Workspace MCP setup and spreadsheet visibility for the shared connector identity.', 'Wait for supported shared manual OAuth before registering a gateway connection.', 'Canary metadata and one small cell range, then review the exact two-tool allowlist.'],
     evidenceUrls: ['https://developers.google.com/workspace/guides/configure-mcp-servers'],
   },
   {
@@ -221,7 +221,7 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     description: 'Read selected CRM objects and property definitions through HubSpot’s native server.',
     status: 'manual_setup', endpoint: 'https://mcp.hubspot.com/',
     authentication: 'oauth_manual_client',
-    upstreamControls: ['Use installation permissions and a source identity that deny CRM, activity, and marketing mutations.', 'Verify the permissions chosen during installation; current MCP auth apps do not accept an arbitrary authored scope list.'],
+    upstreamControls: ['Use installation permissions and a connector identity that deny CRM, activity, and marketing mutations.', 'Verify the permissions chosen during installation; current MCP auth apps do not accept an arbitrary authored scope list.'],
     requiredScopes: [], scopeNote: 'HubSpot determines available scopes from tools and permissions selected during installation; do not reuse a private API app’s scope assumptions.',
     documentedReadTools: ['get_crm_objects', 'get_properties', 'get_user_details', 'search_crm_objects', 'search_owners', 'search_properties'],
     blockers: [MANUAL_AUTH_BLOCKER, 'Prove a genuinely read-only installation; the hosted server also supports writes.', CANARY_BLOCKER, CATALOG_BLOCKER],
@@ -274,7 +274,7 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     scopeNote: 'Linear documents read as a read-only OAuth scope on its standard endpoint. Verify the dedicated read-only endpoint’s actual grant; metadata is not token evidence.',
     documentedReadTools: [],
     blockers: [EXACT_TOOLS_BLOCKER, CANARY_BLOCKER, CATALOG_BLOCKER],
-    setupSteps: ['Prepare an approved test workspace and limited source identity.', 'Use the dedicated read-only URL and confirm the requested and granted provider permissions.', 'Capture the exact authenticated tool list before proposing a small issue/project allowlist.'],
+    setupSteps: ['Prepare an approved test workspace and limited connector identity.', 'Use the dedicated read-only URL and confirm the requested and granted provider permissions.', 'Capture the exact authenticated tool list before proposing a small issue/project allowlist.'],
     evidenceUrls: ['https://linear.app/docs/mcp'],
   },
   {
@@ -282,7 +282,7 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     description: 'Read pages and search knowledge through Notion’s hosted MCP service.',
     status: 'compatibility_pending', endpoint: 'https://mcp.notion.com/mcp',
     authentication: 'oauth_dynamic_registration',
-    upstreamControls: ['Prove a hosted-MCP-specific read-only grant or identity before connecting.', 'Review connected-source search access as well as Notion page access; a separate API integration’s capabilities do not restrict the hosted MCP grant.'],
+    upstreamControls: ['Prove a hosted-MCP-specific read-only grant or identity before connecting.', 'Review connected-connector search access as well as Notion page access; a separate API integration’s capabilities do not restrict the hosted MCP grant.'],
     requiredScopes: [], scopeNote: 'No explicit read-only scope or endpoint for the hosted MCP grant was established in this review.',
     documentedReadTools: ['notion-fetch', 'notion-search'],
     blockers: ['The hosted server can create and update content with the connecting user’s access.', CANARY_BLOCKER, CATALOG_BLOCKER],
@@ -319,7 +319,7 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     description: 'Read approved public-channel context with a restricted internal Slack app.',
     status: 'manual_setup', endpoint: 'https://mcp.slack.com/mcp',
     authentication: 'oauth_manual_client',
-    upstreamControls: ['Use an internal or Marketplace-published Slack app; unlisted distributed apps are not supported.', 'For a public-channel starting point, grant only public search and history access; exclude chat, reaction, canvas, and conversation writes.', 'Do not expose one user’s private conversations through a team-shared source.'],
+    upstreamControls: ['Use an internal or Marketplace-published Slack app; unlisted distributed apps are not supported.', 'For a public-channel starting point, grant only public search and history access; exclude chat, reaction, canvas, and conversation writes.', 'Do not expose one user’s private conversations through a team-shared connector.'],
     requiredScopes: ['channels:history', 'search:read.public'],
     scopeNote: 'This is a minimal public-channel use case, not every Slack read tool. Add other read scopes only for an explicitly reviewed data category.',
     documentedReadTools: [],

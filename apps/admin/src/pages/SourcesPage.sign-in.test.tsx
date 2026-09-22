@@ -58,7 +58,7 @@ async function choice() {
   return screen.findByRole('region', { name: `Tools of ${signInDraft.label}` })
 }
 
-describe('choosing the tools of a connected sign-in source', () => {
+describe('choosing the tools of a connected sign-in connector', () => {
   afterEach(cleanup)
 
   it('starts provider authorization for the current action and retains the manual fallback on failure', async () => {
@@ -66,12 +66,12 @@ describe('choosing the tools of a connected sign-in source', () => {
     const api = pausedApi(pause(), signInDraft, offered('connection_required'))
     api.authorizeSource.mockRejectedValue(new GatewayApiError(409, 'source_oauth_unavailable'))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    const button = await screen.findByRole('button', { name: 'Authorize source' })
+    const button = await screen.findByRole('button', { name: 'Authorize connector' })
     await waitFor(() => expect(button).toBeEnabled())
     await user.click(button)
     expect(api.authorizeSource).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, signInDraft.id)
     expect(await screen.findByRole('alert')).toHaveTextContent('open it in Cloudflare for manual OAuth setup')
-    expect(screen.getByRole('link', { name: 'Open source in Cloudflare' })).toHaveAttribute('href', CONNECTION_URL)
+    expect(screen.getByRole('link', { name: 'Open connector in Cloudflare' })).toHaveAttribute('href', CONNECTION_URL)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
     expect(api.chooseSourceActionTools).not.toHaveBeenCalled()
   })
@@ -83,11 +83,11 @@ describe('choosing the tools of a connected sign-in source', () => {
       .mockResolvedValueOnce(offered('connection_required')).mockResolvedValue(offered('ready', REAL_TOOLS))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const card = await screen.findByRole('article', { name: `Installation of ${signInDraft.label}` })
-    expect(screen.getByText('Connect your source')).toBeVisible()
-    expect(within(card).getByText(/installed with nothing enabled: it is not attached to your Portal and nobody has been assigned access/u)).toBeVisible()
-    expect(within(card).getByRole('link', { name: 'Open source in Cloudflare' })).toHaveAttribute('href', CONNECTION_URL)
+    expect(screen.getByText('Connect your connector')).toBeVisible()
+    expect(within(card).queryByText(/installed with nothing enabled:/u)).not.toBeInTheDocument()
+    expect(within(card).getByRole('link', { name: 'Open connector in Cloudflare' })).toHaveAttribute('href', CONNECTION_URL)
     const region = await choice()
-    expect(await within(region).findByText(/This source needs authorization before its tools can be listed/u)).toBeVisible()
+    expect(await within(region).findByText(/This connector needs authorization before its tools can be listed/u)).toBeVisible()
     expect(within(region).queryByRole('checkbox')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Resume installation' })).not.toBeInTheDocument()
     expect(api.getSourceActionTools).toHaveBeenCalledExactlyOnceWith(ACTION_ID)
@@ -99,20 +99,20 @@ describe('choosing the tools of a connected sign-in source', () => {
     expect(api.chooseSourceActionTools).not.toHaveBeenCalled()
     // The journal still records the reason of the last run. The card follows what Cloudflare says now.
     expect(await screen.findByText('Choose tools')).toBeVisible()
-    expect(screen.queryByText('Connect your source')).not.toBeInTheDocument()
-    expect(within(card).getByText(/This source is connected and nothing is enabled yet\. Choose the tools to allow from its real list below/u)).toBeVisible()
+    expect(screen.queryByText('Connect your connector')).not.toBeInTheDocument()
+    expect(within(card).getByText(/This connector is connected and nothing is enabled yet\. Choose the tools to allow from its real list below/u)).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Resume installation' })).not.toBeInTheDocument()
   })
 
-  it('follows a source that is no longer connected, whatever reason the journal recorded', async () => {
+  it('follows a connector that is no longer connected, whatever reason the journal recorded', async () => {
     const api = pausedApi(pause({ failureCode: 'source_tools_required' }), signInDraft, offered('connection_required'))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByRole('article', { name: `Installation of ${signInDraft.label}` })
-    expect(await screen.findByText('Connect your source')).toBeVisible()
+    expect(await screen.findByText('Connect your connector')).toBeVisible()
     expect(screen.queryByText('Choose tools')).not.toBeInTheDocument()
   })
 
-  it('offers the real list with honest hints, preselects nothing for a custom source, and finishes in two bound steps', async () => {
+  it('offers the real list with honest hints, preselects nothing for a custom connector, and finishes in two bound steps', async () => {
     const user = userEvent.setup()
     const api = pausedApi(pause({ failureCode: 'source_tools_required' }))
     api.chooseSourceActionTools.mockResolvedValue({ schemaVersion: 1, actionId: ACTION_ID, sourceId: signInDraft.id, revision: 5, enabledTools: ['records_export', 'records_search'] })
@@ -121,14 +121,14 @@ describe('choosing the tools of a connected sign-in source', () => {
     await screen.findByRole('article', { name: `Installation of ${signInDraft.label}` })
     expect(screen.getByText('Choose tools')).toBeVisible()
     const region = await choice()
-    expect(await within(region).findByText(/3 tools in Cloudflare’s synced list of this source\. Only the tools you select are attached; everything else stays disabled\./u)).toBeVisible()
-    expect(within(region).getByText('Hints and descriptions are the source’s own claims, as Cloudflare synced them; 1 of 3 tools carry no hint. They help you review. They do not make a tool read-only.')).toBeVisible()
+    expect(await within(region).findByText(/3 tools in Cloudflare’s synced list of this connector\. Only the tools you select are attached; everything else stays disabled\./u)).toBeVisible()
+    expect(within(region).getByText('Hints and descriptions are the connector’s own claims, as Cloudflare synced them; 1 of 3 tools carry no hint. They help you review. They do not make a tool read-only.')).toBeVisible()
     expect(within(region).getByText('No description in Cloudflare’s synced list.')).toBeVisible()
     expect(within(region).getByText('read-only hint')).toBeVisible()
     // Nothing is preselected from a hint, not even a read-only one.
     for (const checkbox of within(region).getAllByRole('checkbox')) expect(checkbox).not.toBeChecked()
     expect(within(region).getByRole('button', { name: 'Allow tools and finish installation' })).toBeDisabled()
-    expect(within(region).getByText('Select at least one tool. Until then the source stays installed with nothing enabled.')).toBeVisible()
+    expect(within(region).getByText('Select at least one tool. Until then the connector stays installed with nothing enabled.')).toBeVisible()
 
     await user.click(within(region).getByRole('checkbox', { name: /records_search/u }))
     await user.click(within(region).getByRole('checkbox', { name: /records_export/u }))
@@ -156,7 +156,7 @@ describe('choosing the tools of a connected sign-in source', () => {
     expect(within(region).getByRole('checkbox', { name: /properties\.update/u })).not.toBeChecked()
     expect(within(region).getByText(/Catalog recommendations that exist are preselected for review\./u)).toBeVisible()
     const changed = within(region).getByRole('status')
-    expect(changed).toHaveTextContent('1 recommended exact tool is absent from this source’s real list.')
+    expect(changed).toHaveTextContent('1 recommended exact tool is absent from this connector’s real list.')
     expect(changed).toHaveTextContent('reports.read')
     expect(within(region).getByRole('button', { name: 'Allow 1 tool and finish installation' })).toBeEnabled()
     // A list of names only says so instead of implying hints it does not have.
@@ -165,7 +165,7 @@ describe('choosing the tools of a connected sign-in source', () => {
   })
 
   it.each([
-    ['sync_required', /has not finished syncing the tools of this source/u],
+    ['sync_required', /has not finished syncing the tools of this connector/u],
     ['unsupported', /cannot be offered here: it has more than 500 tools, a repeated name, or a name the gateway does not accept\. Nothing is enabled\./u],
   ] as const)('says what a %s list waits for and offers nothing to select', async (state, wording) => {
     const api = pausedApi(pause({ failureCode: 'source_sync_required' }), signInDraft, offered(state))
@@ -184,14 +184,14 @@ describe('choosing the tools of a connected sign-in source', () => {
     api.chooseSourceActionTools.mockRejectedValue(new GatewayApiError(409, 'source_tools_mismatch'))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const card = await screen.findByRole('article', { name: `Installation of ${signInDraft.label}` })
-    expect(screen.getByText('Review source tools')).toBeVisible()
+    expect(screen.getByText('Review connector tools')).toBeVisible()
     expect(within(card).getByRole('button', { name: 'Resume installation' })).toBeEnabled()
     const region = await choice()
     // The name that exists is kept; the mistyped one is not in the real list, so it cannot be selected at all.
     expect(await within(region).findByRole('checkbox', { name: /records_search/u })).toBeChecked()
     expect(within(region).queryByText('records_serch')).not.toBeInTheDocument()
     await user.click(within(region).getByRole('button', { name: 'Allow 1 tool and finish installation' }))
-    expect(await within(region).findByRole('alert')).toHaveTextContent('A selected tool is not in the list Cloudflare synced from this source.')
+    expect(await within(region).findByRole('alert')).toHaveTextContent('A selected tool is not in the list Cloudflare synced from this connector.')
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
     expect(within(region).getByRole('checkbox', { name: /records_search/u })).toBeChecked()
   })
@@ -202,11 +202,11 @@ describe('choosing the tools of a connected sign-in source', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const card = await screen.findByRole('article', { name: `Installation of ${signInDraft.label}` })
     expect(screen.getByText('Finish installation')).toBeVisible()
-    expect(within(card).getByText(/Your tool selection is saved\. Resume to attach the source with exactly those tools/u)).toBeVisible()
+    expect(within(card).getByText(/Your tool selection is saved\. Resume to attach the connector with exactly those tools/u)).toBeVisible()
     expect(within(card).getByRole('button', { name: 'Resume installation' })).toBeEnabled()
   })
 
-  it('keeps the choice to the administrator who can resume it, and away from public sources and BigQuery bridges', async () => {
+  it('keeps the choice to the administrator who can resume it, and away from public connectors and BigQuery bridges', async () => {
     const other = pausedApi(pause({ canRenew: false }))
     const first = render(<GatewayProvider api={other}><SourcesPage /></GatewayProvider>)
     expect(await screen.findByText('Only the administrator who started this installation can choose its tools and finish it.')).toBeVisible()
@@ -240,20 +240,20 @@ describe('choosing the tools of a connected sign-in source', () => {
     api.prepareSourceAction.mockRejectedValueOnce(new GatewayApiError(409, 'source_connection_required'))
       .mockRejectedValueOnce(new GatewayApiError(409, 'source_action_conflict'))
     render(<GatewayProvider api={api}><RequestError /><SourcesPage /></GatewayProvider>)
-    const install = await screen.findByRole('button', { name: 'Install source' })
+    const install = await screen.findByRole('button', { name: 'Install connector' })
     await waitFor(() => expect(install).toBeEnabled())
     await user.click(install)
     await waitFor(() => expect(api.prepareSourceAction).toHaveBeenCalledTimes(1))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Install source' })).toBeEnabled())
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Install connector' })).toBeEnabled())
     expect(screen.getByTestId('request-error')).toHaveTextContent('none')
     // Any other refusal stays visible.
-    await user.click(screen.getByRole('button', { name: 'Install source' }))
-    await waitFor(() => expect(screen.getByTestId('request-error')).toHaveTextContent('This source action cannot proceed.'))
+    await user.click(screen.getByRole('button', { name: 'Install connector' }))
+    await waitFor(() => expect(screen.getByTestId('request-error')).toHaveTextContent('This connector action cannot proceed.'))
   })
 
   it.each([
-    ['a sign-in source', 'oauth', 'After this you can no longer roll back to gateway-v0.9.9. Older releases cannot read a source saved without tools.'],
-    ['a public source', 'none', null],
+    ['a sign-in connector', 'oauth', 'After this you can no longer roll back to gateway-v0.9.9. Older releases cannot read a connector saved without tools.'],
+    ['a public connector', 'none', null],
   ] as const)('says beside Save draft what saving %s decides about rollback, only while the gateway reports a release', async (_kind, authentication, sentence) => {
     const user = userEvent.setup()
     for (const installEndsRollbackTo of ['gateway-v0.9.9', null]) {
@@ -267,9 +267,9 @@ describe('choosing the tools of a connected sign-in source', () => {
       addConnector.focus()
       await user.keyboard('{Enter}')
       await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
-      await user.type(screen.getByLabelText('Source name'), 'Customer records')
+      await user.type(screen.getByLabelText('Connector name'), 'Customer records')
       await user.type(screen.getByLabelText('MCP URL'), 'https://records.example.com/mcp')
-      await user.click(screen.getByRole('button', { name: 'Inspect source' }))
+      await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
       const save = await screen.findByRole('button', { name: 'Save draft' })
       // Older releases cannot read a source saved without tools, so for that one draft the save is the decision.
       if (sentence !== null && installEndsRollbackTo !== null) expect(save).toHaveAccessibleDescription(sentence)
@@ -285,7 +285,7 @@ describe('choosing the tools of a connected sign-in source', () => {
     const user = userEvent.setup()
     render(<GatewayProvider api={pausedApi(null)}><SourcesPage /></GatewayProvider>)
     await user.click(await screen.findByRole('button', { name: signInDraft.label }))
-    expect(screen.getByText('No tools chosen yet. Nothing is enabled; you choose from the source’s real list after connecting it.')).toBeVisible()
+    expect(screen.getByText('No tools chosen yet. Nothing is enabled; you choose from the connector’s real list after connecting it.')).toBeVisible()
     expect(screen.queryByText('0 exact tools')).not.toBeInTheDocument()
   })
 })

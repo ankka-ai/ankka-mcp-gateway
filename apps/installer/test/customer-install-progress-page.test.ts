@@ -114,8 +114,8 @@ describe('customer install final navigation', () => {
     expect(shown).toEqual([
       '',
       'Your management token is saved as an encrypted secret on your gateway in the last step of setup.',
-      'You continued without a management token. Adding sources and managing team access stay disabled until you add it in Settings.',
-      'Your gateway no longer held the management token you pasted, so setup is finishing without it. Adding sources and managing team access stay disabled until you add it in Settings.',
+      'You continued without a management token. Adding connectors and managing team access stay disabled until you add it in Settings.',
+      'Your gateway no longer held the management token you pasted, so setup is finishing without it. Adding connectors and managing team access stay disabled until you add it in Settings.',
       'Your management token is saved as an encrypted secret on your gateway.',
       // Only the four fixed words select a sentence; anything else shows nothing.
       '', '', '',

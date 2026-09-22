@@ -103,7 +103,7 @@ export function SettingsPage() {
               {pendingRuntimeOperation === 'rollback' ? <LoadingIndicator inline /> : null} Rollback
             </button>
           ) : rollbackEnded ? (
-            <p>You can no longer roll back to {rollbackEnded}. A source was installed or Team access was changed after the update, and the older version cannot work with those changes.</p>
+            <p>You can no longer roll back to {rollbackEnded}. A connector was installed or Team access was changed after the update, and the older version cannot work with those changes.</p>
           ) : null}
         </div>
       </section>

@@ -37,6 +37,11 @@ on the primary documentation linked in its README and evidence record. No
 provider schemas, examples, or source code are vendored. Provider names identify
 compatibility, not an affiliation or endorsement.
 
+The experimental `apps/api-source-runtime` consumes Cloudflare Code Mode 0.5.1,
+jose and Zod as published MIT-licensed npm packages, reusing the versions already
+locked in this repository. Its source lifecycle and API capability are original
+repository code; no Cloudflare example implementation is vendored.
+
 The `@cfworker/json-schema@4.1.1` npm tarball declares the MIT License but does
 not include its license file. A reviewed copy from the exact upstream source
 revision is retained under `third_party/licenses/` and included by the release

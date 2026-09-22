@@ -6559,7 +6559,7 @@ async function handleSourceDiscovery(request, env, authorizedAccess = null) {
   try {
     const discovered = input.url === managementSourceUrl(env)
       ? { endpoint: input.url, protocolVersion: '2025-06-18', authMode: 'oauth',
-        tools: managementToolDefinitions().map((tool) => ({ name: tool.name, description: tool.description,
+        tools: managementToolDefinitions(null, env).map((tool) => ({ name: tool.name, description: tool.description,
           readOnlyHint: tool.annotations.readOnlyHint, destructiveHint: tool.annotations.destructiveHint, defaultSelected: true })) }
       : await inspectMcpSource(input.url);
     const result = {
@@ -6596,6 +6596,142 @@ async function handleSourceRemoval(request, env, authorizedAccess = null) {
     const sources = safeManagementSources(await response.json());
     return sources ? fixedJson(200, await publicSources(sources, stub, env)) : sourceRemovalRefusal('source_removal_unavailable', 503);
   } catch { return sourceRemovalRefusal('source_removal_recovery_required'); }
+}
+
+// Icons are optional presentation data. They never enter configuration or carry credentials.
+const SOURCE_ICON_LIMIT = 128 * 1024;
+
+function sourceIconType(bytes) {
+  const sizeOK = (width, height) => width > 0 && height > 0 && width <= 2048 && height <= 2048;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes.length >= 24 && [137, 80, 78, 71, 13, 10, 26, 10].every((value, index) => bytes[index] === value)) {
+    return sizeOK(view.getUint32(16), view.getUint32(20)) ? 'image/png' : null;
+  }
+  if (bytes[0] === 255 && bytes[1] === 216) {
+    for (let offset = 2; offset + 9 <= bytes.length;) {
+      if (bytes[offset] !== 255) return null;
+      const marker = bytes[offset + 1];
+      const length = view.getUint16(offset + 2);
+      if (length < 2 || offset + 2 + length > bytes.length) return null;
+      if ([192, 193, 194].includes(marker)) return sizeOK(view.getUint16(offset + 7), view.getUint16(offset + 5)) ? 'image/jpeg' : null;
+      offset += 2 + length;
+    }
+    return null;
+  }
+  if (bytes.length >= 30 && new TextDecoder().decode(bytes.slice(0, 4)) === 'RIFF' &&
+      new TextDecoder().decode(bytes.slice(8, 12)) === 'WEBP') {
+    const format = new TextDecoder().decode(bytes.slice(12, 16));
+    if (format === 'VP8X' && (bytes[20] & 2) === 0) {
+      const width = 1 + bytes[24] + (bytes[25] << 8) + (bytes[26] << 16);
+      const height = 1 + bytes[27] + (bytes[28] << 8) + (bytes[29] << 16);
+      return sizeOK(width, height) ? 'image/webp' : null;
+    }
+    if (format === 'VP8 ' && bytes[23] === 157 && bytes[24] === 1 && bytes[25] === 42) {
+      return sizeOK(view.getUint16(26, true) & 16383, view.getUint16(28, true) & 16383) ? 'image/webp' : null;
+    }
+    if (format === 'VP8L' && bytes[20] === 47) {
+      const dimensions = view.getUint32(21, true);
+      return sizeOK(1 + (dimensions & 16383), 1 + ((dimensions >>> 14) & 16383)) ? 'image/webp' : null;
+    }
+    return null;
+  }
+  // Render simple SVG artwork as an image, never as markup. Reject active content and references.
+  const svg = new TextDecoder().decode(bytes).trim().replace(/^<\?xml\s[^?]*\?>\s*/u, '');
+  if (!/^<svg\s/iu.test(svg) || !/<\/svg>$/iu.test(svg) ||
+      /<!|<\?|<(?:script|foreignObject|image|use|style|animate\w*|set|iframe|object|embed|a)\b|\bon\w+\s*=|\bhref\s*=|\bstyle\s*=|url\s*\(/iu.test(svg)) return null;
+  return 'image/svg+xml';
+}
+
+async function sourceIconBytes(icon, endpoint) {
+  if (!isRecord(icon) || !isText(icon.src) || icon.src.length > SOURCE_ICON_LIMIT * 2) return null;
+  let bytes;
+  let declaredType;
+  const inline = /^data:(image\/(?:png|jpeg|jpg|webp|svg\+xml));base64,([A-Za-z0-9+/]+={0,2})$/u.exec(icon.src);
+  if (inline) {
+    if (inline[2].length > Math.ceil(SOURCE_ICON_LIMIT / 3) * 4) return null;
+    try { bytes = Uint8Array.from(atob(inline[2]), (char) => char.charCodeAt(0)); } catch { return null; }
+    declaredType = inline[1];
+  } else {
+    let url;
+    try { url = new URL(icon.src); } catch { return null; }
+    if (url.protocol !== 'https:' || url.origin !== new URL(endpoint).origin || url.username || url.password || url.hash || url.href.length > 2048) return null;
+    const response = await fetch(new Request(url, { credentials: 'omit', redirect: 'manual',
+      headers: { accept: 'image/png, image/jpeg, image/webp, image/svg+xml' }, signal: AbortSignal.timeout(5000) }));
+    if (response.status !== 200 || response.redirected || !response.body) { await response.body?.cancel(); return null; }
+    declaredType = response.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
+    const reader = response.body.getReader();
+    const chunks = [];
+    let length = 0;
+    try {
+      while (true) {
+        const next = await reader.read();
+        if (next.done) break;
+        length += next.value.byteLength;
+        if (length > SOURCE_ICON_LIMIT) { await reader.cancel(); return null; }
+        chunks.push(next.value);
+      }
+    } finally { reader.releaseLock(); }
+    bytes = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  }
+  if (bytes.length === 0 || bytes.length > SOURCE_ICON_LIMIT) return null;
+  const type = sourceIconType(bytes);
+  const normalize = (value) => value === 'image/jpg' ? 'image/jpeg' : value;
+  if (!type || (declaredType && declaredType !== 'application/octet-stream' && normalize(declaredType) !== type) ||
+      (icon.mimeType && normalize(icon.mimeType) !== type)) return null;
+  return { bytes, type };
+}
+
+export async function fetchMcpSourceIcon(value) {
+  const endpoint = publicMcpUrl(value);
+  if (!endpoint) return null;
+  const budget = createMcpDiscoveryBudget();
+  try {
+    let info;
+    try {
+      const response = await mcpPost(endpoint, { jsonrpc: '2.0', id: 1, method: 'tools/list',
+        params: { _meta: modernRequestMeta() } }, { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/list' }, budget);
+      info = requireMcpResult(response.parsed, true)._meta?.['io.modelcontextprotocol/serverInfo'];
+    } catch (error) {
+      if (sourceFailure(error).code !== 'source_protocol_unsupported') return null;
+    }
+    if (!isRecord(info) || !Array.isArray(info.icons) || info.icons.length === 0) {
+      const response = await mcpPost(endpoint, { jsonrpc: '2.0', id: 1, method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'ankka-mcp-gateway', version: '1.0.0' } } },
+      { 'mcp-method': 'initialize' }, budget);
+      info = requireMcpResult(response.parsed).serverInfo;
+    }
+    if (!isRecord(info) || !Array.isArray(info.icons)) return null;
+    const icons = info.icons.slice(0, 4).filter((icon) => isRecord(icon));
+    icons.sort((left, right) => Number(right.theme === 'dark') - Number(left.theme === 'dark'));
+    for (const icon of icons) {
+      try { const result = await sourceIconBytes(icon, endpoint); if (result) return result; } catch { /* Try the next supplied icon. */ }
+    }
+    return null;
+  } catch { return null; } finally { budget.close(); }
+}
+
+async function handleSourceIcon(request, env) {
+  if (request.method !== 'GET') return fixedJson(405, { error: 'method_not_allowed' }, { allow: 'GET' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  const unavailable = () => new Response(null, { status: 404, headers: { 'cache-control': 'private, max-age=300' } });
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return unavailable();
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCES_PATH}`));
+    if (response.status !== 200) return unavailable();
+    const sources = safeManagementSources(await response.json());
+    const sourceId = new URL(request.url).pathname.split('/').at(-2);
+    const source = sources?.sources.find((item) => item.id === sourceId);
+    if (!source || source.id === MANAGEMENT_SOURCE_ID) return unavailable();
+    const icon = await fetchMcpSourceIcon(source.url);
+    return icon ? new Response(icon.bytes, { headers: {
+      'content-type': icon.type, 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff',
+      'content-security-policy': "default-src 'none'; sandbox", 'cross-origin-resource-policy': 'same-origin',
+    } }) : unavailable();
+  } catch { return unavailable(); }
 }
 
 async function handleSources(request, env, authorizedAccess = null) {
@@ -8097,7 +8233,14 @@ const MCP_SOURCE_INPUT = { type: 'string', pattern: '^source-[a-f0-9]{16}$' };
 const MCP_REVISION_INPUT = { type: 'integer', minimum: 1 };
 const MCP_TOOLS_INPUT = { type: 'array', minItems: 0, maxItems: 500, uniqueItems: true,
   items: { type: 'string', pattern: '^[A-Za-z0-9_.:/-]{1,128}$' } };
+const MCP_API_DEFINITION_INPUT = { type: 'string', maxLength: 24576, contentMediaType: 'application/json' };
 const MANAGEMENT_MCP_TOOLS = [
+  ['get_api_source_runtime', 'Read the optional API source runtime, authoring guide, connection, saved code and revision. No credentials are returned.', mcpObject(), 'POST', 'api-source:read'],
+  ['save_api_source_draft', 'Save secret-free agent-written JavaScript tools in the account-owned API runtime. Read get_api_source_runtime first. Does not activate code or change the connection.', mcpObject({ revision: MCP_REVISION_INPUT, definitionJson: MCP_API_DEFINITION_INPUT }), 'POST', 'api-source:save'],
+  ['test_api_source_draft', 'Test one draft tool with real bounded upstream reads. Returns private source data to this manager; does not store arguments or results. Test every tool before activation.', mcpObject({ revision: MCP_REVISION_INPUT, tool: { type: 'string', pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$' }, argumentsJson: { ...MCP_API_DEFINITION_INPUT, maxLength: 16384 } }), 'POST', 'api-source:test'],
+  ['activate_api_source', 'Activate the tested draft revision. This changes the behavior of existing tools for everyone assigned to this API source. Register/sync the returned MCP endpoint and explicitly select its tools through the ordinary source lifecycle.', mcpObject({ revision: MCP_REVISION_INPUT }), 'POST', 'api-source:activate'],
+  ['disable_api_source', 'Stop new calls to every tool in the optional API runtime. Already running reads may finish. Does not remove the Portal source or its resources.', mcpObject({ revision: MCP_REVISION_INPUT }), 'POST', 'api-source:disable'],
+  ['discard_api_source_draft', 'Discard the saved API source draft and its test markers; the active version remains available.', mcpObject({ revision: MCP_REVISION_INPUT }), 'POST', 'api-source:discard'],
   ['get_gateway_status', 'Read gateway configuration and release; not a live source health test.', mcpObject(), 'GET', '/api/status'],
   ['list_mcp_sources', 'Read sources, exact tool allowlists and revisions.', mcpObject(), 'GET', '/api/sources'],
   ['list_mcp_source_actions', 'Read installation progress and permitted recovery. Unknown writes must not be replayed.', mcpObject(), 'GET', '/api/source-actions'],
@@ -8123,8 +8266,8 @@ const MANAGEMENT_MCP_TOOLS = [
   ['remove_mcp_source_draft', 'Remove an unprovisioned source draft. Started installations retain their journal.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', '/api/sources'],
   ['remove_mcp_source', 'Remove a source and its owned resources after explicit instruction. Its tools and assignments stop being available.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', 'source'],
 ].map(([name, description, inputSchema, method, route]) => ({ name, description, inputSchema, method, route,
-  annotations: { readOnlyHint: method === 'GET', destructiveHint: method === 'DELETE' || route === 'rollback',
-    idempotentHint: method === 'GET', openWorldHint: true } }));
+  annotations: { readOnlyHint: method === 'GET' || route === 'api-source:read', destructiveHint: method === 'DELETE' || ['rollback', 'api-source:disable', 'api-source:activate'].includes(route),
+    idempotentHint: method === 'GET' || route === 'api-source:read', openWorldHint: true } }));
 
 function mcpInputMatches(value, schema) {
   if (schema.type === 'object') return isRecord(value) &&
@@ -8136,16 +8279,26 @@ function mcpInputMatches(value, schema) {
     value.every((item) => mcpInputMatches(item, schema.items));
   if (schema.type === 'integer') return Number.isSafeInteger(value) && value >= schema.minimum;
   return isText(value) && value.length >= (schema.minLength ?? 1) && value.length <= (schema.maxLength ?? 2048) &&
-    !hasControlCharacter(value) && (!schema.pattern || new RegExp(schema.pattern, 'u').test(value)) &&
+    !(schema.contentMediaType === 'application/json' ? hasControlCharacter(value.replace(/[\r\n\t]/gu, '')) : hasControlCharacter(value)) && (!schema.pattern || new RegExp(schema.pattern, 'u').test(value)) &&
     (!schema.enum || schema.enum.includes(value));
 }
 
-function managementToolDefinitions(allowed = null) {
-  return MANAGEMENT_MCP_TOOLS.filter((tool) => allowed === null || allowed.includes(tool.name))
+function managementToolDefinitions(allowed = null, env = {}) {
+  return MANAGEMENT_MCP_TOOLS.filter((tool) => (allowed === null || allowed.includes(tool.name)) &&
+    (!tool.route.startsWith('api-source:') || env.API_SOURCE_RUNTIME))
     .map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
 }
 
 async function managementMcpCall(tool, args, env, access) {
+  if (tool.route.startsWith('api-source:')) {
+    if (!env.API_SOURCE_RUNTIME) return sourceToolsRefusal(503, 'api_source_runtime_unavailable');
+    // A fixed account-owned service binding; never forward the management grant,
+    // browser headers, source-provider credentials, or a caller-selected URL.
+    return env.API_SOURCE_RUNTIME.fetch(new Request('https://api-source-runtime.invalid/manage', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ operation: tool.route.slice('api-source:'.length), ...args }),
+    }));
+  }
   if (['update', 'rollback'].includes(tool.route)) {
     const origin = new URL(managementSourceUrl(env)).origin;
     const headers = { 'content-type': 'application/json', origin };
@@ -8229,12 +8382,12 @@ async function handleManagementMcp(request, env) {
     instructions: 'Read current state and revisions before changes. Source assignments grant management authority. Provider sign-in remains a browser step. Never request credentials.' });
   }
   if (message.method === 'ping') return rpc({});
-  if (message.method === 'tools/list') return rpc({ tools: managementToolDefinitions(access.enabledTools) });
+  if (message.method === 'tools/list') return rpc({ tools: managementToolDefinitions(access.enabledTools, env) });
   if (message.method !== 'tools/call') return error(-32601, 'Method not found');
   const params = message.params;
   if (!isRecord(params) || !isText(params.name) || Object.keys(params).some((key) => !['name', 'arguments', '_meta'].includes(key))) return error(-32602, 'Invalid params');
   const tool = MANAGEMENT_MCP_TOOLS.find((entry) => entry.name === params.name && access.enabledTools.includes(entry.name));
-  if (!tool || !mcpInputMatches(params.arguments ?? {}, tool.inputSchema)) return error(-32602, 'Unknown tool or invalid arguments');
+  if (!tool || (tool.route.startsWith('api-source:') && !env.API_SOURCE_RUNTIME) || !mcpInputMatches(params.arguments ?? {}, tool.inputSchema)) return error(-32602, 'Unknown tool or invalid arguments');
   let result;
   try {
     const response = await managementMcpCall(tool, params.arguments ?? {}, env, access);
@@ -8299,6 +8452,7 @@ export default {
     if (url.pathname === '/api/update') return handleRuntimeUpdate(request, env);
     if (url.pathname === '/api/sources/discover') return handleSourceDiscovery(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}$/u.test(url.pathname)) return handleSourceRemoval(request, env);
+    if (/^\/api\/sources\/source-[a-f0-9]{16}\/icon$/u.test(url.pathname)) return handleSourceIcon(request, env);
     if (url.pathname === '/api/sources') return handleSources(request, env);
     if (url.pathname === '/api/team' || url.pathname === '/api/team-actions' || url.pathname.startsWith('/api/team-actions/')) {
       return handleTeam(request, env);
