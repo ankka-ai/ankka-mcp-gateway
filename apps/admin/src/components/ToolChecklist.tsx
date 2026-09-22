@@ -1,3 +1,4 @@
+import { Checkbox } from './Checkbox'
 import { useId, useMemo, useState } from 'react'
 import type { DiscoveredTool } from '../api'
 import { Button } from './Button'
@@ -80,8 +81,7 @@ export function ToolChecklist({ tools, selected, onChange, listLabel, missingDes
       <div className="mt-4 grid max-h-[38rem] gap-3 overflow-y-auto pr-1" tabIndex={0} aria-label={listLabel}>
         {visibleTools.map((tool) => (
           <label key={tool.name} className="tool-option-card">
-            <input
-              type="checkbox"
+            <Checkbox
               checked={selectedNames.has(tool.name)}
               disabled={disabled}
               onChange={(event) => onChange(event.target.checked

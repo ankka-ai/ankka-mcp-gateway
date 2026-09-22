@@ -275,7 +275,7 @@ export function TeamPage() {
                 <div key={member.email} role="group" aria-label={member.email} className="flex min-w-0 items-center justify-between gap-4 border-b border-kumo-line/70 py-4">
                   <div className="min-w-0">
                     <p className="break-all text-sm font-medium text-kumo-strong">{member.email}</p>
-                    <p className="mt-1 text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Administrator · role unchanged' : 'Team member'}</p>
+                    <p className="mt-1 text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Administrator' : 'Team member'}</p>
                     <p className="mt-1 text-xs text-kumo-subtle">{member.sourceIds.length === 0 ? 'No connectors selected.' : `${member.sourceIds.length} ${member.sourceIds.length === 1 ? 'connector' : 'connectors'} selected`}</p>
                   </div>
                   <div className="flex shrink-0 items-center gap-2">

@@ -1,3 +1,5 @@
+import { Checkbox } from './Checkbox'
+import { Disclosure } from './Disclosure'
 import { Dialog } from '@cloudflare/kumo/primitives/dialog'
 import { X } from '@phosphor-icons/react'
 import { useRef, useState } from 'react'
@@ -31,18 +33,17 @@ export function MemberAccessDialog({ member, sources, disabled, onChange }: Memb
         </header>
         <div className="overflow-y-auto overscroll-contain px-5 sm:px-6">
           {sources.map(source => <div key={source.id} className="border-b border-kumo-line py-4 last:border-0">
-            <label className="flex items-center gap-3 text-sm font-medium text-kumo-strong">
-              <input type="checkbox" className="size-4 shrink-0 accent-brand" disabled={disabled} checked={member.sourceIds.includes(source.id)} onChange={event => {
+            <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm font-medium text-kumo-strong">
+              <Checkbox disabled={disabled} checked={member.sourceIds.includes(source.id)} onChange={event => {
                 if (!disabled) onChange(event.target.checked ? [...new Set([...member.sourceIds, source.id])] : member.sourceIds.filter(id => id !== source.id))
               }} />
               <span className="break-words">{source.label}</span>
             </label>
-            <details className="ml-7 mt-2 text-xs text-kumo-subtle">
-              <summary className="cursor-pointer">{source.enabledTools.length} {source.enabledTools.length === 1 ? 'tool' : 'tools'}</summary>
+            <Disclosure className="ml-8 mt-2 text-xs text-kumo-subtle" label={<>{source.enabledTools.length} {source.enabledTools.length === 1 ? 'tool' : 'tools'}</>}>
               <ul aria-label={`${source.label} tools`} className="mt-3 flex flex-wrap gap-2">
                 {source.enabledTools.map(tool => <li key={tool} className="tool-chip break-all"><code>{tool}</code></li>)}
               </ul>
-            </details>
+            </Disclosure>
           </div>)}
           {sources.length === 0 ? <p className="py-6 text-sm text-kumo-subtle">No installed connectors to assign.</p> : null}
         </div>

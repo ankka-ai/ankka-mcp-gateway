@@ -1,3 +1,4 @@
+import { Disclosure } from './Disclosure'
 import type { NativeConnectorRecipe } from '../connectors/native-recipes'
 import { NATIVE_RECIPE_STATUS_LABELS } from '../connectors/native-recipes'
 import { StatusPill } from './StatusPill'
@@ -30,12 +31,11 @@ export function ProviderConnectorSetup({ recipe }: { recipe: NativeConnectorReci
         </ol>
       </section>
     </div>
-    <details className="mt-4 text-xs leading-5 text-kumo-subtle">
-      <summary className="cursor-pointer font-medium text-kumo-default">Remaining verification</summary>
+    <Disclosure className="mt-4 text-xs leading-5 text-kumo-subtle" label="Remaining verification">
       <ul className="mt-2 list-disc space-y-1 pl-4">
         {recipe.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}
       </ul>
-    </details>
+    </Disclosure>
     <div className="mt-4 flex flex-wrap gap-x-4 gap-y-2" aria-label="Provider documentation">
       {recipe.evidenceUrls.map((url, index) => (
         <a key={url} href={url} target="_blank" rel="noopener noreferrer" className="text-xs text-brand underline underline-offset-2">

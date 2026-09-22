@@ -1,7 +1,8 @@
 import { Button } from './Button'
+import { DisclosureTrigger } from './Disclosure'
 import { SourceIcon } from './SourceIcon'
 import { SourceRemoval } from './SourceRemoval'
-import { CaretDown, CaretRight, Check, Clock, MagnifyingGlass } from '@phosphor-icons/react'
+import { Check, Clock, MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
 import type { ManagedSource } from '../api'
 
@@ -98,17 +99,15 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
               <Fragment key={source.id}>
                 <tr className={`border-b border-kumo-line/70 hover:bg-kumo-tint/40 ${isExpanded ? 'bg-kumo-tint/40' : ''}`}>
                   <th scope="row" className="px-3 py-2 text-left font-medium">
-                    <button
-                      type="button"
-                      className="flex min-h-12 w-full cursor-pointer items-center gap-3 rounded-md py-2 text-left text-kumo-strong"
+                    <DisclosureTrigger
+                      className="min-h-12"
                       aria-expanded={isExpanded}
                       aria-controls={isExpanded ? sourceDetailsId : undefined}
                       onClick={() => setExpanded(isExpanded ? null : source.id)}
                     >
                       <SourceIcon key={`${source.id}:${source.url}`} source={source} />
                       <span className="min-w-0 flex-1 break-words">{source.label}</span>
-                      {isExpanded ? <CaretDown aria-hidden="true" size={14} className="shrink-0 text-kumo-subtle" /> : <CaretRight aria-hidden="true" size={14} className="shrink-0 text-kumo-subtle" />}
-                    </button>
+                    </DisclosureTrigger>
                   </th>
                   <td className="hidden px-3 py-3 text-kumo-subtle sm:table-cell">
                     {source.authMode === 'oauth' ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'OAuth' : 'Legacy OAuth' : 'OAuth' : 'Public'}

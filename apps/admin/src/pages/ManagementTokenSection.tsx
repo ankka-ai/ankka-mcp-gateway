@@ -1,3 +1,4 @@
+import { Disclosure } from '../components/Disclosure'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ManagementCredentialStatus, ManagementVerification } from '../api'
 import { useGateway } from '../GatewayContext'
@@ -195,11 +196,10 @@ export function ManagementTokenSection() {
                 <Button variant="secondary" loading={verifying} onClick={() => void verify()}>Verify management access</Button>
                 <Button variant="secondary" loading={starting} disabled={verifying} onClick={() => void start()}>Replace management token</Button>
               </div>
-              <details className="text-kumo-subtle">
-                <summary className="cursor-pointer">Token details</summary>
+              <Disclosure className="text-kumo-subtle" label="Token details">
                 <p className="mt-3">Verification re-saves your gateway’s MCP Portal and Access policy unchanged to check both permissions.</p>
                 <p className="mt-2">Manage tokens in Cloudflare under Manage Account → Account API Tokens. Look for <strong>{nameInCloudflare}</strong>; the older creation date identifies the previous token. Replacing the token or removing your gateway does not delete it.</p>
-              </details>
+              </Disclosure>
             </>
           )}
           {verification === 'failed' ? <p role="alert" className="notice-banner notice-error">The check could not be run. Reload this page and try again.</p> : null}

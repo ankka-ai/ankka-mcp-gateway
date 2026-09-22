@@ -1,15 +1,13 @@
-# Ankka MCP Gateway — self-hosted on Cloudflare
+<p align="center">
+  <img src="docs/assets/ankka-wordmark.svg" alt="Ankka" width="420" />
+</p>
+<h1 align="center">Ankka MCP Gateway</h1>
 
-Ankka MCP Gateway is an open-source Model Context Protocol (MCP) gateway for
-teams that want one endpoint for approved, read-only tools. The gateway,
-access policies, logs, and upstream credentials stay in your team's
-Cloudflare account, not at Ankka.
+**All your MCPs and services connected to a single MCP endpoint.**
 
-> **Status:** stable and canary releases. The [hosted installer](https://deploy.ankka.ai)
-> serves the stable release; signed [canary releases](https://github.com/ankka-ai/ankka-mcp-gateway/releases)
-> are published for evaluation. Support is [best-effort](SUPPORT.md). This
-> repository contains the gateway runtime and hosted-installer source; live
-> deployment authority and credentials remain outside the public repository.
+Manage your team's MCP connections in one open-source gateway, with per-user
+connector access, Code Mode, and control over which tools are enabled—all
+self-hosted in your own Cloudflare account.
 
 Installing or upgrading to v0.2 requires **Cloudflare Workers Paid** for the
 built-in API runtime. See [Cloudflare’s Dynamic Workers requirements](https://developers.cloudflare.com/dynamic-workers/pricing/).
