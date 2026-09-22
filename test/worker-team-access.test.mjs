@@ -1668,7 +1668,7 @@ test('abandoning current consent expires its unstarted lifecycle lock without ch
 const MANAGEMENT_TOKEN = 'synthetic-account-management-token-never-store';
 
 for (const sourceCount of [0, 1, 5]) {
-  test(`Team overlaps independent reads with bounded concurrency (${sourceCount} sources)`, async () => fixture(async (gateway) => {
+  test(`Team reads its live policy graph from one overlapped round of reads (${sourceCount} sources)`, async () => fixture(async (gateway) => {
     for (let index = 1; index < sourceCount; index += 1) {
       await addHistoricalInstalledSource(gateway, { label: `Extra source ${index}`, url: `https://source-${index}.example.net/mcp` });
     }
@@ -1695,10 +1695,11 @@ for (const sourceCount of [0, 1, 5]) {
       assert.deepEqual(after.members, before.members);
       assert.ok(before.observedAt && after.observedAt);
       assert.equal(active, 0, 'all reads settle before responding');
-      assert.equal(peak, sourceCount === 0 ? 3 : 4);
+      assert.equal(peak, 3, 'the application list, Portal and token reads overlap');
       assert.equal(certReads, 1, 'repeat requests reuse the public signing keys');
       const calls = gateway.provider.requests.slice(baseline);
-      assert.equal(calls.length, 2 * (5 + 2 * sourceCount), 'every load still reads the complete live policy graph');
+      assert.equal(calls.length, 2 * 3, 'every load reads the complete live policy graph from the application list');
+      assert.equal(calls.filter(({ pathname }) => /\/access\/apps\/[^/]+/u.test(pathname)).length, 0, 'no per-application reads');
       assert.equal(calls.filter(({ pathname }) => pathname.endsWith('/tokens/verify')).length, 2, 'management credentials are never cached');
     } finally { globalThis.fetch = network; }
   }, sourceCount === 0 ? await portalOnlyClaim() : undefined));
@@ -1738,8 +1739,83 @@ test('an invalid token drains initial reads without reconciling external members
   assert.equal(gateway.provider.puts().length, 0);
 }));
 
-test('a free Team read slot starts another source while an earlier source is still pending', async () => fixture(async (gateway) => {
+test('Team reads each owned team group alongside its first reads', async () => fixture(async (gateway) => {
   await addHistoricalInstalledSource(gateway);
+  const before = await gateway.view();
+  const [first, second] = before.sources.filter(({ status }) => status === 'installed').map(({ id }) => id);
+  const teams = [
+    { id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [first] },
+    { id: LEGAL_TEAM, name: 'Legal', memberEmails: [MEMBER], sourceIds: [second] },
+  ];
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members, teams,
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  let active = 0;
+  let peak = 0;
+  gateway.provider.hook(async () => {
+    active += 1;
+    peak = Math.max(peak, active);
+    await nextTurn();
+    active -= 1;
+  });
+  const baseline = gateway.provider.requests.length;
+  const view = await gateway.view();
+  assert.ok(view.observedAt);
+  assert.deepEqual(view.teams, teams);
+  const calls = gateway.provider.requests.slice(baseline);
+  assert.equal(calls.length, 5);
+  assert.equal(calls.filter(({ pathname }) => pathname.includes('/access/groups/')).length, 2);
+  assert.equal(peak, 5, 'group reads overlap the application list, Portal and token reads');
+  assert.equal(active, 0, 'all reads settle before responding');
+}));
+
+test('Team reads each application directly when the application list omits its policies', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  gateway.provider.hook(async ({ record, state }) => {
+    if (record.method === 'GET' && record.pathname.endsWith('/access/apps')) return envelope([...state.apps.values()]);
+  });
+  const baseline = gateway.provider.requests.length;
+  const view = await gateway.view();
+  assert.ok(view.observedAt);
+  assert.deepEqual(view.members, before.members);
+  const calls = gateway.provider.requests.slice(baseline);
+  assert.equal(calls.length, 3 + 2 * 2, 'the Portal and the source are each read with their policies');
+  assert.equal(calls.filter(({ pathname }) => pathname.endsWith('/policies')).length, 2);
+}));
+
+test('a failed Team read waits for every outstanding read and never returns a partial roster', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const team = { id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [installedSourceId(before)] };
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members, teams: [team],
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const stored = gateway.managementStorage.snapshot(TEAM_KEY);
+  const writes = gateway.provider.puts().length;
+  let active = 0;
+  let peak = 0;
+  gateway.provider.hook(async ({ record }) => {
+    active += 1;
+    peak = Math.max(peak, active);
+    try {
+      await nextTurn();
+      if (record.pathname.endsWith('/access/apps')) return envelope(null, 403);
+      await nextTurn();
+    } finally { active -= 1; }
+  });
+  const response = await gateway.api('/api/team');
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_unavailable' });
+  assert.equal(peak, 4, 'the Portal, token and group reads were outstanding when the list failed');
+  assert.equal(active, 0, 'every outstanding read settles before responding');
+  assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY), stored);
+  assert.equal(gateway.provider.puts().length, writes);
+}));
+
+test('a free save verification slot starts another source while an earlier source is still pending', async () => fixture(async (gateway) => {
+  await addHistoricalInstalledSource(gateway);
+  const before = await gateway.view();
   const slowId = app(gateway, 'mcp_portal').id;
   let releaseSlow;
   const slow = new Promise((resolve) => { releaseSlow = resolve; });
@@ -1753,7 +1829,8 @@ test('a free Team read slot starts another source while an earlier source is sti
     if (record.pathname.endsWith(`/access/apps/${slowId}/policies`)) {
       await slow;
       slowFinished = true;
-    } else if (/\/access\/apps\/[^/]+$/u.test(record.pathname)) {
+    } else if (record.method === 'GET' && /\/access\/apps\/[^/]+$/u.test(record.pathname) && !applications.has(record.pathname)) {
+      // Later verifications read the same applications again; decide on the first read of the third.
       applications.add(record.pathname);
       if (applications.size === 3) {
         advancedWhilePending = !slowFinished;
@@ -1762,12 +1839,14 @@ test('a free Team read slot starts another source while an earlier source is sti
     }
   });
   try {
-    assert.ok((await gateway.view()).observedAt);
+    const response = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(before) });
+    assert.equal(response.status, 200, await response.clone().text());
     assert.equal(advancedWhilePending, true);
   } finally { clearTimeout(deadline); releaseSlow(); }
 }));
 
-test('a failed parallel Team read drains outstanding reads and never returns a partial roster', async () => fixture(async (gateway) => {
+test('a failed parallel save verification drains outstanding reads and writes nothing', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
   let active = 0;
   gateway.provider.hook(async ({ record }) => {
     if (!record.pathname.endsWith('/policies')) return;
@@ -1776,9 +1855,9 @@ test('a failed parallel Team read drains outstanding reads and never returns a p
     active -= 1;
     return envelope(null, 403);
   });
-  const response = await gateway.api('/api/team');
-  assert.equal(response.status, 503);
-  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_unavailable' });
+  const response = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(before) });
+  assert.equal(response.status, 409);
+  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_management_credential_invalid' });
   assert.equal(active, 0);
   assert.equal(gateway.provider.puts().length, 0);
 }));

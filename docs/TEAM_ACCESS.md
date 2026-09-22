@@ -18,11 +18,14 @@ Refresh before editing after an external change; stale revisions are rejected.
 An interrupted save retains its exact proposal and write journal for explicit
 resume. Do not replace it with a different proposal or delete its state.
 
-Each Team load checks the management token alongside the initial Cloudflare
-reads, and accepts membership only after all checks succeed. Independent roster
-reads run concurrently, with at most four provider requests in flight. A free
-read slot starts the next source immediately; policy writes and their
-verification keep their ordered journal.
+Each Team load reads, in one overlapping round, the account's Access
+applications with their policies, the Portal, the management token and each
+team's Access group, and accepts membership only after every read succeeds.
+Cloudflare's application list carries each application's policies exactly as
+the per-application reads return them, current immediately after a write, so a
+load makes no request per source. Saves still read each application they
+change directly; policy writes and their verification keep their ordered
+journal.
 Only the public Access signing keys are cached in Worker memory, for up to five
 minutes per issuer. A new key ID triggers a refresh, and failed refreshes never
 reuse expired keys. Every request still verifies its signature, issuer, audience,

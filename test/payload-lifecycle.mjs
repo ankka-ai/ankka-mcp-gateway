@@ -599,13 +599,16 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
     // Access applications and their policies. An MCP application has no
     // domain and is stored with the account: the zone listing omits it, the
     // account listing shows every application, and by-id reads work on both.
+    // Listings and by-id reads return each application with its current
+    // policies, as Cloudflare does.
     const appsPrefix = pathname === APPS || pathname.startsWith(`${APPS}/`)
       ? APPS
       : pathname === ACCOUNT_APPS || pathname.startsWith(`${ACCOUNT_APPS}/`) ? ACCOUNT_APPS : null;
+    const served = (app) => ({ ...app, policies: structuredClone(state.policies.get(app.id) ?? []) });
     if (pathname === APPS && method === 'GET') {
-      return envelope([...state.apps.values()].filter((app) => app.type !== 'mcp'));
+      return envelope([...state.apps.values()].filter((app) => app.type !== 'mcp').map(served));
     }
-    if (pathname === ACCOUNT_APPS && method === 'GET') return envelope([...state.apps.values()]);
+    if (pathname === ACCOUNT_APPS && method === 'GET') return envelope([...state.apps.values()].map(served));
     if (appsPrefix !== null && pathname === appsPrefix && method === 'POST') {
       const created = { id: appId(), ...record.body };
       if (stripOauth) delete created.oauth_configuration;
@@ -616,7 +619,7 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
     if (appsPrefix !== null && pathname.startsWith(`${appsPrefix}/`)) {
       const [id, policies, policyIdentifier] = pathname.slice(appsPrefix.length + 1).split('/');
       if (policies === undefined) {
-        if (method === 'GET') return state.apps.has(id) ? envelope(state.apps.get(id)) : envelope(null, 404);
+        if (method === 'GET') return state.apps.has(id) ? envelope(served(state.apps.get(id))) : envelope(null, 404);
         if (method === 'DELETE') {
           if (!state.apps.has(id)) return envelope(null, 404);
           state.apps.delete(id);
