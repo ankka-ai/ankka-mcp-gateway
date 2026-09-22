@@ -7397,7 +7397,7 @@ export async function fetchMcpSourceIcon(value) {
         params: { _meta: modernRequestMeta() } }, { 'mcp-protocol-version': '2026-07-28', 'mcp-method': 'tools/list' }, budget);
       info = requireMcpResult(response.parsed, true)._meta?.['io.modelcontextprotocol/serverInfo'];
     } catch (error) {
-      if (sourceFailure(error).code !== 'source_protocol_unsupported') return null;
+      if (sourceFailure(error).code !== 'source_protocol_unsupported') throw error;
     }
     if (!isRecord(info) || !Array.isArray(info.icons) || info.icons.length === 0) {
       const response = await mcpPost(endpoint, { jsonrpc: '2.0', id: 1, method: 'initialize',
@@ -7412,7 +7412,14 @@ export async function fetchMcpSourceIcon(value) {
       try { const result = await sourceIconBytes(icon, endpoint); if (result) return result; } catch { /* Try the next supplied icon. */ }
     }
     return null;
-  } catch { return null; } finally { budget.close(); }
+  } catch (error) {
+    // Protected metadata cannot advertise its icons to this credential-free probe.
+    // Try one public static PNG on the saved source's own origin instead.
+    if (!['source_authentication_required', 'source_authentication_unsupported'].includes(sourceFailure(error).code)) return null;
+    try {
+      return await sourceIconBytes({ src: new URL('/favicon.png', endpoint).href, mimeType: 'image/png' }, endpoint);
+    } catch { return null; }
+  } finally { budget.close(); }
 }
 
 async function handleSourceIcon(request, env) {
