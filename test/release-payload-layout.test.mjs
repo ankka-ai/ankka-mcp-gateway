@@ -308,7 +308,7 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   }
   assert.equal(script.includes('save_gateway_team'), false);
   assert.match(script, /credential stored in this gateway/iu);
-  assert.match(script, /No sources yet/u);
+  assert.match(script, /No connectors yet/u);
   assert.match(script, /release channel/u);
   assert.match(script, /untrustedContentHint/u);
   assert.match(script, /document\.modelContext/u);
