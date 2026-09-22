@@ -4725,7 +4725,7 @@ test('editing the receipt-owned connector keeps gateway teardown derivable', asy
   const owned = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
   assert.equal(canonicalJson(owned.resources), resourcesBefore);
   assert.deepEqual(control.receiptSourceToolBaseline, {
-    sourceId: source.id, enabledTools: ['company_prepare', 'company_search'],
+    sourceId: source.id, enabledTools: ['company_prepare', 'company_search'], label: source.label,
   });
   assert.deepEqual(portalMapping(gateway, serverId).updated_tools, [
     { name: 'company_archive', enabled: true }, { name: 'company_prepare', enabled: true }, { name: 'company_search', enabled: true },
@@ -4739,6 +4739,7 @@ test('editing the receipt-owned connector keeps gateway teardown derivable', asy
   assert.equal(again.status, 200, await again.clone().text());
   const kept = gateway.managementStorage.snapshot(CONTROL_KEY);
   assert.deepEqual(kept.receiptSourceToolBaseline.enabledTools, ['company_prepare', 'company_search']);
+  assert.equal(kept.receiptSourceToolBaseline.label, source.label);
   assert.equal(canonicalJson(kept.sourceOwnership.find((entry) => entry.sourceId === source.id).resources), resourcesBefore);
   assert.equal((await gateway.currentTeardown(5)).prepared.status, 200);
   await gateway.managementStorage.delete(TEARDOWNS_KEY);
@@ -4746,6 +4747,204 @@ test('editing the receipt-owned connector keeps gateway teardown derivable', asy
   const removed = await removeSource(gateway, source.id);
   assert.equal(removed.status, 200, await removed.clone().text());
   assert.deepEqual(gateway.managementStorage.snapshot(CONTROL_KEY).receiptSourceToolBaseline.enabledTools, ['company_prepare', 'company_search']);
+  assert.equal(gateway.managementStorage.snapshot(CONTROL_KEY).receiptSourceToolBaseline.label, source.label);
+  assert.equal((await gateway.currentTeardown(6)).prepared.status, 200);
+}));
+
+const SOURCE_LABEL_EDIT_KEY = 'ankka-mcp-gateway/source-label-edit/v1';
+
+function labelPath(sourceId) {
+  return `/api/sources/${sourceId}/label`;
+}
+
+function putLabel(gateway, sourceId, revision, label, options = {}) {
+  return gateway.api(labelPath(sourceId), {
+    method: 'PUT', body: { schemaVersion: 1, revision, label }, ...options,
+  });
+}
+
+function sourcePolicy(gateway, resource) {
+  return gateway.provider.state.policies.get(resource.provider.parentId)
+    .find((policy) => policy.id === resource.provider.id);
+}
+
+test('renaming an installed connector updates the gateway and Access policy names only', async () => fixture(async (gateway) => {
+  const drafted = await prepareNewSource(gateway);
+  await refused(await putLabel(gateway, drafted.source.id, drafted.sources.revision, 'Renamed source'), 409, 'source_label_unavailable');
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY) ?? null, null);
+
+  const applied = await gateway.apply(drafted, {}, null);
+  assert.equal(applied.status, 200, await applied.clone().text());
+  const installed = {
+    source: drafted.source,
+    serverId: gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+      .find((entry) => entry.sourceId === drafted.source.id).resources[0].provider.id,
+    ownership: gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+      .find((entry) => entry.sourceId === drafted.source.id),
+  };
+  const sourceId = installed.source.id;
+  const ownershipBefore = installed.ownership;
+  const policyResource = ownershipBefore.resources.find((resource) => resource.kind === 'source_access_policy');
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  const serverName = server.name;
+  const toolsBefore = [...gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === sourceId).enabledTools];
+  const otherResources = canonicalJson(ownershipBefore.resources.slice(1));
+  const hashBefore = ownershipBefore.resources[0].desiredHash;
+  const portalBefore = canonicalJson(gateway.provider.state.portal);
+  const receiptBefore = canonicalJson(gateway.storage.snapshot());
+  const teamBefore = gateway.managementStorage.snapshot(TEAM_KEY);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+
+  const same = await putLabel(gateway, sourceId, revision, 'Additional source');
+  assert.equal(same.status, 200, await same.clone().text());
+  assert.equal((await same.json()).revision, revision);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY) ?? null, null);
+
+  await refused(await putLabel(gateway, sourceId, revision, 'A'), 400, 'source_label_invalid');
+  await refused(await putLabel(gateway, sourceId, revision, ' Padded'), 400, 'source_label_invalid');
+  await refused(await putLabel(gateway, sourceId, revision - 1, 'Renamed source'), 409, 'source_conflict');
+  await refused(await gateway.api(labelPath(sourceId), { method: 'GET' }), 405, 'method_not_allowed');
+  gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+  await refused(await gateway.serviceApi(labelPath(sourceId), {
+    method: 'PUT', body: { schemaVersion: 1, revision, label: 'Renamed source' },
+  }), 403, 'service_operation_denied');
+  delete gateway.env.ANKKA_SERVICE_CLIENT_ID;
+  await refused(await gateway.api(labelPath(sourceId), {
+    method: 'PUT', email: MEMBER, body: { schemaVersion: 1, revision, label: 'Renamed source' },
+  }), 401, 'access_required');
+
+  const saved = await putLabel(gateway, sourceId, revision, 'Renamed source');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const sources = await saved.json();
+  assert.equal(sources.revision, revision + 1);
+  const renamed = sources.sources.find((source) => source.id === sourceId);
+  assert.equal(renamed.label, 'Renamed source');
+  assert.deepEqual(renamed.enabledTools, toolsBefore);
+  assert.equal(server.name, serverName);
+  assert.equal(canonicalJson(gateway.provider.state.portal), portalBefore);
+  assert.equal(sourcePolicy(gateway, policyResource).name, `Renamed source users [${policyResource.marker}]`);
+  const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+    .find((entry) => entry.sourceId === sourceId);
+  assert.notEqual(ownership.resources[0].desiredHash, hashBefore);
+  assert.equal(canonicalJson(ownership.resources.slice(1)), otherResources);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), receiptBefore);
+  const teamAfter = gateway.managementStorage.snapshot(TEAM_KEY);
+  assert.equal(teamAfter.revision, teamBefore.revision);
+  assert.deepEqual(teamAfter.members, teamBefore.members);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY), null);
+
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  const tokenBaseline = gateway.provider.requests.length;
+  await refused(await putLabel(gateway, sourceId, sources.revision, 'Another name'), 409, 'management_credential_required');
+  assert.equal(gateway.provider.requests.length, tokenBaseline);
+}));
+
+test('a rename resumes after a lost Access policy write and refuses drift before it starts', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const sourceId = installed.source.id;
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const policyResource = installed.ownership.resources.find((resource) => resource.kind === 'source_access_policy');
+  const live = sourcePolicy(gateway, policyResource);
+  const originalName = live.name;
+  live.name = 'Unrelated policy';
+  const drifted = gateway.provider.requests.length;
+  await refused(await putLabel(gateway, sourceId, revision, 'Renamed source'), 409, 'source_label_drift');
+  assertNoMutation(gateway.provider, drifted);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY) ?? null, null);
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).revision, revision);
+  live.name = originalName;
+
+  gateway.provider.hook(({ record }) => (
+    record.method === 'PUT' && record.pathname.includes('/policies/') ? envelope(null, 503) : undefined
+  ));
+  await refused(await putLabel(gateway, sourceId, revision, 'Renamed source'), 409, 'source_label_recovery_required');
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY).phase, 'policies_submitted');
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === sourceId).label, 'Additional source');
+  assert.equal(sourcePolicy(gateway, policyResource).name, originalName);
+
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'PUT' || !record.pathname.includes('/policies/')) return undefined;
+    const [appId, , policyId] = record.pathname.split('/access/apps/')[1].split('/');
+    const policies = state.policies.get(appId);
+    const index = policies.findIndex((policy) => policy.id === policyId);
+    policies[index] = { id: policyId, ...structuredClone(record.body) };
+    throw new Error('lost policy response');
+  });
+  await refused(await putLabel(gateway, sourceId, revision, 'Renamed source'), 409, 'source_label_recovery_required');
+  assert.equal(sourcePolicy(gateway, policyResource).name, `Renamed source users [${policyResource.marker}]`);
+  gateway.provider.hook(undefined);
+  const policyWrites = gateway.provider.requests.filter((request) => request.method === 'PUT' && request.pathname.includes('/policies/')).length;
+  const resumed = await putLabel(gateway, sourceId, revision, 'Renamed source');
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.json()).revision, revision + 1);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY), null);
+  assert.equal(gateway.provider.requests.filter((request) => request.method === 'PUT' && request.pathname.includes('/policies/')).length, policyWrites);
+}));
+
+test('a rename waits for other lifecycle work and blocks new work while it is open', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  const installed = await gateway.apply(prepared, {}, null);
+  assert.equal(installed.status, 200, await installed.clone().text());
+  const source = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((entry) => entry.id === prepared.source.id);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  await gateway.managementStorage.put(SOURCE_TOOL_EDIT_KEY, {
+    schemaVersion: 1, sourceId: source.id, fromRevision: revision,
+    enabledTools: ['company_lookup'], phase: 'portal_submitted', receiptBaseline: null,
+  });
+  await refused(await putLabel(gateway, source.id, revision, 'Renamed source'), 409, 'source_action_conflict', 'lifecycle_pending');
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY) ?? null, null);
+  await gateway.managementStorage.put(SOURCE_TOOL_EDIT_KEY, null);
+
+  await gateway.managementStorage.put(SOURCE_LABEL_EDIT_KEY, {
+    schemaVersion: 1, sourceId: source.id, fromRevision: revision,
+    label: 'Renamed source', phase: 'policies_submitted', receiptBaseline: null,
+  });
+  await refused(await gateway.api('/api/sources', { method: 'PUT', body: {
+    schemaVersion: 1, revision,
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+  } }), 409, 'source_action_conflict', 'lifecycle_pending');
+  await refused(await gateway.api('/api/team-actions', { method: 'POST', body: { schemaVersion: 1, expectedRevision: 1, members: [] } }), 409, 'team_action_conflict');
+  await recordUpdateFrom(gateway);
+  await refused(await prepareRollback(gateway), 409, 'runtime_action_conflict');
+  await refused(await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 } }), 409, 'teardown_action_conflict');
+  await refused(await putInstalledTools(gateway, source.id, revision, ['company_lookup']), 409, 'source_action_conflict', 'lifecycle_pending');
+  await refused(await putLabel(gateway, source.id, revision, 'Different name'), 409, 'source_label_pending');
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY).label, 'Renamed source');
+}));
+
+test('renaming the receipt-owned connector keeps gateway teardown derivable', async () => fixture(async (gateway) => {
+  await gateway.view();
+  const source = gateway.managementStorage.snapshot(SOURCES_KEY).sources
+    .find((entry) => entry.enabledTools.includes('company_prepare'));
+  const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
+    .find((entry) => entry.sourceId === source.id);
+  const resourcesBefore = canonicalJson(ownership.resources);
+  const receiptBefore = canonicalJson(gateway.storage.snapshot());
+  const originalLabel = source.label;
+  const originalTools = [...source.enabledTools];
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const policyResource = ownership.resources.find((resource) => resource.kind === 'source_access_policy');
+  const saved = await putLabel(gateway, source.id, revision, 'Company archive');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const control = gateway.managementStorage.snapshot(CONTROL_KEY);
+  assert.equal(canonicalJson(control.sourceOwnership.find((entry) => entry.sourceId === source.id).resources), resourcesBefore);
+  assert.deepEqual(control.receiptSourceToolBaseline, {
+    sourceId: source.id, enabledTools: originalTools, label: originalLabel,
+  });
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((entry) => entry.id === source.id).label, 'Company archive');
+  assert.equal(sourcePolicy(gateway, policyResource).name, `Company archive users [${policyResource.marker}]`);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), receiptBefore);
+  assert.equal((await gateway.currentTeardown(5)).prepared.status, 200);
+  await gateway.managementStorage.delete(TEARDOWNS_KEY);
+
+  const again = await putLabel(gateway, source.id, revision + 1, 'Company records');
+  assert.equal(again.status, 200, await again.clone().text());
+  const kept = gateway.managementStorage.snapshot(CONTROL_KEY);
+  assert.deepEqual(kept.receiptSourceToolBaseline, {
+    sourceId: source.id, enabledTools: originalTools, label: originalLabel,
+  });
+  assert.equal(canonicalJson(kept.sourceOwnership.find((entry) => entry.sourceId === source.id).resources), resourcesBefore);
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((entry) => entry.id === source.id).label, 'Company records');
   assert.equal((await gateway.currentTeardown(6)).prepared.status, 200);
 }));
 

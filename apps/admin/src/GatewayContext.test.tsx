@@ -44,7 +44,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     prepareSourceAction: vi.fn(),
     getSourceActions: vi.fn(async () => emptyActions),
     getSourceAction: vi.fn(),
-    cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(),
+    cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
     prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(),
     prepareTeardownAction: vi.fn(),

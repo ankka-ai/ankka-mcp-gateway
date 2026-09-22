@@ -205,7 +205,9 @@ token for a fixed, receipt-checked Portal update and deletion of that source's
 MCP server, Access policy and Access application. Editing the tools of an
 installed connector uses it the same way: one read of Cloudflare’s synced
 catalogue, then one receipt-checked Portal update for that connector’s
-allowlist. Draft deletion requires no
+allowlist. Renaming an installed connector uses the token to read and update
+that connector’s Access policy names. It does not rewrite the Portal or the
+MCP server record. Draft deletion requires no
 provider credential. Managed BigQuery bridge deletion is not a routine token
 operation: its Worker and stored Google key require separate authorization.
 

@@ -451,6 +451,18 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone(this.#sources)
   }
 
+  async renameInstalledSource(revision: number, sourceId: string, label: string): Promise<ManagedSources> {
+    const source = this.#sources.sources.find((candidate) => candidate.id === sourceId)
+    if (!source || source.status !== 'installed') throw new GatewayApiError(409, 'source_label_unavailable')
+    if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
+    if (label.length < 2 || label.length > 80 || label.trim() !== label) throw new GatewayApiError(400, 'source_label_invalid')
+    if (label !== source.label) {
+      source.label = label
+      this.#sources.revision += 1
+    }
+    return structuredClone(this.#sources)
+  }
+
   async chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {
     const action = this.#signInAction(actionId)
     const source = this.#sources.sources.find((candidate) => candidate.id === sourceId && candidate.id === action.sourceId)

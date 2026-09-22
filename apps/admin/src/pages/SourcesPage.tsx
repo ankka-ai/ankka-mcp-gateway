@@ -714,6 +714,10 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               await api.updateInstalledSourceTools(revision, sourceId, enabledTools)
               await refreshSources()
             }}
+            onRenameSource={async (sourceId, label) => {
+              await api.renameInstalledSource(sources.revision, sourceId, label)
+              await refreshSources()
+            }}
             sourceToolsDisabled={isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || Boolean(blocker && blocker.kind !== 'source_removal')}
             canRemove={canRemoveDraft}
             removeDisabled={isCheckingSourceActions || resumingBigQuery}
