@@ -15,6 +15,7 @@ import { ConnectorLibrary } from '../components/ConnectorLibrary'
 import { ConnectorSetupDialog } from '../components/ConnectorSetupDialog'
 import { StatusPill } from '../components/StatusPill'
 import { SourceList } from '../components/SourceList'
+import { SourceRemoval } from '../components/SourceRemoval'
 import { SourceToolChoice } from '../components/SourceToolChoice'
 import { SourceAuthorization, SourceAuthorizationResult } from '../components/SourceAuthorization'
 import { ToolChecklist } from '../components/ToolChecklist'
@@ -280,6 +281,14 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     sources.sources.some((source) => source.id === sourceId && source.status === 'draft') &&
     (sourceActions.actions.filter((action) => action.sourceId === sourceId)
       .every((action) => action.state === 'failed' || action.canCancel) || needsBridgeCleanup(sourceId))
+  const canRemovePausedSource = (sourceId: string) => {
+    const action = latestActions.get(sourceId)
+    return sources.removalEnabled === true && sourceActions !== null && sourceActionsError === null &&
+      bigQuery !== null && !bigQuery.setups.some((setup) => setup.sourceId === sourceId) &&
+      (sources.pendingRemoval?.sourceId === sourceId || Boolean(action?.canRenew && action.state === 'recovery_required' &&
+        action.failureCode && CONNECTION_PAUSES.has(action.failureCode))) &&
+      (!blocker || ((blocker.kind === 'source' || blocker.kind === 'source_removal') && blocker.sourceId === sourceId))
+  }
   const removeSource = async (sourceId: string) => {
     if (!needsBridgeCleanup(sourceId)) return removeSourceDraft(sourceId)
     setResumingBigQuery(true)
@@ -420,6 +429,17 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     const state = installationState(sourceId)
     if (!state || (state.action.state === 'succeeded' && state.actionSource?.status === 'installed')) return null
     const { action, actionSource, signInPause, toolsChosen, shown, setup, preflightFailed } = state
+    const removal = actionSource?.status === 'draft' && canRemovePausedSource(sourceId) ? <SourceRemoval
+      source={actionSource}
+      pending={sources.pendingRemoval?.sourceId === sourceId}
+      disabled={isBusy || isCheckingSourceActions}
+      credentialConfigured={sources.removalCredentialConfigured === true}
+      managedBigQuery={false}
+      rollbackNote={sources.installEndsRollbackTo ? `Removing this source means you can no longer restore ${sources.installEndsRollbackTo}.` : null}
+      onRemove={removeInstalledSource}
+      onRefresh={async () => { await refreshSources(); await refreshSourceActions() }}
+    /> : null
+    if (sources.pendingRemoval?.sourceId === sourceId && removal) return removal
     return (
       <article key={action.actionId} className="text-sm" aria-label={`Installation of ${actionSource?.label ?? action.sourceId}`}>
         <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{actionGuidance(shown, sourceActionsPollingPaused, sources.applyMode === 'account_token' && bigQuery !== null, toolsChosen, setup !== undefined && !setup.ready)}</p>
@@ -441,6 +461,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           </>
         ) : null}
         <BigQueryFailure setup={setup} />
+        {removal}
         {canRemoveDraft(action.sourceId) ? (
           <Button variant="secondary-destructive" className="pressable mt-3"
             disabled={isBusy || resumingBigQuery || isCheckingSourceActions}

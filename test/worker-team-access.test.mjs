@@ -3565,6 +3565,83 @@ async function removeSource(gateway, sourceId, options = {}) {
   });
 }
 
+for (const chosen of [false, true]) test(`a paused source can be removed ${chosen ? 'after choosing tools' : 'without connecting or installing it'}`, () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  if (chosen) {
+    connectSignInSource(gateway, installed.serverId);
+    const selected = await chooseTools(gateway, installed, ['records_search']);
+    assert.equal(selected.status, 200, await selected.clone().text());
+  }
+  const beforePortal = structuredClone(gateway.provider.state.portal);
+  const beforeControl = gateway.managementStorage.snapshot(CONTROL_KEY);
+  const rootReceipt = canonicalJson(gateway.storage.snapshot());
+  await gateway.managementStorage.put(OAUTH_KEY, { sourceId: installed.source.id, actionId: installed.action.actionId });
+  const baseline = gateway.provider.requests.length;
+  const response = await removeSource(gateway, installed.source.id);
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).sources.some((source) => source.id === installed.source.id), false);
+  assert.deepEqual(gateway.provider.state.portal, beforePortal, 'the paused source was never attached');
+  assert.deepEqual(gateway.managementStorage.snapshot(CONTROL_KEY), beforeControl);
+  assert.equal(canonicalJson(gateway.storage.snapshot()), rootReceipt);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.some((action) => action.sourceId === installed.source.id), false);
+  assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), null);
+  assert.equal(gateway.provider.state.servers.has(installed.serverId), false);
+  const writes = gateway.provider.requests.slice(baseline).filter((request) => request.method !== 'GET');
+  assert.deepEqual(writes.map((request) => request.method), ['DELETE', 'DELETE', 'DELETE']);
+  assert.equal((await resumeInstallation(gateway, installed)).status, 409, 'the old installation cannot restart');
+}));
+
+test('paused-source removal resumes without replaying a delete and blocks installation resumption', () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  let intercepted = false;
+  gateway.provider.hook(({ record, state }) => {
+    if (!intercepted && record.method === 'DELETE' && record.pathname.endsWith(`/mcp/servers/${installed.serverId}`)) {
+      intercepted = true;
+      state.servers.delete(installed.serverId);
+      return new Response(null, { status: 503 });
+    }
+  });
+  const first = await removeSource(gateway, installed.source.id);
+  assert.equal((await first.json()).error, 'source_removal_recovery_required');
+  const removal = gateway.managementStorage.snapshot(SOURCE_REMOVAL_KEY);
+  assert.notEqual(removal.actionId, installed.action.actionId);
+  const baseline = gateway.provider.requests.length;
+  assert.equal((await resumeInstallation(gateway, installed)).status, 409);
+  assertNoMutation(gateway.provider, baseline);
+  const resumed = await removeSource(gateway, installed.source.id);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal(gateway.provider.requests.filter((request) => request.method === 'DELETE' &&
+    request.pathname.endsWith(`/mcp/servers/${installed.serverId}`)).length, 1);
+}));
+
+for (const fault of ['pending-write', 'receipt-drift', 'source-drift', 'portal-drift', 'missing-token', 'other-actor', 'bridge']) {
+  test(`paused-source removal retains its records on ${fault}`, () => signInFixture(async (gateway) => {
+    const installed = await installSignInSource(gateway);
+    const actions = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+    const action = actions.actions.at(-1);
+    if (fault === 'pending-write') action.portalUpdate = { phase: 'send_armed', desiredHash: `sha256:${'a'.repeat(64)}` };
+    if (fault === 'receipt-drift') action.resources[0].desiredHash = `sha256:${'b'.repeat(64)}`;
+    if (fault === 'other-actor') action.actorEmail = 'different-admin@example.com';
+    await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, actions);
+    if (fault === 'source-drift') {
+      const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
+      sources.sources.find((source) => source.id === installed.source.id).label = 'Changed elsewhere';
+      await gateway.managementStorage.put(SOURCES_KEY, sources);
+    }
+    if (fault === 'portal-drift') gateway.provider.state.portal.servers.push({ id: installed.serverId, server_id: installed.serverId });
+    if (fault === 'missing-token') delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+    if (fault === 'bridge') await gateway.managementStorage.put(`ankka-mcp-gateway/bigquery-source/v1/${installed.source.id}`, { retained: true });
+    const before = gateway.managementStorage.snapshot(SOURCES_KEY);
+    const baseline = gateway.provider.requests.length;
+    const response = await removeSource(gateway, installed.source.id);
+    assert.equal(response.status, 409, await response.clone().text());
+    if (fault === 'pending-write') assert.equal((await response.json()).error, 'source_removal_requires_cleanup');
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), before);
+    assertNoMutation(gateway.provider, baseline);
+    assert.equal(gateway.provider.state.servers.has(installed.serverId), true);
+  }));
+}
+
 test('individual source removal deletes only its resources and preserves Team and full gateway teardown', async () => fixture(async (gateway) => {
   const originalReceipt = canonicalJson(gateway.storage.snapshot());
   const before = await gateway.view();

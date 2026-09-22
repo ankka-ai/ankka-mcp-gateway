@@ -4770,7 +4770,7 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
   const portalAlternatives = [];
   for (const rawAction of partialActions) {
     const action = safeSourceAction(rawAction);
-    if (!action || action.bigquerySetupStarted !== true || action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION ||
+    if (!action || (action.bigquerySetupStarted !== true && !sourceActionConnectionPaused(action)) || action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION ||
         partialSourceIds.has(action.sourceId) || installedIds.includes(action.sourceId) ||
         (action.pending !== null && action.pending.provider === null)) return null;
     partialSourceIds.add(action.sourceId);
@@ -5559,6 +5559,8 @@ async function finishSourceRemoval(storage, env, source, control, sources, initi
     [`ankka-mcp-gateway/source-oauth-diagnostic/v1/${source.id}`]: null };
   if (actions) writes[ACTIONS_KEY] = { ...actions, revision: actions.revision + 1,
     actions: actions.actions.filter((action) => action.sourceId !== source.id) };
+  const oauth = await storage.get(SOURCE_OAUTH_KEY);
+  if (oauth?.sourceId === source.id) writes[SOURCE_OAUTH_KEY] = null;
   if (initialSource) {
     const status = safePublicStatus(await storage.get(STATUS_KEY));
     if (!status) return null;
@@ -5582,10 +5584,18 @@ async function removeManagedSource(storage, env, input) {
   const source = sources.sources.find((entry) => entry.id === input.sourceId);
   if (!source) return sourceRemovalRefusal('source_not_found', 404);
   if (removal && removal.sourceId !== source.id) return sourceRemovalRefusal('source_removal_pending');
-  if (source.status === 'draft') {
+  const rawActions = await storage.get(ACTIONS_KEY);
+  const actions = rawActions === undefined ? { actions: [] } : safeSourceActions(rawActions);
+  if (!actions) return sourceRemovalRefusal('source_removal_unavailable');
+  // A connection pause already owns resources, although the source remains a
+  // draft. Use its complete receipts without pretending installation finished.
+  const paused = source.status === 'draft' ? actions.actions.find((action) => action.sourceId === source.id &&
+    action.sourceRevision === sources.revision && action.bigquerySetupStarted !== true &&
+    sourceActionConnectionPaused(action) && sourceActionCanRenew(action, input.actorEmail, Date.now())) : null;
+  if (source.status === 'draft' && !paused) {
     return removeSourceDraft(storage, { schemaVersion: 1, revision: input.revision, sourceId: source.id }, input.actorEmail, Date.now());
   }
-  if (await otherLifecycleBlocksSource(storage, Date.now(), removal?.actionId) || await teamActionBlocksLifecycle(storage)) {
+  if (await otherLifecycleBlocksSource(storage, Date.now(), removal?.actionId, paused?.actionId) || await teamActionBlocksLifecycle(storage)) {
     return sourceRemovalRefusal('source_removal_action_conflict');
   }
   // Bridge receipts are independent of the bounded source-action history.
@@ -5593,9 +5603,6 @@ async function removeManagedSource(storage, env, input) {
   if (await storage.get(`ankka-mcp-gateway/bigquery-source/v1/${source.id}`) !== undefined) {
     return sourceRemovalRefusal('source_removal_managed_bigquery');
   }
-  const rawActions = await storage.get(ACTIONS_KEY);
-  const actions = rawActions === undefined ? { actions: [] } : safeSourceActions(rawActions);
-  if (!actions) return sourceRemovalRefusal('source_removal_unavailable');
   if (actions.actions.some((action) => action.sourceId === source.id && action.bigquerySetupStarted)) {
     return sourceRemovalRefusal('source_removal_managed_bigquery');
   }
@@ -5605,8 +5612,8 @@ async function removeManagedSource(storage, env, input) {
   const evidence = environment && await rootTeardownAuthority(storage, environment, control.installationId, env);
   if (!evidence) return sourceRemovalRefusal('source_removal_ownership_conflict');
   const root = { installationId: control.installationId, receipt: evidence.root.receipt };
-  const authority = await teardownAuthorityState(root, control, sources, environment, true);
-  const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
+  const authority = await teardownAuthorityState(root, control, sources, environment, true, paused ? [paused] : []);
+  const ownership = paused ?? control.sourceOwnership.find((entry) => entry.sourceId === source.id);
   if (!authority || !ownership) return sourceRemovalRefusal('source_removal_ownership_conflict');
   // Detach first, then delete the server while its Access protection remains.
   const resources = [ownership.resources[0], ...ownership.resources.slice(1).reverse()];
@@ -6763,13 +6770,13 @@ async function armSourceCompatibility(storage, env) {
   return true;
 }
 
-async function otherLifecycleBlocksSource(storage, now, currentActionId) {
+async function otherLifecycleBlocksSource(storage, now, currentActionId, currentSourceActionId = currentActionId) {
   if (await credentialActionBlocksLifecycle(storage, now)) return true;
-  return recordedLifecycleBlocks(storage, now, currentActionId);
+  return recordedLifecycleBlocks(storage, now, currentActionId, true, currentSourceActionId);
 }
 
 /** An unfinished source installation, update or removal, as their own journals record it. */
-async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true) {
+async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true, currentSourceActionId = currentActionId) {
   const removal = safeSourceRemoval(await storage.get(SOURCE_REMOVAL_KEY));
   if (removal === false || (removal && removal.actionId !== currentActionId)) return true;
   for (const key of [...(includeSources ? [ACTIONS_KEY] : []), UPDATES_KEY, TEARDOWNS_KEY]) {
@@ -6778,7 +6785,9 @@ async function recordedLifecycleBlocks(storage, now, currentActionId, includeSou
     const state = key === ACTIONS_KEY ? safeSourceActions(raw) : key === UPDATES_KEY
       ? safeRuntimeUpdates(raw) : safeTeardownActions(raw);
     if (!state || state.actions.some((action) => {
-      if (action.actionId === currentActionId || action.status === 'succeeded') return false;
+      // Removal can own its journal and one paused installation. Installation
+      // callers still see the distinct removal journal and cannot resume it.
+      if (action.actionId === (key === ACTIONS_KEY ? currentSourceActionId : currentActionId) || action.status === 'succeeded') return false;
       // An expired grant is not evidence that its provider mutation never ran.
       // Retain source journals even if a historical status says unstarted/failed.
       if (key === ACTIONS_KEY && sourceActionHasWriteEvidence(action)) return true;

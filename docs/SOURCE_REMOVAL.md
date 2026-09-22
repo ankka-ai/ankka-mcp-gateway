@@ -7,6 +7,15 @@ owned MCP server registration, Access policy and Access application. Your
 upstream service and its data are unchanged. Adding it again creates a new
 installation with nobody assigned; old Team assignments do not return.
 
+An unfinished source paused at **Connect your source**, **Sync source tools**,
+or tool selection also offers **Remove source** in its installation details.
+You do not need to finish connecting it first. The administrator who started
+the installation can confirm cleanup using the management token. The gateway
+verifies the complete saved resource receipts, removes those resources, and
+discards the draft and its installation records only after cleanup succeeds.
+An uncertain create or Portal write still requires recovery; it cannot be
+discarded as a connection pause. Managed BigQuery restrictions below still apply.
+
 An unused draft also offers **Remove source**. It needs no management token and
 makes no provider writes. If an installation is pending, cancel its unstarted
 authorization or finish its recovery before deleting the source. A draft with
@@ -41,6 +50,8 @@ response is lost, use **Check status**, then **Continue removal**. Reloading the
 page also finds the saved progress. Continuing first reads Cloudflare's state:
 a verified successful delete is not sent again. An accepted asynchronous
 delete is not treated as proof that the resource is gone.
+An unfinished installation cannot resume or accept a source sign-in callback
+while its removal is in progress.
 
 Removal blocks source installation, draft saves, Team changes, runtime updates,
 gateway teardown and management-token changes until completion. It also

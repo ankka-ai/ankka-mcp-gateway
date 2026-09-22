@@ -37,6 +37,8 @@ adapter, and base64 decoder. It verifies:
   source/action/bridge removal transaction there. Installed-source removal
   persists progress across a workerd restart after a lost provider response,
   commits source and Team changes together, and preserves the root receipt.
+  The same restart check covers an unfinished source paused before sign-in,
+  including removal of its retained installation action after cleanup.
 
 This is a focused runtime integration fixture, not the deployed gateway router.
 It simulates authorization inputs and does not contact Cloudflare, exchange OAuth

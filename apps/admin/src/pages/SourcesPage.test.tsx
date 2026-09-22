@@ -1004,6 +1004,43 @@ describe('the rollback sentence beside the install control', () => {
 describe('individual source removal', () => {
   afterEach(cleanup)
 
+  it.each(['source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'source_tools_required', 'source_tools_chosen'])(
+    'offers confirmed cleanup for an unfinished source waiting on %s', async (failureCode) => {
+      const user = userEvent.setup()
+      const action = pendingAction({ state: 'recovery_required', status: 'recovery_required', canCancel: false, canRenew: true, failureCode })
+      const api = actionApi(actionSnapshot(action))
+      let removed = false
+      api.getSources = vi.fn(async () => ({ ...sources, removalEnabled: true, removalCredentialConfigured: true,
+        revision: removed ? 5 : 4, sources: removed ? [] : [draft] }))
+      api.getSourceActions = vi.fn(async () => removed ? { schemaVersion: 1 as const, actions: [], blockingAction: null } : actionSnapshot(action))
+      api.removeSource = vi.fn(async () => { removed = true; return api.getSources() })
+      render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+      await user.click(await screen.findByRole('button', { name: 'Remove source' }))
+      expect(api.removeSource).not.toHaveBeenCalled()
+      expect(screen.getByText(`Remove “${draft.label}” from your gateway?`)).toBeVisible()
+      await user.click(screen.getByRole('button', { name: 'Remove source' }))
+      await screen.findByText('No sources yet')
+      expect(api.removeSource).toHaveBeenCalledExactlyOnceWith(4, draft.id)
+      expect(api.removeSourceDraft).not.toHaveBeenCalled()
+      expect(api.prepareSourceAction).not.toHaveBeenCalled()
+    })
+
+  it('resumes a paused draft cleanup after reloading without offering installation', async () => {
+    const user = userEvent.setup()
+    const action = pendingAction({ state: 'recovery_required', status: 'recovery_required', canCancel: false, canRenew: false,
+      failureCode: 'source_connection_required' })
+    const api = actionApi({ schemaVersion: 1, actions: [action],
+      blockingAction: { kind: 'source_removal', actionId: `action_${'b'.repeat(32)}`, sourceId: draft.id } })
+    api.getSources = vi.fn(async () => ({ ...sources, removalEnabled: true, removalCredentialConfigured: true,
+      pendingRemoval: { sourceId: draft.id }, sources: [draft] }))
+    api.removeSource = vi.fn(async () => api.getSources())
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Continue removal' }))
+    await waitFor(() => expect(api.removeSource).toHaveBeenCalledExactlyOnceWith(4, draft.id))
+    expect(screen.queryByRole('button', { name: 'Resume installation' })).not.toBeInTheDocument()
+    expect(api.removeSourceDraft).not.toHaveBeenCalled()
+  })
+
   function removalApi() {
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
     let current: ManagedSources = { ...sources, removalEnabled: true, removalCredentialConfigured: true,
