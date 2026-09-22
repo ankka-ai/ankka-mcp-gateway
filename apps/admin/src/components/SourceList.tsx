@@ -18,7 +18,6 @@ interface SourceListProps {
   authorizeDisabled?: boolean
   isBusy: boolean
   installationDetails?(sourceId: string): ReactNode
-  statusAction?: ReactNode
   draftLabel?(sourceId: string): string
   /** One sentence to read before installing, shown directly beside each install control; nothing when null. */
   installNote?: string | null
@@ -36,7 +35,7 @@ interface SourceListProps {
   onRemoveDraft?(sourceId: string): void
 }
 
-export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, statusAction, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft }: SourceListProps) {
+export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -64,7 +63,6 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
             </Button>
           ))}
         </div>
-        {statusAction}
         <label className="flex w-full items-center gap-2 rounded-lg bg-kumo-tint/55 px-3 sm:w-56">
           <MagnifyingGlass aria-hidden="true" size={16} className="shrink-0 text-kumo-subtle" />
           <input

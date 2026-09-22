@@ -108,7 +108,7 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, acc
   switch (action.state) {
     case 'authorization_required':
       return pollingPaused
-        ? 'Complete the existing consent in the Cloudflare tab, then use Check status. Another authorization is blocked.'
+        ? 'Complete the existing consent in the Cloudflare tab, then reload this page. Another authorization is blocked.'
         : 'Complete the existing consent in the Cloudflare tab. This page checks status automatically; another authorization is blocked.'
     case 'authorization_expired':
       return 'The gateway did not start this attempt. Cancel this authorization, then authorize the saved draft again.'
@@ -135,7 +135,7 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, acc
       }
       return action.canRenew === true
         ? 'Resume this recorded installation using the gateway management credential. The gateway checks the retained resources before continuing.'
-        : 'Provisioning may be incomplete or still finishing. Check status after the previous approval expires. The journal is retained; uncertain resource ownership requires review in Cloudflare.'
+        : 'Provisioning may be incomplete or still finishing. Reload this page after the previous approval expires. The journal is retained; uncertain resource ownership requires review in Cloudflare.'
   }
 }
 
@@ -556,11 +556,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       {sourceActionsError || (blocker && blocker.kind !== 'source') ? (
         <div className="mt-6">
           {sourceActionsError ? <p role="alert" className="mt-3 text-sm text-danger">{sourceActionsError} Applying connectors is disabled until status can be checked.</p> : null}
-          {sources.sources.length === 0 ? (
-            <Button variant="secondary" className="pressable mt-3" disabled={isBusy || isCheckingSourceActions} onClick={() => void refreshSourceActions().catch(() => {})}>
-              {isCheckingSourceActions ? 'Checking status…' : 'Check status'}
-            </Button>
-          ) : null}
           {blocker && blocker.kind !== 'source' ? (
             <p role="status" className="mt-3 text-sm leading-6 text-kumo-subtle">
               A gateway {blocker.kind === 'runtime' ? 'update or rollback' : blocker.kind === 'teardown' ? 'removal' : blocker.kind === 'management_credential' ? 'management token' : blocker.kind === 'source_removal' ? 'connector removal' : 'Team access'} action is blocking connector installation. Review that action before applying a connector.
@@ -711,9 +706,6 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             authorizeDisabled={applyBlocked}
             isBusy={isBusy}
             installationDetails={renderInstallation}
-            statusAction={<Button variant="secondary" className="pressable" disabled={isBusy || isCheckingSourceActions} onClick={() => void refreshSourceActions().catch(() => {})}>
-              {isCheckingSourceActions ? 'Checking status…' : 'Check status'}
-            </Button>}
             draftLabel={(sourceId) => sourceDraftLabel(installationState(sourceId)?.shown)}
             installNote={blocker ? null : rollbackNote}
             onAuthorize={(sourceId) => void authorize(sourceId)}

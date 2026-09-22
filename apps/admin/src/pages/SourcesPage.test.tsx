@@ -168,8 +168,9 @@ describe('connector installation recovery', () => {
     expect(apply).toBeDisabled()
     await user.click(apply)
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
-    await user.click(screen.getByRole('button', { name: 'Check status' }))
-    expect(api.getSourceActions).toHaveBeenCalledTimes(2)
+    cleanup()
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await waitFor(() => expect(api.getSourceActions).toHaveBeenCalledTimes(2))
   })
 
   it('requires server-authorized cancellation before restarting a definitely-unstarted expired attempt', async () => {
@@ -260,8 +261,7 @@ describe('connector installation recovery', () => {
     expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
   })
 
-  it('reconciles a late successful installation on Check status instead of offering a second install', async () => {
-    const user = userEvent.setup()
+  it('reconciles a late successful installation on page reload instead of offering a second install', async () => {
     const action = pendingAction()
     let completed = false
     const api = actionApi(actionSnapshot(action))
@@ -270,8 +270,9 @@ describe('connector installation recovery', () => {
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByRole('article', { name: `Installation of ${draft.label}` })
     completed = true
-    await user.click(screen.getByRole('button', { name: 'Check status' }))
-    const sourceRow = await within(screen.getByRole('table', { name: 'Connector list' }))
+    cleanup()
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const sourceRow = await within(await screen.findByRole('table', { name: 'Connector list' }))
       .findByRole('row', { name: new RegExp(`${draft.label} Public Installed`, 'u') })
     expect(within(sourceRow).getByText('Installed')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Install connector' })).not.toBeInTheDocument()
@@ -295,14 +296,14 @@ describe('connector installation recovery', () => {
     expect(screen.queryByRole('button', { name: 'Cancel installation' })).not.toBeInTheDocument()
   })
 
-  it('keeps Apply blocked when status cannot be read and allows an explicit retry', async () => {
-    const user = userEvent.setup()
+  it('keeps Apply blocked when status cannot be read and allows a retry on page reload', async () => {
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
     api.getSourceActions = vi.fn().mockRejectedValueOnce(new GatewayApiError(503, 'source_actions_unavailable')).mockResolvedValue({ schemaVersion: 1, actions: [], blockingAction: null })
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText(/Applying connectors is disabled until status can be checked/)
     expect(screen.getByRole('button', { name: 'Install connector' })).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: 'Check status' }))
+    cleanup()
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Install connector' })).toBeEnabled())
   })
 })
