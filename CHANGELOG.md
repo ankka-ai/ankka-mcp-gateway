@@ -4,6 +4,17 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Save Team changes with fewer than half the Cloudflare calls. A save checked
+  each policy before and after writing it by listing the account's Access
+  applications, reading that application and its policy again, and then
+  reading the Portal, one call after another. With Access API calls taking
+  about a second each, a save that changed eight or nine policies could run
+  past its 60-second deadline and stop for recovery. Each check now reads the
+  application list, which carries every policy, together with the Portal: a
+  save that changes eight policies makes 45 calls instead of 109, about 29 of
+  them in a row instead of 72. An application list entry without its policies
+  is still read directly.
+
 - Load the Team page with one round of Cloudflare reads. Each load listed the
   account's Access applications, then read every connector's application and
   its policy again, two connectors at a time, and then each team's Access

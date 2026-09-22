@@ -79,11 +79,10 @@ test('Team resumes seven-source access from SQLite after restart without replayi
     const resumed = await apply();
     assert.equal(resumed.status, 200, await resumed.clone().text());
     assert.equal(writes, 8, 'the three previously committed policies are never replayed');
-    for (const policyId of committedIds) {
-      const applicationId = [...provider.state.policies].find(([, policies]) => policies.some(({ id }) => id === policyId))[0];
-      const reads = provider.requests.slice(baseline).filter(({ pathname }) => pathname.endsWith(`/apps/${applicationId}/policies`));
-      assert.equal(reads.length, 2, 'completed targets need only the initial and final graph checks');
-    }
+    const reads = provider.requests.slice(baseline).filter(({ method }) => method === 'GET');
+    assert.equal(reads.filter(({ pathname }) => /\/access\/apps\/[^/]+/u.test(pathname)).length, 0, 'the list carries every policy');
+    assert.equal(reads.filter(({ pathname }) => pathname.endsWith('/access/apps')).length, 2 + 2 * (8 - committedIds.length),
+      'completed targets need only the initial and final graph checks');
     const finished = await (await runtime.dispatchFetch(`${origin}/fixture/state`)).json();
     assert.equal(finished[teamKey].pendingAction.status, 'succeeded');
     assert.equal(finished[teamKey].members.find(({ email }) => email === 'new-person@example.com').sourceIds.length, 7);

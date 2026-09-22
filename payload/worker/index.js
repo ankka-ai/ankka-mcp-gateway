@@ -8296,20 +8296,19 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   const account = context.environment.accountId;
   const readApplications = () => providerList(`/accounts/${account}/access/apps`, token, {}, context.signal);
   const readPortal = () => providerCall(`/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`, token, { signal: context.signal });
-  // A roster read checks the token alongside its first provider reads, before
-  // accepting any membership or changing its revision. Mutation verification
-  // keeps its existing order, including checking the Portal after its policies.
-  // The application list carries every application with its policies, exactly
-  // as the per-application reads return them and already current right after a
-  // write, so a roster read takes both from its list entry and makes no further
-  // request. Mutation verification still reads each application directly, as
-  // does a roster read whose list entry lacks its policies.
-  const [applications, portal, credentialValid] = readAudience
-    ? await Promise.all([readApplications(), readPortal(), managementTokenActive(account, token)])
-    : [await readApplications(), null, null];
-  if (readAudience && !credentialValid) return null;
+  // Every verification reads the application list and the Portal together; a
+  // roster read also checks the token alongside them, before accepting any
+  // membership or changing its revision. The application list carries every
+  // application with its policies, exactly as the per-application reads return
+  // them and already current right after a write, so verification takes both
+  // from the list entry and makes no further request. An entry without its
+  // policies is read directly.
+  const [applications, portal, credentialValid] = await Promise.all([
+    readApplications(), readPortal(), readAudience ? managementTokenActive(account, token) : true,
+  ]);
+  if (!credentialValid) return null;
   if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return null;
-  if (readAudience && (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings))) return null;
+  if (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings)) return null;
   const readPolicy = async (policy) => {
     const kind = policy.kind === 'portal' ? 'portal_access_application' : policy.kind === 'management' ? 'management_access_application' : 'source_access_application';
     const resourceValue = context.authority.resources.find((value) => value.kind === kind && value.provider.id === policy.applicationId);
@@ -8320,7 +8319,7 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
         (Object.hasOwn(candidates[0], 'account_id') && candidates[0].account_id !== account)) return null;
     let app;
     let policies;
-    if (readAudience && Array.isArray(candidates[0].policies)) {
+    if (Array.isArray(candidates[0].policies)) {
       app = { status: 'ok', result: candidates[0] };
       policies = { status: 'ok', result: candidates[0].policies };
     } else {
@@ -8368,10 +8367,6 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   };
   await Promise.all(Array.from({ length: 2 }, readNext));
   if (failed) return null;
-  if (!readAudience) {
-    const verifiedPortal = await readPortal();
-    if (!teamProviderOk(context, verifiedPortal) || !portalExact(verifiedPortal.result, context.control, context.authority.portalMappings)) return null;
-  }
   return observed;
 }
 
