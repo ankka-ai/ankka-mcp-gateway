@@ -412,6 +412,7 @@ const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
       AdminState: Object.freeze({ storage: 'sqlite', type: 'durable-object' }),
     }),
   }),
+  workerLoaders: Object.freeze([{ binding: 'API_LOADER' }]),
   mainModule: 'index.js',
   observability: Object.freeze({ enabled: false }),
   previewUrls: false,
@@ -419,6 +420,7 @@ const APPROVED_UPDATE_CLOUDFLARE_CONTRACT = Object.freeze({
     secrets: Object.freeze([
       Object.freeze({ lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' }),
       Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_MANAGEMENT_TOKEN' }),
+      Object.freeze({ lifecycle: 'customer-managed-optional', name: 'ANKKA_API_CONNECTIONS' }),
     ]),
     variables: Object.freeze([
       'ADMIN_EMAILS', 'ANKKA_INSTALL_ID', 'ANKKA_GATEWAY_RELEASE', 'ANKKA_GATEWAY_RELEASE_SHA256',

@@ -73,12 +73,14 @@ function signedManifest(manifest) {
   };
 }
 
-test('the signer and runtime accept one exact V1 contract with only the optional customer management secret', async () => {
+test('the signer and runtime accept one exact contract with built-in API execution and account-owned secrets', async () => {
   assert.deepEqual(APPROVED_CLOUDFLARE_CONTRACT, runtimeContract);
   assert.deepEqual(APPROVED_CLOUDFLARE_CONTRACT.publicBindings.secrets, [
     { lifecycle: 'customer-worker', name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY' },
     { lifecycle: 'customer-managed-optional', name: 'ANKKA_MANAGEMENT_TOKEN' },
+    { lifecycle: 'customer-managed-optional', name: 'ANKKA_API_CONNECTIONS' },
   ]);
+  assert.deepEqual(runtimeContract.workerLoaders, [{ binding: 'API_LOADER' }]);
   const manifest = manifestFor();
   const { envelope, environment } = signedManifest(manifest);
   assert.deepEqual(await verifier.verifyUpdateEnvelope(envelope, environment), manifest);
@@ -96,6 +98,8 @@ test('the runtime rejects every unreviewed contract change', async () => {
     ['unknown binding field', (value) => { value.publicBindings.unreviewed = []; }],
     ['extra secret', (value) => { value.publicBindings.secrets.push({ lifecycle: 'customer-managed-optional', name: 'OTHER_TOKEN' }); }],
     ['missing ownership secret', (value) => { value.publicBindings.secrets.shift(); }],
+    ['removed API loader', (value) => { delete value.workerLoaders; }],
+    ['different API loader', (value) => { value.workerLoaders[0].binding = 'OTHER_LOADER'; }],
     ['extra variable', (value) => { value.publicBindings.variables.push('UNREVIEWED'); }],
     ['different DO class', (value) => { value.durableObjects.bindings[0].className = 'OtherState'; }],
     ['different compatibility date', (value) => { value.compatibilityDate = '2026-08-09'; }],
