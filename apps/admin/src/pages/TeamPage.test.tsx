@@ -61,7 +61,7 @@ async function toggleAccess(user: ReturnType<typeof userEvent.setup>, member: HT
 }
 
 describe('TeamPage', () => {
-  afterEach(() => { cleanup(); window.history.replaceState(null, '', '/'); vi.restoreAllMocks(); vi.unstubAllEnvs() })
+  afterEach(() => { cleanup(); window.history.replaceState(null, '', '/'); vi.restoreAllMocks(); vi.unstubAllEnvs(); vi.useRealTimers() })
 
   it('moves connector selection into an access dialog with shared tool details and restores focus on close', async () => {
     const user = userEvent.setup()
@@ -238,7 +238,7 @@ describe('TeamPage', () => {
       { email: 'admin@example.com', sourceIds: [] },
       { email: 'analyst@example.com', sourceIds: [sourceId] },
     ])
-    expect(screen.queryByText(/last recorded team access change was applied and verified/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Team access saved and verified in Cloudflare/)).not.toBeInTheDocument()
   })
 
   it('keeps a recovery proposal read-only and resumes its exact recorded membership', async () => {
@@ -271,10 +271,56 @@ describe('TeamPage', () => {
     const getTeam = vi.fn().mockResolvedValueOnce(team).mockResolvedValue(verified)
     const getTeamAction = vi.fn(async () => succeeded)
     renderTeam(api({ getTeam, getTeamAction }))
-    expect(await screen.findByText(/last recorded team access change was applied and verified/)).toBeInTheDocument()
+    expect(await screen.findByText(/Team access saved and verified in Cloudflare/)).toBeInTheDocument()
     expect(getTeamAction).toHaveBeenCalledWith(actionId)
     expect(window.location.search).not.toContain('accessActionResult')
     expect(window.location.search).not.toContain('accessAction=')
+  })
+
+  it('does not announce a historical success when opening or revisiting Team', async () => {
+    const succeeded: TeamAction = { schemaVersion: 1, actionId, status: 'succeeded', expiresAt, failureCode: null, canCancel: false }
+    const client = api({ getTeam: vi.fn(async () => ({ ...team, pendingAction: succeeded })) })
+    for (let visit = 0; visit < 2; visit += 1) {
+      renderTeam(client)
+      await screen.findByRole('group', { name: 'admin@example.com' })
+      expect(screen.queryByText(/Team access saved and verified in Cloudflare/)).not.toBeInTheDocument()
+      expect(screen.queryByText(/Unsaved selections have not been applied/)).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Add user' })).toBeEnabled()
+      cleanup()
+    }
+    expect(client.prepareTeamAction).not.toHaveBeenCalled()
+  })
+
+  it.each(['dismiss', 'edit', 'timeout'] as const)('clears a verified recovery confirmation on %s without replaying it', async (reason) => {
+    const user = userEvent.setup()
+    const pendingAction: TeamAction = { schemaVersion: 1, actionId, status: 'recovery_required', expiresAt, failureCode: 'team_recovery_required', canCancel: false }
+    const succeeded: TeamActionResult['action'] = { ...pendingAction, action: 'access', status: 'succeeded', failureCode: null }
+    const verified = { ...team, revision: 8, pendingAction: succeeded }
+    const client = api({
+      getTeam: vi.fn().mockResolvedValueOnce({ ...team, pendingAction, proposedMembers: team.members }).mockResolvedValue(verified),
+      prepareTeamAction: vi.fn(async () => ({ schemaVersion: 1 as const, action: succeeded })),
+    })
+    renderTeam(client)
+    const resume = await screen.findByRole('button', { name: 'Resume recorded change' })
+    if (reason === 'timeout') vi.useFakeTimers()
+    await act(async () => { fireEvent.click(resume) })
+    expect(screen.getByText('Team access saved and verified in Cloudflare.')).toBeVisible()
+    expect(screen.queryByText(/Unsaved selections have not been applied/)).not.toBeInTheDocument()
+    if (reason === 'dismiss') await user.click(screen.getByRole('button', { name: 'Dismiss team access confirmation' }))
+    else if (reason === 'edit') {
+      await toggleAccess(user, screen.getByRole('group', { name: 'analyst@example.com' }))
+      expect(screen.getByText('Unsaved changes')).toBeVisible()
+      await user.click(screen.getByRole('button', { name: 'Discard unsaved changes' }))
+    } else {
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+      vi.useRealTimers()
+    }
+    expect(screen.queryByText(/Team access saved and verified in Cloudflare/)).not.toBeInTheDocument()
+    cleanup()
+    renderTeam(client)
+    await screen.findByRole('group', { name: 'admin@example.com' })
+    expect(screen.queryByText(/Team access saved and verified in Cloudflare/)).not.toBeInTheDocument()
+    expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, team.members)
   })
 
   it('applies an entire batch with one local Save and reloads the verified roster without a hosted handoff', async () => {
@@ -298,8 +344,8 @@ describe('TeamPage', () => {
     await user.click(screen.getByRole('button', { name: 'Add user' }))
     await toggleAccess(user, screen.getByRole('group', { name: 'new.person@example.com' }), /Company knowledge/)
     await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByText(/last recorded team access change was applied and verified/)).toBeInTheDocument()
-    expect(screen.getByText(/last recorded team access change was applied and verified/)).toBeInTheDocument()
+    expect(await screen.findByText(/Team access saved and verified in Cloudflare/)).toBeInTheDocument()
+    expect(screen.getByText(/Team access saved and verified in Cloudflare/)).toBeInTheDocument()
     expect(screen.queryByText('No unsaved changes')).not.toBeInTheDocument()
     expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument()
     expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, members)
@@ -355,7 +401,7 @@ describe('TeamPage', () => {
     expect(await screen.findByText(/Hosted authorization is no longer used/)).toBeInTheDocument()
     expect(accessCheckbox(screen.getByRole('group', { name: 'admin@example.com' }))).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Save recorded change' }))
-    expect(await screen.findByText(/last recorded team access change was applied and verified/)).toBeInTheDocument()
+    expect(await screen.findByText(/Team access saved and verified in Cloudflare/)).toBeInTheDocument()
     expect(client.prepareTeamAction).toHaveBeenCalledExactlyOnceWith(7, proposedMembers)
     expect(client.getTeamAction).not.toHaveBeenCalled()
     expect(window.location.search).toBe('')
@@ -420,7 +466,7 @@ describe('TeamPage', () => {
     window.history.replaceState(null, '', `/team?accessAction=${actionId}&accessActionResult=complete`)
     const client = renderTeam(api({ getTeamAction: vi.fn().mockRejectedValue(new Error('private provider detail')) }))
     expect(await screen.findByRole('alert')).toHaveTextContent('action status is unavailable')
-    expect(screen.queryByText(/last recorded team access change was applied and verified/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Team access saved and verified in Cloudflare/)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add user' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     expect(client.prepareTeamAction).not.toHaveBeenCalled()
@@ -583,7 +629,7 @@ describe('TeamPage', () => {
     expect(accessCheckbox(person)).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
     expect(screen.queryByText(/Team membership is managed directly in Cloudflare/)).not.toBeInTheDocument()
-    expect(screen.queryByText(/last recorded team access change was applied and verified/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Team access saved and verified in Cloudflare/)).not.toBeInTheDocument()
     expect(window.location.pathname).toBe('/team')
     expect(screen.queryByText('No unsaved changes')).not.toBeInTheDocument()
     expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument()
@@ -599,7 +645,7 @@ describe('TeamPage', () => {
     const person = await screen.findByRole('group', { name: 'analyst@example.com' })
     await toggleAccess(user, person)
     await user.click(screen.getByRole('button', { name: 'Save' }))
-    expect(await screen.findByText(/last recorded team access change was applied and verified/)).toBeVisible()
+    expect(await screen.findByText(/Team access saved and verified in Cloudflare/)).toBeVisible()
     expect(accessCheckbox(person)).toBeChecked()
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })

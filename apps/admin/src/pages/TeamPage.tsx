@@ -33,8 +33,7 @@ function isRecordedChange(action: TeamAction | null): boolean {
 }
 
 function actionMessage(action: TeamAction | null): string | null {
-  if (!action) return null
-  if (action.status === 'succeeded') return 'The last recorded team access change was applied and verified in Cloudflare. Unsaved selections have not been applied.'
+  if (!action || action.status === 'succeeded') return null
   const failure = action.failureCode && ['team_management_credential_missing', 'team_management_credential_invalid', 'team_policy_drift'].includes(action.failureCode)
     ? `${new GatewayApiError(409, action.failureCode).message} `
     : ''
@@ -56,6 +55,7 @@ export function TeamPage() {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [needsRefresh, setNeedsRefresh] = useState(false)
+  const [successActionId, setSuccessActionId] = useState<string | null>(null)
   const actionInFlight = useRef(false)
   const seenExternalChange = useRef(externalChangeVersion)
   const teamReadGeneration = useRef(0)
@@ -63,6 +63,7 @@ export function TeamPage() {
     const value = new URL(window.location.href).searchParams.get('accessAction')
     return value && ACTION_ID.test(value) ? value : null
   })
+  const observedActionId = useRef(callbackId)
 
   const clearCallback = useCallback(() => {
     setCallbackId(null)
@@ -73,6 +74,11 @@ export function TeamPage() {
   }, [])
 
   const acceptTeam = useCallback((next: Team) => {
+    // A retained completion is history; only confirm an action observed on this visit.
+    if (next.pendingAction?.status === 'succeeded' && next.pendingAction.actionId === observedActionId.current) {
+      setSuccessActionId(next.pendingAction.actionId)
+    }
+    observedActionId.current = isRecordedChange(next.pendingAction) ? next.pendingAction?.actionId ?? null : null
     setTeam(next)
     setAction(next.pendingAction)
     setDraft(withAdministrators(next, next.members))
@@ -132,6 +138,7 @@ export function TeamPage() {
         const next = await getTeamAction(actionId)
         if (!active) return
         if (next.actionId !== actionId) throw new Error('action_mismatch')
+        observedActionId.current = actionId
         if (next.status === 'succeeded' || next.status === 'failed' || next.status === 'recovery_required') {
           if (await readTeam(false)) clearCallback()
           return
@@ -157,6 +164,14 @@ export function TeamPage() {
   const displayedMembers = recorded ? team?.proposedMembers ?? [] : draft
   const changed = JSON.stringify(canonicalMembers(draft)) !== JSON.stringify(effectiveMembers)
   useEffect(() => {
+    if (changed || needsRefresh) setSuccessActionId(null)
+  }, [changed, needsRefresh])
+  useEffect(() => {
+    if (!successActionId) return
+    const timer = window.setTimeout(() => setSuccessActionId(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [successActionId])
+  useEffect(() => {
     if (seenExternalChange.current === externalChangeVersion) return
     seenExternalChange.current = externalChangeVersion
     if (changed || actionInFlight.current) {
@@ -167,7 +182,8 @@ export function TeamPage() {
     void refresh()
   }, [externalChangeVersion, changed, refresh])
   const installed = team?.sources.filter((source) => source.status === 'installed') ?? []
-  const message = actionMessage(action)
+  const showSuccess = action?.status === 'succeeded' && action.actionId === successActionId && !changed && !saving && !needsRefresh
+  const message = actionMessage(action) ?? (showSuccess ? 'Team access saved and verified in Cloudflare.' : null)
   const disabled = isBusy || saving || loading || needsRefresh || callbackId !== null || recorded || team?.editingEnabled !== true
   const canCancel = (action?.status === 'authorization_required' || action?.status === 'recovery_required') && action.canCancel === true
   // The gateway says it has no management token: lead to the one way of adding it instead of a disabled page.
@@ -180,12 +196,14 @@ export function TeamPage() {
     if (!members) return
     actionInFlight.current = true
     setSaving(true)
+    setSuccessActionId(null)
     setError(null)
     try {
       const { action: pendingAction } = await prepareTeamAction(team.revision, members)
       if (!ACTION_ID.test(pendingAction.actionId) || (recorded && pendingAction.actionId !== action?.actionId)) {
         throw new GatewayApiError(502, 'team_action_invalid')
       }
+      observedActionId.current = pendingAction.actionId
       setAction(pendingAction)
       setTeam((current) => current ? { ...current, pendingAction, proposedMembers: members } : current)
       if (await readTeam()) clearCallback()
@@ -224,7 +242,12 @@ export function TeamPage() {
           </Button>
         </div>
       ) : null}
-      {message ? <p role="status" className={`notice-banner mt-6 notice-${action?.status === 'succeeded' ? 'success' : action?.status === 'failed' || action?.status === 'recovery_required' ? 'error' : 'neutral'}`}>{message}</p> : null}
+      {message ? (
+        <div role="status" className={`notice-banner mt-6 flex items-center justify-between gap-3 notice-${showSuccess ? 'success' : action?.status === 'failed' || action?.status === 'recovery_required' ? 'error' : 'neutral'}`}>
+          <p>{message}</p>
+          {showSuccess ? <button type="button" className="pressable inline-flex size-6 shrink-0 items-center justify-center rounded-md" aria-label="Dismiss team access confirmation" onClick={() => setSuccessActionId(null)}><X size={16} aria-hidden="true" /></button> : null}
+        </div>
+      ) : null}
       {!team ? loading ? <DashboardSkeleton page="team" showHeader={false} /> : <p className="mt-8 text-sm text-kumo-subtle">No team access information is available.</p> : (
         <>
           {tokenMissing ? <ManagementTokenCard choice={team.managementCredentialChoice} /> : null}
