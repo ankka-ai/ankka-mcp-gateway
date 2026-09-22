@@ -5058,6 +5058,35 @@ test('a named team creates one Access group and a later membership edit does not
   ]);
 }));
 
+test('a save that created its group resumes after some policies already name it', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const sourceId = installedSourceId(before);
+  const body = {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members,
+    teams: [{ id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [sourceId] }],
+  };
+  // The first policy write lands; the second fails, as when the save runs out of time.
+  let policyWrites = 0;
+  gateway.provider.hook(async ({ record }) => {
+    if (record.method === 'PUT' && record.pathname.includes('/policies/') && ++policyWrites === 2) {
+      return Response.json({ success: false, errors: [], messages: [], result: null }, { status: 500 });
+    }
+  });
+  const interrupted = await gateway.api('/api/team-actions', { method: 'POST', body });
+  assert.equal(interrupted.status, 409, await interrupted.clone().text());
+  assert.deepEqual(await interrupted.json(), { schemaVersion: 1, error: 'team_action_recovery_required' });
+  const groupId = [...gateway.provider.groups.values()][0].id;
+  const naming = () => [sourceAccessPolicy(gateway, sourceId), policy(gateway, 'mcp_portal')]
+    .filter((entry) => ruleGroups(entry).includes(groupId)).length;
+  assert.equal(naming(), 1);
+  gateway.provider.hook(undefined);
+  const resumed = await gateway.api('/api/team-actions', { method: 'POST', body });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal(gateway.provider.groups.size, 1);
+  assert.equal(naming(), 2);
+  assert.deepEqual((await gateway.view()).teams, body.teams);
+}));
+
 test('a lost Access group create resumes from the stable group name', async () => fixture(async (gateway) => {
   const before = await gateway.view();
   const body = {

@@ -13,6 +13,12 @@ Notable public product and repository changes are recorded here.
   removal that armed or sent any deletion still needs a fresh authorization to
   continue.
 
+- Let an interrupted Team save that created a team's Access group resume. A
+  retry checked the policies it had already written against a plan without
+  that group, so every resume reported `team_policy_drift` and the recorded
+  change could neither finish nor be cancelled. Retries now check written
+  policies against the recorded group ids, and skip one full policy read.
+
 - Fix named teams on connectors the gateway serves itself, and on removal. A
   team that granted Gateway Management or a built-in API connector made that
   connector refuse everyone, including people assigned directly; the Worker now

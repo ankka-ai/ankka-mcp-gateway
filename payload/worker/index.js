@@ -8473,18 +8473,21 @@ async function processTeamAction(env, storage, prepared, nowMs) {
     await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: null, phase: 'verified' }) });
     return true;
   };
+  const pendingGroups = plan.policies.some((policy) => policy.unresolvedTeamIds?.length);
+  // A retry whose groups already exist may have written policies that name them.
+  // Check those against the recorded group ids; without every id, no policy was written.
+  const bound = pendingGroups ? bindTeamPlan(plan, teamGroupBindings(action.journal)) : plan;
   let observed = null;
   if (!membershipOnly) {
-    observed = await verifyTeamPolicies(context, plan, token, action.journal);
+    observed = await verifyTeamPolicies(context, bound ?? plan, token, action.journal);
     if (!observed) return fail('team_policy_drift');
   }
   for (const change of groupChanges.filter((change) => change.op !== 'delete')) {
     if (await applyGroup(change) == null) return fail('team_action_recovery_required');
   }
-  const pendingGroups = plan.policies.some((policy) => policy.unresolvedTeamIds?.length);
-  const executable = pendingGroups ? bindTeamPlan(plan, teamGroupBindings(action.journal)) : plan;
+  const executable = bound ?? bindTeamPlan(plan, teamGroupBindings(action.journal));
   if (!executable) return fail('team_action_recovery_required');
-  if (pendingGroups) {
+  if (!bound) {
     observed = await verifyTeamPolicies(context, executable, token, action.journal);
     if (!observed) return fail('team_policy_drift');
   }
