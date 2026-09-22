@@ -12,6 +12,9 @@ Worker, using the existing `AdminState` SQLite namespace and the fixed
 service binding. Each configured connection has its own source definition,
 revision, and ordinary MCP endpoint.
 
+The built-in runtime starts with `gateway-v0.2.0`. Existing v0.1 gateways need a
+fresh installation because their updater rejects the new signed binding contract.
+
 Installation includes the runtime; updates recreate its loader and inherit the
 account-owned connection secret without reading it. Gateway removal deletes the
 Worker, its secrets, and the existing storage namespace. Source removal uses the

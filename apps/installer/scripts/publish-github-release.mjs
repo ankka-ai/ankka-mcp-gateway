@@ -266,7 +266,12 @@ export function releaseNotes(repository, manifest, receipt) {
   const webMcpReleaseNotes = manifest.release === 'gateway-v0.1.19'
     ? '- WebMCP exposes supported management actions only in compatible browsers with the gateway or installer page open; no remote management MCP endpoint is added.\n\n'
     : '';
+  const apiSourceReleaseNotes = manifest.release === 'gateway-v0.2.0'
+    ? '- API sources are built into the gateway: agents can define, test and activate JavaScript tools through Gateway Management, with ordinary Portal and Team access. No feature flag or separate runtime deployment is required.\n' +
+      '- Compatibility: v0.1 gateways reject the new signed binding contract and require a fresh v0.2 installation. There is no v0.1 update bridge.\n\n'
+    : '';
   return `${channelLabel} of Ankka MCP Gateway. This GitHub Release mirrors the exact signed artifact already committed to the customer update channel.\n\n` +
+    apiSourceReleaseNotes +
     teamReleaseNotes +
     bridgeReleaseNotes +
     localTeamReleaseNotes +

@@ -196,6 +196,11 @@ permanently, and the gateway, never the dashboard, works out both answers:
 
 ## Built-in API sources
 
+`gateway-v0.2.0` starts a new deployment-contract boundary. Gateways on v0.1
+reject its added bindings before an update can start; install a fresh v0.2
+gateway to use this release. There is no v0.1 compatibility bridge. The update
+behavior below applies within the v0.2 contract.
+
 The API-source release includes the runtime in the final gateway Worker. Final
 installation and runtime updates provide `API_LOADER` automatically. Updates
 inherit `ANKKA_API_CONNECTIONS` when configured as a secret, without fetching its

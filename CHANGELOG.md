@@ -9,7 +9,8 @@ Notable public product and repository changes are recorded here.
   API connections; ordinary Portal source installation and Team access govern
   their use. Connections and credentials stay in your Cloudflare account. New
   installations and updates include the runtime without a separate deployment
-  or feature flag.
+  or feature flag. The v0.2 deployment contract requires a fresh installation
+  for gateways on v0.1; updates within the new contract preserve API connections.
 
 - Accept Cloudflare server records up to 8 MiB, including large synced tool
   schemas, when reading source tools and verifying removal ownership. Sources
