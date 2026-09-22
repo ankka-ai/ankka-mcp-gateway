@@ -635,9 +635,13 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
 
   prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult> {
-    const body: { schemaVersion: 1; expectedRevision: number; members: TeamMember[]; teams?: TeamGrant[] } = {
-      schemaVersion: 1, expectedRevision, members,
+    type TeamActionRequest = {
+      schemaVersion: 1
+      expectedRevision: number
+      members: TeamMember[]
+      teams?: TeamGrant[]
     }
+    const body: TeamActionRequest = { schemaVersion: 1, expectedRevision, members }
     if (teams !== undefined) body.teams = teams
     return this.#request('/api/team-actions', teamActionResultSchema, {
       method: 'POST',
