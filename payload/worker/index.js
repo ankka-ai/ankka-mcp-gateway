@@ -5348,11 +5348,13 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
   let receiptSubject = receiptSource;
   if (control.receiptSourceToolBaseline) {
     if (!receiptSource || control.receiptSourceToolBaseline.sourceId !== receiptSource.id) return null;
-    receiptSubject = {
+    const receiptSubjectBase = {
       ...receiptSource,
       enabledTools: control.receiptSourceToolBaseline.enabledTools,
-      ...(control.receiptSourceToolBaseline.label ? { label: control.receiptSourceToolBaseline.label } : {}),
     };
+    receiptSubject = control.receiptSourceToolBaseline.label
+      ? { ...receiptSubjectBase, label: control.receiptSourceToolBaseline.label }
+      : receiptSubjectBase;
   }
   const rootSettings = teardownSettings(control, receiptSubject, 'company-context');
   const rootDesired = await buildDesiredResources(rootSettings, root.installationId);
@@ -7984,7 +7986,7 @@ function teamGroupEmails(include) {
   return emails.sort(compareText);
 }
 
-function teamGroupShapeOk(observed, name) {
+function teamGroupRecordAccepted(observed, name) {
   if (!isRecord(observed) || observed.name !== name) return false;
   if (observed.exclude != null && (!Array.isArray(observed.exclude) || observed.exclude.length !== 0)) return false;
   if (observed.require != null && (!Array.isArray(observed.require) || observed.require.length !== 0)) return false;
@@ -7992,7 +7994,7 @@ function teamGroupShapeOk(observed, name) {
 }
 
 function teamGroupRecordMatches(observed, name, emails) {
-  const found = teamGroupShapeOk(observed, name) ? teamGroupEmails(observed.include) : null;
+  const found = teamGroupRecordAccepted(observed, name) ? teamGroupEmails(observed.include) : null;
   return found !== null && canonicalJson(found) === canonicalJson([...emails].sort(compareText));
 }
 
@@ -8066,7 +8068,7 @@ async function readOwnedTeamGroup(context, token, team) {
   const group = response.result;
   if (!isRecord(group) || group.id !== team.accessGroupId ||
       (Object.hasOwn(group, 'account_id') && group.account_id !== account) ||
-      !teamGroupShapeOk(group, name)) return null;
+      !teamGroupRecordAccepted(group, name)) return null;
   return teamGroupEmails(group.include);
 }
 
@@ -8386,7 +8388,7 @@ async function processTeamAction(env, storage, prepared, nowMs) {
       const live = await providerCall(`${groupCollection}/${encodeURIComponent(change.groupId)}`, token, { signal: context.signal });
       if (!groupAccepted(live) || live.result?.id !== change.groupId ||
           (Object.hasOwn(live.result, 'account_id') && live.result.account_id !== account) ||
-          !teamGroupShapeOk(live.result, name)) return null;
+          !teamGroupRecordAccepted(live.result, name)) return null;
       if (teamGroupRecordMatches(live.result, name, change.memberEmails)) {
         await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'verified' }) });
         return change.groupId;
@@ -8406,7 +8408,7 @@ async function processTeamAction(env, storage, prepared, nowMs) {
       await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: null, phase: 'verified' }) });
       return true;
     }
-    if (!groupAccepted(live) || live.result?.id !== change.groupId || !teamGroupShapeOk(live.result, name)) return null;
+    if (!groupAccepted(live) || live.result?.id !== change.groupId || !teamGroupRecordAccepted(live.result, name)) return null;
     await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: change.groupId, phase: 'send_armed' }) });
     const removed = await providerCall(`${groupCollection}/${encodeURIComponent(change.groupId)}`, token, {
       method: 'DELETE', signal: context.signal,

@@ -146,62 +146,73 @@ describe('SettingsPage management token', () => {
     return section()
   }
 
-  it('offers one way to add the token, says why it is missing, and no longer sends anyone to Cloudflare’s secret settings', async () => {
+  it('reveals setup before starting an approval and keeps the missing-token explanation in details', async () => {
     const client = api()
     client.getManagementCredentialStatus = vi.fn(async () => withoutToken)
-    // jsdom follows a fragment, not a navigation: stand on the operation page so the handoff is observable.
     window.history.replaceState(null, '', '/__ankka/operation')
     const prepared = { schemaVersion: 1 as const, actionId: ACTION, status: 'authorization_required' as const, expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}` }
     client.prepareManagementCredentialAction = vi.fn(async () => prepared)
     const user = userEvent.setup()
     const { container } = render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
 
-    expect(await (await opened()).findByRole('heading', { name: 'Add your management token' })).toBeInTheDocument()
-    expect(section().getByText('You skipped the token during setup.')).toBeVisible()
-    expect(section().getByText(/Create the token first as a Cloudflare account Administrator/u)).toBeVisible()
+    expect(await (await opened()).findByText('No management token')).toBeVisible()
+    const explanation = section().getByText('You skipped the token during setup.')
+    expect(explanation).not.toBeVisible()
+    await user.click(section().getByText('Token details'))
+    expect(explanation).toBeVisible()
     expect(container.textContent).not.toMatch(/Variables and Secrets|encrypted secret named|Enter the token only in Cloudflare|wrangler/u)
-    expect(section().queryByRole('button', { name: 'Verify management access' })).not.toBeInTheDocument()
-    expect(section().queryByRole('button', { name: 'Replace management token' })).not.toBeInTheDocument()
-    // The dashboard never takes the token itself.
+    expect(section().queryByRole('button', { name: 'Verify access' })).not.toBeInTheDocument()
+    expect(section().queryByRole('button', { name: 'Replace token' })).not.toBeInTheDocument()
     expect(container.querySelector('input')).toBeNull()
 
-    await user.click(section().getByRole('button', { name: 'Add management token' }))
+    await user.click(section().getByRole('button', { name: 'Add token' }))
+    expect(section().getByRole('heading', { name: 'Add a management token' })).toBeVisible()
+    expect(client.prepareManagementCredentialAction).not.toHaveBeenCalled()
+    await user.click(section().getByRole('button', { name: 'I’ve copied the token' }))
     expect(client.prepareManagementCredentialAction).toHaveBeenCalledTimes(1)
     await waitFor(() => expect(window.location.hash).toBe(`#${'a'.repeat(40)}`))
   })
 
-  it('offers token replacement and verification', async () => {
+  it('keeps the card compact until replacement is requested', async () => {
     const client = api()
     client.getManagementCredentialStatus = vi.fn(async () => withToken)
+    const user = userEvent.setup()
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    expect(await (await opened()).findByText('Management token configured.')).toBeVisible()
+    expect(await (await opened()).findByText('Management token added')).toBeVisible()
     expect(client.getTeam).not.toHaveBeenCalled()
-    expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
-    expect(section().getByRole('button', { name: 'Verify management access' })).toBeEnabled()
-    expect(section().queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
+    expect(section().getByRole('button', { name: 'Verify access' })).toBeEnabled()
+    expect(section().queryByRole('link', { name: 'Create a token in Cloudflare ↗' })).not.toBeInTheDocument()
+    const replace = section().getByRole('button', { name: 'Replace token' })
+    expect(replace).toHaveAttribute('aria-expanded', 'false')
+    await user.click(replace)
+    expect(replace).toHaveAttribute('aria-expanded', 'true')
+    expect(section().getByText(/After replacing, delete the older/u)).toHaveTextContent(`After replacing, delete the older Ankka gateway ${window.location.hostname} token in Cloudflare under Manage Account → Account API Tokens.`)
+    await user.click(section().getByRole('button', { name: 'Cancel' }))
+    expect(replace).toHaveAttribute('aria-expanded', 'false')
+    expect(section().queryByRole('button', { name: 'I’ve copied the token' })).not.toBeInTheDocument()
+    expect(client.prepareManagementCredentialAction).not.toHaveBeenCalled()
   })
 
   const verifications: [ManagementVerification, string[]][] = [
-    [verified, ['Verified. The token is active with MCP Portals Edit and Access: Apps and Policies Edit permissions.']],
+    [verified, ['Management token active']],
     [{ ...verified, status: 'permission_missing', accessPolicies: 'permission_missing' }, [
-      'The token is active.', 'MCP Portals Edit: proven. Your gateway wrote its own MCP Portal back unchanged.',
-      'Access: Apps and Policies Edit: missing. Cloudflare refused the token for your gateway’s own Portal Access policy.',
-      'Create a new token from the link, which fills in both permissions, and replace this one.']],
+      'Missing permission: Access: Apps and Policies Edit.',
+      'Replace the token using the prefilled Cloudflare link.']],
     [{ ...verified, status: 'permission_missing', portals: 'permission_missing' }, [
-      'MCP Portals Edit: missing. Cloudflare refused the token for your gateway’s own MCP Portal.',
-      'Access: Apps and Policies Edit: proven. Your gateway wrote its own Portal Access policy back unchanged.']],
+      'Missing permission: MCP Portals Edit.',
+      'Replace the token using the prefilled Cloudflare link.']],
     [{ ...verified, status: 'drift', portals: 'drift' }, [
-      'MCP Portals Edit: not proven. Your gateway’s own MCP Portal no longer matches what your gateway recorded, so nothing was written to it. Review it in Cloudflare; this page does not reset it.']],
+      'Your MCP Portal has changed. Review it in Cloudflare before verifying again; nothing was overwritten.']],
     [{ ...verified, status: 'unconfirmed', accessPolicies: 'unconfirmed' }, [
-      'Access: Apps and Policies Edit: not confirmed. Cloudflare gave no clear answer for your gateway’s own Portal Access policy, or your gateway’s records could not be read.']],
+      'Could not confirm Access: Apps and Policies Edit. Try again.']],
     [{ ...verified, status: 'rejected', token: 'rejected', portals: 'not_checked', accessPolicies: 'not_checked' }, [
-      'Cloudflare rejected the token: it was revoked, has expired, or belongs to another account. Replace it.']],
+      'Cloudflare rejected this token. Replace it to restore management access.']],
     [{ ...verified, status: 'unconfirmed', token: 'unconfirmed', portals: 'not_checked', accessPolicies: 'not_checked' }, [
-      'Cloudflare did not answer the token check, so nothing is proven yet. Try again in a moment.']],
+      'Could not confirm the token with Cloudflare. Try again.']],
     [{ ...verified, status: 'busy', token: 'not_checked', portals: 'not_checked', accessPolicies: 'not_checked' }, [
-      'A connector installation, update, removal, Team change or token change is unfinished, so nothing was checked. Verify again when it has finished.']],
+      'Another gateway change is in progress. Verify again when it finishes.']],
     [{ ...verified, status: 'missing', token: 'missing', portals: 'not_checked', accessPolicies: 'not_checked' }, [
-      'Your gateway has no management token.']],
+      'No management token found. Reload this page to add one.']],
   ]
   it.each(verifications)('says what a verification proved: %j', async (answer, lines) => {
     const client = api()
@@ -209,7 +220,7 @@ describe('SettingsPage management token', () => {
     client.verifyManagementAccess = vi.fn(async () => answer)
     const user = userEvent.setup()
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    await user.click(await (await opened()).findByRole('button', { name: 'Verify management access' }))
+    await user.click(await (await opened()).findByRole('button', { name: 'Verify access' }))
     for (const line of lines) expect(await (await opened()).findByText(line)).toBeVisible()
     expect(client.verifyManagementAccess).toHaveBeenCalledTimes(1)
   })
@@ -220,9 +231,9 @@ describe('SettingsPage management token', () => {
     client.verifyManagementAccess = vi.fn(async () => { throw new GatewayApiError(503, 'management_credential_unavailable') })
     const user = userEvent.setup()
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    expect(await (await opened()).findByText('Your gateway could not read its management token status. Reload this page or verify management access.')).toBeVisible()
-    expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
-    await user.click(section().getByRole('button', { name: 'Verify management access' }))
+    expect(await (await opened()).findByText('Token status unavailable. Reload or verify access.')).toBeVisible()
+    expect(section().getByRole('button', { name: 'Replace token' })).toBeEnabled()
+    await user.click(section().getByRole('button', { name: 'Verify access' }))
     expect(await (await opened()).findByRole('alert')).toHaveTextContent('The check could not be run. Reload this page and try again.')
   })
 
@@ -238,8 +249,8 @@ describe('SettingsPage management token', () => {
     // The answer leaves the address at once, so a reload starts clean.
     expect(window.location.search).toBe('')
     // While it waits there is no second "Add" card and nothing to verify yet.
-    expect(section().queryByRole('heading', { name: 'Add your management token' })).not.toBeInTheDocument()
-    expect(section().queryByRole('button', { name: 'Verify management access' })).not.toBeInTheDocument()
+    expect(section().queryByRole('heading', { name: 'Add a management token' })).not.toBeInTheDocument()
+    expect(section().queryByRole('button', { name: 'Verify access' })).not.toBeInTheDocument()
 
     await act(() => vi.advanceTimersByTimeAsync(3_000))
     await act(() => vi.advanceTimersByTimeAsync(3_000))
@@ -247,8 +258,8 @@ describe('SettingsPage management token', () => {
     expect(client.getManagementCredentialStatus).toHaveBeenCalledTimes(3)
     // Sources were loaded while the token was missing: they are read again, so the Sources page is not left disabled.
     expect(client.getSources).toHaveBeenCalledTimes(2)
-    expect(section().getByRole('button', { name: 'Verify management access' })).toBeEnabled()
-    expect(section().getByRole('button', { name: 'Replace management token' })).toBeEnabled()
+    expect(section().getByRole('button', { name: 'Verify access' })).toBeEnabled()
+    expect(section().getByRole('button', { name: 'Replace token' })).toBeEnabled()
     // It stops asking once the token is there.
     await act(() => vi.advanceTimersByTimeAsync(30_000))
     expect(client.getManagementCredentialStatus).toHaveBeenCalledTimes(3)
@@ -267,7 +278,7 @@ describe('SettingsPage management token', () => {
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
     expect(await (await opened()).findByText(message)).toBeVisible()
     // Nothing arrived, so nothing is polled: one read, and the way to start again is right there.
-    expect(await (await opened()).findByRole('button', { name: 'Add management token' })).toBeEnabled()
+    expect(await (await opened()).findByRole('button', { name: 'Add token' })).toBeEnabled()
     expect(client.getManagementCredentialStatus).toHaveBeenCalledTimes(1)
     expect(window.location.search).toBe('')
   })
@@ -277,7 +288,7 @@ describe('SettingsPage management token', () => {
     const client = api()
     client.getManagementCredentialStatus = vi.fn(async () => withoutToken)
     render(<GatewayProvider api={client}><SettingsPage /></GatewayProvider>)
-    expect(await (await opened()).findByRole('button', { name: 'Add management token' })).toBeEnabled()
+    expect(await (await opened()).findByRole('button', { name: 'Add token' })).toBeEnabled()
     expect(section().queryByText(/Cloudflare accepted the token/u)).not.toBeInTheDocument()
     expect(window.location.search).toBe('')
   })
