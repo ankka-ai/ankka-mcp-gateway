@@ -29,7 +29,7 @@ const MAX_PLAN_BYTES = 1 * 1024 * 1024;
 // Raw signed object bytes one local publisher may carry. The two customer
 // The gateway embeds its BigQuery bridge and bootstrap runtime. Current signed
 // releases total about 8.2 MB; bound the local publication bundle to 10 MB.
-const MAX_OPERATOR_RELEASE_BYTES = 10_000_000;
+const MAX_OPERATOR_RELEASE_BYTES = 12_000_000;
 const MAX_OPERATOR_OBJECTS = 512;
 // Base64 expansion of the raw cap plus a fixed allowance for keys, content
 // types, the canonical plan, identity, and decoder code.

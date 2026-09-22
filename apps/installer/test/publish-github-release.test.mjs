@@ -207,6 +207,21 @@ describe('reviewed GitHub Release publication', () => {
     }
   });
 
+  it('describes installed-connector changes in the v0.2.2 GitHub notes', () => {
+    const notes = releaseNotes(REPOSITORY, {
+      release: 'gateway-v0.2.2', sourceCommit: 'a'.repeat(40),
+    }, { channel: 'stable', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
+    assert.match(notes, /Installed connectors can change their exact tool allowlist\. New tools stay off until you select them\./u);
+    assert.match(notes, /An installed connector can be renamed in your gateway, in Team, and on its Access policy\. Who can use it does not change\./u);
+    assert.match(notes, /Connector access can be shared through named teams\./u);
+    assert.match(notes, /Settings lets you add, replace, or verify the management token\./u);
+    assert.ok(notes.indexOf('Installed connectors can change') < notes.indexOf('- Source commit:'));
+    const earlier = releaseNotes(REPOSITORY, {
+      release: 'gateway-v0.2.1', sourceCommit: 'a'.repeat(40),
+    }, { channel: 'stable', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
+    assert.doesNotMatch(earlier, /exact tool allowlist/u);
+  });
+
   it.each(['gateway-v0.1.14', 'gateway-v0.1.20'])(
     'preserves generic GitHub release notes for %s', (release) => {
       const sourceCommit = 'a'.repeat(40);
