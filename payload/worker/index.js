@@ -8137,7 +8137,14 @@ async function teamSnapshot(storage, env) {
     const plan = planGatewayTeamAccess({ schemaVersion: 1, expectedRevision: state.revision,
       members: state.members }, context.planner);
     const token = managementCredential(env);
-    const audiences = await verifyTeamPolicies(context, plan, token, [], null, true);
+    const teams = state.teams?.map((team) => ({ ...team }));
+    // Each owned group read needs only its stored id, so it runs alongside the
+    // policy reads. Membership is accepted only after every read has settled.
+    const [audiences, groupEmails] = await Promise.all([
+      verifyTeamPolicies(context, plan, token, [], null, true).catch(() => null),
+      Promise.all((teams ?? []).map((team) => team.accessGroupId
+        ? readOwnedTeamGroup(context, token, team).catch(() => null) : null)),
+    ]);
     if (!audiences) return null;
     const audienceOf = (policy) => audiences.get(policy.policyId);
     const portal = plan.policies.find((policy) => policy.kind === 'portal');
@@ -8156,13 +8163,12 @@ async function teamSnapshot(storage, env) {
     const expectedGroups = (policy) => (state.teams ?? []).filter((team) => team.accessGroupId && team.memberEmails.length > 0 &&
       (policy.kind === 'portal' || (policy.sourceId && team.sourceIds.includes(policy.sourceId))))
       .map((team) => team.accessGroupId).sort(compareText);
-    let teams = state.teams?.map((team) => ({ ...team }));
     let groupMismatch = plan.policies.some((policy) => canonicalJson([...audienceOf(policy).groupIds].sort(compareText)) !==
       canonicalJson(expectedGroups(policy)));
-    if (!groupMismatch && teams?.some((team) => team.accessGroupId)) {
-      for (const team of teams) {
+    if (!groupMismatch && teams) {
+      for (const [index, team] of teams.entries()) {
         if (!team.accessGroupId) continue;
-        const liveEmails = await readOwnedTeamGroup(context, token, team);
+        const liveEmails = groupEmails[index];
         if (!liveEmails) { groupMismatch = true; break; }
         team.memberEmails = liveEmails;
       }
@@ -8293,6 +8299,11 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   // A roster read checks the token alongside its first provider reads, before
   // accepting any membership or changing its revision. Mutation verification
   // keeps its existing order, including checking the Portal after its policies.
+  // The application list carries every application with its policies, exactly
+  // as the per-application reads return them and already current right after a
+  // write, so a roster read takes both from its list entry and makes no further
+  // request. Mutation verification still reads each application directly, as
+  // does a roster read whose list entry lacks its policies.
   const [applications, portal, credentialValid] = readAudience
     ? await Promise.all([readApplications(), readPortal(), managementTokenActive(account, token)])
     : [await readApplications(), null, null];
@@ -8307,10 +8318,17 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
     const candidates = applications.result.filter((value) => accessApplicationCandidate(value, kind, entry.state));
     if (candidates.length !== 1 || candidates[0].id !== policy.applicationId ||
         (Object.hasOwn(candidates[0], 'account_id') && candidates[0].account_id !== account)) return null;
-    const path = `/accounts/${account}/access/apps/${encodeURIComponent(policy.applicationId)}`;
-    const readApp = () => providerCall(path, token, { signal: context.signal });
-    const readPolicies = () => providerList(`${path}/policies`, token, {}, context.signal);
-    const [app, policies] = await Promise.all([readApp(), readPolicies()]);
+    let app;
+    let policies;
+    if (readAudience && Array.isArray(candidates[0].policies)) {
+      app = { status: 'ok', result: candidates[0] };
+      policies = { status: 'ok', result: candidates[0].policies };
+    } else {
+      const path = `/accounts/${account}/access/apps/${encodeURIComponent(policy.applicationId)}`;
+      const readApp = () => providerCall(path, token, { signal: context.signal });
+      const readPolicies = () => providerList(`${path}/policies`, token, {}, context.signal);
+      [app, policies] = await Promise.all([readApp(), readPolicies()]);
+    }
     if (!teamProviderOk(context, app) || app.result?.id !== policy.applicationId ||
         (Object.hasOwn(app.result, 'account_id') && app.result.account_id !== account) ||
         !accessApplicationIdentityMatches(app.result, kind, entry.state)) return null;
@@ -8332,9 +8350,10 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   };
   const observed = new Map();
   const policies = plan.policies.filter((policy) => onlyPolicy === null || policy.policyId === onlyPolicy);
-  // Two application slots with two reads each keep at most four provider
-  // requests outstanding. A free slot starts the next application immediately;
-  // a slow application cannot hold up a whole batch. Drain both slots on failure.
+  // Where applications are read directly, two application slots with two reads
+  // each keep at most four provider requests outstanding. A free slot starts the
+  // next application immediately; a slow application cannot hold up a whole
+  // batch. Drain both slots on failure.
   let cursor = 0;
   let failed = false;
   const readNext = async () => {

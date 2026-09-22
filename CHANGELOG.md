@@ -4,6 +4,16 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Load the Team page with one round of Cloudflare reads. Each load listed the
+  account's Access applications, then read every connector's application and
+  its policy again, two connectors at a time, and then each team's Access
+  group one after another. Access API calls take about a second each, and a
+  gateway with nine policies waited on at least six of them in a row. The
+  application list already carries each application's policies, exactly as the
+  separate reads return them and current immediately after a write, so a load
+  now uses the list and reads team groups alongside it. Saves still read each
+  application they change directly.
+
 - Let a gateway that updated to v0.2.2 or v0.2.3 read the install records an
   earlier release wrote. Those releases added an optional `cleanup` field to the
   install record and the Stage 2 journal, and their reads compared the parsed
