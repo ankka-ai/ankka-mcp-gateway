@@ -7453,12 +7453,10 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
     const path = `/accounts/${account}/access/apps/${encodeURIComponent(policy.applicationId)}`;
     const readApp = () => providerCall(path, token, { signal: context.signal });
     const readPolicies = () => providerList(`${path}/policies`, token, {}, context.signal);
-    const [app, listedPolicies] = readAudience
-      ? await Promise.all([readApp(), readPolicies()]) : [await readApp(), null];
+    const [app, policies] = await Promise.all([readApp(), readPolicies()]);
     if (!teamProviderOk(context, app) || app.result?.id !== policy.applicationId ||
         (Object.hasOwn(app.result, 'account_id') && app.result.account_id !== account) ||
         !accessApplicationIdentityMatches(app.result, kind, entry.state)) return null;
-    const policies = readAudience ? listedPolicies : await readPolicies();
     if (!teamProviderOk(context, policies) || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
     const live = policies.result[0];
     if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return null;
@@ -7492,7 +7490,7 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
       } catch { failed = true; }
     }
   };
-  await Promise.all(Array.from({ length: readAudience ? 2 : 1 }, readNext));
+  await Promise.all(Array.from({ length: 2 }, readNext));
   if (failed) return null;
   if (!readAudience) {
     const verifiedPortal = await readPortal();
@@ -7521,6 +7519,7 @@ async function processTeamAction(env, storage, prepared, nowMs) {
     await storage.put(TEAM_KEY, { ...teamState, pendingAction: action });
   };
   const fail = async (code) => {
+    if (context.signal?.aborted) code = 'team_action_recovery_required';
     if (context.credentialRejected) code = 'team_management_credential_invalid';
     await persist({ status: 'recovery_required', failureCode: code });
     return fixedJson(409, { schemaVersion: 1, error: code });
@@ -7536,6 +7535,17 @@ async function processTeamAction(env, storage, prepared, nowMs) {
   let observed = await verifyTeamPolicies(context, plan, token, action.journal);
   if (!observed) return fail('team_policy_drift');
   for (const policy of plan.policyChanges) {
+    // The complete graph read just proved this journaled write is still exact.
+    // Retrying must advance to unfinished targets instead of spending another
+    // deadline rechecking every completed write. The final graph read still
+    // catches drift, including on targets skipped here.
+    if (observed.get(policy.policyId) === 'after') {
+      if (action.journal.find((entry) => entry.policyId === policy.policyId)?.phase !== 'verified') {
+        await persist({ journal: [...action.journal.filter((entry) => entry.policyId !== policy.policyId),
+          { policyId: policy.policyId, phase: 'verified' }] });
+      }
+      continue;
+    }
     const fresh = await verifyTeamPolicies(context, plan, token, action.journal, policy.policyId);
     if (!fresh) return fail('team_policy_drift');
     observed.set(policy.policyId, fresh.get(policy.policyId));

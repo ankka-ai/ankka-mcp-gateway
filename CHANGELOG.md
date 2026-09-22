@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Make Team access saves and retries faster by overlapping independent
+  Cloudflare ownership reads and using verified progress from the saved change.
+  Retrying an interrupted save advances to unfinished policies without replaying
+  completed writes; the complete policy graph is still verified before success.
+
 - Include agent-authored API sources in the gateway runtime by default. Gateway
   Management can save, test, activate and disable JavaScript tools for configured
   API connections; ordinary Portal source installation and Team access govern

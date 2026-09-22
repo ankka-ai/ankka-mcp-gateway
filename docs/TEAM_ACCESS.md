@@ -161,6 +161,13 @@ recorded change after restoring the token or reconciling unexpected provider
 state. An ambiguous write is not undone by revoking its credential. Lifecycle
 floors continue to block incompatible rollback and legacy removal paths.
 
+Each save attempt has a 60-second provider deadline. Independent ownership reads
+overlap with at most four provider requests in flight; policy writes remain
+serial and are recorded before sending. A retry verifies the complete policy
+graph, skips policies already confirmed at the recorded target, and checks the
+complete graph again before completing. Saving Team access does not download a
+source's MCP tool catalogue.
+
 The retired `ANKKA_TEAM_MANAGEMENT_TOKEN` binding is not reused. Revoke any old
 preview token and remove its binding. See [Upgrade boundary](TEAM_UPGRADE.md)
 for the new contract and fresh-install requirement.

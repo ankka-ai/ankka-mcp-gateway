@@ -46,6 +46,9 @@ adapter, and base64 decoder. It verifies:
   commits source and Team changes together, and preserves the root receipt.
   The same restart check covers an unfinished source paused before sign-in,
   including removal of its retained installation action after cleanup.
+- Team access resumes a seven-source change after a workerd restart, retaining
+  verified and uncertain policy writes in SQLite. It recognizes a committed
+  write whose response was lost and skips redundant checks on completed targets.
 
 This is a focused runtime integration fixture, not the deployed gateway router.
 It simulates authorization inputs and does not contact Cloudflare, exchange OAuth
