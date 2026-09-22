@@ -4,6 +4,15 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Release the lifecycle lock when a gateway removal stops before deleting
+  anything. If an ownership check refused a resource after you authorized
+  removal, for example because an Access policy was changed in Cloudflare, Team
+  changes, source changes and updates stayed blocked indefinitely, so the
+  change could not be corrected from the dashboard. Ending that attempt now
+  marks the removal failed and returns the gateway to its installed state. A
+  removal that armed or sent any deletion still needs a fresh authorization to
+  continue.
+
 - Let an interrupted Team save that created a team's Access group resume. A
   retry checked the policies it had already written against a plan without
   that group, so every resume reported `team_policy_drift` and the recorded

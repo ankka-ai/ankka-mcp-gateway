@@ -1552,7 +1552,8 @@ for (let lostDelete = 0; lostDelete < 7; lostDelete += 1) {
 test('current teardown routes have no public HTTP entry point', async () => fixture(async (gateway) => {
   const baseline = gateway.provider.requests.length;
   for (const path of ['/teardown-actions/prepare-current', '/teardown-actions/prove-current',
-    '/teardown-actions/apply-current', '/teardown-actions/settle-current', '/teardown-root/apply-current', '/teardown-root/status-current']) {
+    '/teardown-actions/apply-current', '/teardown-actions/settle-current', '/teardown-root/apply-current', '/teardown-root/status-current',
+    '/teardown-root/settle-current']) {
     const response = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}${path}`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
     }), gateway.env);
@@ -1607,6 +1608,48 @@ test('declining current teardown before deletion releases lifecycle locks withou
   assert.deepEqual(gateway.storage.snapshot(), before);
   assert.equal(gateway.provider.deletes().length, 0);
   assert.equal((await first.send('apply')).status, 409);
+}));
+
+test('declining current teardown after an apply that deleted nothing releases lifecycle locks and restores the root', async () => fixture(async (gateway) => {
+  const before = structuredClone(gateway.storage.snapshot());
+  // A rule the receipt-owned matcher does not accept stops the apply at its ownership check.
+  const { provider: locator } = gateway.readyReceipt.resources.find((resource) => resource.kind === 'portal_access_policy');
+  const policy = gateway.provider.state.policies.get(locator.parentId).find((entry) => entry.id === locator.id);
+  policy.require = [{ geo: { country_code: 'FI' } }];
+  const first = await gateway.currentTeardown();
+  assert.equal(first.prepared.status, 200, await first.prepared.clone().text());
+  assert.equal((await first.send('prove')).status, 200);
+  const baseline = gateway.provider.requests.length;
+  const applied = await first.send('apply');
+  assert.equal(applied.status, 409);
+  assert.equal((await applied.json()).error, 'teardown_action_recovery_required');
+  assert.deepEqual([...new Set(gateway.provider.requests.slice(baseline).map(({ method }) => method))], ['GET']);
+  const { status, teardown } = gateway.storage.snapshot();
+  assert.deepEqual([status, teardown.removedKeys, teardown.pending], ['tearing_down', [], null]);
+  assert.notEqual((await (await gateway.api('/api/source-actions')).json()).blockingAction, null);
+
+  const settled = await first.send('settle');
+  assert.equal(settled.status, 200, await settled.clone().text());
+  const outcome = await settled.json();
+  assert.deepEqual([outcome.status, outcome.failureCode], ['failed', 'fresh_authorization_required']);
+  const actions = await (await gateway.api('/api/source-actions')).json();
+  assert.deepEqual([actions.blockingAction, actions.removalStarted], [null, false]);
+  assert.deepEqual(gateway.storage.snapshot(), before, 'the installation is back at its ready receipt');
+  assert.equal((await first.send('apply')).status, 409);
+  assert.equal(gateway.provider.deletes().length, 0);
+
+  // Nothing holds the gateway any more: once the rule is corrected, Team saves and a fresh removal completes.
+  policy.require = [];
+  const view = await gateway.view();
+  assert.deepEqual([view.editingEnabled, view.editingDisabledReason], [true, null]);
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(view) });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal((await saved.json()).action.status, 'succeeded');
+  const second = await gateway.currentTeardown(6);
+  assert.equal(second.prepared.status, 200, await second.prepared.clone().text());
+  assert.equal((await second.send('prove')).status, 200);
+  assert.equal((await second.send('apply', 'H'.repeat(22))).status, 200);
+  assert.equal(gateway.provider.liveResourceCount(), 0);
 }));
 
 

@@ -165,13 +165,22 @@ function assertCompleted(t, result) {
     'no DELETE may reach a resource that was already absent');
 }
 
-/** An interrupted attempt ends with the journal intact and a fresh consent is possible at once. */
-async function settleInterrupted(t, consent, { started = true } = {}) {
+/**
+ * An interrupted attempt ends and a fresh consent is possible at once. A removed dependency or a pending DELETE keeps
+ * the journal intact and the attempt recovery-required; without either, the root is its ready receipt again and the
+ * attempt failed.
+ */
+async function settleInterrupted(t, consent) {
   const before = t.root();
+  const started = before.teardown !== undefined && (before.teardown.removedKeys.length > 0 || before.teardown.pending !== null);
   const settled = await consent.send('settle');
   assert.equal(settled.status, 200, await settled.clone().text());
   assert.equal((await settled.json()).status, started ? 'recovery_required' : 'failed');
-  assert.deepEqual(t.root(), before, 'settling keeps the receipt and the deletion boundary');
+  if (started) assert.deepEqual(t.root(), before, 'settling keeps the receipt and the deletion boundary');
+  else {
+    assert.deepEqual(t.root(), t.gateway.readyReceipt, 'nothing was deleted or armed, so the ready receipt returns');
+    assert.equal(t.progress(), undefined, 'no pass progress outlives the attempt');
+  }
   assert.equal((await consent.status()).status, started ? 'recovery_required' : 'failed');
   return before;
 }
@@ -425,9 +434,10 @@ for (const [executor, bounded] of EXECUTORS) {
     assert.deepEqual(t.deletes(), t.paths);
   }, { bounded }));
 
-  // An ownership conflict is recovery-required by design: nothing is deleted
-  // while the exact read disagrees with the receipt, before or after earlier
-  // deletions, until the resource reads exactly again.
+  // An ownership conflict stops every consent: nothing is deleted while the
+  // exact read disagrees with the receipt, before or after earlier deletions,
+  // until the resource reads exactly again. Before the first deletion the
+  // attempt settles failed and holds no lock; after it, recovery-required.
   for (let index = 0; index < REMOVAL_ORDER.length; index++) {
     for (const when of ['before any deletion', 'after the earlier deletions']) {
       test(`${executor}: ownership conflict at ${REMOVAL_ORDER[index]} ${when} stops every consent until the read is exact again`, async () => fixture(async (t) => {
@@ -500,7 +510,7 @@ for (const [executor, bounded] of EXECUTORS) {
   test(`${executor}: a settled attempt that never reached the root releases the lock without a journal`, async () => fixture(async (t) => {
     const first = await t.consent(1);
     assert.equal((await first.send('prove')).status, 200);
-    await settleInterrupted(t, first, { started: false });
+    await settleInterrupted(t, first);
     assert.deepEqual(t.root(), t.gateway.readyReceipt, 'the untouched root is still the bare ready receipt');
     const { result } = await freshConsent(t, 2);
     assertCompleted(t, result);

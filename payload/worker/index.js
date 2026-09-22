@@ -5878,6 +5878,31 @@ async function processRootTeardownApply(storage, environment, input, nowMs = Dat
   return rootRemovalCompletion(root, resources.length, resumed, resourcesHash, currentPolicies);
 }
 
+/**
+ * The installation's side of ending a consent attempt. Every DELETE is armed in
+ * the journal before it is sent, so a journal with no removed resource and no
+ * pending entry proves that the provider was only read. Such an attempt leaves
+ * nothing behind: the ready receipt returns, and the pass progress, bound to a
+ * graph that may change before the next removal, is dropped. Any other journal
+ * stays exactly as recorded.
+ */
+async function settleRootTeardown(storage, environment, installationId) {
+  const root = await storedTeardownRoot(storage, environment, installationId);
+  if (!root) return null;
+  const { teardown } = root;
+  const unstarted = root.status === 'tearing_down' && exactKeys(teardown, [
+    'schemaVersion', 'installationId', 'resourcesHash', 'status', 'removedKeys', 'pending', 'removedAt',
+  ]) && teardown.schemaVersion === 1 && teardown.installationId === installationId && teardown.status === 'applying' &&
+    Array.isArray(teardown.removedKeys) && teardown.removedKeys.length === 0 && teardown.pending === null &&
+    teardown.removedAt === null;
+  if (unstarted) {
+    // Progress first: if the receipt write is lost, the same empty journal settles again.
+    await storage.delete(ROOT_TEARDOWN_PROGRESS_KEY);
+    await storage.put(STORAGE_KEY, root.receipt);
+  }
+  return Object.freeze({ schemaVersion: 1, installationId, removalStarted: root.status !== 'ready' && !unstarted });
+}
+
 async function rootTeardownAuthority(storage, environment, installationId, env, partialActions = []) {
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
@@ -6125,7 +6150,12 @@ async function processTeardownActionApply(request, env, storage, nowMs = Date.no
   return Object.freeze(result);
 }
 
-/** End a current consent attempt without erasing its receipt or deletion boundary. */
+/**
+ * End a current consent attempt without erasing its receipt or deletion boundary.
+ * An attempt that armed no deletion fails and releases the lifecycle lock, even
+ * after its apply began; any armed, submitted or completed deletion keeps it
+ * recoverable only by a fresh authorization.
+ */
 async function settleCurrentTeardownAction(request, env, storage, nowMs = Date.now()) {
   if (request.method !== 'POST' || ['authorization', 'cookie', 'referer', 'origin'].some((name) => request.headers.has(name)) ||
       request.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase() !== 'application/json') return null;
@@ -6149,7 +6179,7 @@ async function settleCurrentTeardownAction(request, env, storage, nowMs = Date.n
   let untouched = false;
   try {
     const stub = adminStateStub(env, `v1:${action.installationId}`);
-    const response = await stub?.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/status-current`, {
+    const response = await stub?.fetch(new Request(`https://admin-state.invalid${INTERNAL_TEARDOWN_ROOT_PATH}/settle-current`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: canonicalJson({ schemaVersion: 1, installationId: action.installationId }),
     }));
@@ -6464,12 +6494,15 @@ export class AdminState {
         return control ? fixedJson(200, control) :
           fixedJson(503, { schemaVersion: 1, error: 'control_unavailable' });
       }
-      if ([INTERNAL_TEARDOWN_ROOT_PATH, `${INTERNAL_TEARDOWN_ROOT_PATH}/status-current`].includes(url.pathname) && request.method === 'POST') {
+      if ([INTERNAL_TEARDOWN_ROOT_PATH, `${INTERNAL_TEARDOWN_ROOT_PATH}/status-current`,
+        `${INTERNAL_TEARDOWN_ROOT_PATH}/settle-current`].includes(url.pathname) && request.method === 'POST') {
         const environment = parseManagementEnvironment(this.env);
         const input = await request.json().catch(() => null);
         const evidence = environment && exactKeys(input, ['schemaVersion', 'installationId']) &&
           input.schemaVersion === 1 && INSTALLATION_ID.test(input.installationId)
-          ? await rootTeardownEvidence(this.state.storage, environment, input.installationId, url.pathname.endsWith('/status-current'))
+          ? await (url.pathname.endsWith('/settle-current')
+            ? settleRootTeardown(this.state.storage, environment, input.installationId)
+            : rootTeardownEvidence(this.state.storage, environment, input.installationId, url.pathname.endsWith('/status-current')))
           : null;
         return evidence ? fixedJson(200, evidence) :
           fixedJson(409, { schemaVersion: 1, error: 'teardown_root_unavailable' });

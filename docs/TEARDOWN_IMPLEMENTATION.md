@@ -64,8 +64,11 @@ Only the installation object's completed removal result supplies the original
 receipt checksum and dependency-graph digest used in the signed handoff. The
 current grant must be revoked before that handoff is signed. A rejected or
 interrupted attempt retains the deletion boundary and permits fresh consent.
-A declined consent releases lifecycle locks only when the installation object
-proves that removal has not started. Unknown or partial removal stays locked.
+Settling an attempt releases lifecycle locks only when the installation object
+proves that no deletion was armed: its journal holds no removed resource and no
+pending DELETE. This includes an apply that stopped at an ownership check before
+its first deletion; the installation object returns to its ready receipt and
+drops its pass progress. Unknown or partial removal stays locked.
 An earlier unconfirmed revocation remains in the signed handoff even when a
 later grant was revoked successfully.
 
@@ -96,7 +99,7 @@ gives its status. `applying` inside its authorization window is a removal that
 is still running. `applying` past that window, `gateway_removed` and
 `recovery_required` are a removal that has begun, or may have, and needs a
 fresh consent; the settlement records `failed` only when the installation
-object proves that deletion never started. For these the dashboard
+object proves that no deletion was armed. For these the dashboard
 shows **Removal in progress** on every page with one action, **Continue
 removing this gateway**, which posts `/api/teardown-actions` and opens the
 removal page exactly as Settings does. The same notice replaces the load
@@ -107,7 +110,9 @@ resources absent, and signs a new receipt handoff.
 The notice has two sources. The recorded action says whether an attempt runs
 right now. The installation object's own durable record says whether deletion
 has begun at all: the source-actions answer carries it as `removalStarted`,
-read from the same `status-current` evidence the settle step uses. The journal
+read from `status-current`. The settle step asks the same object through
+`settle-current`, which first returns an attempt that armed no deletion to the
+ready receipt, so `removalStarted` reads `false` again afterwards. The journal
 alone is not enough, because a newer review that is never authorized replaces
 an expired record and then expires itself, after which the journal names no
 removal although the connected resources are gone. While an earlier
