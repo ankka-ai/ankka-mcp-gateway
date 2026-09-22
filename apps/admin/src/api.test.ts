@@ -649,6 +649,7 @@ describe('the tool choice of a sign-in connector', () => {
     const fetch = vi.fn()
       .mockResolvedValueOnce(Response.json(listed))
       .mockResolvedValueOnce(Response.json(saved))
+      .mockResolvedValueOnce(Response.json(saved))
     vi.stubGlobal('fetch', fetch)
     const api = new HttpGatewayAdminApi()
     await expect(api.getInstalledSourceTools(sourceId)).resolves.toEqual(listed)
@@ -657,6 +658,11 @@ describe('the tool choice of a sign-in connector', () => {
     expect(fetch).toHaveBeenNthCalledWith(2, `/api/sources/${sourceId}/tools`, expect.objectContaining({
       method: 'PUT',
       body: JSON.stringify({ schemaVersion: 1, revision: 4, enabledTools: ['records_export', 'records_search'] }),
+    }))
+    await expect(api.renameInstalledSource(5, sourceId, 'Records')).resolves.toEqual(saved)
+    expect(fetch).toHaveBeenNthCalledWith(3, `/api/sources/${sourceId}/label`, expect.objectContaining({
+      method: 'PUT',
+      body: JSON.stringify({ schemaVersion: 1, revision: 5, label: 'Records' }),
     }))
   })
 })

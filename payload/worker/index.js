@@ -480,6 +480,8 @@ const STATUS_KEY = 'ankka-mcp-gateway/public-status/v1';
 const SOURCE_REMOVAL_KEY = 'ankka-mcp-gateway/source-removal/v1';
 // One installed-source tool update. It exists only between the Portal write and the allowlist commit.
 const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
+// One installed-source rename. It exists only between the Access policy writes and the name commit.
+const SOURCE_LABEL_EDIT_KEY = 'ankka-mcp-gateway/source-label-edit/v1';
 const INTERNAL_SOURCE_REMOVAL_PATH = '/source-removal';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
 const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
@@ -3305,7 +3307,7 @@ function parseSourceActionPrepare(value) {
 
 async function prepareSourceAction(storage, input) {
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
-  if (await sourceToolEditBlocks(storage)) return sourceActionConflict('lifecycle_pending');
+  if (await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage)) return sourceActionConflict('lifecycle_pending');
   const parsed = parseSourceActionPrepare(input);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
@@ -4167,10 +4169,13 @@ async function chooseSourceActionTools(storage, env, input) {
 }
 
 function safeReceiptSourceToolBaseline(value) {
-  if (!exactKeys(value, ['sourceId', 'enabledTools']) || !SOURCE_ID.test(value.sourceId)) return null;
+  const keys = ['sourceId', 'enabledTools', ...(Object.hasOwn(value ?? {}, 'label') ? ['label'] : [])];
+  if (!exactKeys(value, keys) || !SOURCE_ID.test(value.sourceId)) return null;
   const enabledTools = exactSortedUniqueStrings(value.enabledTools, toolName, MAX_ENABLED_TOOLS_PER_SOURCE, 1);
-  if (!enabledTools) return null;
-  return Object.freeze({ sourceId: value.sourceId, enabledTools });
+  if (!enabledTools || (Object.hasOwn(value, 'label') && !validSourceLabel(value.label))) return null;
+  const baseline = { sourceId: value.sourceId, enabledTools };
+  if (Object.hasOwn(value, 'label')) baseline.label = value.label;
+  return Object.freeze(baseline);
 }
 
 function safeSourceToolEdit(value) {
@@ -4213,11 +4218,11 @@ function offeredInstalledCatalogue(source, catalogue) {
 }
 
 /**
- * Recompute one added source's receipts after an allowlist change. Only the
- * MCP server hash may move; a change to any other resource means this edit
- * would rewrite identity or policy, which a tool selection must not do.
+ * Recompute one added source's receipts after an allowlist or name change.
+ * Only the MCP server hash may move; a change to any other resource means
+ * this edit would rewrite identity or policy, which it must not do.
  */
-async function reboundOwnershipForTools(control, source, ownership, enabledTools, installationId) {
+async function reboundOwnershipForTools(control, source, ownership, nextSource, installationId) {
   const emptyAudienceHash = await sha256({ emails: [] });
   const audienceHash = await sha256({ emails: control.audienceEmails });
   const managementHash = source.id === MANAGEMENT_SOURCE_ID && source.initialManager
@@ -4229,7 +4234,7 @@ async function reboundOwnershipForTools(control, source, ownership, enabledTools
     teardownSettings(control, source, source.id), installationId, sourceIdentityHash === emptyAudienceHash,
   )).slice(0, length);
   const nextDesired = (await buildDesiredResources(
-    teardownSettings(control, { ...source, enabledTools }, source.id), installationId, sourceIdentityHash === emptyAudienceHash,
+    teardownSettings(control, nextSource, source.id), installationId, sourceIdentityHash === emptyAudienceHash,
   )).slice(0, length);
   if (currentDesired.length !== length || nextDesired.length !== length || currentDesired[0]?.kind !== 'mcp_server') return null;
   for (let index = 0; index < length; index += 1) {
@@ -4337,9 +4342,9 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
     return sourceToolsRefusal(409, 'source_tools_mismatch');
   }
   const nextBaseline = edit?.receiptBaseline ?? (aliasesReceipt && !control.receiptSourceToolBaseline
-    ? { sourceId: source.id, enabledTools: [...source.enabledTools] } : control.receiptSourceToolBaseline ?? null);
+    ? { sourceId: source.id, enabledTools: [...source.enabledTools], label: source.label } : control.receiptSourceToolBaseline ?? null);
   const nextResources = aliasesReceipt ? ownership.resources
-    : await reboundOwnershipForTools(control, source, ownership, enabledTools, control.installationId);
+    : await reboundOwnershipForTools(control, source, ownership, { ...source, enabledTools }, control.installationId);
   if (!nextResources) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
   const nextControlValue = {
     ...control,
@@ -4406,6 +4411,175 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   }
   await storage.put({ [SOURCES_KEY]: nextSources, [CONTROL_KEY]: nextControl, [SOURCE_TOOL_EDIT_KEY]: null });
   return fixedJson(200, nextSources);
+}
+
+function sourcePolicyDisplayName(label, policy) {
+  return `${label} users [${policy.marker}]`;
+}
+
+function safeSourceLabelEdit(value) {
+  if (value === undefined || value === null) return null;
+  if (!exactKeys(value, ['schemaVersion', 'sourceId', 'fromRevision', 'label', 'phase', 'receiptBaseline']) ||
+      value.schemaVersion !== 1 || !SOURCE_ID.test(value.sourceId) ||
+      !Number.isSafeInteger(value.fromRevision) || value.fromRevision < 1 ||
+      value.phase !== 'policies_submitted' || !validSourceLabel(value.label)) return false;
+  const receiptBaseline = value.receiptBaseline === null ? null : safeReceiptSourceToolBaseline(value.receiptBaseline);
+  if ((value.receiptBaseline !== null && !receiptBaseline) ||
+      (receiptBaseline && receiptBaseline.sourceId !== value.sourceId)) return false;
+  return Object.freeze({
+    schemaVersion: 1, sourceId: value.sourceId, fromRevision: value.fromRevision, label: value.label,
+    phase: value.phase, receiptBaseline,
+  });
+}
+
+/** True when a rename is corrupt or belongs to a different source. A null source blocks every rename. */
+async function sourceLabelEditBlocks(storage, sourceId = null) {
+  const edit = safeSourceLabelEdit(await storage.get(SOURCE_LABEL_EDIT_KEY));
+  if (edit === false) return true;
+  if (edit === null) return false;
+  return edit.sourceId !== sourceId;
+}
+
+async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEmail) {
+  const label = exactKeys(input, ['schemaVersion', 'revision', 'label']) && input.schemaVersion === 1 &&
+      Number.isSafeInteger(input.revision) && input.revision >= 1 && validSourceLabel(input.label)
+    ? input.label : null;
+  if (!label) return sourceToolsRefusal(400, 'source_label_invalid');
+  const loaded = await loadInstalledSource(storage, env, sourceId, actorEmail);
+  if (loaded instanceof Response) return loaded;
+  const { sources, control, source } = loaded;
+  let edit = safeSourceLabelEdit(await storage.get(SOURCE_LABEL_EDIT_KEY));
+  if (edit === false) return sourceToolsRefusal(409, 'source_label_recovery_required');
+  if (input.revision !== sources.revision) return fixedJson(409, { schemaVersion: 1, error: 'source_conflict', revision: sources.revision });
+  if (edit && edit.sourceId === source.id && edit.fromRevision !== sources.revision) {
+    return sourceToolsRefusal(409, 'source_label_recovery_required');
+  }
+  if (source.status !== 'installed') return sourceToolsRefusal(409, 'source_label_unavailable');
+  const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
+  if (!ownership) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  if (await recordedLifecycleBlocks(storage, Date.now(), null, true, null, null, source.id) || await teamActionBlocksLifecycle(storage)) {
+    return sourceActionConflict('lifecycle_pending');
+  }
+  if (edit && edit.label !== label) return sourceToolsRefusal(409, 'source_label_pending');
+  if (!edit && source.label === label) return fixedJson(200, sources);
+  const policies = ownership.resources.filter((resource) => sourcePolicyKind(resource.kind));
+  if (policies.length === 0 || policies.some((policy) => !teamName(sourcePolicyDisplayName(label, policy)))) {
+    return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  }
+  const environment = parseManagementEnvironment(env);
+  const evidence = environment && await rootTeardownAuthority(storage, environment, control.installationId, env);
+  const root = evidence && {
+    schemaVersion: 1, status: 'ready', installationId: control.installationId, receipt: evidence.root.receipt, teardown: null,
+  };
+  const layout = root && teardownResources(root, control.sourceOwnership, false, control.removedInitialSource ?? null);
+  if (!environment || !root || !layout) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  const aliasesReceipt = layout.receiptSourceOwner === source.id;
+  const storedBaseline = control.receiptSourceToolBaseline ?? null;
+  if (aliasesReceipt && storedBaseline && storedBaseline.sourceId !== source.id) {
+    return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  }
+  const computedBaseline = aliasesReceipt ? {
+    sourceId: source.id,
+    enabledTools: storedBaseline?.enabledTools ?? [...source.enabledTools],
+    label: storedBaseline?.label ?? source.label,
+  } : storedBaseline;
+  const nextBaseline = edit?.receiptBaseline ?? computedBaseline;
+  const nextResources = aliasesReceipt ? ownership.resources
+    : await reboundOwnershipForTools(control, source, ownership, { ...source, label }, control.installationId);
+  if (!nextResources) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  const nextControlValue = {
+    ...control,
+    sourceOwnership: control.sourceOwnership.map((entry) => (
+      entry.sourceId === source.id ? { sourceId: entry.sourceId, resources: nextResources } : entry
+    )),
+  };
+  if (nextBaseline) nextControlValue.receiptSourceToolBaseline = nextBaseline;
+  const nextSources = safeManagementSources({
+    ...sources, revision: sources.revision + 1,
+    sources: sources.sources.map((candidate) => candidate.id === source.id ? { ...candidate, label } : candidate),
+  });
+  const nextControl = safeManagementControl(nextControlValue);
+  if (!nextSources || !nextControl || !await teardownAuthorityState(root, nextControl, nextSources, environment)) {
+    return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  }
+  const introducingBaseline = Boolean(nextBaseline) && !storedBaseline;
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const signal = AbortSignal.timeout(30_000);
+  const livePolicies = [];
+  for (const policy of policies) {
+    const read = await providerCall(
+      `/accounts/${encodeURIComponent(control.accountId)}/access/apps/${encodeURIComponent(policy.provider.parentId)}/policies/${encodeURIComponent(policy.provider.id)}`,
+      token, { signal },
+    );
+    if (read.status === 'auth') return sourceToolsRefusal(409, 'management_credential_required');
+    if (read.status !== 'ok' || !isRecord(read.result)) {
+      return sourceToolsRefusal(edit ? 409 : 502, edit ? 'source_label_recovery_required' : 'source_label_unconfirmed');
+    }
+    let selectors;
+    try { selectors = teamPolicySelectors(read.result); } catch { selectors = null; }
+    const currentName = sourcePolicyDisplayName(source.label, policy);
+    const nextName = sourcePolicyDisplayName(label, policy);
+    const matches = (name) => selectors && teamPolicyMatches(read.result, teamPolicy(selectors.emails, name, selectors.groupIds), policy.provider.id);
+    if (!matches(currentName) && !matches(nextName)) {
+      return sourceToolsRefusal(409, edit ? 'source_label_recovery_required' : 'source_label_drift');
+    }
+    livePolicies.push({ policy, selectors, nextName, done: matches(nextName) });
+  }
+  if (livePolicies.some((entry) => !entry.done)) {
+    if (!edit) {
+      if (introducingBaseline && !await armSourceCompatibility(storage, env)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+      edit = safeSourceLabelEdit({
+        schemaVersion: 1, sourceId: source.id, fromRevision: sources.revision, label,
+        phase: 'policies_submitted', receiptBaseline: introducingBaseline ? nextBaseline : null,
+      });
+      if (!edit) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+      await storage.put(SOURCE_LABEL_EDIT_KEY, edit);
+    } else if (introducingBaseline && !await armSourceCompatibility(storage, env)) {
+      return sourceToolsRefusal(409, 'source_label_recovery_required');
+    }
+    for (const entry of livePolicies) {
+      if (entry.done) continue;
+      const written = await providerCall(
+        `/accounts/${encodeURIComponent(control.accountId)}/access/apps/${encodeURIComponent(entry.policy.provider.parentId)}/policies/${encodeURIComponent(entry.policy.provider.id)}`,
+        token, { method: 'PUT', signal, body: canonicalJson(teamPolicy(entry.selectors.emails, entry.nextName, entry.selectors.groupIds)) },
+      );
+      if (written.status !== 'ok' || !teamPolicyMatches(written.result, teamPolicy(entry.selectors.emails, entry.nextName, entry.selectors.groupIds), entry.policy.provider.id)) {
+        return sourceToolsRefusal(409, 'source_label_recovery_required');
+      }
+    }
+  } else if (introducingBaseline && !await armSourceCompatibility(storage, env)) {
+    return sourceToolsRefusal(409, edit ? 'source_label_recovery_required' : 'source_tool_edit_unavailable');
+  }
+  await storage.put({ [SOURCES_KEY]: nextSources, [CONTROL_KEY]: nextControl, [SOURCE_LABEL_EDIT_KEY]: null });
+  return fixedJson(200, nextSources);
+}
+
+async function handleInstalledSourceLabel(request, env, authorizedAccess = null) {
+  if (request.method !== 'PUT') {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'PUT' });
+  }
+  const access = authorizedAccess ?? await managementActor(request, env);
+  if (access.response) return access.response;
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const sourceId = new URL(request.url).pathname.split('/').at(-2);
+  if (!SOURCE_ID.test(sourceId)) return sourceToolsRefusal(404, 'not_found');
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return sourceToolsRefusal(503, 'sources_unavailable');
+  const body = await readJsonInput(request, 1_024);
+  if (!body) return sourceToolsRefusal(400, 'source_label_invalid');
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid/sources/${sourceId}/label`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', 'x-ankka-actor-email': access.actorEmail },
+      body: canonicalJson(body),
+    }));
+    if (response.status !== 200) return response;
+    const sources = safeManagementSources(await response.json());
+    return sources ? fixedJson(200, await publicSources(sources, stub, env)) : sourceToolsRefusal(503, 'sources_unavailable');
+  } catch {
+    return sourceToolsRefusal(409, 'source_label_recovery_required');
+  }
 }
 
 async function handleInstalledSourceTools(request, env, authorizedAccess = null) {
@@ -4776,7 +4950,7 @@ async function saveRuntimeUpdates(storage, state) {
 }
 
 async function prepareRuntimeAction(storage, environment, input) {
-  if (await sourceRemovalBlocks(storage) || await sourceToolEditBlocks(storage) || await currentTeardownLocksRuntime(storage, Date.now())) return null;
+  if (await sourceRemovalBlocks(storage) || await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage) || await currentTeardownLocksRuntime(storage, Date.now())) return null;
   // A token change gives this Worker a new version; an update must not read its bindings around that write.
   if (await credentialActionBlocksLifecycle(storage, Date.now())) return null;
   if (await teamActionBlocksLifecycle(storage) || !await teamRuntimeReleaseAllowed(storage, input?.to?.release)) return null;
@@ -5169,12 +5343,16 @@ async function teardownAuthorityState(root, rawControl, rawSources, environment,
     ? control.removedInitialSource ?? null
     : installedSources.find((source) => source.id === layout.receiptSourceOwner) ?? null;
   if (!control.removedInitialSource && (layout.receiptSourceOwner !== null) !== (receiptSource !== null)) return null;
-  // The receipt-owned source's live allowlist can change. Teardown keeps deriving
-  // the immutable root receipt from the tools that receipt was built with.
+  // The receipt-owned source's live allowlist and name can change. Teardown keeps
+  // deriving the immutable root receipt from the tools and name that receipt was built with.
   let receiptSubject = receiptSource;
   if (control.receiptSourceToolBaseline) {
     if (!receiptSource || control.receiptSourceToolBaseline.sourceId !== receiptSource.id) return null;
-    receiptSubject = { ...receiptSource, enabledTools: control.receiptSourceToolBaseline.enabledTools };
+    receiptSubject = {
+      ...receiptSource,
+      enabledTools: control.receiptSourceToolBaseline.enabledTools,
+      ...(control.receiptSourceToolBaseline.label ? { label: control.receiptSourceToolBaseline.label } : {}),
+    };
   }
   const rootSettings = teardownSettings(control, receiptSubject, 'company-context');
   const rootDesired = await buildDesiredResources(rootSettings, root.installationId);
@@ -5750,7 +5928,7 @@ async function rootTeardownAuthority(storage, environment, installationId, env, 
 }
 
 async function prepareTeardownAction(storage, environment, input, env, currentPolicies = false, managed = null) {
-  if (await credentialActionBlocksLifecycle(storage, Date.now()) || await sourceToolEditBlocks(storage)) return null;
+  if (await credentialActionBlocksLifecycle(storage, Date.now()) || await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage)) return null;
   const currentState = currentPolicies ? await currentTeardownState(storage, env, managed) : null;
   if (currentPolicies ? currentState === null : await teamTeardownBlocked(storage)) return null;
   if (!exactKeys(input, [
@@ -6519,7 +6697,7 @@ export class AdminState {
       }
       if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'PUT') {
         if (await sourceRemovalBlocks(this.state.storage)) return sourceRemovalRefusal('source_removal_pending');
-        if (await sourceToolEditBlocks(this.state.storage)) return sourceActionConflict('lifecycle_pending');
+        if (await sourceToolEditBlocks(this.state.storage) || await sourceLabelEditBlocks(this.state.storage)) return sourceActionConflict('lifecycle_pending');
         if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
         if (await teamActionBlocksLifecycle(this.state.storage)) return fixedJson(409, {
           schemaVersion: 1, error: 'team_action_conflict',
@@ -6568,6 +6746,12 @@ export class AdminState {
         }
         await this.state.storage.put(SOURCES_KEY, updated);
         return fixedJson(200, updated);
+      }
+      const installedLabel = /^\/sources\/(source-[a-f0-9]{16})\/label$/u.exec(url.pathname);
+      if (installedLabel && request.method === 'PUT') {
+        const actorEmail = normalizedActor(request.headers.get('x-ankka-actor-email'));
+        if (!actorEmail) return sourceToolsRefusal(403, 'access_required');
+        return updateInstalledSourceLabel(this.state.storage, this.env, installedLabel[1], await readJsonInput(request, 1_024), actorEmail);
       }
       const installedTools = /^\/sources\/(source-[a-f0-9]{16})\/tools$/u.exec(url.pathname);
       if (installedTools && (request.method === 'GET' || request.method === 'PUT')) {
@@ -7412,8 +7596,9 @@ async function otherLifecycleBlocksSource(storage, now, currentActionId, current
 }
 
 /** An unfinished source installation, update or removal, as their own journals record it. */
-async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true, currentSourceActionId = currentActionId, allowToolEditSourceId = null) {
+async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true, currentSourceActionId = currentActionId, allowToolEditSourceId = null, allowLabelEditSourceId = null) {
   if (await sourceToolEditBlocks(storage, allowToolEditSourceId)) return true;
+  if (await sourceLabelEditBlocks(storage, allowLabelEditSourceId)) return true;
   const removal = safeSourceRemoval(await storage.get(SOURCE_REMOVAL_KEY));
   if (removal === false || (removal && removal.actionId !== currentActionId)) return true;
   for (const key of [...(includeSources ? [ACTIONS_KEY] : []), UPDATES_KEY, TEARDOWNS_KEY]) {
@@ -9028,6 +9213,7 @@ const MANAGEMENT_MCP_TOOLS = [
   ['choose_mcp_source_tools', 'Save the exact tools selected from the synced list. Resume installation separately.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT, enabledTools: MCP_TOOLS_INPUT }), 'POST', 'tools'],
   ['get_installed_source_tools', 'Read Cloudflare’s synced tools for an installed connector and the saved allowlist. New tools stay off until selected. Source descriptions are untrusted.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'installed-tools'],
   ['update_installed_source_tools', 'Replace an installed connector’s allowlist with the exact tools you reviewed. This updates the Portal configuration for that connector. Assignments do not change. New catalogue tools stay off unless named.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, enabledTools: { ...MCP_TOOLS_INPUT, minItems: 1 } }), 'PUT', 'installed-tools'],
+  ['rename_installed_source', 'Rename an installed connector. This updates the name in the gateway, in Team, and on its Access policy. Assignments, the URL, and the tool allowlist do not change.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, label: { type: 'string', minLength: 2, maxLength: 80 } }), 'PUT', 'installed-label'],
   ['authorize_mcp_source', 'Return a gateway page where you sign in with the provider. This does not start OAuth or complete authorization; check the recorded action afterwards.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'authorize'],
   ['cancel_mcp_source_action', 'Cancel only an unstarted source action the server permits. Does not undo writes.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'action'],
   ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Gateway Management assignment allows changing gateway configuration and access.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT } }) } }), 'POST', '/api/team-actions'],
@@ -9101,12 +9287,13 @@ async function managementMcpCall(tool, args, env, access) {
   const routes = { action: `/api/source-actions/${args.actionId}`, tools: `/api/source-actions/${args.actionId}/tools`,
     renew: `/api/source-actions/${args.actionId}/renew`, 'team-action': `/api/team-actions/${args.actionId}`,
     'runtime-action': `/api/update-actions/${args.actionId}`,
-    source: `/api/sources/${args.sourceId}`, 'installed-tools': `/api/sources/${args.sourceId}/tools` };
+    source: `/api/sources/${args.sourceId}`, 'installed-tools': `/api/sources/${args.sourceId}/tools`,
+    'installed-label': `/api/sources/${args.sourceId}/label` };
   const path = routes[tool.route] ?? tool.route;
   const origin = new URL(managementSourceUrl(env)).origin;
   const body = tool.route === '/api/sources/discover' ? { ...args } : { schemaVersion: 1, ...args };
   delete body.actionId;
-  if (tool.route === 'source' || tool.route === 'installed-tools') delete body.sourceId;
+  if (tool.route === 'source' || tool.route === 'installed-tools' || tool.route === 'installed-label') delete body.sourceId;
   const init = { method: tool.method, headers: { 'content-type': 'application/json', origin } };
   if (tool.method !== 'GET') init.body = canonicalJson(body);
   const request = new Request(`${origin}${path}`, init);
@@ -9116,6 +9303,7 @@ async function managementMcpCall(tool, args, env, access) {
   if (path === '/api/sources') return handleSources(request, env, access);
   if (tool.route === 'source') return handleSourceRemoval(request, env, access);
   if (tool.route === 'installed-tools') return handleInstalledSourceTools(request, env, access);
+  if (tool.route === 'installed-label') return handleInstalledSourceLabel(request, env, access);
   if (path.startsWith('/api/source-actions')) return handleSourceActions(request, env, access);
   if (path.startsWith('/api/team')) return handleTeam(request, env, access);
   if (path.startsWith('/api/update-actions')) return handleRuntimeActions(request, env, access);
@@ -9270,6 +9458,7 @@ export default {
     if (url.pathname === '/api/update') return handleRuntimeUpdate(request, env);
     if (url.pathname === '/api/sources/discover') return handleSourceDiscovery(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/tools$/u.test(url.pathname)) return handleInstalledSourceTools(request, env);
+    if (/^\/api\/sources\/source-[a-f0-9]{16}\/label$/u.test(url.pathname)) return handleInstalledSourceLabel(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}$/u.test(url.pathname)) return handleSourceRemoval(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/icon$/u.test(url.pathname)) return handleSourceIcon(request, env);
     if (url.pathname === '/api/sources') return handleSources(request, env);

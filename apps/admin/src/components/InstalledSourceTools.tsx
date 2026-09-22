@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import { GatewayApiError, type InstalledSourceTools, type ManagedSource } from '../api'
 import { Button } from './Button'
 import { syncedHintSummary } from './SourceToolChoice'
@@ -119,6 +119,50 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
           ) : null}
         </div>
       ) : error ? <p role="alert" className="mt-3 text-sm text-kumo-danger">{error}</p> : null}
+    </div>
+  )
+}
+
+function nameIsValid(value: string): boolean {
+  return value.length >= 2 && value.length <= 80 && value.trim() === value && !/[\u0000-\u001f\u007f]/u.test(value)
+}
+
+/** Rename an installed connector. The URL, tools, and who can use it stay as they are. */
+export function InstalledSourceName({ source, disabled, onRename }: {
+  source: ManagedSource
+  disabled: boolean
+  onRename(sourceId: string, label: string): Promise<void>
+}) {
+  const inputId = useId()
+  const [name, setName] = useState(source.label)
+  const [error, setError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { setName(source.label) }, [source.label])
+  const unchanged = name === source.label
+  const busy = disabled || saving
+
+  async function save() {
+    if (!nameIsValid(name) || unchanged) return
+    setSaving(true)
+    setError(null)
+    try {
+      await onRename(source.id, name)
+    } catch (cause) {
+      setError(cause instanceof GatewayApiError ? cause.message : 'The gateway request failed. Refresh and try again.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="mt-4">
+      <label className="block text-xs font-medium text-kumo-subtle" htmlFor={inputId}>Name
+        <input id={inputId} className="text-input mt-2 w-full max-w-md" value={name} maxLength={80} disabled={busy}
+          onChange={(event) => { setName(event.target.value); setError(null) }} />
+      </label>
+      <p className="mt-2 text-xs leading-5 text-kumo-subtle">This changes the name in your gateway, in Team, and on this connector’s Access policy. Who can use it does not change.</p>
+      {error ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{error}</p> : null}
+      <Button type="button" variant="secondary" className="pressable mt-3" disabled={busy || unchanged || !nameIsValid(name)} loading={saving} onClick={() => void save()}>Save name</Button>
     </div>
   )
 }

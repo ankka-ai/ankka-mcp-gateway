@@ -419,6 +419,8 @@ export interface GatewayAdminApi {
   getInstalledSourceTools(sourceId: string): Promise<InstalledSourceTools>
   /** Replaces an installed connector’s allowlist and its Portal tool configuration. Assignments stay as they are. */
   updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[]): Promise<ManagedSources>
+  /** Renames an installed connector in the gateway, in Team, and on its Access policy. Assignments stay as they are. */
+  renameInstalledSource(revision: number, sourceId: string, label: string): Promise<ManagedSources>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
   getRuntimeAction(actionId: string): Promise<RuntimeAction>
   prepareTeardownAction(): Promise<PreparedAction>
@@ -522,6 +524,12 @@ const ERROR_MESSAGES = new Map([
   ['source_tools_recovery_required', 'The tool update could not be confirmed. Retry the same selection; the gateway continues from the saved progress.'],
   ['source_portal_drift', 'The Portal configuration does not match this gateway’s record, so the tool selection was not saved. Review the connector in Cloudflare, then try again.'],
   ['source_tool_edit_unavailable', 'This connector’s saved ownership could not be verified, so its tools were not changed. Refresh and try again.'],
+  ['source_label_invalid', 'Enter a name of 2 to 80 characters. It was not saved.'],
+  ['source_label_unavailable', 'Only an installed connector can be renamed.'],
+  ['source_label_pending', 'A rename for this connector is already in progress. Refresh and save that same name to finish it.'],
+  ['source_label_recovery_required', 'The rename could not be confirmed. Retry the same name; the gateway continues from the saved progress.'],
+  ['source_label_drift', 'The Access policy name does not match this connector, so the name was not saved. Review the connector in Cloudflare, then try again.'],
+  ['source_label_unconfirmed', 'The connector’s Access policy could not be read, so the name was not saved. Try again.'],
   ['source_unreachable', 'The MCP endpoint could not be reached within the discovery deadline.'],
   ['source_url_invalid', 'Enter a public HTTPS MCP endpoint without credentials, query parameters, or a custom port.'],
   ['runtime_action_conflict', 'Another runtime action is active or the installed version changed.'],
@@ -724,6 +732,13 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, managedSourcesSchema, {
       method: 'PUT',
       body: JSON.stringify({ schemaVersion: 1, revision, enabledTools: [...new Set(enabledTools)].sort() }),
+    })
+  }
+
+  renameInstalledSource(revision: number, sourceId: string, label: string): Promise<ManagedSources> {
+    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/label`, managedSourcesSchema, {
+      method: 'PUT',
+      body: JSON.stringify({ schemaVersion: 1, revision, label }),
     })
   }
 

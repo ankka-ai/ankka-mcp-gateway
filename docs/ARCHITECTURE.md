@@ -110,7 +110,9 @@ a new, short-lived Cloudflare authorization. Changing the tools of a connector
 that is already installed is separate: Edit tools reads Cloudflare’s synced
 catalogue with the management token, and saving replaces that connector’s exact
 allowlist and its Portal tool configuration. Tools that were not already allowed
-stay off until you select them. A protected source defaults to
+stay off until you select them. Renaming an installed connector updates its
+name in the gateway, in Team, and on its Access policy. The URL, the tool
+allowlist, and who can use it stay as they are. A protected source defaults to
 `onBehalfOfUser: false`: a gateway operator connects it once, Cloudflare stores
 the source credential, and employees authenticate only to the Portal. The
 current dashboard does not expose per-user upstream authentication. Upstream

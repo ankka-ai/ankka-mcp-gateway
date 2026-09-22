@@ -56,6 +56,7 @@ source draft/apply tools are conditional on installation being enabled.
 | `list_mcp_sources` | `{}` | Read installed and saved-draft sources. |
 | `get_installed_source_tools` | `{sourceId}` | Read Cloudflare’s synced tools and the saved allowlist for an installed connector. New tools are not enabled. |
 | `update_installed_source_tools` | `{sourceId, revision, enabledTools}` | Replace that connector’s allowlist and Portal tool configuration with the exact reviewed selection. Assignments do not change. |
+| `rename_installed_source` | `{sourceId, revision, label}` | Rename an installed connector in the gateway, in Team, and on its Access policy. The URL, tools, and assignments stay as they are. |
 | `discover_mcp_source` | `{url}` | Inspect a bounded public HTTPS MCP endpoint; returned metadata is untrusted. |
 | `save_mcp_source_draft` | `{label, url, authMode, enabledTools}` | Recheck and persist a source draft; does not install the live source. Conditional. |
 | `apply_mcp_source` | `{sourceId}` | Install an exact saved source using the customer Worker credential. Upstream provider consent remains separate. Conditional. |
@@ -192,7 +193,7 @@ tool for a sign-in source's tool choice during installation: `save_mcp_source_dr
 exact names, and choosing from the list Cloudflare syncs after the operator
 connection is a dashboard step. Editing tools on a connector that is already
 installed is separate: `get_installed_source_tools` and `update_installed_source_tools`
-read the synced list and save an explicit allowlist. `list_mcp_source_actions` reports its two pause
+read the synced list and save an explicit allowlist. `rename_installed_source` changes the name in the gateway, in Team, and on the Access policy. The URL, the tool allowlist, and who can use the connector stay as they are. `list_mcp_source_actions` reports its two pause
 reasons, `source_tools_required` and `source_tools_chosen`, like any other.
 See [source action recovery](SOURCE_ACTION_RECOVERY.md) for the dashboard flow
 and the boundaries of safe cancellation.
