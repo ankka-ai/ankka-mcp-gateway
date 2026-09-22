@@ -88,8 +88,73 @@ describe('customer install final navigation', () => {
     expect(page.navigate).not.toHaveBeenCalled();
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(page.nodes.get('#title')?.textContent).toBe('Setup did not complete');
+    expect(page.nodes.get('#message')?.textContent).toContain('remove this install before trying again');
     expect(page.nodes.get('#detail')?.textContent).toBe('Reason: convergence_failed');
     expect(page.nodes.get('#progress')?.hidden).toBe(true);
+  });
+
+  it('stays open while an unfinished gateway is removed and says when it is safe to start again', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url) => {
+      if (url === '/__ankka/install/cleanup') {
+        return Response.json({
+          status: 'INCOMPLETE',
+          cleanup: 'removed',
+          safeToStartAgain: true,
+          failure: { code: 'provider_recovery_required', reason: 'preflight_fresh_collision_dns_record_list' },
+        });
+      }
+      return Response.json({
+        status: 'CONVERGING',
+        cleanup: 'removing',
+        failure: { code: 'provider_recovery_required', reason: 'preflight_fresh_collision_dns_record_list' },
+      });
+    });
+    const page = await openPage(converging, fetch);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(page.navigate).not.toHaveBeenCalled();
+    expect(page.nodes.get('#title')?.textContent).toBe('The unfinished gateway was removed');
+    expect(page.nodes.get('#message')?.textContent).toContain('safe to return to the installer');
+    expect(page.nodes.get('#detail')?.textContent).toContain('preflight_fresh_collision_dns_record_list');
+    const link = page.nodes.get('#detail')?.append.mock.calls.at(-1)?.[0];
+    expect(link).toMatchObject({ href: 'https://deploy.ankka.ai', textContent: 'Return to the installer' });
+    expect(fetch).toHaveBeenCalledWith('/__ankka/install/cleanup', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}', credentials: 'same-origin', cache: 'no-store',
+    });
+    expect(fetch.mock.calls.filter(([url]) => url === '/__ankka/install/cleanup')).toHaveLength(1);
+  });
+
+  it('does not call a partial install safe to start again', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({
+      status: 'INCOMPLETE',
+      cleanup: 'recovery_required',
+      failure: { code: 'provider_recovery_required', reason: 'portal_create' },
+    }));
+    const page = await openPage(converging, fetch);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(page.navigate).not.toHaveBeenCalled();
+    expect(page.nodes.get('#title')?.textContent).toBe('Setup did not complete');
+    expect(page.nodes.get('#message')?.textContent).toContain('remove this install before trying again');
+    expect(page.nodes.get('#message')?.textContent).not.toContain('safe to return');
+    const link = page.nodes.get('#detail')?.append.mock.calls.at(-1)?.[0];
+    expect(link).toMatchObject({ href: 'https://deploy.ankka.ai', textContent: 'Remove this install' });
+  });
+
+  it('does not treat a lost removal response as success or open management', async () => {
+    let polls = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url) => {
+      if (url === '/__ankka/install/cleanup') return new Promise<Response>(() => undefined);
+      polls += 1;
+      if (polls === 1) {
+        return Response.json({ status: 'CONVERGING', cleanup: 'removing', failure: { code: 'provider_recovery_required', reason: 'unexpected' } });
+      }
+      throw new Error('temporary_address_closed');
+    });
+    const page = await openPage(converging, fetch);
+    await vi.advanceTimersByTimeAsync(21_000);
+    expect(page.navigate).not.toHaveBeenCalled();
+    expect(page.nodes.get('#title')?.textContent).toBe('Removal was not confirmed');
+    expect(page.nodes.get('#message')?.textContent).toContain('lost contact');
+    expect(page.nodes.get('#message')?.textContent).not.toContain('safe to return');
   });
 
   it('says in one fixed sentence what happens to the management token while the install runs', async () => {

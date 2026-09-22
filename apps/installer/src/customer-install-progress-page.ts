@@ -1,7 +1,8 @@
 import { customerPageEnd, customerPageStart } from './customer-page-shell';
 import { customerLoadingIndicator } from './customer-page-theme';
 import type { CustomerBootstrapCallbackOutcome } from './customer-bootstrap-router';
-import { CUSTOMER_INSTALL_ROOT_PATH, CUSTOMER_INSTALL_STATUS_PATH } from './customer-install-paths';
+import { PUBLIC_ORIGIN } from './constants';
+import { CUSTOMER_INSTALL_CLEANUP_PATH, CUSTOMER_INSTALL_ROOT_PATH, CUSTOMER_INSTALL_STATUS_PATH } from './customer-install-paths';
 
 function secureHeaders(contentType: string): Headers {
   return new Headers({
@@ -65,12 +66,24 @@ export function customerInstallProgressPage(
     skipped:'You continued without a management token. Adding connectors and managing team access stay disabled until you add it in Settings.',
     dropped:'Your gateway no longer held the management token you pasted, so setup is finishing without it. Adding connectors and managing team access stay disabled until you add it in Settings.',
   };
+  const installer=${scriptLiteral(PUBLIC_ORIGIN)};
   const progress=document.querySelector('#progress');
   let misses=0;
   let active=true;
+  let removing=false;
+  let removalRequested=false;
   let timer;
   let controller;
   const stop=()=>{active=false;progress.hidden=true;clearTimeout(timer);if(controller)controller.abort()};
+  const reasonText=(failure)=>failure?'Reason: '+failure.code+(failure.reason?' / '+failure.reason:''):'';
+  const installerLink=(label)=>{const link=document.createElement('a');link.href=installer;link.textContent=label;detail.append(link)};
+  const unconfirmed=()=>{
+    stop();
+    title.textContent='Removal was not confirmed';
+    message.textContent='This page lost contact before removal could be confirmed. Return to the installer and start again only after it shows this installation is gone.';
+    detail.textContent='';
+    installerLink('Return to the installer');
+  };
   addEventListener('pagehide',stop);
   const openManagement=()=>{
     if(!active)return;
@@ -87,12 +100,32 @@ export function customerInstallProgressPage(
   const show=(state)=>{
     credential.textContent=state.status==='CONVERGING'&&Object.hasOwn(notes,String(state.managementCredential))?notes[state.managementCredential]:'';
     if(state.status==='READY'){openManagement();return true}
-    if(state.status==='INCOMPLETE'){
+    const failure=state.failure;
+    if(state.cleanup==='removing'){
+      removing=true;
+      title.textContent='Removing the unfinished gateway';
+      message.textContent='Setup stopped before it was ready. This page stays open while that unfinished gateway is removed.';
+      detail.textContent=reasonText(failure);
+      if(!removalRequested){
+        removalRequested=true;
+        fetch(${scriptLiteral(CUSTOMER_INSTALL_CLEANUP_PATH)},{method:'POST',headers:{'content-type':'application/json'},body:'{}',credentials:'same-origin',cache:'no-store'}).then(async(response)=>{if(!response.ok)throw new Error();const next=await response.json();if(active)show(next)}).catch(()=>{if(active)unconfirmed()});
+      }
+      return false;
+    }
+    if(state.cleanup==='removed'||state.safeToStartAgain===true){
+      stop();
+      title.textContent='The unfinished gateway was removed';
+      message.textContent='It is safe to return to the installer and start again.';
+      detail.textContent=reasonText(failure);
+      installerLink('Return to the installer');
+      return true;
+    }
+    if(state.status==='INCOMPLETE'||state.cleanup==='recovery_required'){
       stop();
       title.textContent='Setup did not complete';
-      message.textContent='The Gateway stopped before it was ready. Return to deploy.ankka.ai to remove this install and try again.';
-      const failure=state.failure;
-      detail.textContent=failure?'Reason: '+failure.code+(failure.reason?' / '+failure.reason:''):'';
+      message.textContent='The Gateway stopped before it was ready. Return to the installer to remove this install before trying again. Do not start another one until that removal finishes.';
+      detail.textContent=reasonText(failure);
+      installerLink('Remove this install');
       return true;
     }
     if(state.status!=='CONVERGING')throw new Error();
@@ -111,8 +144,12 @@ export function customerInstallProgressPage(
     }catch{
       if(!active)return;
       misses+=1;
+      if(removing){
+        if(misses>=5)unconfirmed();
+      }else{
       if(misses===3){message.textContent='Still finishing. The temporary setup address is being replaced by your management address; this can take a few minutes.'}
       if(misses>=20){openManagement();return}
+      }
     }finally{clearTimeout(timeout)}
     if(active)timer=setTimeout(poll,3000);
   };

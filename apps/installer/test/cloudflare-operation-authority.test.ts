@@ -73,7 +73,7 @@ describe('fixed Cloudflare OAuth operation authority', () => {
     ]);
     expect(install.mutations).toEqual(expect.arrayContaining([
       'create-final-resources', 'resume-final-resource-convergence', 'activate-worker-release',
-      'disable-workers-dev',
+      'disable-workers-dev', 'delete-bootstrap-worker', 'delete-bootstrap-admin-state-namespace',
     ]));
     expect(install.postconditions).toEqual(expect.arrayContaining([
       'ownership-receipt-complete', 'bootstrap-surface-dead', 'workers-dev-disabled',

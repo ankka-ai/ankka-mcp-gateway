@@ -36,6 +36,7 @@ import {
   verifyReceiptInInstallationObject,
 } from './customer-installation-object';
 import {
+  CUSTOMER_INSTALL_CLEANUP_PATH,
   CUSTOMER_INSTALL_CONTINUE_PATH,
   CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH,
   CUSTOMER_INSTALL_OAUTH_START_PATH,
@@ -44,6 +45,11 @@ import {
 } from './customer-install-paths';
 import type { CustomerInstallStatus } from './customer-install-status';
 import { customerInstallProgressPage } from './customer-install-progress-page';
+import { classifyCustomerBootstrapFailure } from './customer-bootstrap-failure-cleanup';
+import { recordCustomerStage2Cleanup } from './customer-stage2-journal';
+import { HostedStage1CleanupError, removeExactBootstrapRoot } from './hosted-stage1-cleanup';
+import { verifyCloudflareGatewayOwnershipCertificate } from './cloudflare-gateway-ownership-proof';
+import type { CustomerBootstrapPlainBindings } from './customer-bootstrap-worker-deployment';
 import {
   CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH,
   CustomerManagementCredentialHolder,
@@ -55,6 +61,7 @@ import {
 import { customerPayloadEnvironment } from './customer-payload-environment';
 
 declare const __ANKKA_FINAL_RUNTIME_SOURCE__: string;
+declare const __ANKKA_RETIREMENT_SOURCE__: string;
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/u;
 const envSchema = v.object({
@@ -188,6 +195,8 @@ export class AdminState extends RuntimeAdminState {
       publicClientId: parsedEnv(bootstrapEnv).CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
       converge: (accessToken, attemptId, handover) => this.converge(accessToken, attemptId, handover),
       now: Date.now,
+      classifyTerminalFailure: (input) => this.classifyTerminalFailure(input),
+      removeOwnedBootstrap: (input) => this.removeOwnedBootstrap(input),
       // Every alarm is its own invocation with its own subrequest budget; the
       // delayed one fires on the final runtime after the handover. An alarm
       // the driver sets replaces any keep-alive tick and is the driver's own.
@@ -325,6 +334,162 @@ export class AdminState extends RuntimeAdminState {
     }));
   }
 
+  /**
+   * A terminal failure may remove the bootstrap Worker and namespace only when
+   * the journal and ownership certificate agree that nothing else was sent.
+   * A failed journal read is recovery, not deletion.
+   */
+  private async classifyTerminalFailure(input: {
+    readonly attemptId: string;
+    readonly failureReason: string | null;
+  }): Promise<'bootstrap_only' | 'recovery_required'> {
+    const journalPort = new CustomerStage2DurableStatePort(this.bootstrapState.storage);
+    let journal;
+    try {
+      journal = await journalPort.read();
+    } catch {
+      return 'recovery_required';
+    }
+    const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage).catch(() => null);
+    if (ownership === null || ownership.ownershipCertificate === null || ownership.trust === null) {
+      return 'recovery_required';
+    }
+    let workerId: string | null = null;
+    let namespaceId: string | null = null;
+    try {
+      const certificate = await verifyCloudflareGatewayOwnershipCertificate({
+        certificate: ownership.ownershipCertificate,
+        pinnedIssuerPublicKey: ownership.trust.pinnedIssuerPublicKey,
+        expectedKeyId: ownership.trust.issuerKeyId,
+        expectedPublicClientId: ownership.trust.publicClientId,
+      });
+      if (certificate.statement.accountId !== parsedEnv(this.bootstrapEnv).CLOUDFLARE_ACCOUNT_ID) {
+        return 'recovery_required';
+      }
+      workerId = certificate.statement.worker.providerId;
+      namespaceId = certificate.statement.adminStateNamespaceId;
+    } catch {
+      return 'recovery_required';
+    }
+    const decision = classifyCustomerBootstrapFailure({
+      journal,
+      workerId,
+      namespaceId,
+      versionId: ownership.bootstrapVersionId,
+    });
+    if (journal !== null) {
+      try {
+        const next = recordCustomerStage2Cleanup(journal, {
+          now: Date.now(),
+          phase: decision === 'bootstrap_only' ? 'removing' : 'recovery_required',
+          reason: input.failureReason,
+        });
+        if (!await journalPort.compareAndSet(journal.revision, next)) return 'recovery_required';
+      } catch {
+        return 'recovery_required';
+      }
+    }
+    return decision;
+  }
+
+  /** Uses the install grant only. The management token is not read. */
+  private async removeOwnedBootstrap(input: {
+    readonly grant: { withAccessToken<Value>(operation: (accessToken: string) => Promise<Value>): Promise<Value> };
+  }): Promise<'removed' | 'recovery_required'> {
+    const config = parsedEnv(this.bootstrapEnv);
+    const ownership = await readCustomerGatewayOwnershipState(this.bootstrapState.storage).catch(() => null);
+    if (ownership === null || ownership.serializedPlan === null || ownership.ownershipCertificate === null ||
+        ownership.trust === null) return 'recovery_required';
+    let workerId: string;
+    let workerName: string;
+    let namespaceId: string;
+    let accountId: string;
+    try {
+      const certificate = await verifyCloudflareGatewayOwnershipCertificate({
+        certificate: ownership.ownershipCertificate,
+        pinnedIssuerPublicKey: ownership.trust.pinnedIssuerPublicKey,
+        expectedKeyId: ownership.trust.issuerKeyId,
+        expectedPublicClientId: ownership.trust.publicClientId,
+      });
+      accountId = certificate.statement.accountId;
+      workerId = certificate.statement.worker.providerId;
+      workerName = certificate.statement.worker.name;
+      namespaceId = certificate.statement.adminStateNamespaceId;
+    } catch {
+      return 'recovery_required';
+    }
+    if (accountId !== config.CLOUDFLARE_ACCOUNT_ID || workerName !== config.ANKKA_WORKER_NAME) {
+      return 'recovery_required';
+    }
+    let plan;
+    try {
+      plan = await verifyStaticDeployPlanIntegrity(JSON.parse(ownership.serializedPlan));
+    } catch {
+      return 'recovery_required';
+    }
+    let retirement: string;
+    try {
+      retirement = __ANKKA_RETIREMENT_SOURCE__;
+      if (retirement.length === 0) return 'recovery_required';
+    } catch {
+      return 'recovery_required';
+    }
+    const expectedBindings: CustomerBootstrapPlainBindings = {
+      ANKKA_BOOTSTRAP_CALLBACK: config.ANKKA_BOOTSTRAP_CALLBACK,
+      ANKKA_BOOTSTRAP_EXPIRES_AT: config.ANKKA_BOOTSTRAP_EXPIRES_AT,
+      ANKKA_BOOTSTRAP_ID: config.ANKKA_BOOTSTRAP_ID,
+      ANKKA_BOOTSTRAP_SECRET_SHA256: config.ANKKA_BOOTSTRAP_SECRET_SHA256,
+      ANKKA_GATEWAY_RELEASE: config.ANKKA_GATEWAY_RELEASE,
+      ANKKA_GATEWAY_RELEASE_SHA256: config.ANKKA_GATEWAY_RELEASE_SHA256,
+      ANKKA_INSTALL_ID: config.ANKKA_INSTALL_ID,
+      ANKKA_INSTALLER_ORIGIN: config.ANKKA_INSTALLER_ORIGIN,
+      ANKKA_MANAGEMENT_HOSTNAME: config.ANKKA_MANAGEMENT_HOSTNAME,
+      ANKKA_PLAN_HASH: config.ANKKA_PLAN_HASH,
+      ANKKA_PLAN_ID: config.ANKKA_PLAN_ID,
+      ANKKA_UPDATE_CHANNEL: config.ANKKA_UPDATE_CHANNEL,
+      ANKKA_UPDATE_KEY_ID: config.ANKKA_UPDATE_KEY_ID,
+      ANKKA_UPDATE_PUBLIC_KEY: config.ANKKA_UPDATE_PUBLIC_KEY,
+      ANKKA_WORKER_NAME: config.ANKKA_WORKER_NAME,
+      CLOUDFLARE_ACCOUNT_ID: config.CLOUDFLARE_ACCOUNT_ID,
+      CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID: config.CLOUDFLARE_CUSTOMER_OAUTH_CLIENT_ID,
+      CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID: config.CLOUDFLARE_OWNERSHIP_ISSUER_KEY_ID,
+      CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY: config.CLOUDFLARE_OWNERSHIP_ISSUER_PUBLIC_KEY,
+    };
+    try {
+      await input.grant.withAccessToken((accessToken) => removeExactBootstrapRoot({
+        accessToken,
+        transport: (target, init) => fetch(target, init),
+        now: Date.now,
+        root: {
+          plan,
+          accountId,
+          bootstrapId: config.ANKKA_BOOTSTRAP_ID,
+          bootstrapCallback: config.ANKKA_BOOTSTRAP_CALLBACK,
+          bootstrapSecretCommitment: config.ANKKA_BOOTSTRAP_SECRET_SHA256,
+          capabilityExpiresAt: config.expiresAt,
+          workerId,
+          workerName,
+          namespaceId,
+          namespaceName: null,
+          versionId: ownership.bootstrapVersionId,
+          bootstrapSourceSha256: plan.bootstrapWorkerSourceSha256,
+          expectedBindings,
+          retirementModule: new Blob([retirement], { type: 'application/javascript+module' }),
+          disableSubdomain: false,
+        },
+      }));
+    } catch (error) {
+      // A provider blip or an unproven absence can be read back on the next
+      // call. A mismatch or a shared binding is not something to keep retrying.
+      if (error instanceof HostedStage1CleanupError &&
+          (error.code === 'provider_unknown' || error.code === 'provider_rejected' || error.code === 'absence_not_proven')) {
+        throw error;
+      }
+      return 'recovery_required';
+    }
+    return 'removed';
+  }
+
   private installationObject(): DurableObjectStub {
     const namespace = this.bootstrapEnv.ADMIN_STATE;
     return namespace.get(namespace.idFromName(customerInstallationObjectName(parsedEnv(this.bootstrapEnv).ANKKA_INSTALL_ID)));
@@ -365,9 +530,13 @@ export class AdminState extends RuntimeAdminState {
       // shell answers the hosted readiness check exactly as before. The
       // install's status never depends on it: an unreadable word is no word.
       const managementCredential = await managementStep.word().catch(() => undefined);
-      const body: CustomerInstallStatus = managementCredential === undefined
+      const withCredential: CustomerInstallStatus = managementCredential === undefined
         ? answer
         : { ...answer, managementCredential };
+      const cleanup = state?.cleanup ?? null;
+      const body: CustomerInstallStatus = cleanup === null
+        ? withCredential
+        : { ...withCredential, cleanup: cleanup.phase };
       const headers = secureHeaders('application/json; charset=utf-8');
       // Only the installer may read this public status from a browser. This
       // route accepts no credentials and never exposes the setup capability.
@@ -394,7 +563,8 @@ export class AdminState extends RuntimeAdminState {
         url.pathname !== CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH &&
         url.pathname !== CUSTOMER_INSTALL_CONTINUE_PATH &&
         url.pathname !== CUSTOMER_INSTALL_OAUTH_START_PATH &&
-        url.pathname !== CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH) {
+        url.pathname !== CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH &&
+        url.pathname !== CUSTOMER_INSTALL_CLEANUP_PATH) {
       return super.fetch(request);
     }
     const setup = createCustomerWorkerSetup({
@@ -481,6 +651,7 @@ export class AdminState extends RuntimeAdminState {
       startConvergence: (input) => this.convergence.start(input),
       callbackResponse: (outcome, cookies) => customerInstallProgressPage(managementHostname, outcome, cookies),
       managementCredential: managementStep,
+      finishBootstrapCleanup: () => this.convergence.finishOwnedCleanup(),
     });
     const response = await router.fetch(request);
     // A value the step just took starts being looked after here; with none held this does nothing.
@@ -504,7 +675,8 @@ export default {
           url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH) ||
         request.method === 'POST' && (url.pathname === '/__ankka/install/configuration' || url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH ||
           url.pathname === CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH ||
-          url.pathname === CUSTOMER_INSTALL_OAUTH_START_PATH)
+          url.pathname === CUSTOMER_INSTALL_OAUTH_START_PATH ||
+          url.pathname === CUSTOMER_INSTALL_CLEANUP_PATH)
       )) return new Response(null, { status: 404, headers: secureHeaders('text/plain; charset=utf-8') });
       return await env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(request);
     } catch {
