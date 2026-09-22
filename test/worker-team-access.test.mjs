@@ -659,7 +659,7 @@ test('slow consent is discoverable after reload and repeated Apply points to the
     const response = await gateway.api('/api/source-actions');
     assert.equal(response.status, 200);
     const snapshot = await response.json();
-    assert.equal(snapshot.blockingAction, null, 'an unstarted approval reserves only its own source');
+    assert.deepEqual(snapshot.blockingAction, pointer);
     assert.equal(snapshot.actions.length, 1);
     const action = snapshot.actions[0];
     assert.equal(action.state, 'authorization_required');
@@ -702,7 +702,7 @@ test('an expired proven-unstarted source action requires owner cancellation befo
   const snapshot = await (await gateway.api('/api/source-actions')).json();
   assert.equal(snapshot.actions[0].state, 'authorization_expired');
   assert.equal(snapshot.actions[0].canCancel, true);
-  assert.equal(snapshot.blockingAction, null, 'an expired unstarted approval does not block other sources');
+  assert.equal(snapshot.blockingAction.actionId, prepared.claim.actionId);
   const repeat = await gateway.api('/api/source-actions', { method: 'POST', body: {
     schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
   } });
@@ -833,11 +833,6 @@ test('invalid source journal state cannot be presented as idle or replaced', asy
 for (const kind of ['source', 'runtime', 'teardown', 'team']) {
   test(`source preparation identifies an unrelated ${kind} action`, async () => fixture(async (gateway) => {
     const prepared = await prepareNewSource(gateway);
-    if (kind === 'source') {
-      const saved = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
-      await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { ...saved,
-        actions: saved.actions.map((action) => ({ ...action, status: 'applying' })) });
-    }
     if (kind !== 'source') {
       assert.equal((await gateway.api(`/api/source-actions/${prepared.claim.actionId}`, { method: 'DELETE' })).status, 200);
       if (kind === 'runtime') assert.equal((await (await runtimeAction(gateway)).prepare()).status, 200);
