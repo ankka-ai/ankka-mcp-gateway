@@ -4,6 +4,13 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Include agent-authored API sources in the gateway runtime by default. Gateway
+  Management can save, test, activate and disable JavaScript tools for configured
+  API connections; ordinary Portal source installation and Team access govern
+  their use. Connections and credentials stay in your Cloudflare account. New
+  installations and updates include the runtime without a separate deployment
+  or feature flag.
+
 - Accept Cloudflare server records up to 8 MiB, including large synced tool
   schemas, when reading source tools and verifying removal ownership. Sources
   whose records exceeded the previous 4 MiB limit can now finish removal.

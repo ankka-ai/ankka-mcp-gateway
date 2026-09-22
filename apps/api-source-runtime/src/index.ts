@@ -1,9 +1,17 @@
-import { WorkerEntrypoint } from 'cloudflare:workers';
+import { DurableObject, WorkerEntrypoint } from 'cloudflare:workers';
 import { z } from 'zod';
 import { verifyAccess } from '../../read-only-connectors/src/access';
 import { readRequestBody } from '../../read-only-connectors/src/incoming';
 import { toolSchema } from './contract';
-export { ApiSource } from './state';
+import { ApiSourceStore } from './state';
+
+/** Standalone harness for local runtime verification; releases embed the store in AdminState. */
+export class ApiSource extends DurableObject<Env> {
+  private store() { return new ApiSourceStore(this.ctx.storage, this.env, `${this.env.PUBLIC_ORIGIN}/mcp`); }
+  manage(text: string) { return this.store().manage(text); }
+  catalogue() { return this.store().catalogue(); }
+  call(name: string, input: string) { return this.store().call(name, input); }
+}
 
 const envelope = z.strictObject({
   jsonrpc: z.literal('2.0'), id: z.union([z.string().max(128), z.number().int()]).optional(),

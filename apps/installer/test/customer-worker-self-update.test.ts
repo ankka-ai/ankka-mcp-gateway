@@ -60,6 +60,7 @@ function base64(value: string): string {
 
 function finalBindings(overrides: readonly BoundaryObject[] = []): readonly BoundaryObject[] {
   const values: BoundaryObject[] = [
+    { name: 'API_LOADER', type: 'worker_loader' },
     { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
     { name: 'ASSETS', type: 'assets' },
     { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'secret_text' },
@@ -323,7 +324,7 @@ describe('customer Worker final self-update', () => {
     expect(bindings.filter((binding) => v.is(v.looseObject({ type: v.literal('secret_text') }), binding))).toEqual([
       { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text', text: MANAGEMENT_VALUE },
     ]);
-    expect(bindings).toHaveLength(Object.keys(BINDINGS).length + 4);
+    expect(bindings).toHaveLength(Object.keys(BINDINGS).length + 5);
     // The value is in the metadata part exactly once and in nothing else the process sent or returned.
     expect(provider.uploadedMetadataText()?.split(MANAGEMENT_VALUE)).toHaveLength(2);
     expect(provider.uploadedSource()).not.toContain(MANAGEMENT_VALUE);

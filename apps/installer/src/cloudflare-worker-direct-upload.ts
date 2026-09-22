@@ -377,6 +377,7 @@ const returnedVersionBindingSchema = v.union([
     namespace_id: v.optional(accountIdSchema),
   }),
   v.strictObject({ name: v.literal('ASSETS'), type: v.literal('assets') }),
+  v.strictObject({ name: v.literal('API_LOADER'), type: v.literal('worker_loader') }),
   v.strictObject({ name: v.literal('ANKKA_BOOTSTRAP_NONCE'), type: v.literal('secret_text') }),
   v.strictObject({
     name: v.picklist(PLAIN_TEXT_BINDING_NAMES),
@@ -467,6 +468,7 @@ const submitVersionBindingSchema = v.union([
     class_name: v.literal('AdminState'),
   }),
   v.strictObject({ name: v.literal('ASSETS'), type: v.literal('assets') }),
+  v.strictObject({ name: v.literal('API_LOADER'), type: v.literal('worker_loader') }),
   v.strictObject({
     name: v.literal('ANKKA_BOOTSTRAP_NONCE'),
     type: v.literal('secret_text'),
@@ -2041,6 +2043,7 @@ async function uploadAssets(
 export type WorkerVersionBinding =
   | { readonly name: 'ADMIN_STATE'; readonly type: 'durable_object_namespace'; readonly class_name: 'AdminState' }
   | { readonly name: 'ASSETS'; readonly type: 'assets' }
+  | { readonly name: 'API_LOADER'; readonly type: 'worker_loader' }
   | { readonly name: GatewayWorkerPlainTextBindingName; readonly type: 'plain_text'; readonly text: string }
   | { readonly name: 'ANKKA_BOOTSTRAP_NONCE'; readonly type: 'secret_text'; readonly text: string };
 
@@ -2054,6 +2057,7 @@ function versionBindings(
       { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
       { name: 'ASSETS', type: 'assets' },
     ];
+  if (phase === 'clean') bindings.push({ name: 'API_LOADER', type: 'worker_loader' });
   for (const name of PLAIN_TEXT_BINDING_NAMES) {
     const text = prepared.plainTextBindings[name];
     if (text !== undefined) bindings.push({ name, type: 'plain_text', text });
@@ -2162,7 +2166,7 @@ async function exactVersionResult(
       ? result.assets !== undefined
       : result.assets === undefined) ||
     result.bindings.length !== recovery.plainTextBindingHashes.length +
-      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
+      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 3 : 0) ||
     result.modules.length !== recovery.modules.length ||
     !exactVersionAnnotations(result.annotations, recovery.correlationTag) ||
     !exactExports(result.exports) ||
@@ -2175,6 +2179,7 @@ async function exactVersionResult(
     if (returnedBindings.has(binding.name)) return false;
     returnedBindings.set(binding.name, binding);
   }
+  if (recovery.phase === 'clean' ? returnedBindings.get('API_LOADER')?.type !== 'worker_loader' : returnedBindings.has('API_LOADER')) return false;
   if (recovery.phase === 'provision') {
     if (returnedBindings.has('ADMIN_STATE') || returnedBindings.has('ASSETS')) return false;
   } else {
@@ -2585,7 +2590,7 @@ async function validVersionSubmitIntent(
     !canonicalEqual(parsedIntent.semanticCommitment, versionSemanticCommitment(recovery)) ||
     parsedIntent.body.annotations['workers/tag'] !== parsedIntent.correlationTag ||
     parsedIntent.body.bindings.length !== recovery.plainTextBindingHashes.length +
-      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 2 : 0) ||
+      (recovery.phase === 'bootstrap' ? 3 : recovery.phase === 'clean' ? 3 : 0) ||
     parsedIntent.body.modules.length !== recovery.modules.length ||
     !canonicalEqual(parsedIntent.body.exports, recovery.releaseContract.exports) ||
     // The provision version carries no ASSETS binding and no asset session.
@@ -2598,6 +2603,7 @@ async function validVersionSubmitIntent(
     if (bindings.has(binding.name)) return false;
     bindings.set(binding.name, binding);
   }
+  if (recovery.phase === 'clean' ? bindings.get('API_LOADER')?.type !== 'worker_loader' : bindings.has('API_LOADER')) return false;
   if (recovery.phase === 'provision') {
     if (bindings.has('ADMIN_STATE') || bindings.has('ASSETS')) return false;
   } else {

@@ -2161,3 +2161,15 @@ test('only the draft of a sign-in source may be saved or stored without tools', 
   assert.deepEqual([drafted.revision, drafted.sources[0].status, drafted.sources[0].enabledTools], [2, 'draft', []]);
   assert.equal(managementSourcesInstallProjectionFits(drafted), true);
 });
+
+
+test('ordinary API URLs cannot accidentally enter the reserved built-in API source ID range', async () => {
+  const empty = safeManagementSources({ schemaVersion: 1, revision: 1, applyMode: 'oauth_per_action', sources: [] });
+  // This synthetic URL's SHA-256 starts with the reserved a9 prefix.
+  const input = parseSourceSave({ schemaVersion: 1, revision: 1, source: { label: 'Synthetic API',
+    url: 'https://synthetic.example.com/api-369/mcp', authMode: 'oauth', enabledTools: [] } });
+  const saved = await saveDraftSource(empty, input);
+  assert.ok(saved);
+  assert.match(saved.sources[0].id, /^source-a8/);
+  assert.equal(saved.sources[0].onBehalfOfUser, false);
+});

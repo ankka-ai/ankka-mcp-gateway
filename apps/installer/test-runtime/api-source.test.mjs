@@ -31,7 +31,7 @@ async function runtime(directory, changedConnection = connection) {
   const readStarted = Promise.withResolvers();
   const mf = new Miniflare({ host: '127.0.0.1', port: 0, cf: false,
     unsafeDevRegistryPath: join(directory, 'registry'), resourcePersistencePath: join(directory, 'storage'),
-    workers: [{ config: { type: 'worker', name: 'api-source-fixture', compatibilityDate: '2026-08-29', compatibilityFlags: ['nodejs_compat'],
+    workers: [{ config: { type: 'worker', name: 'api-source-fixture', compatibilityDate: '2026-08-08', compatibilityFlags: [],
       manifest: { mainModule: 'fixture.mjs', modules: { 'fixture.mjs': { type: 'esm', contents: bundle.outputFiles[0].text } } },
       env: {
         SOURCE: { type: 'durable-object', workerName: 'api-source-fixture', exportName: 'ApiSourceFixture' },
@@ -187,4 +187,31 @@ test('draft edits invalidate tests, active code is stable, and a connection chan
     assert.equal((await active.call('getStock', { sku: 'item' })).ok, false);
     assert.equal(active.calls.length, 0);
   } finally { await active?.mf.dispose(); await rm(dir, { recursive: true, force: true }); }
+});
+
+
+test('built-in gateway registry exposes safe configuration and isolates each source in existing SQLite storage', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'ankka-api-registry-'));
+  const active = await runtime(dir);
+  const manage = async (command) => {
+    const response = await active.mf.dispatchFetch('http://localhost/gateway/manage', { method: 'POST', body: JSON.stringify(command) });
+    return { status: response.status, body: await response.json() };
+  };
+  try {
+    const registry = await manage({ operation: 'read' });
+    assert.deepEqual(registry.body.connections.map((entry) => entry.connectionKey), ['inventory', 'billing']);
+    assert.equal(JSON.stringify(registry).includes(credential), false);
+    assert.equal((await manage({ operation: 'read', connectionKey: 'missing' })).status, 409);
+    assert.equal((await manage({ operation: 'save', connectionKey: 'inventory', revision: 1, definitionJson: JSON.stringify(definition) })).status, 200);
+    assert.equal((await manage({ operation: 'test', connectionKey: 'inventory', revision: 2, tool: 'getStock', argumentsJson: '{"sku":"one"}' })).body.ok, true);
+    const activated = await manage({ operation: 'activate', connectionKey: 'inventory', revision: 2 });
+    assert.equal(activated.body.endpoint, 'https://manage.example.com/api/api-sources/inventory/mcp');
+    assert.equal((await manage({ operation: 'call', connectionKey: 'inventory', tool: 'getStock', argumentsJson: '{"sku":"one"}' })).body.ok, true);
+    assert.equal((await manage({ operation: 'call', connectionKey: 'billing', tool: 'getStock', argumentsJson: '{"sku":"one"}' })).body.ok, false);
+    assert.equal((await manage({ operation: 'read', connectionKey: 'billing' })).body.revision, 1);
+    assert.equal((await manage({ operation: 'save', connectionKey: 'inventory', revision: 3, origin: 'https://evil.example.com', definitionJson: JSON.stringify(definition) })).status, 400);
+    const stored = await (await active.mf.dispatchFetch('http://localhost/state')).text();
+    assert.equal(stored.includes(credential), false);
+    assert.equal(stored.includes('synthetic-private-response'), false);
+  } finally { await active.mf.dispose(); await rm(dir, { recursive: true, force: true }); }
 });

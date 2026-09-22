@@ -280,9 +280,9 @@ function exactBindings(
         bindings.has(named.output.name)) return false;
     bindings.set(named.output.name, object.output);
   }
-  const exactCount = Object.keys(expected).length + INHERITED_BINDINGS.length +
+  const exactCount = Object.keys(expected).length + INHERITED_BINDINGS.length + 1 +
     (managementCredentialBound ? 1 : 0);
-  if (bindings.size !== exactCount) return false;
+  if (bindings.size !== exactCount || bindings.get('API_LOADER')?.type !== 'worker_loader') return false;
   const admin = bindings.get('ADMIN_STATE');
   const assets = bindings.get('ASSETS');
   const ownershipKey = bindings.get('ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY');
@@ -374,7 +374,7 @@ function uploadMetadata(input: CustomerWorkerSelfUpdateInput): BoundaryObject {
       'workers/message': `Ankka final runtime ${input.finalRuntimeSha256.slice(0, 16)}`,
       'workers/tag': `ankka-final-${input.finalRuntimeSha256.slice(0, 64)}`,
     }),
-    bindings: Object.freeze([...inherited, ...plain, ...management].sort((left, right) =>
+    bindings: Object.freeze([...inherited, { name: 'API_LOADER', type: 'worker_loader' }, ...plain, ...management].sort((left, right) =>
       left.name < right.name ? -1 : left.name > right.name ? 1 : 0)),
     compatibility_date: COMPATIBILITY_DATE,
     compatibility_flags: Object.freeze([]),

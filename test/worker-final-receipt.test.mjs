@@ -19,6 +19,8 @@ await build({
     resolveDir: path.resolve(import.meta.dirname, '..'),
     loader: 'ts',
   },
+  // This Node suite exercises receipt ownership. API execution is verified in workerd.
+  external: ['../../api-source-runtime/src/gateway'],
   bundle: true, format: 'esm', platform: 'browser', target: 'es2022', outfile, logLevel: 'silent',
 });
 const { AdminState, initializeCustomerGatewayOwnershipState } = await import(pathToFileURL(outfile).href);

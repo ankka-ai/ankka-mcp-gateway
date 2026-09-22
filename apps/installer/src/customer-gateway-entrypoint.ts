@@ -1,3 +1,4 @@
+import type { GatewayApiEnv } from '../../api-source-runtime/src/gateway';
 import { customerPageEnd, customerPageStart } from './customer-page-shell';
 import { customerLoadingIndicator } from './customer-page-theme';
 import * as v from 'valibot';
@@ -160,7 +161,7 @@ class DurableCustomerOperationAttemptPort implements CustomerOperationAttemptPor
   }
 }
 
-interface FinalGatewayEnv extends Record<string, unknown> {
+interface FinalGatewayEnv extends Record<string, unknown>, GatewayApiEnv {
   ADMIN_STATE: DurableObjectNamespace;
   ADMIN_EMAILS: string;
   ANKKA_INSTALL_ID: string;
@@ -179,6 +180,17 @@ interface FinalGatewayEnv extends Record<string, unknown> {
   CLOUDFLARE_ZONE_NAME: string;
   ZERO_TRUST_READY: 'true';
   ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY: string;
+}
+
+function withApiRuntime(env: FinalGatewayEnv, storage?: DurableObjectStorage): FinalGatewayEnv {
+  return { ...env, API_SOURCE_RUNTIME: { fetch: async (request: Request) => {
+    if (storage !== undefined) {
+      const { gatewayApiRequest } = await import('../../api-source-runtime/src/gateway');
+      return gatewayApiRequest(request, env, storage);
+    }
+    return env.ADMIN_STATE.get(env.ADMIN_STATE.idFromName('v1:management')).fetch(
+      new Request('https://admin-state.invalid/api-source-runtime/manage', request));
+  } } };
 }
 
 interface FinalDurableObjectState extends DurableObjectState {
@@ -275,7 +287,7 @@ export class AdminState extends RuntimeAdminState {
     private readonly finalEnv: FinalGatewayEnv,
   ) {
     const config = parsedEnv(finalEnv);
-    super(finalState, finalEnv, createBigQueryTeardown({
+    super(finalState, withApiRuntime(finalEnv, finalState.storage), createBigQueryTeardown({
       accountId: config.CLOUDFLARE_ACCOUNT_ID, zoneId: config.CLOUDFLARE_ZONE_ID,
       zoneName: config.CLOUDFLARE_ZONE_NAME, installationId: config.ANKKA_INSTALL_ID,
       accessIssuer: new URL(config.CF_ACCESS_ISSUER).origin,
@@ -794,8 +806,12 @@ export class AdminState extends RuntimeAdminState {
 
   async fetch(request: Request): Promise<Response> {
     await this.recoveryReady;
-    const config = parsedEnv(this.finalEnv);
     const url = new URL(request.url);
+    if (url.origin === 'https://admin-state.invalid' && url.pathname === '/api-source-runtime/manage' && request.method === 'POST') {
+      const { gatewayApiRequest } = await import('../../api-source-runtime/src/gateway');
+      return gatewayApiRequest(request, this.finalEnv, this.finalState.storage);
+    }
+    const config = parsedEnv(this.finalEnv);
     const managementOrigin = `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`;
     // The receipt verification runs in the installation object, where the
     // bootstrap wrote the receipt; internal only, the entry never forwards it.
@@ -925,7 +941,7 @@ export default {
       if (request.method === 'POST' && url.pathname === '/api/teardown-actions') {
         return prepareCurrentGatewayTeardown(request, env);
       }
-      return gatewayRuntime.fetch(request, env, context);
+      return gatewayRuntime.fetch(request, withApiRuntime(env), context);
     } catch {
       return unavailable();
     }

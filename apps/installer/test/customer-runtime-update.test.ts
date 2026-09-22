@@ -185,6 +185,7 @@ function envelope(result: BoundaryValue, status = 200): Response {
 function providerFake(release: SignedRelease, options: {
   readonly currentRelease?: string;
   readonly managementBinding?: { name: string; type: string };
+  readonly apiConnectionsBinding?: { name: string; type: string };
   readonly serviceBinding?: { name: string; type: string; text?: string };
   readonly controlPlane?: (request: Request) => Promise<Response>;
   /** The active version's bindings exactly as the provider lists them, in place of the assembled default. */
@@ -243,6 +244,7 @@ function providerFake(release: SignedRelease, options: {
           { name: 'ADMIN_STATE', type: 'durable_object_namespace', class_name: 'AdminState' },
           { name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'secret_text' },
           ...(options.managementBinding ? [options.managementBinding] : []),
+          ...(options.apiConnectionsBinding ? [options.apiConnectionsBinding] : []),
           ...(options.serviceBinding ? [options.serviceBinding] : []),
           { name: 'ASSETS', type: 'assets' },
           ...Object.entries(bindings).map(([name, text]) => ({ name, type: 'plain_text', text })),
@@ -440,6 +442,22 @@ describe('gateway-local runtime update', () => {
     expect(await file.text()).toBe(retained.workerSource);
   });
 
+  it('inherits the API connection secret without reading its value and rejects plaintext substitutes', async () => {
+    const release = await signedRelease();
+    const fake = providerFake(release, { apiConnectionsBinding: { name: 'ANKKA_API_CONNECTIONS', type: 'secret_text' } });
+    await runCustomerRuntimeUpdate(input(fake, release, [], []));
+    const metadata = fake.requests.find((entry) => entry.method === 'PUT')?.form?.get('metadata');
+    if (!(metadata instanceof Blob)) throw new Error('metadata missing');
+    const value = v.parse(metadataSchema, JSON.parse(await metadata.text()));
+    expect(value.bindings.find((binding) => binding.name === 'ANKKA_API_CONNECTIONS')).toEqual({
+      name: 'ANKKA_API_CONNECTIONS', type: 'inherit', version_id: 'latest',
+    });
+    expect(fake.requests.some((entry) => new URL(entry.url).pathname.endsWith('/secrets'))).toBe(false);
+    const invalid = providerFake(release, { apiConnectionsBinding: { name: 'ANKKA_API_CONNECTIONS', type: 'plain_text' } });
+    await expect(runCustomerRuntimeUpdate(input(invalid, release, [], []))).rejects.toBeInstanceOf(CustomerRuntimeUpdateError);
+    expect(invalid.requests.some((entry) => entry.method === 'PUT')).toBe(false);
+  });
+
   it.each([false, true])('preserves only the declared secret bindings across updates (management configured: %s)', async (configured) => {
     const release = await signedRelease();
     const fake = providerFake(release, configured ? { managementBinding: { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'secret_text' } } : {});
@@ -474,6 +492,7 @@ describe('gateway-local runtime update', () => {
     expect(bindingsByName.get('ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY')).toEqual({
       name: 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY', type: 'inherit', version_id: 'latest',
     });
+    expect(bindingsByName.get('API_LOADER')).toEqual({ name: 'API_LOADER', type: 'worker_loader' });
     expect(bindingsByName.get('ASSETS')).toEqual({ name: 'ASSETS', type: 'assets' });
     expect(bindingsByName.get('ANKKA_GATEWAY_RELEASE')).toEqual({ name: 'ANKKA_GATEWAY_RELEASE', type: 'plain_text', text: TO_RELEASE });
     expect(bindingsByName.get('ANKKA_GATEWAY_RELEASE_SHA256')).toEqual({
@@ -481,7 +500,7 @@ describe('gateway-local runtime update', () => {
     });
     expect(bindingsByName.get('ANKKA_INSTALL_ID')).toEqual({ name: 'ANKKA_INSTALL_ID', type: 'plain_text', text: `acg-${'c'.repeat(24)}` });
     expect(bindingsByName.has('ANKKA_BOOTSTRAP_NONCE')).toBe(false);
-    expect(metadata.bindings).toHaveLength(configured ? 20 : 19);
+    expect(metadata.bindings).toHaveLength(configured ? 21 : 20);
     expect(bindingsByName.get('ANKKA_MANAGEMENT_TOKEN')).toEqual(configured ? { name: 'ANKKA_MANAGEMENT_TOKEN', type: 'inherit', version_id: 'latest' } : undefined);
     const module = upload.form.get('index.js');
     if (!(module instanceof Blob)) throw new Error('module missing');
@@ -550,7 +569,7 @@ describe('gateway-local runtime update', () => {
     if (!(metadataFile instanceof Blob)) throw new Error('metadata missing');
     const metadataText = await metadataFile.text();
     const metadata = v.parse(metadataSchema, JSON.parse(metadataText));
-    expect(metadata.bindings).toHaveLength(20);
+    expect(metadata.bindings).toHaveLength(21);
     expect(metadata.bindings).toContainEqual({ name: 'ANKKA_MANAGEMENT_TOKEN', type: 'inherit', version_id: 'latest' });
     expect(metadata.bindings.some((binding) => binding.type === 'secret_text')).toBe(false);
     expect(metadataText).not.toContain(managementValue);
@@ -622,7 +641,7 @@ describe('gateway-local runtime update', () => {
     const metadataFile = upload.form.get('metadata');
     if (!(metadataFile instanceof Blob)) throw new Error('metadata missing');
     const metadata = v.parse(metadataSchema, JSON.parse(await metadataFile.text()));
-    expect(metadata.bindings).toHaveLength(21);
+    expect(metadata.bindings).toHaveLength(22);
     expect(metadata.bindings.find((binding) => binding.name === 'ANKKA_SERVICE_CLIENT_ID')).toEqual({ name: 'ANKKA_SERVICE_CLIENT_ID', type: 'plain_text', text: clientId });
   });
 

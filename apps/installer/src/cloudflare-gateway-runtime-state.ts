@@ -122,10 +122,12 @@ export function parseGatewayRuntimeBindings(value: BoundaryValue): GatewayWorker
     if (!named.success || bindings.has(named.output.name)) return null;
     bindings.set(named.output.name, binding);
   }
-  // Exactly the fixed bindings, plus the service identity binding only when the gateway opted into one.
+  // Fixed bindings plus the built-in loader and the configured service identity.
+  const loader = bindings.get('API_LOADER');
+  if (loader !== undefined && !v.is(v.strictObject({ name: v.literal('API_LOADER'), type: v.literal('worker_loader') }), loader)) return null;
   const ANKKA_SERVICE_CLIENT_ID = bindings.has('ANKKA_SERVICE_CLIENT_ID') ? plainTextBinding(bindings, 'ANKKA_SERVICE_CLIENT_ID') : undefined;
   if (ANKKA_SERVICE_CLIENT_ID === null || (ANKKA_SERVICE_CLIENT_ID !== undefined && !SERVICE_CLIENT_ID_PATTERN.test(ANKKA_SERVICE_CLIENT_ID)) ||
-      bindings.size !== GATEWAY_RUNTIME_BINDING_NAMES.length + 2 + (ANKKA_SERVICE_CLIENT_ID === undefined ? 0 : 1)) return null;
+      bindings.size !== GATEWAY_RUNTIME_BINDING_NAMES.length + 2 + (ANKKA_SERVICE_CLIENT_ID === undefined ? 0 : 1) + (loader === undefined ? 0 : 1)) return null;
   if (!v.safeParse(adminBindingSchema, bindings.get('ADMIN_STATE')).success ||
       !v.safeParse(assetsBindingSchema, bindings.get('ASSETS')).success) return null;
 
