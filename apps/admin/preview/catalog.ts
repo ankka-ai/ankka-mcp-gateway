@@ -57,6 +57,7 @@ export const catalog: PreviewEntry[] = [
   dashboard('team-legacy', 'Team · recorded proposal', '/team?preview=team-legacy', 'A retained proposal that can be cancelled before writes.', 'pages/TeamPage'),
   dashboard('team-lifecycle', 'Team · action in progress', '/team?preview=team-lifecycle', 'Editing paused while another lifecycle action is active.', 'pages/TeamPage'),
   dashboard('settings', 'Settings', '/settings?preview=ready', 'Cloudflare management, software updates, and the danger zone.', 'pages/SettingsPage'),
+  dashboard('settings-token', 'Management token', '/settings?preview=management-token', 'Token verification, replacement, and collapsed details.', 'pages/ManagementTokenSection'),
   dashboard('update', 'Update available', '/settings?preview=update#software-updates-title', 'Release details, notes, update, and rollback.', 'pages/SettingsPage'),
   dashboard('update-running', 'Update · in progress', `/settings?preview=update-running&runtimeAction=${action}#software-updates-title`, 'The update status notice and shared matrix loader.', 'pages/SettingsPage'),
   dashboard('update-failed', 'Update · recovery required', `/settings?preview=update-failed&runtimeAction=${action}#software-updates-title`, 'A failed update with recovery guidance.', 'pages/SettingsPage'),

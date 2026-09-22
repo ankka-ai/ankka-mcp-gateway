@@ -124,7 +124,12 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
 }
 
 function nameIsValid(value: string): boolean {
-  return value.length >= 2 && value.length <= 80 && value.trim() === value && !/[\u0000-\u001f\u007f]/u.test(value)
+  if (value.length < 2 || value.length > 80 || value.trim() !== value) return false
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (code <= 31 || code === 127) return false
+  }
+  return true
 }
 
 /** Rename an installed connector. The URL, tools, and who can use it stay as they are. */

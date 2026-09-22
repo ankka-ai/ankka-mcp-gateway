@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { CheckCircle } from '@phosphor-icons/react'
 import type { ManagementCredentialStatus, ManagementVerification } from '../api'
 import { useGateway } from '../GatewayContext'
 import { Button } from '../components/Button'
 import { LoadingIndicator } from '../components/LoadingIndicator'
 import {
-  ManagementTokenCard,
-  ManagementTokenCreateLink,
+  managementTokenChoiceSentence,
   useManagementTokenStart,
 } from '../components/ManagementTokenCard'
+import { managementTokenCreateLink, managementTokenName } from '../managementTokenLink'
 
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u
 const REASON = /^[a-z][a-z0-9_]{0,120}$/u
@@ -74,26 +75,23 @@ const PERMISSIONS = [
 ] as const
 
 function verificationLines(result: ManagementVerification): string[] {
-  if (result.status === 'missing') return ['Your gateway has no management token.']
+  if (result.status === 'missing') return ['No management token found. Reload this page to add one.']
   if (result.status === 'busy') {
-    return ['A connector installation, update, removal, Team change or token change is unfinished, so nothing was checked. Verify again when it has finished.']
+    return ['Another gateway change is in progress. Verify again when it finishes.']
   }
-  if (result.token === 'rejected') return ['Cloudflare rejected the token: it was revoked, has expired, or belongs to another account. Replace it.']
-  if (result.token !== 'active') return ['Cloudflare did not answer the token check, so nothing is proven yet. Try again in a moment.']
-  if (result.status === 'verified') {
-    return ['Verified. The token is active with MCP Portals Edit and Access: Apps and Policies Edit permissions.']
-  }
-  const lines = PERMISSIONS.map(([key, permission, resource]) => {
+  if (result.token === 'rejected') return ['Cloudflare rejected this token. Replace it to restore management access.']
+  if (result.token !== 'active') return ['Could not confirm the token with Cloudflare. Try again.']
+  const lines = PERMISSIONS.flatMap(([key, permission, resource]) => {
     const word = result[key]
-    if (word === 'verified') return `${permission}: proven. Your gateway wrote its own ${resource} back unchanged.`
-    if (word === 'permission_missing') return `${permission}: missing. Cloudflare refused the token for your gateway’s own ${resource}.`
-    if (word === 'drift') return `${permission}: not proven. Your gateway’s own ${resource} no longer matches what your gateway recorded, so nothing was written to it. Review it in Cloudflare; this page does not reset it.`
-    return `${permission}: not confirmed. Cloudflare gave no clear answer for your gateway’s own ${resource}, or your gateway’s records could not be read.`
+    if (word === 'verified') return []
+    if (word === 'permission_missing') return [`Missing permission: ${permission}.`]
+    if (word === 'drift') return [`Your ${resource} has changed. Review it in Cloudflare before verifying again; nothing was overwritten.`]
+    return [`Could not confirm ${permission}. Try again.`]
   })
   if (result.status === 'permission_missing') {
-    lines.push('Create a new token from the link, which fills in both permissions, and replace this one.')
+    lines.push('Replace the token using the prefilled Cloudflare link.')
   }
-  return ['The token is active.', ...lines]
+  return lines
 }
 
 /** Settings → Cloudflare management: the one way to add, replace and verify the gateway's own token. */
@@ -107,6 +105,8 @@ export function ManagementTokenSection() {
     () => flow !== null && mayHaveArrived(flow) ? 'waiting' : null)
   const [verification, setVerification] = useState<ManagementVerification | 'failed' | null>(null)
   const [verifying, setVerifying] = useState(false)
+  const [editingToken, setEditingToken] = useState(false)
+  const editButton = useRef<HTMLButtonElement>(null)
   const active = useRef(true)
   useEffect(() => { active.current = true; return () => { active.current = false } }, [])
   useEffect(forgetFlowReturn, [])
@@ -164,11 +164,15 @@ export function ManagementTokenSection() {
   }
 
   const missing = tokenState === 'read' && tokenStatus?.managementCredentialConfigured === false && arrival !== 'waiting'
-  const status = tokenState === 'loading' ? 'Checking your management token…'
+  const tokenVerified = verification !== null && verification !== 'failed' && verification.status === 'verified'
+  const nameInCloudflare = managementTokenName(window.location.hostname)
+  const status = tokenVerified ? 'Management token active'
+    : verifying ? 'Checking access…'
+    : tokenState === 'loading' ? 'Checking token…'
     : tokenState === 'unreadable'
-      ? 'Your gateway could not read its management token status. Reload this page or verify management access.'
-      : tokenStatus?.managementCredentialConfigured !== true ? 'No management token configured.'
-        : 'Management token configured.'
+      ? 'Token status unavailable. Reload or verify access.'
+      : arrival === 'waiting' ? 'Waiting for your token…'
+        : missing ? 'No management token' : 'Management token added'
 
   return (
     <section className="mt-8" aria-labelledby="management-title">
@@ -178,27 +182,55 @@ export function ManagementTokenSection() {
           {arrival === 'waiting' ? <LoadingIndicator inline /> : null} {flowMessage(flow, arrival)}
         </p>
       ) : null}
-      {missing ? <ManagementTokenCard choice={tokenStatus?.managementCredentialChoice} className="mt-5" /> : (
-        <div className="surface-card mt-5 space-y-4 p-5 text-sm leading-6 sm:p-6">
-          <p role="status">{status}</p>
+      <div className="surface-card mt-5 space-y-4 p-5 text-sm leading-6 sm:p-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <p role="status" className={`flex items-center gap-2 font-medium ${tokenVerified ? 'text-success-strong' : 'text-subheading'}`}>
+              {tokenVerified ? <CheckCircle size={20} weight="fill" aria-hidden="true" className="shrink-0" /> : null}
+              {status}
+            </p>
+            {missing ? <p className="mt-1 text-kumo-subtle">Add a token to manage sources and team access.</p> : null}
+          </div>
           {arrival === 'waiting' || tokenState === 'loading' ? null : (
-            <>
-              <ManagementTokenCreateLink />
-              <div className="flex flex-wrap gap-3">
-                <Button variant="secondary" loading={verifying} onClick={() => void verify()}>Verify management access</Button>
-                <Button variant="secondary" loading={starting} disabled={verifying} onClick={() => void start()}>Replace management token</Button>
-              </div>
-            </>
-          )}
-          {verification === 'failed' ? <p role="alert" className="notice-banner notice-error">The check could not be run. Reload this page and try again.</p> : null}
-          {verification !== null && verification !== 'failed' ? (
-            <div role="status" className={`notice-banner notice-${verification.status === 'verified' ? 'success' : verification.status === 'busy' ? 'neutral' : 'warning'}`}>
-              <ul className="space-y-1">{verificationLines(verification).map((line) => <li key={line}>{line}</li>)}</ul>
+            <div className="flex flex-wrap gap-3">
+              {!missing ? <Button variant="secondary" loading={verifying} disabled={starting} onClick={() => void verify()}>Verify access</Button> : null}
+              <Button ref={editButton} variant={missing ? 'primary' : 'secondary'} disabled={verifying || starting} aria-expanded={editingToken} aria-controls="management-token-setup" onClick={() => setEditingToken((open) => !open)}>{missing ? 'Add token' : 'Replace token'}</Button>
             </div>
-          ) : null}
-          <a className="underline underline-offset-4" href="https://github.com/ankka-ai/ankka-mcp-gateway/blob/main/docs/MANAGEMENT_TOKEN.md" target="_blank" rel="noreferrer">Management token guide</a>
+          )}
         </div>
-      )}
+        <p className="text-kumo-subtle">This token can edit all MCP Portals and Access policies in your Cloudflare account.</p>
+        {editingToken ? (
+          <div id="management-token-setup" className="space-y-4 rounded-lg border border-kumo-line p-4">
+            <h3 className="font-medium text-subheading">{missing ? 'Add a management token' : 'Replace your management token'}</h3>
+            <ol className="list-decimal space-y-2 pl-5">
+              <li><a className="underline underline-offset-4" href={managementTokenCreateLink(window.location.hostname)} target="_blank" rel="noopener noreferrer">Create a token in Cloudflare ↗</a> and copy it. The name and permissions are prefilled.</li>
+              <li>Continue to approve in Cloudflare, then paste the token into your gateway.</li>
+            </ol>
+            {!missing ? <p className="text-kumo-subtle">After replacing, delete the older <strong>{nameInCloudflare}</strong> token in Cloudflare under Manage Account → Account API Tokens.</p> : null}
+            <div className="flex flex-wrap gap-3">
+              <Button variant="primary" loading={starting} disabled={verifying} onClick={() => void start()}>I’ve copied the token</Button>
+              <Button variant="secondary" disabled={starting} onClick={() => { setEditingToken(false); editButton.current?.focus() }}>Cancel</Button>
+            </div>
+          </div>
+        ) : null}
+        {verification === 'failed' ? <p role="alert" className="notice-banner notice-error">The check could not be run. Reload this page and try again.</p> : null}
+        {verification !== null && verification !== 'failed' && !tokenVerified ? (
+          <div role="status" className={`notice-banner notice-${verification.status === 'busy' ? 'neutral' : 'warning'}`}>
+            <ul className="space-y-1">{verificationLines(verification).map((line) => <li key={line}>{line}</li>)}</ul>
+          </div>
+        ) : null}
+        <details className="border-t border-kumo-line pt-4 text-kumo-subtle">
+          <summary className="w-fit cursor-pointer font-medium text-subheading">Token details</summary>
+          <div className="mt-3 space-y-3">
+            <p>Your gateway uses this token to manage sources and team access. It stays in your Cloudflare account and never passes through Ankka.</p>
+            {missing ? <p>{managementTokenChoiceSentence(tokenStatus?.managementCredentialChoice)}</p> : null}
+            <p>Creating a token requires a Cloudflare account Administrator or Super Administrator. Create it before continuing: the approval expires after a few minutes.</p>
+            <p>Verification re-saves your gateway’s own MCP Portal and Access policy unchanged to check both edit permissions.</p>
+            <p>Removing your gateway does not delete its token. Delete unused tokens in Cloudflare under Manage Account → Account API Tokens.</p>
+            <a className="inline-block underline underline-offset-4" href="https://github.com/ankka-ai/ankka-mcp-gateway/blob/main/docs/MANAGEMENT_TOKEN.md" target="_blank" rel="noreferrer">Read the token documentation ↗</a>
+          </div>
+        </details>
+      </div>
     </section>
   )
 }

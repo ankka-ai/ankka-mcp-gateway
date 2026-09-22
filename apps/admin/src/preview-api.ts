@@ -32,6 +32,7 @@ const PREVIEW_SCENARIOS = [
   'empty', 'ready', 'update', 'update-running', 'update-failed', 'loading', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential', 'team-editable',
   'source-pending', 'source-applying', 'source-expired', 'source-recovery', 'source-completed', 'source-late-success', 'source-lifecycle',
   'source-sign-in',
+  'management-token',
   'removal-interrupted',
 ] as const
 type PreviewScenario = typeof PREVIEW_SCENARIOS[number]
@@ -185,7 +186,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       revision: 2,
       editingEnabled: scenario === 'team-editable',
       editingDisabledReason: scenario === 'team-editable' ? null : scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : 'managed_in_cloudflare',
-      managementCredentialConfigured: scenario === 'team-editable',
+      managementCredentialConfigured: scenario === 'team-editable' || scenario === 'management-token',
       adminEmails: ['admin@example.com'],
       members: [
         { email: 'admin@example.com', sourceIds: scenario === 'empty' ? [] : ['source-1111111111111111'] },

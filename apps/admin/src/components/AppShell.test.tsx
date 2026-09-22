@@ -80,7 +80,7 @@ describe('AppShell during a removal', () => {
     open(client)
 
     expect(await screen.findByRole('heading', { name: 'Settings', level: 1 })).toBeInTheDocument()
-    expect(await screen.findByText('Management token configured.')).toBeInTheDocument()
+    expect(await screen.findByText('Management token added')).toBeInTheDocument()
     expect(client.getTeam).not.toHaveBeenCalled()
     const notice = (await screen.findByText('Removal in progress')).closest('[role="status"]')
     expect(notice).toHaveTextContent('some of its connected resources may already be gone')

@@ -48,7 +48,7 @@ export function useManagementTokenStart() {
   return { start, starting }
 }
 
-/** Shown on Sources, Team and Settings while the gateway reports that it has no management token. */
+/** Shown on Sources and Team while the gateway reports that it has no management token. */
 export function ManagementTokenCard({ choice, className = 'mt-6' }: {
   choice: ManagementCredentialChoice | null | undefined
   className?: string
