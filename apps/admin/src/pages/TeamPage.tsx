@@ -79,7 +79,10 @@ function actionMessage(action: TeamAction | null): string | null {
   const failure = action.failureCode && ['team_management_credential_missing', 'team_management_credential_invalid', 'team_access_group_permission_missing', 'team_policy_drift'].includes(action.failureCode)
     ? `${new GatewayApiError(409, action.failureCode).message} `
     : ''
-  if (action.status === 'recovery_required') return `${failure}Some access policies may already have changed. Resume the exact recorded change below. Nothing was automatically restored.`
+  // The gateway offers cancellation only while no write is recorded.
+  if (action.status === 'recovery_required') return action.canCancel
+    ? `${failure}No access policy was changed. Resume the recorded change${failure ? ' once this is fixed' : ''}, or cancel it.`
+    : `${failure}Some access policies may already have changed. Resume the exact recorded change below. Nothing was automatically restored.`
   if (action.status === 'applying') return 'Applying and verifying team access. Some policies may already have changed; the saved configuration below is not a live check.'
   if (action.status === 'failed') return action.failureCode === 'team_action_cancelled'
     ? 'The recorded change was canceled before any access policy was changed.'

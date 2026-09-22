@@ -12,9 +12,11 @@ Existing hosted teardown handoffs retain their original restrictions and cannot
 select the new interpretation.
 
 The executor rederives the immutable installation and source receipts before
-using their provider locators. An Access policy can have a different email
-assignment, including the supported deny-everyone state, while retaining its
-exact marked name and recorded parent. Receipt hashes are never rewritten to
+using their provider locators. An Access policy can have a different email or
+team group assignment, including the supported deny-everyone state, while
+retaining its exact marked name and recorded parent. Full removal is not
+prepared while a team still has an Access group, because removal does not
+delete team groups. Receipt hashes are never rewritten to
 make live policy changes appear original. Applications with an unrecorded
 policy, changed destinations, renamed resources, and servers used by another
 Portal stop teardown before deletion. The complete graph is checked first;

@@ -182,7 +182,11 @@ policies whose audience changed. An empty audience stays a deny policy.
 
 A team can include the Gateway Management connector. That grants the connector
 the same way a direct assignment does. It does not make someone a dashboard
-administrator. Administrators stay on the fixed administrator list.
+administrator. Administrators stay on the fixed administrator list. On every
+request, the Worker reads the team's group from Cloudflare. It accepts only a
+group this gateway created for one of its teams, with its stable name; any
+other group on that connector's policy is drift. Built-in API connectors are
+checked the same way.
 
 Creating, updating, and deleting a group is journaled like a policy write.
 If a create response is lost, resume lists groups and adopts the one exact
@@ -192,7 +196,16 @@ Group writes need Access group permission in your Cloudflare account. The
 [management token template](MANAGEMENT_TOKEN.md#the-template-link) does not
 request it. A refused group call is `team_access_group_permission_missing`.
 Apps and Policies Edit does not include that permission. See
-[Customer-owned management credential](MANAGEMENT_TOKEN.md).
+[Customer-owned management credential](MANAGEMENT_TOKEN.md). Cloudflare refuses
+the call before changing anything, and group writes come before policy writes,
+so no policy has changed. Add the permission to the same token and resume the
+recorded change, or cancel it.
+
+Removing a connector drops it from every team; the team and its group stay.
+Removing the gateway does not delete team groups, so it waits until no team has
+members. Delete your teams on the Team page first; that removes their groups
+from each policy and then deletes the groups. Until then, removal is refused
+with `teardown_teams_present` before anything is recorded or deleted.
 
 A membership change still does not end an existing Portal session by itself.
 Use [Session and acceptance limits](#revocation-and-acceptance) when someone
