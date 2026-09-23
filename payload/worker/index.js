@@ -133,7 +133,9 @@ function teamMembers(values, context) {
   const emails = new Set();
   const members = [];
   for (const value of values) {
-    if (!teamKeys(value, ['email', 'sourceIds']) || !Array.isArray(value.sourceIds) ||
+    const keys = ['email', 'sourceIds'];
+    if (teamRecord(value) && Object.hasOwn(value, 'dashboardAccess')) keys.push('dashboardAccess');
+    if (!teamKeys(value, keys) || (Object.hasOwn(value, 'dashboardAccess') && !isBoolean(value.dashboardAccess)) || !Array.isArray(value.sourceIds) ||
         value.sourceIds.length > TEAM_MAX_SOURCES) teamFail();
     const email = teamEmail(value.email);
     if (emails.has(email)) teamFail();
@@ -144,7 +146,10 @@ function teamMembers(values, context) {
       sourceIds.push(id);
     }
     if (new Set(sourceIds).size !== sourceIds.length) teamFail();
-    members.push({ email, sourceIds: sourceIds.sort(teamCompare) });
+    if (context.adminEmails.includes(email) && value.dashboardAccess === false) teamFail('team_access_admin_required');
+    const member = { email, sourceIds: sourceIds.sort(teamCompare) };
+    if (Object.hasOwn(value, 'dashboardAccess') && !context.adminEmails.includes(email)) member.dashboardAccess = value.dashboardAccess;
+    members.push(member);
   }
   if (context.adminEmails.some((email) => !emails.has(email))) teamFail('team_access_admin_required');
   return members.sort((left, right) => teamCompare(left.email, right.email));
@@ -236,7 +241,10 @@ export function normalizeTeamAccessRequest(value, context) {
   const normalized = {
     schemaVersion: 1,
     expectedRevision: current.revision,
-    members: teamMembers(value.members, current),
+    members: teamMembers(Array.isArray(value.members) ? value.members.map(member =>
+      teamRecord(member) && !Object.hasOwn(member, 'dashboardAccess') &&
+      context.currentMembers?.some(prior => prior.email === teamEmail(member.email) && prior.dashboardAccess === true)
+        ? { ...member, dashboardAccess: true } : member) : value.members, current),
   };
   if (Object.hasOwn(value, 'teams')) normalized.teams = teamDefinitions(value.teams, current);
   return teamFreeze(normalized);
@@ -2881,6 +2889,7 @@ function safeManagedSource(value) {
   const current = exactKeys(value, [
     'id', 'label', 'url', 'authMode', 'onBehalfOfUser', 'enabledTools', 'status',
     ...(value?.id === MANAGEMENT_SOURCE_ID ? ['initialManager'] : []),
+    ...(Object.hasOwn(value ?? {}, 'initialDashboardEmails') ? ['initialDashboardEmails'] : []),
   ]);
   if ((!legacyPublic && !legacyAuth && !current) ||
       !isText(value.id) || !SOURCE_ID.test(value.id) ||
@@ -2911,6 +2920,11 @@ function safeManagedSource(value) {
     status: value.status,
   };
   if (value.id === MANAGEMENT_SOURCE_ID) parsedSource.initialManager = value.initialManager;
+  if (Object.hasOwn(value, 'initialDashboardEmails')) {
+    const emails = exactSortedUniqueStrings(value.initialDashboardEmails, normalizedEmail, 1000, 0);
+    if (!nativeSourceId(value.id) || !emails) return null;
+    parsedSource.initialDashboardEmails = emails;
+  }
   return Object.freeze(parsedSource);
 }
 
@@ -3301,15 +3315,15 @@ function parseSourceActionPrepare(value) {
   return Object.freeze({ ...value, actorEmail: normalizedActor(value.actorEmail) });
 }
 
-async function prepareSourceAction(storage, input) {
+async function prepareSourceAction(storage, input, env) {
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
   if (await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage)) return sourceActionConflict('lifecycle_pending');
   const parsed = parseSourceActionPrepare(input);
-  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  let sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
   if (!parsed || !sources || !control || !managementSourcesInstallProjectionFits(sources)) return sourceActionConflict();
   if (parsed.sourceRevision !== sources.revision) return sourceActionConflict('draft_changed');
-  const source = sources.sources.find((candidate) => candidate.id === parsed.sourceId);
+  let source = sources.sources.find((candidate) => candidate.id === parsed.sourceId);
   if (!source || source.status !== 'draft') return sourceActionConflict('draft_changed');
   const conflict = sourceSnapshotConflict(await sourceActionSnapshot(storage, parsed.actorEmail, parsed.issuedAt));
   if (conflict) return conflict;
@@ -3319,8 +3333,21 @@ async function prepareSourceAction(storage, input) {
   // New authorization never adopts, discards, or reinterprets an unfinished
   // journal. Only an explicit cancellation can release a proven-unstarted one.
   const retained = current.actions.filter((action) => action.sourceId !== parsed.sourceId).slice(-15);
+  if (await managedSourceHash(source) !== parsed.sourceHash) return sourceActionConflict('draft_changed');
+  // Capture authentication-only administrators when the attempt starts. Receipts
+  // must rederive this initial policy after later grants and revocations.
+  if (nativeSourceId(source.id)) {
+    const team = await readTeamState(storage, env);
+    if (!team) return sourceActionConflict();
+    const emails = dashboardEmails(team.members, []);
+    if (emails.length || source.initialDashboardEmails) {
+      source = { ...source, initialDashboardEmails: emails };
+      sources = safeManagementSources({ ...sources, sources: sources.sources.map(candidate => candidate.id === source.id ? source : candidate) });
+      if (!sources || !managementSourcesInstallProjectionFits(sources) || !await armSourceCompatibility(storage, env)) return sourceActionConflict();
+    }
+  }
   const action = safeSourceAction({
-    ...parsed,
+    ...parsed, sourceHash: await managedSourceHash(source),
     initialPolicyVersion: SOURCE_INITIAL_POLICY_VERSION,
     status: 'authorization_required',
     resources: [],
@@ -3335,7 +3362,7 @@ async function prepareSourceAction(storage, input) {
     actions: [...retained, action],
   });
   if (!updated) return sourceActionConflict();
-  await storage.put(ACTIONS_KEY, updated);
+  await storage.put({ [SOURCES_KEY]: sources, [ACTIONS_KEY]: updated });
   return action;
 }
 
@@ -3349,6 +3376,7 @@ export async function managedSourceHash(source) {
     enabledTools: source.enabledTools,
   };
   if (source.id === MANAGEMENT_SOURCE_ID) identity.initialManager = source.initialManager;
+  if (source.initialDashboardEmails) identity.initialDashboardEmails = source.initialDashboardEmails;
   return sha256(identity);
 }
 
@@ -3574,7 +3602,7 @@ async function actionDesiredState(control, sources, action) {
       enabledTools: [...source.enabledTools],
     }],
   };
-  if (nativeSourceId(source.id)) settings.sources[0].administratorEmails = [...control.audienceEmails];
+  if (nativeSourceId(source.id)) settings.sources[0].administratorEmails = [...new Set([...control.audienceEmails, ...(source.initialDashboardEmails ?? [])])].sort(compareText);
   const desiredResources = (await buildDesiredResources(settings, control.installationId, true)).slice(0, sourceResourceOrder(source.id).length);
   return Object.freeze({
     installationId: control.installationId,
@@ -5292,7 +5320,7 @@ function teardownSettings(control, source, sourceId) {
     const configured = { id: sourceId, label: source.label, url: source.url,
       authentication: Object.freeze({ mode: source.authMode, onBehalfOfUser: source.onBehalfOfUser }),
       enabledTools: source.enabledTools };
-    if (nativeSourceId(source.id)) configured.administratorEmails = [...control.audienceEmails];
+    if (nativeSourceId(source.id)) configured.administratorEmails = [...new Set([...control.audienceEmails, ...(source.initialDashboardEmails ?? [])])].sort(compareText);
     sources.push(Object.freeze(configured));
   }
   return Object.freeze({
@@ -6398,6 +6426,14 @@ export class AdminState {
 
   fetch(request) {
     const requestUrl = new URL(request.url);
+    // Membership checks must not deadlock a management operation re-entering this object.
+    if (request.method === 'POST' && requestUrl.pathname === '/dashboard-access') {
+      return (async () => {
+        const input = await readJsonInput(request, 1024);
+        const allowed = exactKeys(input, ['email']) && await dashboardActorAllowed(this.state.storage, this.env, input.email);
+        return new Response(null, { status: allowed ? 204 : 403 });
+      })().catch(() => new Response(null, { status: 403 }));
+    }
     // Source synchronization can call back while an OAuth mutation awaits Cloudflare.
     // This read must not wait for that mutation queue.
     if (request.method === 'GET' && requestUrl.pathname === '/management-mcp/access') {
@@ -6519,7 +6555,7 @@ export class AdminState {
       if (url.pathname === INTERNAL_ACTIONS_PATH && request.method === 'POST') {
         if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
         const input = await request.json().catch(() => null);
-        const action = await prepareSourceAction(this.state.storage, input);
+        const action = await prepareSourceAction(this.state.storage, input, this.env);
         return action instanceof Response ? action : fixedJson(200, publicSourceAction(action));
       }
       if (url.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`) && url.pathname.endsWith('/renew') &&
@@ -6991,7 +7027,26 @@ async function accessSigningKey(issuer, kid, nowMs) {
  * and the signature against the issuer's published keys are verified for both.
  */
 export async function verifyAccessActor(request, env, nowMs = Date.now()) {
-  return verifyAccessAssertion(request, accessConfiguration(env), nowMs);
+  const configuration = accessConfiguration(env);
+  const fixed = await verifyAccessAssertion(request, configuration, nowMs);
+  if (fixed || !configuration) return fixed;
+  return verifyDashboardActor(request, env, configuration, nowMs);
+}
+
+async function verifyDashboardActor(request, env, configuration, nowMs) {
+  const email = normalizedEmail(request.headers.get('cf-access-authenticated-user-email'));
+  if (!email || configuration.emails.includes(email)) return null;
+  // Verify identity before any membership read; never trust an identity header alone.
+  const actor = await verifyAccessAssertion(request, { ...configuration, emails: [email], serviceClientId: null }, nowMs);
+  if (!actor || actor.kind !== 'human') return null;
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return null;
+  try {
+    const response = await stub.fetch(new Request('https://admin-state.invalid/dashboard-access', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson({ email }),
+    }));
+    return response.status === 204 ? actor : null;
+  } catch { return null; }
 }
 
 async function verifyAccessAssertion(request, configuration, nowMs = Date.now()) {
@@ -7536,7 +7591,7 @@ function safeTeamAction(value, context) {
       !HASH.test(value.actionKeyHash) || !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
       !HASH.test(value.planHash) || !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
       (value.failureCode !== null && !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)) ||
-      !Array.isArray(value.journal) || value.journal.length > 64) return null;
+      !Array.isArray(value.journal) || value.journal.length > 96) return null;
   try {
     normalizeTeamAccessRequest(value.request, { ...context,
       revision: value.status === 'succeeded' ? context.revision - 1 : context.revision });
@@ -7840,7 +7895,7 @@ function publicCredentialAction(action) {
  */
 async function prepareCredentialAction(storage, env, input) {
   if (!exactKeys(input, ['actionId', 'actionKeyHash', 'actorEmail', 'expiresAt', 'issuedAt']) ||
-      !Number.isSafeInteger(input.issuedAt) || !accessConfiguration(env)?.emails.includes(input.actorEmail)) return null;
+      !Number.isSafeInteger(input.issuedAt) || !await dashboardActorAllowed(storage, env, input.actorEmail)) return null;
   // An administrator may start their own unfinished approval again; it replaces the earlier one, whose handoff
   // then names an action that no longer exists. Anything already writing, or prepared by someone else, stays.
   const open = await openCredentialAction(storage, input.issuedAt);
@@ -8121,6 +8176,56 @@ async function readOwnedTeamGroup(context, token, team) {
   return teamGroupEmails(group.include);
 }
 
+function dashboardEmails(members, admins) {
+  return [...new Set([...admins, ...members.filter(member => member.dashboardAccess === true).map(member => member.email)])].sort(compareText);
+}
+function dashboardPolicy(members, admins, name) {
+  return { ...teamPolicy(dashboardEmails(members, admins), name), precedence: 1 };
+}
+async function dashboardTarget(env) {
+  if (!env.DASHBOARD_ACCESS_TARGET) return null;
+  try {
+    const target = await env.DASHBOARD_ACCESS_TARGET();
+    const environment = parseManagementEnvironment(env);
+    if (!target || !environment || target.hostname !== environment.managementHostname || target.aud !== env.CF_ACCESS_AUD ||
+        !safeProviderId(target.applicationId) || !safeProviderId(target.policyId) || !teamName(target.policyName) ||
+        !teamName(target.applicationName) || !Array.isArray(target.allowedIdps)) return null;
+    return target;
+  } catch { return null; }
+}
+async function readDashboardPolicy(environment, target, token, signal) {
+  const path = `/accounts/${environment.accountId}/access/apps/${encodeURIComponent(target.applicationId)}`;
+  const [application, policy] = await Promise.all([
+    providerCall(path, token, { signal }),
+    providerCall(`${path}/policies/${encodeURIComponent(target.policyId)}`, token, { signal }),
+  ]);
+  const app = application.result;
+  if (application.status !== 'ok' || !isRecord(app) || app.id !== target.applicationId || app.aud !== target.aud ||
+      app.name !== target.applicationName || app.domain !== target.hostname || app.type !== 'self_hosted' ||
+      (Object.hasOwn(app, 'account_id') && app.account_id !== environment.accountId) ||
+      !Array.isArray(app.allowed_idps) || canonicalJson([...app.allowed_idps].sort(compareText)) !== canonicalJson([...target.allowedIdps].sort(compareText)) ||
+      policy.status !== 'ok' || !isRecord(policy.result) ||
+      (Object.hasOwn(policy.result, 'account_id') && policy.result.account_id !== environment.accountId)) return null;
+  try {
+    const selectors = teamPolicySelectors(policy.result);
+    if (selectors.groupIds.length || !teamPolicyMatches(policy.result,
+      { ...teamPolicy(selectors.emails, target.policyName), precedence: 1 }, target.policyId)) return null;
+    return policy.result;
+  } catch { return null; }
+}
+async function dashboardActorAllowed(storage, env, email) {
+  const configuration = accessConfiguration(env);
+  if (!configuration || normalizedEmail(email) !== email) return false;
+  if (configuration.emails.includes(email)) return true;
+  const state = await readTeamState(storage, env);
+  if (!state?.members.some(member => member.email === email && member.dashboardAccess === true)) return false;
+  const target = await dashboardTarget(env);
+  const token = managementCredential(env);
+  if (!target || !token) return false;
+  const policy = await readDashboardPolicy(parseManagementEnvironment(env), target, token, AbortSignal.timeout(10_000));
+  return policy !== null && teamPolicySelectors(policy).emails.includes(email);
+}
+
 async function teamSnapshot(storage, env) {
   let state = await readTeamState(storage, env);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
@@ -8157,7 +8262,7 @@ async function teamSnapshot(storage, env) {
       const live = audienceOf(policy);
       const sourceLive = audienceOf(source);
       return canonicalJson(live.emails) !== canonicalJson(
-        [...new Set([...context.control.audienceEmails, ...sourceLive.emails])].sort(compareText)) ||
+        [...new Set([...context.control.audienceEmails, ...dashboardEmails(state.members, []), ...sourceLive.emails])].sort(compareText)) ||
         canonicalJson(live.groupIds) !== canonicalJson(sourceLive.groupIds);
     });
     const expectedGroups = (policy) => (state.teams ?? []).filter((team) => team.accessGroupId && team.memberEmails.length > 0 &&
@@ -8173,14 +8278,25 @@ async function teamSnapshot(storage, env) {
         team.memberEmails = liveEmails;
       }
     }
-    const inconsistent = nativeMismatch || groupMismatch || sourcePolicies.some((policy) =>
+    const dashboard = plan.policies.find(policy => policy.kind === 'dashboard');
+    const dashboardAudience = dashboard ? audienceOf(dashboard).emails : [];
+    const dashboardMismatch = dashboard && (admins.some(email => !dashboardAudience.includes(email)) ||
+      dashboardAudience.some(email => !emails.includes(email)));
+    const inconsistent = dashboardMismatch || nativeMismatch || groupMismatch || sourcePolicies.some((policy) =>
       audienceOf(policy).emails.some((email) => !emails.includes(email)));
     if (inconsistent && (!state.pendingAction || ['failed', 'succeeded'].includes(state.pendingAction.status))) return null;
     // A partially applied proposal may temporarily disagree across policies.
     // Keep it resumable, but do not label the saved roster as a live snapshot.
     if (!inconsistent) {
-      members = emails.map((email) => ({ email, sourceIds: sourcePolicies
-        .filter((policy) => audienceOf(policy).emails.includes(email)).map((policy) => policy.sourceId).sort(compareText) }));
+      members = emails.map((email) => {
+        const member = { email, sourceIds: sourcePolicies
+          .filter((policy) => audienceOf(policy).emails.includes(email)).map((policy) => policy.sourceId).sort(compareText) };
+        if (!admins.includes(email) && (dashboardAudience.includes(email) ||
+            state.members.find(person => person.email === email)?.dashboardAccess !== undefined)) {
+          member.dashboardAccess = dashboardAudience.includes(email);
+        }
+        return member;
+      });
       observedAt = new Date().toISOString();
     }
     const teamsChanged = teams && canonicalJson(teams.map(publicTeam)) !== canonicalJson((state.teams ?? []).map(publicTeam));
@@ -8195,6 +8311,7 @@ async function teamSnapshot(storage, env) {
     Object.hasOwn(state.pendingAction.request, 'teams') ? state.pendingAction.request.teams : null;
   return { schemaVersion: 1, revision: state.revision, members, adminEmails: admins,
     observedAt,
+    dashboardAccessAvailable: (await dashboardTarget(env)) !== null,
     sources: sources.sources.map((source) => ({ id: source.id, label: source.label,
       enabledTools: source.enabledTools, status: source.status })),
     teams: (state.teams ?? []).map(publicTeam),
@@ -8215,15 +8332,20 @@ function planGatewayTeamAccess(value, context) {
     const source = plan.policies.find((policy) => policy.kind === 'source' && policy.sourceId === target.sourceId);
     if (!source || plan.policies.some((policy) => policy.applicationId === target.applicationId || policy.policyId === target.policyId)) teamFail('team_access_invalid_target');
     const selectors = (policy) => teamPolicySelectors(policy);
-    const audience = (policy) => [...new Set([...context.managementAuthenticationEmails, ...selectors(policy).emails])].sort(compareText);
+    const audience = (policy, members) => [...new Set([...context.managementAuthenticationEmails,
+      ...dashboardEmails(members, []), ...selectors(policy).emails])].sort(compareText);
     const entry = { kind: 'management', ...target,
-      before: teamPolicy(audience(source.before), target.policyName, selectors(source.before).groupIds),
-      after: teamPolicy(audience(source.after), target.policyName, selectors(source.after).groupIds) };
+      before: teamPolicy(audience(source.before, context.currentMembers), target.policyName, selectors(source.before).groupIds),
+      after: teamPolicy(audience(source.after, plan.nextState.members), target.policyName, selectors(source.after).groupIds) };
     if (source.unresolvedTeamIds) entry.unresolvedTeamIds = source.unresolvedTeamIds;
     return entry;
   });
-  return teamFreeze({ ...plan, policies: [...plan.policies, ...native],
-    policyChanges: [...plan.policyChanges, ...native.filter((policy) => canonicalJson(policy.before) !== canonicalJson(policy.after) ||
+  const dashboard = context.dashboardTarget && [...context.currentMembers, ...plan.nextState.members].some(member => Object.hasOwn(member, 'dashboardAccess')) ? [{ kind: 'dashboard', ...context.dashboardTarget,
+    before: dashboardPolicy(context.currentMembers, context.adminEmails, context.dashboardTarget.policyName),
+    after: dashboardPolicy(plan.nextState.members, context.adminEmails, context.dashboardTarget.policyName) }] : [];
+  if (!context.dashboardTarget && plan.nextState.members.some(member => member.dashboardAccess)) teamFail('team_access_invalid_target');
+  return teamFreeze({ ...plan, policies: [...plan.policies, ...native, ...dashboard],
+    policyChanges: [...plan.policyChanges, ...[...native, ...dashboard].filter((policy) => canonicalJson(policy.before) !== canonicalJson(policy.after) ||
       policy.unresolvedTeamIds)] });
 }
 
@@ -8253,7 +8375,7 @@ async function teamRuntimeContext(storage, env) {
   return { team, control, sources, environment, authority,
     planner: { revision: team.revision, adminEmails: admins, serviceActor: serviceActorOf(accessConfiguration(env)), sources: teamSources(sources),
       currentMembers: team.members, currentTeams: team.teams ?? [], portalTarget: portal, sourceTargets,
-      nativeTargets, managementAuthenticationEmails: control.audienceEmails } };
+      nativeTargets, dashboardTarget: await dashboardTarget(env), managementAuthenticationEmails: control.audienceEmails } };
 }
 
 async function prepareTeamAction(storage, env, input) {
@@ -8267,6 +8389,9 @@ async function prepareTeamAction(storage, env, input) {
   const context = await teamRuntimeContext(storage, env);
   if (!context) return null;
   const plan = planGatewayTeamAccess(input.request, context.planner);
+  if (canonicalJson(dashboardEmails(plan.nextState.members, context.planner.adminEmails)) !==
+      canonicalJson(dashboardEmails(context.team.members, context.planner.adminEmails)) &&
+      !await dashboardActorAllowed(storage, env, input.actorEmail)) teamFail('team_access_admin_required');
   const previous = context.team.pendingAction;
   const unfinished = previous && !['failed', 'succeeded'].includes(previous.status);
   // Resume only the exact retained proposal, including legacy OAuth proposals.
@@ -8310,6 +8435,17 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return null;
   if (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings)) return null;
   const readPolicy = async (policy) => {
+    if (policy.kind === 'dashboard') {
+      const live = await readDashboardPolicy(context.environment, policy, token, context.signal);
+      if (!live) return null;
+      if (readAudience) return teamPolicySelectors(live);
+      const armed = journal.find(value => value.policyId === policy.policyId);
+      const before = teamPolicyMatches(live, policy.before, policy.policyId);
+      const after = teamPolicyMatches(live, policy.after, policy.policyId);
+      if ((!armed && !before) || (armed?.phase === 'verified' && !after) ||
+          (armed?.phase === 'send_armed' && !before && !after)) return null;
+      return after ? 'after' : 'before';
+    }
     const kind = policy.kind === 'portal' ? 'portal_access_application' : policy.kind === 'management' ? 'management_access_application' : 'source_access_application';
     const resourceValue = context.authority.resources.find((value) => value.kind === kind && value.provider.id === policy.applicationId);
     const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
@@ -9231,8 +9367,10 @@ async function managementSourceContext(storage, env, allowDraft = false, sourceI
     return { aud: application.result.aud, ...selectors };
   };
   const [portal, native] = await Promise.all([read(1), read(3)]);
+  const team = await readTeamState(storage, env);
+  const dashboardAdmins = dashboardEmails(team?.members ?? [], []);
   if (!portal || !native || !oauthText(native.aud, 512) || canonicalJson(native.emails) !==
-      canonicalJson([...new Set([...control.audienceEmails, ...portal.emails])].sort(compareText)) ||
+      canonicalJson([...new Set([...control.audienceEmails, ...dashboardAdmins, ...portal.emails])].sort(compareText)) ||
       canonicalJson(native.groupIds) !== canonicalJson(portal.groupIds)) return null;
   // A team grants the source through its Access group. Read each member list live,
   // and only from a group this gateway created and recorded for one of its teams.
@@ -9250,7 +9388,7 @@ async function managementSourceContext(storage, env, allowDraft = false, sourceI
 }
 
 async function managementOperationActorAllowed(storage, env, actorEmail) {
-  if (teamActorAllowed(actorEmail, accessConfiguration(env))) return true;
+  if (teamActorAllowed(actorEmail, accessConfiguration(env)) || await dashboardActorAllowed(storage, env, actorEmail)) return true;
   const context = await managementSourceContext(storage, env);
   return context !== null && context.emails.includes(actorEmail);
 }
@@ -9267,8 +9405,9 @@ async function managementSourceAccess(request, env, allowDraft = false, nowMs = 
     if (sourceId !== MANAGEMENT_SOURCE_ID && context.endpoint !== request.url) return null;
     const configuration = accessConfiguration(env);
     if (!configuration || !oauthText(context.aud, 512) || !Array.isArray(context.emails)) return null;
-    const actor = await verifyAccessAssertion(request, { ...configuration, aud: context.aud,
+    let actor = await verifyAccessAssertion(request, { ...configuration, aud: context.aud,
       emails: allowAdministratorConsent ? [...new Set([...context.emails, ...configuration.emails])] : context.emails, serviceClientId: null }, nowMs);
+    if (!actor && allowAdministratorConsent) actor = await verifyDashboardActor(request, env, { ...configuration, aud: context.aud }, nowMs);
     return actor?.kind === 'human' ? { actor, actorEmail: actor.email,
       enabledTools: context.enabledTools, installed: context.installed } : null;
   } catch { return null; }
@@ -9314,7 +9453,7 @@ const MANAGEMENT_MCP_TOOLS = [
   ['rename_installed_source', 'Rename an installed connector. This updates the name in the gateway, in Team, and on its Access policy. Assignments, the URL, and the tool allowlist do not change.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, label: { type: 'string', minLength: 2, maxLength: 80 } }), 'PUT', 'installed-label'],
   ['authorize_mcp_source', 'Return a gateway page where you sign in with the provider. This does not start OAuth or complete authorization; check the recorded action afterwards.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'authorize'],
   ['cancel_mcp_source_action', 'Cancel only an unstarted source action the server permits. Does not undo writes.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'action'],
-  ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Gateway Management assignment allows changing gateway configuration and access.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT } }) } }), 'POST', '/api/team-actions'],
+  ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Only dashboard administrators may change dashboardAccess grants; omission preserves existing grants.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT }, dashboardAccess: { type: 'boolean' } }, ['email', 'sourceIds']) } }), 'POST', '/api/team-actions'],
   ['cancel_gateway_team_action', 'Cancel an unstarted Team proposal only when the server permits.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'team-action'],
   ['remove_mcp_source_draft', 'Remove an unprovisioned source draft. Started installations retain their journal.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', '/api/sources'],
   ['remove_mcp_source', 'Remove a source and its owned resources after explicit instruction. Its tools and assignments stop being available.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', 'source'],

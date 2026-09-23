@@ -51,14 +51,14 @@ function renderTeam(client = api()) {
 
 function accessCheckbox(member: HTMLElement, name?: RegExp) {
   fireEvent.click(within(member).getByRole('button', { name: /^Access for/ }))
-  const checkbox = screen.getByRole('checkbox', name ? { name } : undefined)
+  const checkbox = screen.getByRole('checkbox', { name: name ?? /^(?!Dashboard administrator$)/ })
   fireEvent.click(screen.getByRole('button', { name: 'Done' }))
   return checkbox
 }
 
 async function toggleAccess(user: ReturnType<typeof userEvent.setup>, member: HTMLElement, name?: RegExp) {
   await user.click(within(member).getByRole('button', { name: /^Access for/ }))
-  await user.click(screen.getByRole('checkbox', name ? { name } : undefined))
+  await user.click(screen.getByRole('checkbox', { name: name ?? /^(?!Dashboard administrator$)/ }))
   await user.click(screen.getByRole('button', { name: 'Done' }))
 }
 
@@ -157,7 +157,7 @@ describe('TeamPage', () => {
     const administrator = await screen.findByRole('group', { name: 'admin@example.com' })
     await toggleAccess(user, administrator, /Company knowledge/)
     expect(accessCheckbox(administrator)).toBeChecked()
-    expect(screen.getByText('Administrator')).toBeInTheDocument()
+    expect(screen.getByText('Deployment administrator')).toBeInTheDocument()
   })
 
   it('keeps existing-connector permission controls usable while connector addition is paused', async () => {
@@ -708,4 +708,28 @@ describe('TeamPage', () => {
       sourceIds: [sourceId],
     }])
   })
+
+  it('grants dashboard access explicitly and keeps deployment administrators enabled', async () => {
+    const user = userEvent.setup()
+    const enabled = { ...team, dashboardAccessAvailable: true }
+    const savedMembers = enabled.members.map(member => member.email === 'analyst@example.com' ? { ...member, dashboardAccess: true } : member)
+    const getTeam = vi.fn().mockResolvedValueOnce(enabled).mockResolvedValue({ ...enabled, revision: 8, members: savedMembers,
+      pendingAction: { schemaVersion: 1, actionId, status: 'succeeded', expiresAt, failureCode: null, canCancel: false } })
+    const client = renderTeam(api({ getTeam, prepareTeamAction: vi.fn(async (): Promise<TeamActionResult> => ({ schemaVersion: 1, action: {
+      schemaVersion: 1, actionId, status: 'succeeded', expiresAt, failureCode: null, canCancel: false,
+    } })) }))
+    await user.click(await screen.findByRole('button', { name: 'Access for analyst@example.com' }))
+    const checkbox = screen.getByRole('checkbox', { name: 'Dashboard administrator' })
+    expect(checkbox).not.toBeChecked()
+    expect(screen.getByText(/Full access to manage connectors/)).toBeVisible()
+    await user.click(checkbox)
+    await user.click(screen.getByRole('button', { name: 'Done' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(client.prepareTeamAction).toHaveBeenCalledWith(7, savedMembers, []))
+    await screen.findByText('Team access saved and verified in Cloudflare.')
+    await user.click(screen.getByRole('button', { name: 'Access for admin@example.com' }))
+    expect(screen.getByRole('checkbox', { name: 'Dashboard administrator' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Dashboard administrator' })).toBeDisabled()
+  })
+
 })

@@ -179,7 +179,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       { type: 'object', additionalProperties: false, properties: { url: { type: 'string', format: 'uri', maxLength: 2048 } }, required: ['url'] },
       v.strictObject({ url: v.pipe(v.string(), v.maxLength(2048), v.url()) }),
       { ...readOnly, openWorldHint: true, untrustedContentHint: true }, ({ url }) => api.discoverSource(url)),
-    tool('get_gateway_team', 'Read Team policy membership, fixed administrators, revision, observation time and any recorded proposal. A non-null observedAt identifies the live policy read; a null value is an unverified saved snapshot. This does not guarantee effective access or revoke existing sessions.', noInput, empty, readOnly, () => api.getTeam()),
+    tool('get_gateway_team', 'Read Team policy membership, deployment administrators, dashboard grants, revision, observation time and any recorded proposal. A non-null observedAt identifies the live policy read; a null value is an unverified saved snapshot. This does not guarantee effective access or revoke existing sessions.', noInput, empty, readOnly, () => api.getTeam()),
     tool('get_gateway_team_action', 'Read a recorded Team action. Partial/unknown outcomes are not a rollback; inspect get_gateway_team before exact recovery.', actionInput, actionSchema, readOnly, ({ actionId }) => api.getTeamAction(actionId)),
     tool('cancel_gateway_team_action', 'Cancel only a recorded, explicitly cancelable zero-write Team proposal. Does not undo policy writes or restore old access.', actionInput, actionSchema, mutation, async ({ actionId }) => {
       const action = await api.getTeamAction(actionId)

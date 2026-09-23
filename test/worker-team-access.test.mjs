@@ -5389,3 +5389,180 @@ test('full removal waits until no team holds an Access group', async () => fixtu
   const applied = await teardown.send('apply');
   assert.equal(applied.status, 200, await applied.clone().text());
 }));
+
+function installDashboardTarget(gateway) {
+  const target = {
+    applicationId: 'synthetic-dashboard-app', policyId: 'synthetic-dashboard-policy',
+    policyName: 'Gateway administrators [synthetic-dashboard]', applicationName: 'Gateway management [synthetic-dashboard]',
+    hostname: 'manage.example.com', aud: gateway.env.CF_ACCESS_AUD, allowedIdps: ['synthetic-idp'],
+  };
+  gateway.env.DASHBOARD_ACCESS_TARGET = async () => target;
+  gateway.provider.state.apps.set(target.applicationId, {
+    id: target.applicationId, type: 'self_hosted', name: target.applicationName,
+    domain: target.hostname, aud: target.aud, allowed_idps: target.allowedIdps,
+  });
+  gateway.provider.state.policies.set(target.applicationId, [{
+    id: target.policyId, name: target.policyName, decision: 'allow', precedence: 1,
+    include: [ADMIN, OWNER].map(email => ({ email: { email } })), exclude: [], require: [],
+  }]);
+  return target;
+}
+
+test('dashboard grants admit a member, preserve source grants, and revoke an existing login after a restart', async () => fixture(async gateway => {
+  const target = installDashboardTarget(gateway);
+  const initial = await gateway.view();
+  assert.equal(initial.dashboardAccessAvailable, true);
+  assert.equal((await gateway.api('/api/status', { email: MEMBER })).status, 401);
+  const granted = initial.members.map(member => member.email === MEMBER ? { ...member, dashboardAccess: true } : member);
+  const save = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: initial.revision, members: granted,
+  } });
+  assert.equal(save.status, 200, await save.clone().text());
+  const headers = await gateway.headers(MEMBER);
+  const request = () => new Request(`${MANAGEMENT_ORIGIN}/api/team`, { headers });
+  gateway.reloadManagement();
+  assert.equal((await worker.fetch(request(), gateway.env)).status, 200);
+  const current = await gateway.view();
+  assert.deepEqual(current.members.find(member => member.email === MEMBER)?.sourceIds,
+    initial.members.find(member => member.email === MEMBER)?.sourceIds);
+  assert.equal(current.members.find(member => member.email === MEMBER)?.dashboardAccess, true);
+  // Older clients that omit the optional field preserve the existing dashboard grant.
+  const legacy = await gateway.api('/api/team-actions', { method: 'POST', email: MEMBER, body: {
+    schemaVersion: 1, expectedRevision: current.revision, members: current.members.map(({ email, sourceIds }) => ({ email, sourceIds })),
+  } });
+  assert.equal(legacy.status, 200, await legacy.clone().text());
+  const beforeRevocation = await gateway.view();
+  const revoked = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: beforeRevocation.revision,
+    members: beforeRevocation.members.map(member => member.email === MEMBER ? { ...member, dashboardAccess: false } : member),
+  } });
+  assert.equal(revoked.status, 200, await revoked.clone().text());
+  assert.equal((await worker.fetch(request(), gateway.env)).status, 401);
+  const afterRevocation = await gateway.view();
+  assert.equal(afterRevocation.pendingAction?.status, 'succeeded');
+  assert.equal(afterRevocation.members.find(member => member.email === MEMBER)?.dashboardAccess, false);
+  assert.deepEqual(gateway.provider.state.policies.get(target.applicationId)[0].include,
+    [ADMIN, OWNER].map(email => ({ email: { email } })));
+  assert.equal((await gateway.api('/api/status')).status, 200);
+}));
+
+test('service identities cannot grant dashboard access or remove a dashboard administrator', async () => fixture(async gateway => {
+  installDashboardTarget(gateway);
+  gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+  const initial = await gateway.view();
+  const members = initial.members.map(member => member.email === MEMBER ? { ...member, dashboardAccess: true } : member);
+  const request = { schemaVersion: 1, expectedRevision: initial.revision, members };
+  const baseline = gateway.provider.requests.length;
+  const denied = await gateway.serviceApi('/api/team-actions', { method: 'POST', body: request });
+  assert.equal(denied.status, 400, await denied.clone().text());
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: request })).status, 200);
+  const next = await gateway.view();
+  const removal = await gateway.serviceApi('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: next.revision, members: next.members.filter(member => member.email !== MEMBER),
+  } });
+  assert.equal(removal.status, 400);
+}));
+
+test('dashboard access fails closed on live policy drift, missing credential, or a forged identity', async () => fixture(async gateway => {
+  const target = installDashboardTarget(gateway);
+  const initial = await gateway.view();
+  assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: initial.revision,
+    members: initial.members.map(member => member.email === MEMBER ? { ...member, dashboardAccess: true } : member),
+  } })).status, 200);
+  assert.equal((await gateway.api('/api/status', { email: MEMBER, extraHeaders: { 'cf-access-authenticated-user-email': NEW_PERSON } })).status, 401);
+  const policies = gateway.provider.state.policies.get(target.applicationId);
+  policies[0].include = [{ email: { email: ADMIN } }, { email: { email: OWNER } }];
+  assert.equal((await gateway.api('/api/status', { email: MEMBER })).status, 401);
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  assert.equal((await gateway.api('/api/status', { email: MEMBER })).status, 401);
+  assert.equal((await gateway.api('/api/status')).status, 200);
+}));
+
+for (const installFirst of [true, false]) {
+  test(`dashboard administrators can use consent paths without gaining management MCP tools (source first: ${installFirst})`, () => fixture(async gateway => {
+    installDashboardTarget(gateway);
+    if (installFirst) await installManagementSource(gateway);
+    const initial = await gateway.view();
+    const save = await gateway.api('/api/team-actions', { method: 'POST', body: {
+      schemaVersion: 1, expectedRevision: initial.revision,
+      members: initial.members.map(member => member.email === MEMBER ? { ...member, dashboardAccess: true } : member),
+    } });
+    assert.equal(save.status, 200, await save.clone().text());
+    if (!installFirst) await installManagementSource(gateway);
+    const view = await gateway.view();
+    assert.equal(view.members.find(member => member.email === MEMBER)?.dashboardAccess, true);
+    const application = [...gateway.provider.state.apps.values()].find(item => item.domain === 'manage.example.com/api/mcp');
+    assert.ok(gateway.provider.state.policies.get(application.id)[0].include.some(rule => rule.email?.email === MEMBER));
+    const consent = new Request(`${MANAGEMENT_ORIGIN}/__ankka/operation`, { headers: await gateway.headers(MEMBER, MANAGEMENT_AUDIENCE) });
+    assert.equal(await verifyAccess(consent, gateway.env), MEMBER);
+    assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: MEMBER })).response.status, 401);
+    const revoke = await gateway.api('/api/team-actions', { method: 'POST', body: {
+      schemaVersion: 1, expectedRevision: view.revision,
+      members: view.members.map(member => member.email === MEMBER ? { ...member, dashboardAccess: false } : member),
+    } });
+    assert.equal(revoke.status, 200, await revoke.clone().text());
+    assert.equal(await verifyAccess(consent, gateway.env), false);
+  }));
+}
+
+for (const committed of [false, true]) {
+  test(`dashboard policy changes resume exactly after a lost response (committed: ${committed})`, () => fixture(async gateway => {
+    const target = installDashboardTarget(gateway);
+    const initial = await gateway.view();
+    const body = { schemaVersion: 1, expectedRevision: initial.revision,
+      members: initial.members.map(member => member.email === MEMBER ? { ...member, dashboardAccess: true } : member) };
+    gateway.provider.hook(({ record, state }) => {
+      if (record.method !== 'PUT' || !record.pathname.endsWith(`/policies/${target.policyId}`)) return undefined;
+      if (committed) state.policies.set(target.applicationId, [{ id: target.policyId, ...record.body }]);
+      return envelope(null, 503);
+    });
+    assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body })).status, 409);
+    assert.equal((await gateway.api('/api/status', { email: MEMBER })).status, 401, 'an unfinished grant does not authorize');
+    gateway.reloadManagement();
+    gateway.provider.hook(undefined);
+    const recovery = await gateway.view();
+    assert.deepEqual(recovery.proposedMembers, body.members);
+    const resumed = await gateway.api('/api/team-actions', { method: 'POST', body });
+    assert.equal(resumed.status, 200, await resumed.clone().text());
+    assert.equal((await gateway.api('/api/status', { email: MEMBER })).status, 200);
+  }));
+}
+
+test('source-only managers cannot remove dashboard administrators through MCP', () => fixture(async gateway => {
+  installDashboardTarget(gateway);
+  await installManagementSource(gateway);
+  const initial = await gateway.view();
+  const members = initial.members.map(member => member.email === MEMBER
+    ? { ...member, sourceIds: [...member.sourceIds, MANAGEMENT_ID] } : member);
+  members.push({ email: NEW_PERSON, sourceIds: [], dashboardAccess: true });
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: initial.revision, members,
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const current = await gateway.view();
+  const baseline = gateway.provider.requests.length;
+  const removal = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: {
+    expectedRevision: current.revision,
+    members: current.members.filter(member => member.email !== NEW_PERSON).map(({ email, sourceIds }) => ({ email, sourceIds })),
+  } }, { email: MEMBER });
+  assert.equal(removal.body.result.isError, true);
+  assert.equal(removal.body.result.structuredContent.error.code, 'team_access_admin_required');
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal((await gateway.api('/api/status', { email: NEW_PERSON })).status, 200);
+}));
+
+test('dashboard fields are strictly typed and deployment administrators cannot be demoted', () => fixture(async gateway => {
+  installDashboardTarget(gateway);
+  const initial = await gateway.view();
+  const baseline = gateway.provider.requests.length;
+  for (const [email, dashboardAccess] of [[ADMIN, false], [MEMBER, 'true'], [MEMBER, null]]) {
+    const denied = await gateway.api('/api/team-actions', { method: 'POST', body: {
+      schemaVersion: 1, expectedRevision: initial.revision,
+      members: initial.members.map(member => member.email === email ? { ...member, dashboardAccess } : member),
+    } });
+    assert.equal(denied.status, 400);
+  }
+  assertNoMutation(gateway.provider, baseline);
+}));

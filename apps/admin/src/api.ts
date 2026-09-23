@@ -287,6 +287,7 @@ const teamEmailSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(254))
 const teamSourceIdSchema = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u))
 const teamMemberSchema = v.strictObject({
   email: teamEmailSchema,
+  dashboardAccess: v.optional(v.boolean()),
   sourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
 })
 const teamMembersSchema = v.array(teamMemberSchema)
@@ -315,6 +316,7 @@ const teamSchema = v.strictObject({
   managementCredentialChoice: v.optional(v.nullable(v.picklist(['provided', 'skipped']))),
   observedAt: v.optional(v.nullable(v.string())),
   members: teamMembersSchema,
+  dashboardAccessAvailable: v.optional(v.boolean()),
   adminEmails: v.pipe(v.array(teamEmailSchema), v.minLength(1)),
   sources: v.pipe(v.array(v.strictObject({
     id: teamSourceIdSchema,
@@ -470,7 +472,7 @@ const ERROR_MESSAGES = new Map([
   ['team_recovery_required', 'Some access policies may already have changed. Resume the recorded change before editing access again.'],
   ['team_access_revision_conflict', 'Team access changed in another tab. Refresh before preparing another change.'],
   ['team_access_invalid_request', 'Review the email addresses and installed connector selections before trying again.'],
-  ['team_access_admin_required', 'Gateway administrators must remain in your team. Their roles cannot be changed here.'],
+  ['team_access_admin_required', 'Deployment administrators must remain in your team and keep dashboard access. Only dashboard administrators can change dashboard access.'],
   ['team_access_invalid_state', 'The saved access configuration could not be verified. Refresh before making changes.'],
   ['team_access_invalid_target', 'The owned access policies could not be verified. No new change can be prepared.'],
   ['team_action_recovery_required', 'Some access policies may already have changed. Resume the recorded change before editing access again.'],

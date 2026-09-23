@@ -4,7 +4,12 @@ import { DurableObject } from 'cloudflare:workers';
 import { AdminState } from '../../../payload/worker/index.js';
 
 export class RemovalState extends DurableObject {
-  constructor(ctx, env) { super(ctx, env); this.runtime = new AdminState(ctx, env); }
+  constructor(ctx, env) {
+    super(ctx, env);
+    const runtimeEnv = { ...env };
+    if (env.FIXTURE_DASHBOARD_TARGET) runtimeEnv.DASHBOARD_ACCESS_TARGET = async () => JSON.parse(env.FIXTURE_DASHBOARD_TARGET);
+    this.runtime = new AdminState(ctx, runtimeEnv);
+  }
   async fetch(request) {
     const path = new URL(request.url).pathname;
     if (path === '/fixture/seed') {

@@ -10,10 +10,13 @@ interface MemberAccessDialogProps {
   member: TeamMember
   sources: Team['sources']
   disabled: boolean
+  dashboardAccessAvailable?: boolean
+  deploymentAdministrator?: boolean
+  onDashboardAccessChange?(allowed: boolean): void
   onChange(sourceIds: string[]): void
 }
 
-export function MemberAccessDialog({ member, sources, disabled, onChange }: MemberAccessDialogProps) {
+export function MemberAccessDialog({ member, sources, disabled, onChange, dashboardAccessAvailable, deploymentAdministrator, onDashboardAccessChange }: MemberAccessDialogProps) {
   const [open, setOpen] = useState(false)
   const heading = useRef<HTMLHeadingElement>(null)
   return <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -32,6 +35,16 @@ export function MemberAccessDialog({ member, sources, disabled, onChange }: Memb
           <Dialog.Description className="mt-4 text-sm leading-6 text-kumo-subtle">Select connectors to grant access to their tools. Tools are shared per connector.</Dialog.Description>
         </header>
         <div className="overflow-y-auto overscroll-contain px-5 sm:px-6">
+          {dashboardAccessAvailable ? <div className="border-b border-kumo-line py-4">
+            <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm font-medium text-kumo-strong">
+              <Checkbox checked={deploymentAdministrator || member.dashboardAccess === true} disabled={disabled || deploymentAdministrator}
+                onChange={event => { if (!disabled && !deploymentAdministrator) onDashboardAccessChange?.(event.target.checked) }} />
+              <span>Dashboard administrator</span>
+            </label>
+            <p className="ml-8 mt-2 text-xs leading-5 text-kumo-subtle">{deploymentAdministrator
+              ? 'Deployment administrators keep dashboard access for recovery.'
+              : 'Full access to manage connectors, team access, gateway settings, updates and removal. This includes giving others dashboard access.'}</p>
+          </div> : null}
           {sources.map(source => <div key={source.id} className="border-b border-kumo-line py-4 last:border-0">
             <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm font-medium text-kumo-strong">
               <Checkbox disabled={disabled} checked={member.sourceIds.includes(source.id)} onChange={event => {
