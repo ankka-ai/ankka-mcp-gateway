@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Grant full dashboard management access from Team with the explicit Dashboard
+  administrator option. Administrators can grant and revoke access for team
+  members; revocation also rejects existing dashboard sessions. Initial
+  installation administrators retain recovery access, and dashboard access stays
+  separate from permissions to use MCP tools.
+
 - Save Team changes with fewer than half the Cloudflare calls. A save checked
   each policy before and after writing it by listing the account's Access
   applications, reading that application and its policy again, and then

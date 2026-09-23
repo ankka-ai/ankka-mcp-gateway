@@ -113,7 +113,11 @@ remain pending and are not replayed blindly.
 The management dashboard runs in the team's Cloudflare account on a
 hostname separate from the MCP Portal. Cloudflare Access protects the origin,
 and the Worker independently verifies the Access JWT issuer, audience,
-signature, expiry, verified email, and deployment administrator allowlist.
+signature, expiry and verified email. Deployment administrators are a fixed
+recovery allowlist. Additional dashboard administrators require an explicit
+Team grant and a matching live, installation-owned dashboard Access policy on
+every request. Their full management authority includes granting dashboard
+access; source-only assignees and service identities cannot change those grants.
 Cross-origin API requests are rejected.
 
 A gateway can additionally accept exactly one machine identity: the Access
@@ -123,7 +127,7 @@ administrators; the optional management MCP source separately admits its assigne
 human identities. The Worker verifies a service token exactly like an
 administrator's token and then authorizes the exact `common_name` claim
 (`type: app` appears on both kinds of token and distinguishes nothing): a
-token with an email claim is an administrator or nothing, and a token without
+token with an email claim requires dashboard authorization, and a token without
 one must carry no identity header and the configured client id. The service
 identity acts only within a fixed method-and-route allowlist (status and
 update reads, source discovery, draft and apply, Team read and save); update

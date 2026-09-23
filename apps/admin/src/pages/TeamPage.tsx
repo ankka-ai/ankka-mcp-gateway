@@ -56,10 +56,11 @@ function moveCoveredDirectGrants(members: TeamMember[], team: TeamGrant): TeamMe
 }
 
 function canonicalMembers(members: TeamMember[]): TeamMember[] {
-  return members.map((member) => ({
-    email: member.email.trim().toLowerCase(),
-    sourceIds: [...new Set(member.sourceIds)].sort(),
-  })).sort((a, b) => a.email.localeCompare(b.email))
+  return members.map((member) => {
+    const normalized: TeamMember = { email: member.email.trim().toLowerCase(), sourceIds: [...new Set(member.sourceIds)].sort() }
+    if (member.dashboardAccess !== undefined) normalized.dashboardAccess = member.dashboardAccess
+    return normalized
+  }).sort((a, b) => a.email.localeCompare(b.email))
 }
 
 function withAdministrators(team: Team, members: TeamMember[]): TeamMember[] {
@@ -357,12 +358,16 @@ export function TeamPage() {
                 <div key={member.email} role="group" aria-label={member.email} className="flex min-w-0 items-center justify-between gap-4 border-b border-kumo-line/70 py-4">
                   <div className="min-w-0">
                     <p className="break-all text-sm font-medium text-kumo-strong">{member.email}</p>
-                    <p className="mt-1 text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Administrator' : 'Team member'}</p>
+                    <p className="mt-1 text-xs text-kumo-subtle">{administrators.has(member.email) ? 'Deployment administrator' : member.dashboardAccess ? 'Dashboard administrator' : 'Team member'}</p>
                     <p className="mt-1 text-xs text-kumo-subtle">{member.sourceIds.length === 0 ? 'No connectors selected.' : `${member.sourceIds.length} ${member.sourceIds.length === 1 ? 'connector' : 'connectors'} selected`}</p>
                     {displayedTeams.length > 0 ? <p className="mt-1 text-xs text-kumo-subtle">{effectiveAccessText(member, displayedTeams, team.sources)}</p> : null}
                   </div>
                   <div className="flex shrink-0 items-center gap-2">
-                    <MemberAccessDialog member={member} sources={installed} disabled={disabled} onChange={sourceIds => {
+                    <MemberAccessDialog dashboardAccessAvailable={team.dashboardAccessAvailable === true}
+                      deploymentAdministrator={administrators.has(member.email)}
+                      onDashboardAccessChange={dashboardAccess => {
+                        if (!disabled) setDraft(current => current.map(person => person.email === member.email ? { ...person, dashboardAccess } : person))
+                      }} member={member} sources={installed} disabled={disabled} onChange={sourceIds => {
                       if (!disabled) setDraft(current => current.map(person => person.email === member.email ? { ...person, sourceIds } : person))
                     }} />
                     {!administrators.has(member.email) && !recorded ? <Button type="button" variant="secondary" disabled={disabled} className="size-9 justify-center p-0" aria-label={`Remove ${member.email}`} onClick={() => setDraft((current) => current.filter((person) => person.email !== member.email))}><Trash size={16} aria-hidden="true" /></Button> : null}

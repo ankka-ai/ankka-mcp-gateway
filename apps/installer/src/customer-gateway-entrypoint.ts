@@ -1,3 +1,4 @@
+import { customerDashboardAccessTarget } from './customer-dashboard-access';
 import type { GatewayApiEnv } from '../../api-source-runtime/src/gateway';
 import { customerPageEnd, customerPageStart } from './customer-page-shell';
 import { customerLoadingIndicator } from './customer-page-theme';
@@ -183,7 +184,9 @@ interface FinalGatewayEnv extends Record<string, unknown>, GatewayApiEnv {
 }
 
 function withApiRuntime(env: FinalGatewayEnv, storage?: DurableObjectStorage): FinalGatewayEnv {
-  return { ...env, API_SOURCE_RUNTIME: { fetch: async (request: Request) => {
+  const runtimeEnv: FinalGatewayEnv = { ...env };
+  if (storage) runtimeEnv.DASHBOARD_ACCESS_TARGET = () => customerDashboardAccessTarget(storage, env);
+  return { ...runtimeEnv, API_SOURCE_RUNTIME: { fetch: async (request: Request) => {
     if (storage !== undefined) {
       const { gatewayApiRequest } = await import('../../api-source-runtime/src/gateway');
       return gatewayApiRequest(request, env, storage);

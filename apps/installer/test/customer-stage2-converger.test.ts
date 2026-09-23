@@ -1,3 +1,4 @@
+import { dashboardAccessTargetFromReceipt } from '../src/customer-dashboard-access';
 import { buildBootstrapDeployPlan } from '../src/bootstrap-plan';
 import * as v from 'valibot';
 import { describe, expect, it } from 'vitest';
@@ -1312,6 +1313,28 @@ describe('gateway teardown handoff from a real installation journal', () => {
     expect(await expiredGatewayTeardownHandoffHostname({ handoff: encoded, trust: input.trust, now: closed - 1 })).toBeNull();
     expect(await expiredGatewayTeardownHandoffHostname({ handoff: canonicalJson(tampered), trust: input.trust, now: closed })).toBeNull();
     expect(await expiredGatewayTeardownHandoffHostname({ handoff: 'not a receipt', trust: input.trust, now: closed })).toBeNull();
+  });
+
+  it('binds dashboard membership writes to the verified installation application and policy', async () => {
+    const { input } = await installed();
+    const application = v.parse(v.strictObject({ applicationId: v.string(), aud: v.string() }),
+      input.journal.actions.find(action => action.name === 'management_access_application')?.locator);
+    const env = {
+      CLOUDFLARE_ACCOUNT_ID: ACCOUNT_ID, CLOUDFLARE_ZONE_ID: ZONE_ID,
+      ANKKA_INSTALL_ID: input.journal.identity.installId, ANKKA_WORKER_NAME: input.journal.identity.workerName,
+      ANKKA_MANAGEMENT_HOSTNAME: input.plan.gatewayConfiguration.managementHostname, CF_ACCESS_AUD: application.aud,
+    };
+    const serializedPlan = canonicalJson(input.plan);
+    expect(await dashboardAccessTargetFromReceipt(serializedPlan, input.journal, env)).toMatchObject({
+      applicationId: APPLICATION_ID, policyId: POLICY_ID, hostname: env.ANKKA_MANAGEMENT_HOSTNAME,
+      aud: application.aud, allowedIdps: [IDP_ID],
+    });
+    for (const key of ['CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_ZONE_ID', 'ANKKA_INSTALL_ID', 'ANKKA_WORKER_NAME', 'ANKKA_MANAGEMENT_HOSTNAME', 'CF_ACCESS_AUD'] as const) {
+      expect(await dashboardAccessTargetFromReceipt(serializedPlan, input.journal, { ...env, [key]: 'foreign' })).toBeNull();
+    }
+    expect(await dashboardAccessTargetFromReceipt(serializedPlan, null, env)).toBeNull();
+    const unverified = { ...input.journal, actions: input.journal.actions.filter(action => action.name !== 'management_admin_policy') };
+    expect(await dashboardAccessTargetFromReceipt(serializedPlan, unverified, env)).toBeNull();
   });
 
   it('certifies a journal written before the placeholder record existed exactly as one written after', async () => {

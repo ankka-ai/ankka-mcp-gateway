@@ -188,6 +188,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       editingDisabledReason: scenario === 'team-editable' ? null : scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : 'managed_in_cloudflare',
       managementCredentialConfigured: scenario === 'team-editable' || scenario === 'management-token',
       adminEmails: ['admin@example.com'],
+      dashboardAccessAvailable: true,
       members: [
         { email: 'admin@example.com', sourceIds: scenario === 'empty' ? [] : ['source-1111111111111111'] },
         { email: 'analyst@example.com', sourceIds: [] },

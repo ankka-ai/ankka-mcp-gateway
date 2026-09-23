@@ -3,8 +3,28 @@
 Team reads current Cloudflare membership and displays its observation time.
 With the [customer-owned management token](MANAGEMENT_TOKEN.md) configured,
 administrators save source assignments directly in the gateway. The token stays
-in your Cloudflare account. Administrator identities remain fixed, and new
-data sources start denied to everyone until an explicit Team grant.
+in your Cloudflare account. New data sources start denied to everyone until an explicit Team grant.
+
+To give someone full dashboard access, open **Team → Access** beside their
+email, select **Dashboard administrator**, and save. They can manage connectors,
+team access (including dashboard access), settings, updates and removal.
+Deployment administrators always retain dashboard access for recovery. New team
+members start without it; connector assignments do not grant it.
+
+The option requires a gateway release with dashboard-access support and its
+verified installation record. Changes use the customer-owned management token
+and the existing Team write journal. The Worker verifies both the saved grant
+and the live, installation-owned dashboard policy on every delegated dashboard
+request. Revoking the grant rejects later requests even with an unexpired login
+token; it does not cancel an operation already accepted. Missing credentials or
+unverifiable policy state deny delegated access; deployment administrators can
+still sign in for recovery. Only dashboard administrators can change these
+grants. Service identities and source-only management assignees cannot grant
+themselves dashboard access. Dashboard grants do not assign MCP sources.
+Cloudflare approval is still required for operations that already require it.
+The Team API uses the optional member field `dashboardAccess`: `true` grants
+access, `false` revokes it, and omission preserves an existing grant for older
+clients. Deployment administrators cannot be removed or demoted here.
 
 The optional [Gateway Management source](GATEWAY_MANAGEMENT_MCP.md) initially
 assigns its creator and uses ordinary Team assignments thereafter. People assigned
@@ -28,7 +48,7 @@ writes and their verification keep their ordered journal.
 Only the public Access signing keys are cached in Worker memory, for up to five
 minutes per issuer. A new key ID triggers a refresh, and failed refreshes never
 reuse expired keys. Every request still verifies its signature, issuer, audience,
-expiry and configured administrator or service identity. Membership and
+expiry and the authorized dashboard or service identity. Membership and
 management credentials are not cached.
 
 The manual procedures below remain useful for provider-side inspection and

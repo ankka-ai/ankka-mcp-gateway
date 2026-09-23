@@ -171,7 +171,8 @@ separate steps. Gateways still on the published v19 preview cannot add sources.
   acquire the new default-deny authorization profile.
 - **Team** reads current Cloudflare policy membership, shows when it was
   checked, and saves assignments using your gateway's management credential.
-  Administrator rights remain fixed. See [Team access](TEAM_ACCESS.md).
+  You can also grant full dashboard access; deployment administrators retain
+  recovery access. See [Team access](TEAM_ACCESS.md).
 - **Settings** checks the installed signed release channel, prepares an
   update or rollback, and contains the removal entry point in its danger zone.
   The sidebar footer shows the installed version and any available update. Older canary

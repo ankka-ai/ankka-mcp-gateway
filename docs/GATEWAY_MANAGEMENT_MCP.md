@@ -10,7 +10,9 @@ Gateway Management exposes fixed gateway operations through the team's existing
 Cloudflare MCP Portal. Add it in **Sources**, install the draft, and assign it in
 **Team** like any other source. The person who adds it receives the initial
 assignment. Other people receive no management access until explicitly assigned.
-There is no additional MCP administrator role.
+There is no additional MCP administrator role. Dashboard access is a separate
+explicit grant in Team. Source assignment alone cannot grant or revoke dashboard
+access; see [Team access](TEAM_ACCESS.md).
 
 Source code can be ahead of the signed release in your account. This implementation
 has synthetic provider tests; it still requires deployed Cloudflare qualification.
