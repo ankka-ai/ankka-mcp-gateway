@@ -267,7 +267,9 @@ Cloudflare Access flow.
 
 New installations configure these public, non-secret callbacks in the Portal's
 Managed OAuth **Allowed redirect URIs** for dynamic client registration (DCR).
-The provider documentation was reviewed on 2026-09-05.
+The Claude, ChatGPT, and Cursor documentation was reviewed on 2026-09-05;
+Cloudflare's Managed OAuth documentation and the live AI Playground callback
+were checked on 2026-09-24.
 
 | Client surface | Callback allowed during registration |
 | --- | --- |
@@ -275,14 +277,24 @@ The provider documentation was reviewed on 2026-09-05.
 | ChatGPT stable callback | `https://chatgpt.com/connector_platform_oauth_redirect` |
 | ChatGPT callback specific to a connector | `https://chatgpt.com/connector/oauth/*` |
 | Cursor web and Cursor Agents | `https://www.cursor.com/agents/mcp/oauth/callback` |
+| Cloudflare AI Playground | `https://playground.ai.cloudflare.com/agents/playground/*` |
 
 ChatGPT uses the stable callback for eligible authorization servers with issuer
 identification and for older connections. Otherwise its callback contains a
-connector-specific ID. The single wildcard above is limited to that documented
+connector-specific ID. Its wildcard above is limited to that documented
 callback path; it does not allow other ChatGPT paths or hosts. Cloudflare uses
 the pattern to admit registration; the client still registers its concrete
 callback URI. See [ChatGPT's redirect URL documentation](https://developers.openai.com/plugins/build/auth#redirect-url)
 and [Cloudflare's Managed OAuth settings](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/managed-oauth/#managed-oauth-settings).
+
+The [Cloudflare AI Playground](https://playground.ai.cloudflare.com/) uses a
+session-specific callback at `/agents/playground/<session-name>/callback`.
+Cloudflare's Managed OAuth supports a trailing `/*` for sub-paths, so the
+Playground entry allows that callback subtree on its exact HTTPS host. It does
+not allow other Playground paths or Cloudflare hosts. This follows the
+[Agents SDK callback format](https://github.com/cloudflare/agents/blob/main/packages/agents/src/index.ts)
+and was confirmed from the live Playground's OAuth authorization request without
+completing sign-in. The client still registers its concrete callback URI.
 
 In Claude, use **Always required** authentication and automatic OAuth client
 registration. In ChatGPT, use OAuth with DCR when configuring the connection.

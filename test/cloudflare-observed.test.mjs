@@ -261,6 +261,7 @@ test('adding client callbacks preserves existing receipt hashes and planner noop
     'https://chatgpt.com/connector_platform_oauth_redirect',
     'https://chatgpt.com/connector/oauth/*',
     'https://www.cursor.com/agents/mcp/oauth/callback',
+    'https://playground.ai.cloudflare.com/agents/playground/*',
     'https://client.example.com/oauth/callback',
   ];
   const observed = await readCloudflareObservedState({
