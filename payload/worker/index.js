@@ -4781,12 +4781,13 @@ const GORGIAS_MCP_URL = 'https://mcp.gorgias.com/mcp';
 // are a catalogue, not consent to all of the provider's read/write authority.
 const GORGIAS_TICKET_SCOPES = Object.freeze(['openid', 'email', 'profile', 'offline', 'tickets:read']);
 const META_ADS_MCP_URL = 'https://mcp.facebook.com/ads';
+const META_ADS_TOKEN_ENDPOINT = 'https://graph.facebook.com/v26.0/oauth/access_token';
 // Meta's reviewed OAuth endpoints span three origins. Keep this exception
 // specific to this resource and these exact endpoints, including API version.
 const META_ADS_OAUTH = Object.freeze({
   issuer: 'https://www.facebook.com/ads',
   authorization_endpoint: 'https://www.facebook.com/v26.0/dialog/oauth',
-  token_endpoint: 'https://graph.facebook.com/v26.0/oauth/access_token',
+  token_endpoint: META_ADS_TOKEN_ENDPOINT,
   registration_endpoint: 'https://mcp.facebook.com/.well-known/register/ads',
 });
 const META_ADS_READ_SCOPES = Object.freeze(['ads_mcp_management', 'ads_read']);
