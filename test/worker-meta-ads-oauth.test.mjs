@@ -26,7 +26,7 @@ const permissionData = (granted = `${READ_SCOPE} public_profile`) => ({
 
 async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metadata = {},
   supported = [...READ_SCOPE.split(' '), 'ads_management', 'business_management', 'catalog_management'],
-  input = {}, tokenScope, permissions = () => Response.json(permissionData()) } = {}) {
+  input = {}, tokenScope, metadataRedirect, permissions = () => Response.json(permissionData()) } = {}) {
   const gateway = await pausedGateway({ endpoint });
   const stub = gateway.env.ADMIN_STATE.get('v1:management');
   const registrations = [], imports = [], calls = [];
@@ -60,7 +60,16 @@ async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metad
     if (url.href === `${new URL(endpoint).origin}/.well-known/oauth-protected-resource${new URL(endpoint).pathname}`) {
       return Response.json({ resource: endpoint, authorization_servers: issuers, scopes_supported: supported });
     }
-    if (url.href === METADATA) return Response.json({ ...config, ...metadata });
+    if (url.href === METADATA) {
+      // Meta's live endpoint redirects unidentified Cloudflare Workers requests
+      // to unsupportedbrowser. An honest explicit client identifier avoids it.
+      if (request.headers.get('user-agent') !== 'Ankka-MCP-Gateway' || metadataRedirect) {
+        return new Response(null, { status: 302, headers: {
+          location: metadataRedirect ?? 'https://www.facebook.com/unsupportedbrowser',
+        } });
+      }
+      return Response.json({ ...config, ...metadata });
+    }
     if (url.href === config.registration_endpoint) {
       registrations.push(await request.json());
       assert.fail('Meta must use the pre-registered App ID, not dynamic registration');
@@ -130,6 +139,8 @@ test('Meta refuses issuer drift and endpoint changes before registering or sendi
     { metadata: { registration_endpoint: 'https://mcp.facebook.com/.well-known/register/other' } },
     { metadata: { registration_endpoint: 'https://mcp.facebook.com.example.net/register' } },
     { metadata: { code_challenge_methods_supported: ['plain'] } },
+    { metadataRedirect: 'https://www.facebook.com/unsupportedbrowser' },
+    { metadataRedirect: 'https://identity.example.net/discovery' },
     { endpoint: sourceUrl },
     { endpoint: 'https://mcp.facebook.com/other' },
   ];

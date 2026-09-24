@@ -38,7 +38,12 @@ async function assertSourceOauthRestart(endpoint) {
       return Response.json(resource);
     }
     const issuer = new URL(config.issuer);
-    if (url.href === `${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`) return Response.json(config);
+    if (url.href === `${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`) {
+      if (meta && request.headers.get('user-agent') !== 'Ankka-MCP-Gateway') return new Response(null, {
+        status: 302, headers: { location: 'https://www.facebook.com/unsupportedbrowser' },
+      });
+      return Response.json(config);
+    }
     if (url.href === config.registration_endpoint) {
       assert.equal(meta, false, 'Meta must never attempt dynamic registration');
       return Response.json({ ...await request.json(), client_id: 'synthetic-public-client' });

@@ -23,7 +23,7 @@ export function SourceAuthorization({ actionId, sourceId, sourceUrl, revision, d
       window.location.assign(result.authorizationUrl)
     } catch (failure) {
       setError(meta && failure instanceof GatewayApiError && failure.code === 'source_oauth_unavailable'
-        ? 'Meta authorization could not start. Check your app’s Ads MCP use case and callback URL, then try again.'
+        ? 'Your gateway could not start Meta authorization. Try again.'
         : failure instanceof GatewayApiError ? failure.message : 'Authorization could not start. Try again.')
       setPending(false)
     }

@@ -122,7 +122,7 @@ describe('choosing the tools of a connected sign-in connector', () => {
     await waitFor(() => expect(button).toBeEnabled())
     await user.click(button)
     expect(api.authorizeSource).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, source.id, '123456789012345')
-    expect(await screen.findByRole('alert')).toHaveTextContent('Check your app’s Ads MCP use case and callback URL')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your gateway could not start Meta authorization. Try again.')
     expect(api.saveSourceDraft).not.toHaveBeenCalled()
   })
 
