@@ -277,8 +277,7 @@ export function releaseNotes(repository, manifest, receipt) {
     ? '- Compatibility bridge: update existing gateways to this release first, then check for updates again to install v0.2.0. Configuration, credentials, sources and Team access are preserved.\n' +
       '- This release accepts the exact new API-source deployment contract but keeps the old binding set. API-source tools become available with the second update.\n\n'
     : manifest.release === 'gateway-v0.2.0'
-      ? '- Requires **Cloudflare Workers Paid**, even if no API sources are configured, because the built-in API runtime uses [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/pricing/). Enable Workers Paid in your Cloudflare account before installing or upgrading. Ankka does not change your billing plan.\n' +
-        '- Agent-authored API sources are built in, with no feature flag or separate runtime deployment. Existing v0.1 gateways upgrade through v0.1.82 first; no fresh installation is required.\n\n'
+      ? '- Agent-authored API sources are built in, with no feature flag or separate runtime deployment. Existing v0.1 gateways upgrade through v0.1.82 first; no fresh installation is required.\n\n'
       : '';
   return `${channelLabel} of Ankka MCP Gateway. This GitHub Release mirrors the exact signed artifact already committed to the customer update channel.\n\n` +
     connectorReleaseNotes +

@@ -40,16 +40,42 @@ body.ankka-setup { margin: 0; }
 .ankka-setup, .ankka-setup * { box-sizing: border-box; }
 .ankka-setup [hidden] { display: none !important; }
 .ankka-setup ::selection { color: var(--canvas); background: #dedede; }
-.ankka-setup .site-header { width: min(48rem, calc(100% - 3rem)); margin-inline: auto; padding-block: clamp(5rem, 15vh, 10rem) 2.75rem; }
-.ankka-setup .brand { display: flex; justify-content: center; color: var(--ink); }
+.ankka-setup .site-header { position: relative; z-index: 0; width: min(48rem, calc(100% - 3rem)); margin-inline: auto; padding-block: clamp(5rem, 15vh, 10rem) 0; }
+.ankka-setup .brand { display: flex; justify-content: center; color: var(--ink); transform: translateY(28%); }
 .ankka-setup .wordmark {
   display: block;
   width: min(80%, 28rem);
   height: auto;
-  -webkit-mask-image: linear-gradient(to bottom, #000 20%, transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 20%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, rgb(0 0 0 / 0.6) 40%, rgb(0 0 0 / 0.2) 75%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, rgb(0 0 0 / 0.6) 40%, rgb(0 0 0 / 0.2) 75%, transparent 100%);
 }
-.ankka-setup main { width: min(42rem, calc(100% - 3rem)); margin-inline: auto; padding: 0; }
+.ankka-setup main {
+  position: relative;
+  z-index: 1;
+  width: min(42rem, calc(100% - 3rem));
+  margin-inline: auto;
+  padding: clamp(2rem, 4vw, 3rem);
+  border: 1px solid rgb(255 255 255 / 0.16);
+  border-radius: 1.5rem;
+  background: linear-gradient(145deg, rgb(255 255 255 / 0.07), rgb(255 255 255 / 0.015) 50%, rgb(255 255 255 / 0.035)), rgb(20 20 20 / 0.24);
+  box-shadow: 0 20px 60px rgb(0 0 0 / 0.18), inset 0 1px 0 rgb(255 255 255 / 0.12), inset 0 -1px 0 rgb(255 255 255 / 0.025);
+  -webkit-backdrop-filter: blur(16px) saturate(125%);
+  backdrop-filter: blur(16px) saturate(125%);
+}
+.ankka-setup main::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 1px 0 0 rgb(255 255 255 / 0.06), inset -1px 0 0 rgb(255 255 255 / 0.025);
+  pointer-events: none;
+}
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .ankka-setup main { background-color: rgb(20 20 20 / 0.88); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .ankka-setup main { background: #202020; -webkit-backdrop-filter: none; backdrop-filter: none; }
+}
 .ankka-setup main.page-message { max-width: 32rem; text-align: center; }
 .ankka-setup h1, .ankka-setup h2 { color: var(--ink); text-wrap: balance; font-weight: 300; }
 .ankka-setup h1 { margin: 0 auto; font-size: clamp(1.75rem, 4vw, 2.5rem); letter-spacing: -0.025em; line-height: 1.1; text-align: center; }
@@ -99,7 +125,7 @@ body.ankka-setup { margin: 0; }
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--ink);
-  font: 400 var(--font-size-caption)/1.5 var(--font-mono);
+  font: 400 var(--font-size-caption)/1.5 "Helvetica Neue", Helvetica, Arial, sans-serif;
   text-align: center;
   text-decoration: none;
   cursor: pointer;
@@ -151,7 +177,7 @@ body.ankka-setup { margin: 0; }
   .ankka-setup summary:hover { color: var(--ink); }
 }
 @media (max-width: 45rem) {
-  .ankka-setup .site-header { padding-block: clamp(4rem, 12vh, 7rem) 2.25rem; }
+  .ankka-setup .site-header { padding-block: clamp(4rem, 12vh, 7rem) 0; }
   .ankka-setup .grid, .ankka-setup .address-examples, .ankka-setup .release-summary { grid-template-columns: 1fr; gap: 0; }
   .ankka-setup .release-summary { gap: 1.25rem; }
   .ankka-setup .address-examples { gap: 1.25rem; }

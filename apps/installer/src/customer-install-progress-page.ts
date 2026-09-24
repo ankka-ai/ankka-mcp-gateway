@@ -63,8 +63,8 @@ export function customerInstallProgressPage(
   const notes={
     held:'Your management token is saved as an encrypted secret on your gateway in the last step of setup.',
     installed:'Your management token is saved as an encrypted secret on your gateway.',
-    skipped:'You continued without a management token. Adding connectors and managing team access stay disabled until you add it in Settings.',
-    dropped:'Your gateway no longer held the management token you pasted, so setup is finishing without it. Adding connectors and managing team access stay disabled until you add it in Settings.',
+    skipped:'This gateway was set up without a management token. Adding connectors and managing team access stay disabled until you add it in Settings.',
+    dropped:'Your gateway no longer held the management token you pasted. Setup cannot finish until you provide a token again.',
   };
   const installer=${scriptLiteral(PUBLIC_ORIGIN)};
   const progress=document.querySelector('#progress');

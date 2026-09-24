@@ -3,8 +3,8 @@ import { customerSetupPage } from '../src/customer-setup-page'
 import { customerInstallProgressPage } from '../src/customer-install-progress-page'
 import { bigQueryCredentialPage } from '../src/customer-bigquery-credential-page'
 import { customerManagementCredentialPage } from '../src/customer-management-credential-page'
-import { operationPage } from '../src/customer-operation-router'
-import { recoveryPage } from '../src/customer-gateway-entrypoint'
+import { operationPage, updateProgressPage } from '../src/customer-operation-router'
+import { recoveryPage } from '../src/customer-recovery-page'
 import { page as customerTeardownPage, progressPage as customerTeardownProgressPage } from '../src/customer-teardown-router'
 import { page as finalTeardownPage } from '../src/gateway-teardown-router'
 
@@ -13,7 +13,7 @@ import { page as finalTeardownPage } from '../src/gateway-teardown-router'
 function fixtureScript(scenario: string): string {
   return String.raw`(()=>{
 const scenario=${JSON.stringify(scenario)};
-const basics={gatewayName:'Example MCP Gateway',zoneName:'example.com',adminEmail:'owner@example.com',additionalAdminEmails:['admin@example.com'],managementHostname:'manage.example.com',portalHostname:'mcp.example.com'};
+const basics={gatewayName:'Example MCP Gateway',zoneName:'example.com',adminEmail:'owner@example.com',additionalAdminEmails:[],managementHostname:'manage.example.com',portalHostname:'mcp.example.com'};
 const reviewed=selection=>({availableZones:[{name:'example.com'}],selection,plan:{managementAdminEmails:[selection.basics.adminEmail,...selection.basics.additionalAdminEmails],managementResources:[{name:'Management Worker'},{name:'Administrator access policy'}],gatewayResources:[{name:'MCP gateway'},{name:'Gateway DNS record'}]}});
 if(scenario.startsWith('operation-'))history.replaceState(null,'',location.pathname+'#'+'a'.repeat(40));
 window.fetch=async(input,options={})=>{
@@ -26,6 +26,7 @@ window.fetch=async(input,options={})=>{
   }
   if(path==='/__ankka/install/configuration')return Response.json(reviewed(JSON.parse(options.body)));
   if(path==='/__ankka/install/status')return Response.json({schemaVersion:1,status:'CONVERGING'});
+  if(path==='/__ankka/operation/update/progress')return Response.json({schemaVersion:1,status:'running',stage:'assets_uploaded',result:null,reason:null,redirectUrl:null,applied:false,targetRelease:'gateway-v0.2.0',servingRelease:'gateway-v0.1.0'});
   if(path==='/__ankka/operation/teardown/progress')return Response.json({status:scenario==='remove-stopped'?'settled':'running',result:scenario==='remove-stopped'?'recovery_required':null,reason:scenario==='remove-stopped'?'removal':null,steps:['Shared connections','Access applications','Access policies','DNS records','Verification'].map((label,index)=>({label,state:index===0?'done':index===1&&scenario!=='remove-stopped'?'active':'pending'}))});
   if(path==='/api/teardown')return Response.json({hostname:'manage.example.com',message:scenario==='remove-final-running'?'Your gateway is removing its remaining resources.':'Review the final removal, then authorize it in Cloudflare.',failureReason:null,revocationUnconfirmed:scenario!=='remove-final-running',canAuthorize:scenario!=='remove-final-running',started:scenario==='remove-final-running',removing:scenario==='remove-final-running',handoff:'synthetic-preview-receipt',steps:['Gateway storage','Management domain','Administrator policy','Management Access application','Gateway Worker'].map((label,index)=>({label,done:scenario==='remove-final-running'&&index===0,current:scenario==='remove-final-running'&&index===1}))});
   return Response.json({error:'preview_only'},{status:409});
@@ -38,6 +39,7 @@ function render(scenario: string): Response | null {
   if (scenario === 'progress') return customerInstallProgressPage('manage.example.com', { status: 'CONVERGING', failureCode: null, failureReason: null }, [])
   if (scenario === 'incomplete' || scenario === 'denied') return customerInstallProgressPage('manage.example.com', { status: 'INCOMPLETE', failureCode: scenario === 'denied' ? 'authorization_rejected' : 'provider_recovery_required', failureReason: null }, [])
   if (scenario === 'operation-loading' || scenario === 'operation-error') return operationPage()
+  if (scenario === 'update-progress') return updateProgressPage('attempt_' + 'a'.repeat(24))
   if (scenario === 'recovery-loading' || scenario === 'recovery-error') return recoveryPage()
   if (scenario === 'bigquery-key') return bigQueryCredentialPage('synthetic-preview-code', 'synthetic-preview-state')
   if (scenario === 'management-token') return customerManagementCredentialPage({ code: 'synthetic-preview-code', state: 'synthetic-preview-state', managementHostname: 'manage.example.com', expiresAt: 600_000, now: 0 })

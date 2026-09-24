@@ -23,7 +23,7 @@ const selection = {
     gatewayName: 'Example MCP Gateway',
     zoneName: 'example.com',
     adminEmail: 'owner@example.com',
-    additionalAdminEmails: ['admin@example.com'],
+    additionalAdminEmails: [],
     managementHostname: 'manage.example.com',
     portalHostname: 'mcp.example.com',
   },

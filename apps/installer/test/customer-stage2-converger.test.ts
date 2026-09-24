@@ -1217,19 +1217,15 @@ describe('management credential in Stage 2 convergence', () => {
     expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
   });
 
-  it('completes the install without a secret when the customer continued without one', async () => {
+  it('refuses a bootstrap convergence pass when the required token is absent', async () => {
     const test = await fixture();
-    const holder = new CustomerManagementCredentialHolder(() => NOW);
-    const step = createCustomerManagementCredentialStep(holder, test.storage);
-    await step.accept(MANAGEMENT_VALUE);
-    await step.skip();
-    const passes = await chunkedPasses(test, `attempt_${'y'.repeat(24)}`, (input) =>
-      runConvergerPassWithManagementCredential(holder, (managementCredential) =>
-        convergeCustomerStage2({ ...input, managementCredential })));
-    expect(passes.result).toMatchObject({ verified: true });
+    await expect(convergeCustomerStage2({
+      ...test.baseInput,
+      attemptId: `attempt_${'y'.repeat(24)}`,
+      managementCredentialRequired: true,
+    })).rejects.toMatchObject({ code: 'management_token_required' });
     expect(managementBindings(test)).toEqual([]);
-    expect(await step.word()).toBe('skipped');
-    expect(test.observable()).not.toContain(MANAGEMENT_VALUE);
+    expect(test.journal.serializedWrites).toHaveLength(0);
   });
 
   it('keeps the value for a fresh approval when a pass fails before the upload', async () => {

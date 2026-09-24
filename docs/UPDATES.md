@@ -196,12 +196,6 @@ permanently, and the gateway, never the dashboard, works out both answers:
 
 ## Built-in API sources
 
-**v0.2 requires Cloudflare Workers Paid**, including gateways that have not yet
-configured an API source. Enable it in your Cloudflare account before the second
-update: the built-in runtime uses
-[Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/pricing/).
-Ankka does not change your billing plan. The v0.1.82 bridge does not add this requirement.
-
 Existing v0.1 gateways update to `gateway-v0.1.82` first, then check for updates
 again to install `gateway-v0.2.0`. The bridge carries the old signed deployment
 contract and binding set while accepting the exact new contract. It retains

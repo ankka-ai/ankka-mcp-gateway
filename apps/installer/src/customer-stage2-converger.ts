@@ -261,10 +261,11 @@ export interface CustomerStage2ConvergerInput {
    * runtime upload writes it once as the `ANKKA_MANAGEMENT_TOKEN` secret
    * binding, and the exact read-backs of this run then expect that binding.
    * Like the grant it is request-local: it never enters the journal, a
-   * receipt, an error, or any durable transition. Absent, the install
-   * completes without it.
+   * receipt, an error, or any durable transition.
    */
   readonly managementCredential?: string | undefined;
+  /** The browser setup requires a held token for every bootstrap convergence pass. */
+  readonly managementCredentialRequired?: boolean | undefined;
   /**
    * Recovery in the final runtime uploads nothing. It states whether its own
    * environment carries the management secret, so the exact read-back of the
@@ -288,6 +289,7 @@ export interface CustomerStage2ConvergerInput {
 
 export type CustomerStage2ConvergerErrorCode =
   | 'invalid'
+  | 'management_token_required'
   | 'ownership_invalid'
   | 'journal_conflict'
   | 'journal_mismatch'
@@ -1302,6 +1304,9 @@ export async function convergeCustomerStage2(
   if (!ATTEMPT_ID.test(input.attemptId) || !v.is(callableSchema, input.now) ||
       !v.is(callableSchema, input.transport) || !v.is(callableSchema, input.payload.bootstrap) ||
       !v.is(callableSchema, input.payload.verifyReady)) fail('invalid');
+  if (input.managementCredentialRequired === true && input.managementCredential === undefined) {
+    fail('management_token_required');
+  }
   const adopted = await adoptOwnership(input);
   const startedAt = clock(input);
   const plan = await renewedPlan(adopted.plan, startedAt);

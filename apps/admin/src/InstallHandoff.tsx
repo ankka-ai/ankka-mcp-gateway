@@ -84,7 +84,7 @@ export function InstallHandoff({ children }: PropsWithChildren) {
     <LifecycleScreen title={heading} loading={checking}>
       <div role="status" aria-live="polite">
         <p>
-          {checking ? 'Your gateway is finishing setup in your Cloudflare account. This page will open your dashboard when setup is ready.'
+          {checking ? 'This page will open your dashboard when setup is ready.'
             : state === 'incomplete' ? 'Your gateway stopped before setup finished. Return to the installer to review this installation and the recovery options.'
             : state === 'sign_in' ? 'Open this page again to continue through Cloudflare Access and check setup.'
             : 'We could not confirm that setup finished. You can check again or return to the installer to review this installation.'}

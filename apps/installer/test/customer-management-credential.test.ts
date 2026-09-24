@@ -157,9 +157,6 @@ describe('management token step', () => {
     ]);
     expect(storage.serialized()).not.toContain(SCANNABLE_VALUE);
 
-    await step.skip();
-    expect(holder.value()).toBeUndefined();
-    expect(await step.word()).toBe('skipped');
     expect(storage.serialized()).not.toContain(SCANNABLE_VALUE);
     holder.release();
   });

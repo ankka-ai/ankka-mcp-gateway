@@ -34,7 +34,7 @@ async function openPage(fetch: typeof globalThis.fetch) {
   runInNewContext(script, {
     document: {
       getElementById: node, createElement: element,
-      querySelectorAll: () => ['approve', 'edit', 'review-button', 'credential-save', 'credential-skip', 'credential-change'].map(node),
+      querySelectorAll: () => ['approve', 'edit', 'review-button', 'credential-save', 'credential-change'].map(node),
     },
     location: { hash: '', assign: navigate }, history,
     fetch, URL,
@@ -114,7 +114,7 @@ describe('customer setup management token step', () => {
   });
   const submit = { preventDefault: () => undefined };
 
-  it('says why the token is needed, who can create it, what it can reach, and that it can wait', async () => {
+  it('says why the required token is needed, who can create it, and what it can reach', async () => {
     const html = await customerSetupPage().text();
     expect(html).toContain('<h2 id="credential-heading">Management token</h2>');
     expect(html).toContain('Adding a connector or giving a teammate access writes to your Cloudflare account, and the approvals in this setup are temporary.');
@@ -122,8 +122,8 @@ describe('customer setup management token step', () => {
     expect(html).toContain('Creating it needs a Super Administrator or Administrator of your Cloudflare account.');
     expect(html).toContain('Cloudflare cannot limit this token to your gateway: it can edit every Access policy in the account.');
     expect(html).toContain('It never passes through anything Ankka hosts.');
-    expect(html).toContain('Without the token, adding connectors and managing team access stay disabled. You can add it later in Settings.');
-    expect(html).toContain('<button id="credential-skip" type="button" class="secondary">Continue without a token</button>');
+    expect(html).toContain('This token is required to finish setup and manage connectors and team access.');
+    expect(html).not.toContain('credential-skip');
     // One paste field: not echoed, not remembered, and without a name no form submission could carry.
     const fields = [...html.matchAll(/<input\b[^>]*>/giu)].map((match) => match[0]).filter((field) => field.includes('credential'));
     expect(fields).toEqual([
@@ -154,7 +154,7 @@ describe('customer setup management token step', () => {
     expect(html).toContain('<meta name="referrer" content="no-referrer">');
   });
 
-  it('shows the exact template link, asks for a choice before the approval, and sends the value once in a POST body', async () => {
+  it('shows the exact template link, requires the token before approval, and sends it once in a POST body', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(Response.json({ ...reviewed, managementCredential: step(null) }))
       .mockResolvedValueOnce(Response.json({ schemaVersion: 1, managementCredential: 'held' }));
@@ -167,7 +167,7 @@ describe('customer setup management token step', () => {
     // Until the customer has chosen, the approval is not offered.
     expect(page.node('approve').hidden).toBe(true);
     expect(page.node('credential-entry').hidden).toBe(false);
-    expect(page.node('message').textContent).toBe('Review these details, then add your management token or continue without it.');
+    expect(page.node('message').textContent).toBe('Review these details, then add your required management token.');
 
     page.node('credential-value').value = `  ${PASTED_VALUE}\n`;
     page.node('credential-form').listeners.get('submit')?.(submit);
@@ -189,25 +189,6 @@ describe('customer setup management token step', () => {
     expect(page.navigate).not.toHaveBeenCalled();
   });
 
-  it('continues without a token through the explicit secondary control and says where to add it later', async () => {
-    const fetch = vi.fn<typeof globalThis.fetch>()
-      .mockResolvedValueOnce(Response.json({ ...reviewed, managementCredential: step(null) }))
-      .mockResolvedValueOnce(Response.json({ schemaVersion: 1, managementCredential: 'skipped' }));
-    const page = await openPage(fetch);
-    await vi.waitFor(() => expect(page.node('credential').hidden).toBe(false));
-    page.node('credential-value').value = PASTED_VALUE;
-    page.node('credential-skip').listeners.get('click')?.();
-    await vi.waitFor(() => expect(page.node('approve').hidden).toBe(false));
-    expect(fetch).toHaveBeenLastCalledWith('/__ankka/install/management-token', {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"skip":true}',
-      credentials: 'same-origin', cache: 'no-store',
-    });
-    expect(page.node('credential-value').value).toBe('');
-    expect(page.node('credential-note').textContent).toBe('Continuing without a management token. Adding connectors and managing team access stay disabled until you add it in Settings.');
-    expect(page.node('credential-change').textContent).toBe('Add a token after all');
-    expect(page.texts()).not.toContain(PASTED_VALUE);
-  });
-
   it('answers a refused value with one fixed sentence and keeps the choice open', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(Response.json({ ...reviewed, managementCredential: step(null) }))
@@ -217,14 +198,14 @@ describe('customer setup management token step', () => {
     page.node('credential-value').value = 'not-a-token';
     page.node('credential-form').listeners.get('submit')?.(submit);
     await vi.waitFor(() => expect(page.node('message').textContent).toBe(
-      'That is not a Cloudflare account API token. Account tokens start with cfat_. Copy the token exactly as Cloudflare showed it, or continue without it.',
+      'That is not a Cloudflare account API token. Account tokens start with cfat_. Copy the token exactly as Cloudflare showed it.',
     ));
     expect(page.node('credential-value').value).toBe('');
     expect(page.node('approve').hidden).toBe(true);
     expect(page.node('credential-entry').hidden).toBe(false);
     // An empty field never reaches the gateway.
     page.node('credential-form').listeners.get('submit')?.(submit);
-    await vi.waitFor(() => expect(page.node('message').textContent).toBe('Paste the token first, or continue without it.'));
+    await vi.waitFor(() => expect(page.node('message').textContent).toBe('Paste the token first.'));
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 
@@ -243,16 +224,16 @@ describe('customer setup management token step', () => {
     await vi.waitFor(() => expect(dropped.node('credential').hidden).toBe(false));
     expect(dropped.node('approve').hidden).toBe(true);
     expect(dropped.node('credential-entry').hidden).toBe(false);
-    expect(dropped.node('credential-note').textContent).toBe('Your gateway no longer holds the token you pasted earlier. Paste it again, or continue without it.');
-    expect(dropped.node('message').textContent).toContain('Add your management token again or continue without it, then start a fresh approval.');
+    expect(dropped.node('credential-note').textContent).toBe('Your gateway no longer holds the token you pasted earlier. Paste it again.');
+    expect(dropped.node('message').textContent).toContain('Add your management token again, then start a fresh approval.');
 
     const foreign = await openPage(vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({
       ...reviewed, managementCredential: { ...step(null), createUrl: 'https://dash.cloudflare.com.example/?to=/:account/api-tokens' },
     })));
     await vi.waitFor(() => expect(foreign.node('message').textContent).toBe('The Cloudflare link could not be verified.'));
     expect(foreign.node('credential-link').href).toBe('');
-    // The step is withdrawn rather than half shown, and the install itself stays available.
+    // The step is withdrawn rather than half shown, and approval stays unavailable.
     expect(foreign.node('credential').hidden).toBe(true);
-    expect(foreign.node('approve').hidden).toBe(false);
+    expect(foreign.node('approve').hidden).toBe(true);
   });
 });

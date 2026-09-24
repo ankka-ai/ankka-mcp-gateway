@@ -159,8 +159,8 @@ export class AdminState extends RuntimeAdminState {
   /**
    * The management credential the setup page received, in memory only, next
    * to the grant. Storage receives one fixed word about the customer's
-   * choice and never the value; a restart loses the value, and the install
-   * then finishes without it.
+   * choice and never the value; a restart loses the value, and setup
+   * remains incomplete until the token is pasted again.
    */
   private readonly managementCredential = new CustomerManagementCredentialHolder(Date.now);
   /**
@@ -238,7 +238,7 @@ export class AdminState extends RuntimeAdminState {
         },
       }, Date.now());
     } catch {
-      // A value that is lost this way is reported as dropped; setup goes on without it.
+      // A lost value is reported as dropped; setup waits for a fresh paste.
     }
   }
 
@@ -248,13 +248,14 @@ export class AdminState extends RuntimeAdminState {
     handover: (() => Promise<void>) | undefined,
   ): Promise<CustomerStage2ConvergerResult> {
     const config = parsedEnv(this.bootstrapEnv);
-    // Whatever memory still holds when this pass runs; only the pass that
-    // uploads the final runtime uses it. None held: the install goes on without.
+    // The token must still be held when a pass begins. A lost value leaves
+    // setup incomplete instead of installing a gateway without management.
     return runConvergerPassWithManagementCredential(this.managementCredential, (managementCredential) => convergeCustomerStage2({
       accessToken,
       attemptId,
       handover,
       managementCredential,
+      managementCredentialRequired: true,
       storage: this.bootstrapState.storage,
       journal: new CustomerStage2DurableStatePort(this.bootstrapState.storage),
       runtime: {

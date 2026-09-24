@@ -1,5 +1,6 @@
 import { customerPageEnd, customerPageStart } from './customer-page-shell';
 import { customerLoadingIndicator } from './customer-page-theme';
+import { stepListScript } from './step-list';
 import * as v from 'valibot';
 import { bigQueryCredentialPage } from './customer-bigquery-credential-page';
 import { readBigQueryText } from './customer-bigquery-contract';
@@ -616,20 +617,22 @@ const UPDATE_SERVING_NOTICE_MS = 5_000;
  * release's dashboard. The wait is bounded; past it the page hands over anyway
  * and says that a reload may be needed.
  */
-function updateProgressPage(attemptId: string): Response {
+export function updateProgressPage(attemptId: string): Response {
   const nonce = crypto.randomUUID().replaceAll('-', '');
   const pageHeaders = headers('text/html; charset=utf-8');
   pageHeaders.set('content-security-policy', `default-src 'none'; script-src 'nonce-${nonce}'; connect-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`);
   const literal = <Value>(value: Value): string => JSON.stringify(value).replaceAll('<', '\\u003c');
-  return new Response(`${customerPageStart('Updating your Ankka Gateway', 'message')}<h1>Updating your Ankka Gateway</h1><p id="message" role="status" aria-live="polite"><span id="loader" class="page-loader">${customerLoadingIndicator}</span>Cloudflare approved the update. Your gateway is verifying and uploading the signed release; this page updates itself.</p><ol id="steps"></ol><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{
-const attempt=${literal(attemptId)},labels=${literal(UPDATE_STEP_LABELS)},serving=${literal(UPDATE_SERVING_STEP_LABEL)},stages=${literal(CUSTOMER_UPDATE_STAGES)},steps=document.querySelector('#steps'),message=document.querySelector('#message'),loader=document.querySelector('#loader'),served=document.createElement('li');
+  return new Response(`${customerPageStart('Updating your Ankka Gateway', 'message')}<h1>Updating your Ankka Gateway</h1><p id="message" role="status" aria-live="polite"><span id="loader" class="page-loader">${customerLoadingIndicator}</span>Your gateway is verifying and uploading the signed release; this page updates itself.</p><ol id="steps" class="ankka-steps" role="list" aria-label="Gateway update progress"></ol><p><a href="/settings">Back to Settings</a></p><script nonce="${nonce}">(()=>{
+${stepListScript}
+const attempt=${literal(attemptId)},labels=${literal(UPDATE_STEP_LABELS)},serving=${literal(UPDATE_SERVING_STEP_LABEL)},stages=${literal(CUSTOMER_UPDATE_STAGES)},steps=document.querySelector('#steps'),message=document.querySelector('#message'),loader=document.querySelector('#loader');
+let served=progressStep(serving,'pending','Waiting');
 let active=true,timer,bound,controller,confirmed=0;const stop=()=>{active=false;clearTimeout(timer);clearTimeout(bound);if(controller)controller.abort()};addEventListener('pagehide',stop);
 const reached=(stage)=>{const index=stages.indexOf(stage);return index<0?0:index>=stages.length-1?labels.length-1:Math.min(index,labels.length-1)};
-const giveUp=(url)=>{stop();served.textContent=serving+' — Not confirmed';message.textContent='Cloudflare is taking longer than usual to serve the new version. Handing over to your dashboard; if it still shows the previous version, reload the page.';timer=setTimeout(()=>location.replace(url),${UPDATE_SERVING_NOTICE_MS})};
-const show=(state)=>{const settled=state.status==='settled',done=settled&&state.applied===true,awaited=done&&typeof state.targetRelease==='string';confirmed=awaited&&state.servingRelease===state.targetRelease?confirmed+1:0;const arrived=confirmed>=${UPDATE_SERVING_CONFIRMATIONS},current=state.status==='running'?reached(state.stage):-1;
-served.textContent=serving+(arrived?' — Done':awaited?' — In progress…':'');steps.replaceChildren(...labels.map((label,index)=>{const item=document.createElement('li');item.textContent=label+(done||index<current?' — Done':index===current?' — In progress…':'');return item}),served);
+const giveUp=(url)=>{stop();served.replaceWith(progressStep(serving,'stopped','Not confirmed'));message.textContent='Cloudflare is taking longer than usual to serve the new version. Handing over to your dashboard; if it still shows the previous version, reload the page.';timer=setTimeout(()=>location.replace(url),${UPDATE_SERVING_NOTICE_MS})};
+const show=(state)=>{loader.hidden=true;const settled=state.status==='settled',done=settled&&state.applied===true,awaited=done&&typeof state.targetRelease==='string';confirmed=awaited&&state.servingRelease===state.targetRelease?confirmed+1:0;const arrived=confirmed>=${UPDATE_SERVING_CONFIRMATIONS},current=reached(state.stage);
+served=progressStep(serving,arrived?'done':awaited?'active':'pending',arrived?'Done':awaited?'In progress…':'Waiting');steps.replaceChildren(...labels.map((label,index)=>{const step=done||index<current?'done':settled&&index===current?'stopped':index===current?'active':'pending';return progressStep(label,step,step==='done'?'Done':step==='stopped'?'Stopped':step==='active'?'In progress…':'Waiting')}),served);
 if(!settled)return false;const url=state.redirectUrl||'';if(!url.startsWith(location.origin+'/settings')){stop();message.textContent='The update has ended. Open Settings to see its result.';return true}
-if(awaited&&!arrived){if(!bound){message.replaceChildren(loader,'The upload is complete. Waiting for Cloudflare to serve the new version…');bound=setTimeout(()=>giveUp(url),${UPDATE_SERVING_WAIT_MS})}return false}
+if(awaited&&!arrived){loader.hidden=false;if(!bound){message.replaceChildren(loader,'The upload is complete. Waiting for Cloudflare to serve the new version…');bound=setTimeout(()=>giveUp(url),${UPDATE_SERVING_WAIT_MS})}return false}
 stop();message.textContent='Handing over to your dashboard, which follows the update to its end.';location.replace(url);return true};
 const poll=async()=>{controller=new AbortController();const timeout=setTimeout(()=>controller.abort(),5000);try{const response=await fetch(${literal(CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH)}+'?attempt='+encodeURIComponent(attempt),{credentials:'same-origin',cache:'no-store',redirect:'manual',signal:controller.signal});if(!response.ok)throw new Error();const state=await response.json();if(!active)return;if(show(state))return}catch{if(!active)return;confirmed=0}finally{clearTimeout(timeout)}if(active)timer=setTimeout(poll,2000)};
 poll()})();</script>${customerPageEnd}`, { status: 200, headers: pageHeaders });

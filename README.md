@@ -9,9 +9,6 @@ Manage your team's MCP connections in one open-source gateway, with per-user
 connector access, Code Mode, and control over which tools are enabled—all
 self-hosted in your own Cloudflare account.
 
-Installing or upgrading to v0.2 requires **Cloudflare Workers Paid** for the
-built-in API runtime. See [Cloudflare’s Dynamic Workers requirements](https://developers.cloudflare.com/dynamic-workers/pricing/).
-
 [Try the local preview](#run-locally) ·
 [What Ankka adds](#what-ankka-adds-to-cloudflare-mcp-portals) ·
 [Common questions](#common-questions) · [Documentation](#documentation)
