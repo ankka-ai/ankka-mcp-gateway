@@ -4463,6 +4463,75 @@ test('management discovery exposes new tools for selection without granting exec
   assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} })).body.result.structuredContent.ok, true);
 }));
 
+test('management catalogue uses the installed release and automatically syncs a stale provider on save', () => fixture(async (gateway) => {
+  const { server } = await installManagementSource(gateway, ['get_gateway_status']);
+  const available = (await managementRpc(gateway, 'tools/list', {})).body.result.tools;
+  server.tools = [{ name: 'get_gateway_status' }];
+  const teamBefore = gateway.managementStorage.snapshot(TEAM_KEY);
+  const baseline = gateway.provider.requests.length;
+  const catalogue = await (await gateway.api(installedToolsPath(MANAGEMENT_ID))).json();
+  assert.equal(catalogue.catalogueSource, 'gateway');
+  assert.ok(catalogue.tools.some((tool) => tool.name === 'get_api_source_runtime'));
+  assert.deepEqual(catalogue.enabledTools, ['get_gateway_status']);
+  assertNoMutation(gateway.provider, baseline);
+  let syncs = 0;
+  gateway.provider.hook(({ record }) => {
+    if (record.pathname === `${SERVERS_PATH}/${server.id}/sync` && record.method === 'POST') {
+      syncs += 1;
+      server.tools = available;
+      // A lost response must not prevent confirming the successful sync by readback.
+      return envelope(null, 503);
+    }
+  });
+  const selected = ['get_gateway_status', 'get_gateway_team'];
+  const saved = await putInstalledTools(gateway, MANAGEMENT_ID, catalogue.revision, selected);
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(syncs, 1);
+  assert.deepEqual(portalMapping(gateway, server.id).updated_tools, selected.map(name => ({ name, enabled: true })));
+  assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY), teamBefore);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_api_source_runtime' })).body.error.code, -32602);
+  const revision = (await saved.json()).revision;
+  assert.equal((await putInstalledTools(gateway, MANAGEMENT_ID, revision, ['get_gateway_status'])).status, 200);
+  assert.equal(syncs, 1, 'a current catalogue is not synced again');
+}));
+
+test('management catalogue sync waits safely and retries without changing permissions on failure', () => fixture(async (gateway) => {
+  const { server } = await installManagementSource(gateway, ['get_gateway_status']);
+  const available = (await managementRpc(gateway, 'tools/list', {})).body.result.tools;
+  server.tools = [{ name: 'get_gateway_status' }];
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const original = canonicalJson([gateway.managementStorage.snapshot(SOURCES_KEY), gateway.managementStorage.snapshot(CONTROL_KEY),
+    gateway.managementStorage.snapshot(TEAM_KEY), gateway.provider.state.portal]);
+  let syncs = 0;
+  gateway.provider.hook(({ record }) => {
+    if (record.pathname === `${SERVERS_PATH}/${server.id}/sync`) { syncs += 1; return envelope({}); }
+  });
+  const selection = ['get_gateway_status', 'get_gateway_team'];
+  await refused(await putInstalledTools(gateway, MANAGEMENT_ID, revision, selection), 409, 'source_management_sync_pending');
+  assert.equal(syncs, 1);
+  assert.equal(canonicalJson([gateway.managementStorage.snapshot(SOURCES_KEY), gateway.managementStorage.snapshot(CONTROL_KEY),
+    gateway.managementStorage.snapshot(TEAM_KEY), gateway.provider.state.portal]), original);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY) ?? null, null);
+  // Once the provider finishes asynchronously, the same reviewed selection can finish without another sync.
+  server.tools = available;
+  assert.equal((await putInstalledTools(gateway, MANAGEMENT_ID, revision, selection)).status, 200);
+  assert.equal(syncs, 1);
+}));
+
+test('management catalogue sync refuses server drift and expired authentication before requesting a sync', () => fixture(async (gateway) => {
+  const { server } = await installManagementSource(gateway, ['get_gateway_status']);
+  server.tools = [{ name: 'get_gateway_status' }];
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const baseline = gateway.provider.requests.length;
+  const hostname = server.hostname;
+  server.hostname = 'https://foreign.example.net/mcp';
+  await refused(await putInstalledTools(gateway, MANAGEMENT_ID, revision, ['get_gateway_status', 'get_gateway_team']), 409, 'source_tool_edit_unavailable');
+  server.hostname = hostname;
+  server.authentication_status = 'stale';
+  await refused(await putInstalledTools(gateway, MANAGEMENT_ID, revision, ['get_gateway_status', 'get_gateway_team']), 409, 'source_management_connection_required');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
 test('management MCP creates, applies and removes a URL source through the shared journal', () => fixture(async (gateway) => {
   await installManagementSource(gateway);
   const call = async (name, args = {}) => {

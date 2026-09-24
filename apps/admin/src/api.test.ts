@@ -646,7 +646,7 @@ describe('the tool choice of a sign-in connector', () => {
 
   it('reads an installed connector’s synced tools and saves the explicit selection', async () => {
     const listed = {
-      schemaVersion: 1, sourceId, revision: 4, state: 'ready', pendingTools: null,
+      schemaVersion: 1, sourceId, revision: 4, state: 'ready', pendingTools: null, catalogueSource: 'gateway',
       enabledTools: ['records_search'],
       tools: [
         { name: 'records_export', ...bare },

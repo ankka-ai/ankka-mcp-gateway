@@ -185,6 +185,7 @@ const installedSourceToolsSchema = v.strictObject({
   state: sourceActionToolsSchema.entries.state,
   tools: sourceActionToolsSchema.entries.tools,
   enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.maxLength(500)),
+  catalogueSource: v.optional(v.literal('gateway')),
   pendingTools: v.nullable(v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.minLength(1), v.maxLength(500))),
 })
 const sourceAuthorizationSchema = v.strictObject({
@@ -523,6 +524,8 @@ const ERROR_MESSAGES = new Map([
   ['source_tools_invalid', 'Select between 1 and 500 tools from the list, then try again.'],
   ['source_tools_unsupported', 'Cloudflare’s synced list for this connector cannot be offered here. Nothing was enabled.'],
   ['source_catalogue_unavailable', 'Cloudflare did not return this connector’s server record. Try again in a moment.'],
+  ['source_management_sync_pending', 'Gateway Management is still syncing its new tools. Your selection was not changed. Wait a moment, then save the same selection again here.'],
+  ['source_management_connection_required', 'Gateway Management needs to be reauthenticated in Cloudflare before its tools can be synced. Your selection was not changed.'],
   ['source_tools_pending', 'A tool update for this connector is already in progress. Refresh and save that same selection to finish it.'],
   ['source_tools_recovery_required', 'The tool update could not be confirmed. Retry the same selection; the gateway continues from the saved progress.'],
   ['source_portal_drift', 'The Portal configuration does not match this gateway’s record, so the tool selection was not saved. Review the connector in Cloudflare, then try again.'],

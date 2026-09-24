@@ -90,11 +90,15 @@ tools that are not selected. Stored tool allowlists constrain `tools/call`,
 including calls made directly to the Worker. Cloudflare's Portal mapping also
 keeps unselected tools disabled. Discovery does not grant execution permission.
 
-After a gateway upgrade adds tools, sync the Gateway Management server's
-capabilities in Cloudflare, then open **Edit tools** in Ankka and select
-**Check again** if the editor was already open. New tools appear unchecked; save
-the exact selection to enable them. Syncing alone does not change the allowlist
-or Team assignments.
+After a gateway upgrade adds tools, open **Edit tools** in Ankka. Gateway
+Management's catalogue comes directly from the installed release, so it does not
+require a separate Cloudflare capability sync. Select **Check again** if the
+editor was already open. New tools appear unchecked. Saving your exact selection
+syncs the receipt-owned Cloudflare server when its catalogue is stale, verifies
+the refreshed list, then updates the allowlist and Portal mapping. Team
+assignments do not change. If Cloudflare is still syncing, permissions remain
+unchanged; wait a moment and save the same selection again in Ankka. An expired
+provider connection still requires reauthentication.
 
 During installation only protocol initialization and tool discovery can use the
 receipt-owned paused draft. Tool execution requires a completed installation.

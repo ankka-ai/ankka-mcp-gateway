@@ -97,11 +97,12 @@ describe('SourceList', () => {
     expect(onAuthorize).not.toHaveBeenCalled()
   })
 
-  it('fetches synced tools and saves only the explicit selection', async () => {
+  it.each([undefined, 'gateway'] as const)('fetches synced tools and saves only the explicit selection', async (catalogueSource) => {
     const user = userEvent.setup()
     const bare = { title: null, description: null, readOnlyHint: null, destructiveHint: null, openWorldHint: null }
     const onLoadSourceTools = vi.fn(async () => ({
       schemaVersion: 1 as const, sourceId: sources[0].id, revision: 4, state: 'ready' as const, pendingTools: null,
+      catalogueSource,
       enabledTools: ['fetch_document', 'search'],
       tools: [
         { name: 'export_document', ...bare, description: 'Export a page.', readOnlyHint: true, destructiveHint: false },
@@ -120,6 +121,11 @@ describe('SourceList', () => {
     expect(await screen.findByRole('checkbox', { name: /export_document/ })).not.toBeChecked()
     expect(screen.getByRole('checkbox', { name: /^search/ })).toBeChecked()
     expect(screen.getByText(/New tools stay off until you select them/)).toBeInTheDocument()
+    if (catalogueSource === 'gateway') {
+      expect(screen.getByText(/in your installed gateway release/)).toBeInTheDocument()
+      expect(screen.getByText(/automatically syncs Gateway Management/)).toBeInTheDocument()
+      expect(screen.queryByText(/as Cloudflare synced them/)).not.toBeInTheDocument()
+    }
 
     await user.click(screen.getByRole('checkbox', { name: /export_document/ }))
     await user.click(screen.getByRole('button', { name: 'Save tools' }))

@@ -4291,7 +4291,7 @@ function offeredInstalledCatalogue(source, catalogue) {
   if (source.id !== MANAGEMENT_SOURCE_ID || catalogue.state !== 'ready') return catalogue;
   const allowed = new Set(MANAGEMENT_MCP_TOOLS.map((tool) => tool.name));
   return Object.freeze({
-    state: catalogue.state,
+    ...catalogue,
     tools: Object.freeze(catalogue.tools.filter((tool) => allowed.has(tool.name))),
   });
 }
@@ -4332,9 +4332,15 @@ async function reboundOwnershipForTools(control, source, ownership, nextSource, 
   ));
 }
 
-async function readInstalledSourceCatalogue(env, control, serverId) {
+async function readInstalledSourceCatalogue(env, control, serverId, source) {
   const token = managementCredential(env);
   if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  // Our installed release is authoritative for its own catalogue. Reading it
+  // must not depend on Cloudflare having refreshed an older tools/list response.
+  if (source?.id === MANAGEMENT_SOURCE_ID) {
+    if (source.url !== managementSourceUrl(env)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+    return { ...syncedSourceCatalogue({ status: 'ready', tools: managementToolDefinitions(env) }), catalogueSource: 'gateway' };
+  }
   const server = await providerCall(
     `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`,
     token, { signal: AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS) },
@@ -4346,12 +4352,45 @@ async function readInstalledSourceCatalogue(env, control, serverId) {
   return syncedSourceCatalogue(server.result);
 }
 
+/** Refresh only the receipt-owned built-in server, before changing any tool permissions. */
+async function syncManagementCatalogue(env, control, source, serverId) {
+  const desired = (await buildDesiredResources(teardownSettings(control, source, source.id), control.installationId))[0];
+  if (source.url !== managementSourceUrl(env) || desired?.kind !== 'mcp_server' || desired.key !== serverId) {
+    return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  }
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const path = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`;
+  const signal = AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS);
+  const expected = managementToolDefinitions(env).map((tool) => tool.name).sort(compareText);
+  // One sync request, bounded readback. A retry reads first, so a lost response
+  // whose sync completed does not trigger another request or grant any tools.
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const server = await providerCall(path, token, { signal });
+    if (server.status === 'auth') return sourceToolsRefusal(409, 'management_credential_required');
+    if (server.status !== 'ok') return sourceToolsRefusal(502, 'source_catalogue_unavailable');
+    if (!mcpMatches(server.result, desired)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+    const catalogue = syncedSourceCatalogue(server.result);
+    if (catalogue.state === 'connection_required') return sourceToolsRefusal(409, 'source_management_connection_required');
+    if (catalogue.state === 'ready' && canonicalJson(catalogue.tools.map((tool) => tool.name)) === canonicalJson(expected)) return null;
+    if (attempt === 0) {
+      const sync = await providerCall(`${path}/sync`, token, { method: 'POST', signal });
+      if (sync.status === 'auth') return sourceToolsRefusal(409, 'management_credential_required');
+      // Read back even after an uncertain response; the provider may have accepted it.
+    }
+    if (attempt < 5) await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  return sourceToolsRefusal(409, 'source_management_sync_pending');
+}
+
 function installedSourceToolsView(source, sources, catalogue, edit) {
-  return fixedJson(200, {
+  const view = {
     schemaVersion: 1, sourceId: source.id, revision: sources.revision, state: catalogue.state, tools: catalogue.tools,
     enabledTools: source.enabledTools,
     pendingTools: edit?.sourceId === source.id ? edit.enabledTools : null,
-  });
+  };
+  if (catalogue.catalogueSource === 'gateway') view.catalogueSource = 'gateway';
+  return fixedJson(200, view);
 }
 
 async function loadInstalledSource(storage, env, sourceId, actorEmail) {
@@ -4377,7 +4416,7 @@ async function readInstalledSourceTools(storage, env, sourceId, actorEmail) {
   if (source.status !== 'installed') return sourceToolsRefusal(409, 'source_tools_unavailable');
   const serverId = control.sourceOwnership.find((entry) => entry.sourceId === source.id)?.resources[0]?.provider?.id;
   if (!safeProviderId(serverId)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
-  const catalogue = await readInstalledSourceCatalogue(env, control, serverId);
+  const catalogue = await readInstalledSourceCatalogue(env, control, serverId, source);
   if (catalogue instanceof Response) return catalogue;
   return installedSourceToolsView(source, sources, offeredInstalledCatalogue(source, catalogue), edit);
 }
@@ -4413,7 +4452,7 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   const layout = root && teardownResources(root, control.sourceOwnership, false, control.removedInitialSource ?? null);
   if (!environment || !root || !layout) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
   const aliasesReceipt = layout.receiptSourceOwner === source.id;
-  const catalogue = await readInstalledSourceCatalogue(env, control, serverId);
+  const catalogue = await readInstalledSourceCatalogue(env, control, serverId, source);
   if (catalogue instanceof Response) return catalogue;
   const offered = offeredInstalledCatalogue(source, catalogue);
   if (offered.state !== 'ready') return sourceToolsRefusal(409, SOURCE_CATALOGUE_REFUSALS[offered.state]);
@@ -4459,6 +4498,10 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   if (!edit && !matchesBefore && !matchesAfter) return sourceToolsRefusal(409, 'source_portal_drift');
   if (edit && (portal.status !== 'ok' || (!matchesBefore && !matchesAfter))) {
     return sourceToolsRefusal(409, 'source_tools_recovery_required');
+  }
+  if (source.id === MANAGEMENT_SOURCE_ID) {
+    const sync = await syncManagementCatalogue(env, control, source, serverId);
+    if (sync) return sync;
   }
   if (!matchesAfter) {
     if (!edit) {

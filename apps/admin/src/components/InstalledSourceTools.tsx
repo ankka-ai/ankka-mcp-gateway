@@ -23,7 +23,7 @@ function selectedFrom(catalogue: InstalledSourceTools): string[] {
 }
 
 /**
- * Review the tools Cloudflare has synced for an installed connector and save an explicit allowlist.
+ * Review an installed connector’s available tools and save an explicit allowlist.
  * Opening the editor fetches that list. Tools that were not already allowed start unselected.
  */
 export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }: InstalledSourceToolsProps) {
@@ -71,6 +71,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
   const missing = catalogue === null ? [] : (pending ?? catalogue.enabledTools).filter((name) => (
     !catalogue.tools.some((tool) => tool.name === name)
   ))
+  const builtin = catalogue?.catalogueSource === 'gateway'
   const ready = catalogue?.state === 'ready'
   const canSave = ready === true && selected.length > 0 && (pending === null || missing.length === 0)
 
@@ -81,19 +82,19 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
       </Button>
       {open ? (
         <div className="mt-4">
-          {loading ? <p className="text-sm text-kumo-subtle">Reading this connector’s tools from Cloudflare…</p> : null}
+          {loading ? <p className="text-sm text-kumo-subtle">Reading this connector’s available tools…</p> : null}
           {error ? <p role="alert" className="text-sm text-kumo-danger">{error}</p> : null}
           {catalogue && !loading ? (
             <>
               {catalogue.state === 'ready' ? (
                 <p className="text-sm leading-6 text-kumo-subtle">
-                  {catalogue.tools.length} tools in Cloudflare’s synced list. The tools already allowed are selected. New tools stay off until you select them.
+                  {catalogue.tools.length} tools {builtin ? 'in your installed gateway release' : 'in Cloudflare’s synced list'}. The tools already allowed are selected. New tools stay off until you select them.
                 </p>
               ) : <p className="text-sm leading-6 text-kumo-subtle">{WAITING[catalogue.state]}</p>}
-              {ready && catalogue.tools.length > 0 ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{syncedHintSummary(catalogue.tools)}</p> : null}
+              {ready && catalogue.tools.length > 0 ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{builtin ? 'This list comes from your gateway. Saving your selection automatically syncs Gateway Management with Cloudflare when needed.' : syncedHintSummary(catalogue.tools)}</p> : null}
               {missing.length > 0 ? (
                 <p className="mt-3 text-sm leading-6 text-kumo-subtle">
-                  {pending
+                  {builtin ? 'These previously allowed tools are not in the installed gateway release. Review your selection before saving.' : pending
                     ? 'This tool update is still in progress, and some of its tools are no longer in Cloudflare’s synced list. Sync capabilities in Cloudflare, then check again.'
                     : 'These allowed tools are not in Cloudflare’s synced list. Saving removes them from the allowlist.'}
                   <span className="mt-2 flex flex-wrap gap-2">{missing.map((name) => <code key={name} className="tool-chip break-all">{name}</code>)}</span>
@@ -105,8 +106,8 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
                     tools={catalogue.tools}
                     selected={pending ?? selected}
                     onChange={setSelected}
-                    listLabel={`${source.label} synced tools`}
-                    missingDescription="This tool has no description in Cloudflare’s synced list."
+                    listLabel={`${source.label} ${builtin ? 'available' : 'synced'} tools`}
+                    missingDescription={builtin ? 'This tool has no description in the installed gateway release.' : 'This tool has no description in Cloudflare’s synced list.'}
                     disabled={busy || pending !== null}
                   />
                 </div>
