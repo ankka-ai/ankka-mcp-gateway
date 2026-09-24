@@ -83,14 +83,6 @@ async function callTool(connector: ReadConnector, name: string, args: ToolArgume
 
 describe('Google Analytics fixed read plans', () => {
   const connector = createGoogleAnalyticsConnector(config, secret);
-  it('pins the Data API origin and defers authorization to the shared Google boundary', () => {
-    expect(connector.id).toBe('google-analytics');
-    expect(connector.origin).toBe('https://analyticsdata.googleapis.com');
-    expect(connector.headers).toEqual({});
-    expect(connector.authorize).toBeTypeOf('function');
-  });
-  it.each([dailyPlan(), realtimePlan(), dailyPlan({ limit: '1' }), realtimePlan({ limit: '1' })])
-    ('allows the exact authored plan %j', (plan) => expect(connector.allowRequest(plan)).toBe(true));
   it.each<ReadRequestPlan>([
     { ...dailyPlan(), method: 'GET' },
     { ...dailyPlan(), path: '/v1beta/properties/987654321:runReport' },

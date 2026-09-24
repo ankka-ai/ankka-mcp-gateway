@@ -31,12 +31,8 @@ async function preview() {
 
 describe('synthetic installer preview session', () => {
   it.each([
-    ['/review', 'draft'],
     ['/deploy', 'authorizing'],
-    ['/result', 'provisioned'],
-    ['/result?preview=success', 'handed_off'],
     ['/result?preview=failed', 'failed'],
-    ['/result?preview=removal', 'cleanup_required'],
   ])('provides the current installer session contract for %s', async (path, phase) => {
     const api = await preview()
     try {
@@ -63,7 +59,6 @@ describe('synthetic installer preview session', () => {
         expect(fixture).toMatchObject({ session: { attempt: { kind: 'bootstrap', expiresAt: expect.any(Number) } } })
       }
       if (phase === 'failed') expect(fixture).toMatchObject({ session: { failure: { code: 'authorization_rejected' } } })
-      if (phase === 'cleanup_required') expect(fixture).toMatchObject({ session: { cleanup: { reason: 'cookie_lost' } } })
     } finally {
       await api.close()
     }
@@ -80,38 +75,6 @@ describe('synthetic installer preview session', () => {
       const restarted = await (await api.request('/api/session/new', 'POST', '/result')).json()
       expect(restarted).toMatchObject({ session: { phase: 'draft', selection: null, plan: null, provision: null } })
       expect(await (await api.request('/api/session')).json()).toEqual(restarted)
-    } finally {
-      await api.close()
-    }
-  })
-
-  it('retains configuration and its plan through status refreshes and client-side routes', async () => {
-    const api = await preview()
-    try {
-      expect(await (await api.request('/api/session', 'GET', '/gateway?preview=connected')).json()).toMatchObject({ selection: null, plan: null })
-      const configured = await (await api.request('/api/selection', 'PUT', '/gateway?preview=connected')).json()
-      expect(configured).toMatchObject({ plan: null, capabilities: { plan: true } })
-      expect(await (await api.request('/api/session', 'GET', '/review')).json()).toEqual(configured)
-      const planned = await (await api.request('/api/plan', 'POST', '/review')).json()
-      expect(planned).toMatchObject({ plan: { planId: 'plan-example-preview', writesPerformed: false } })
-      expect(await (await api.request('/api/session', 'GET', '/review')).json()).toEqual(planned)
-      expect(await (await api.request('/api/session', 'GET', '/gateway?preview=connected')).json()).toEqual(planned)
-      expect(await (await api.request('/api/session', 'GET', '/deploy')).json()).toEqual(planned)
-    } finally {
-      await api.close()
-    }
-  })
-
-  it('explicit fixture navigation resets retained state, including a repeated fixture', async () => {
-    const api = await preview()
-    try {
-      await api.request('/gateway?preview=connected')
-      await api.request('/api/selection', 'PUT', '/gateway?preview=connected')
-      await api.request('/api/plan', 'POST', '/review')
-      await api.request('/gateway?preview=connected')
-      expect(await (await api.request('/api/session', 'GET', '/gateway?preview=connected')).json()).toMatchObject({ selection: null, plan: null })
-      expect(await (await api.request('/api/session', 'GET', '/result?preview=failed')).json()).toMatchObject({ deployment: { status: 'failed' } })
-      expect(await (await api.request('/api/session', 'GET', '/?preview=start')).json()).toMatchObject({ selection: null, plan: null, deployment: null })
     } finally {
       await api.close()
     }

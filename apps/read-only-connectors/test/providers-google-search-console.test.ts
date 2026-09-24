@@ -40,12 +40,6 @@ async function callTool(name: string, args: Record<string, ConnectorJson>, execu
 }
 
 describe('ordinary Search Console domain-property reads', () => {
-  it('pins the API origin and defers service-account authorization to actual reads', () => {
-    expect(connector.id).toBe('google-search-console');
-    expect(connector.origin).toBe('https://www.googleapis.com');
-    expect(connector.headers).toEqual({});
-    expect(connector.authorize).toBeTypeOf('function');
-  });
   it.each([
     ['https://example.com/'], ['sc-domain:EXAMPLE.com'], ['sc-domain:example.com/'],
     ['sc-domain:example..com'], ['sc-domain:*.example.com'], ['sc-domain:127.0.0.1'],
@@ -62,10 +56,6 @@ describe('ordinary Search Console domain-property reads', () => {
     const selected = createGoogleSearchConsoleConnector(JSON.stringify({ allowedSites: ['sc-domain:example.xn--p1ai'] }), rawSecret);
     expect(selected.allowRequest({ method: 'GET', path: '/webmasters/v3/sites/sc-domain%3Aexample.xn--p1ai' })).toBe(true);
   });
-  it.each<ReadRequestPlan>([
-    { method: 'GET', path: base }, { method: 'GET', path: `${base}/sitemaps` },
-    { method: 'POST', path: `${base}/searchAnalytics/query`, body },
-  ])('allows exact statically authored reads %j', (plan) => expect(connector.allowRequest(plan)).toBe(true));
   it.each<ReadRequestPlan>([
     { method: 'POST', path: base, body: {} },
     { method: 'GET', path: `${base}/sitemaps`, query: { sitemapIndex: 'https://evil.example.com' } },

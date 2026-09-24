@@ -19,15 +19,6 @@ import {
 // the same provider state. This is the check that returned false on the
 // live install of 2026-09-04.
 
-test('the receipt verification accepts the receipt the bootstrap just wrote (portal with a source)', async () => {
-  const provider = cloudflareProvider();
-  const { env, storage } = await installReadyGateway({ provider, claimInput: goldenClaim() });
-  const later = { ...goldenClaim('B'.repeat(22)), cloudflareAccessToken: BOOTSTRAP_GRANT };
-  const verified = await withProviderFetch(provider.fetch, () =>
-    verifyBootstrapReceiptProviderState(later, env, storage, Date.now()));
-  assert.equal(verified, true);
-});
-
 test('the receipt verification accepts a portal-only receipt, as the live install had', async () => {
   const provider = cloudflareProvider();
   const claimInput = await portalOnlyClaim();

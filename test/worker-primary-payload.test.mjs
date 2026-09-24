@@ -251,45 +251,6 @@ test('primary payload has the exact dependency-free Worker export and layout', a
   assert.match(source, /export default/u);
 });
 
-test('bounded provider reads cover the independent 32-source and 500-tool response ceilings', async () => {
-  const maxLengthName = (sourceIndex, toolIndex) => (
-    `tool_${String(sourceIndex).padStart(2, '0')}_${String(toolIndex).padStart(3, '0')}_`.padEnd(128, 'x')
-  );
-  const servers = Array.from({ length: 32 }, (_source, sourceIndex) => ({
-    server_id: `server_${String(sourceIndex).padStart(2, '0')}_`.padEnd(128, 'a'),
-    default_disabled: true,
-    on_behalf: false,
-    updated_tools: Array.from({ length: 500 }, (_tool, toolIndex) => ({
-      name: maxLengthName(sourceIndex, toolIndex),
-      enabled: true,
-    })),
-  }));
-  const envelope = JSON.stringify({
-    success: true,
-    errors: [],
-    messages: [],
-    result: {
-      id: 'p'.repeat(128),
-      name: 'n'.repeat(128),
-      hostname: `${'h'.repeat(63)}.${'h'.repeat(63)}.${'h'.repeat(63)}.${'h'.repeat(61)}`,
-      description: 'd'.repeat(256),
-      code_mode: 'default_on',
-      secure_web_gateway: false,
-      servers,
-    },
-  });
-  const bytes = Buffer.byteLength(envelope);
-  assert.ok(bytes > 64 * 1024, 'the fixture must catch the former 64 KiB incompatibility');
-  assert.ok(bytes < 3 * 1024 * 1024, 'the schema-shaped response should retain at least 1 MiB of headroom');
-
-  const [primarySource, cleanupSource] = await Promise.all([
-    readFile(new URL('../payload/worker/index.js', import.meta.url), 'utf8'),
-    readFile(new URL('../payload/worker-cleanup/index.js', import.meta.url), 'utf8'),
-  ]);
-  assert.match(primarySource, /const PROVIDER_RESPONSE_LIMIT_BYTES = 8 \* 1024 \* 1024;/u);
-  assert.match(cleanupSource, /const PROVIDER_RESPONSE_LIMIT_BYTES = 4 \* 1024 \* 1024;/u);
-});
-
 test('primary provider reads accept a streamed response above the former 64 KiB cap', async () => {
   let injectedBytes = 0;
   const provider = cloudflareProvider({

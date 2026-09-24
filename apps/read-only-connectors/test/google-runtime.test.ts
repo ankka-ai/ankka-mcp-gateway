@@ -347,7 +347,7 @@ describe.each(providers)('$provider authenticated Google runtime', (fixture) => 
       }
     });
 
-    if (fixture.provider === 'bigquery') {
+    if (fixture.provider === 'bigquery' && version === '2026-07-28') {
       it.each<{ result: ConnectorJson; code: string }>([
         { result: { statistics: { query: { statementType: 'DELETE', totalBytesProcessed: '1024' } } },
           code: 'CONNECTOR_QUERY_NOT_READ_ONLY' },
@@ -388,49 +388,56 @@ describe.each(providers)('$provider authenticated Google runtime', (fixture) => 
       });
     }
 
-    it.each(['status', 'scope', 'redirect', 'exception'] as const)('sanitizes a token %s failure without attempting the provider read', async (failure) => {
-      const read = providerReads[0];
-      if (read === undefined) throw new Error('Missing synthetic read');
-      const log = vi.spyOn(console, 'log');
-      const errorLog = vi.spyOn(console, 'error');
-      const outbound = mockFetch(fixture, read, () => {
-        if (failure === 'status') return new Response('sentinel-token-provider-detail', { status: 500 });
-        if (failure === 'scope') return Response.json({ access_token: mintedToken, token_type: 'Bearer', expires_in: 300, scope: 'sentinel-write-scope' });
-        if (failure === 'redirect') return Response.redirect('https://sentinel-redirect.example.com/token');
-        throw new Error(`sentinel-token-error:${accessAssertion}:${serviceAccountSecret}`);
-      });
-      const response = await handleRequest(toolRequest(version, read), environment(fixture), outbound);
-      const text = await response.text();
-      expect(text).toContain('CONNECTOR_READ_FAILED');
-      expectNoSecrets(text);
-      expect(outbound.mock.calls.map(([url]) => String(url))).toEqual([accessKeysEndpoint, tokenEndpoint]);
-      expect(log).not.toHaveBeenCalled();
-      expect(errorLog).not.toHaveBeenCalled();
-    });
-
-    it.each(['status', 'redirect', 'invalid-json', 'projection', 'exception'] as const)('sanitizes a provider %s failure after token minting', async (failure) => {
-      const read = providerReads[0];
-      if (read === undefined) throw new Error('Missing synthetic read');
-      const log = vi.spyOn(console, 'log');
-      const errorLog = vi.spyOn(console, 'error');
-      const outbound = mockFetch(fixture, read, undefined, () => {
-        if (failure === 'status') return new Response('sentinel-provider-detail', { status: 500 });
-        if (failure === 'redirect') return Response.redirect('https://sentinel-redirect.example.com/provider');
-        if (failure === 'invalid-json') return new Response('sentinel-invalid-json', { headers: { 'Content-Type': 'application/json' } });
-        if (failure === 'projection') return Response.json({ unexpected: `sentinel-provider-data:${mintedToken}` });
-        throw new Error(`sentinel-provider-error:${mintedToken}:${accessAssertion}`);
-      });
-      const response = await handleRequest(toolRequest(version, read), environment(fixture), outbound);
-      const text = await response.text();
-      expect(text).toContain('CONNECTOR_READ_FAILED');
-      expectNoSecrets(text);
-      expect(outbound.mock.calls.map(([url]) => String(url))).toEqual([accessKeysEndpoint, tokenEndpoint, read.url]);
-      expect(log).not.toHaveBeenCalled();
-      expect(errorLog).not.toHaveBeenCalled();
-    });
   });
 
-  it.each(protocolVersions)('does not read credentials or contact any endpoint without Access in MCP %s', async (version) => {
+  // These failures occur after protocol decoding; both transports are exercised above.
+  const version = '2026-07-28';
+  const tokenFailures = fixture.provider === 'google-search-console'
+    ? ['status', 'scope', 'redirect', 'exception'] as const : ['scope', 'exception'] as const;
+  it.each(tokenFailures)('sanitizes a token %s failure without attempting the provider read', async (failure) => {
+    const read = providerReads[0];
+    if (read === undefined) throw new Error('Missing synthetic read');
+    const log = vi.spyOn(console, 'log');
+    const errorLog = vi.spyOn(console, 'error');
+    const outbound = mockFetch(fixture, read, () => {
+      if (failure === 'status') return new Response('sentinel-token-provider-detail', { status: 500 });
+      if (failure === 'scope') return Response.json({ access_token: mintedToken, token_type: 'Bearer', expires_in: 300, scope: 'sentinel-write-scope' });
+      if (failure === 'redirect') return Response.redirect('https://sentinel-redirect.example.com/token');
+      throw new Error(`sentinel-token-error:${accessAssertion}:${serviceAccountSecret}`);
+    });
+    const response = await handleRequest(toolRequest(version, read), environment(fixture), outbound);
+    const text = await response.text();
+    expect(text).toContain('CONNECTOR_READ_FAILED');
+    expectNoSecrets(text);
+    expect(outbound.mock.calls.map(([url]) => String(url))).toEqual([accessKeysEndpoint, tokenEndpoint]);
+    expect(log).not.toHaveBeenCalled();
+    expect(errorLog).not.toHaveBeenCalled();
+  });
+
+  const providerFailures = fixture.provider === 'google-search-console'
+    ? ['status', 'redirect', 'invalid-json', 'projection', 'exception'] as const : ['projection', 'exception'] as const;
+  it.each(providerFailures)('sanitizes a provider %s failure after token minting', async (failure) => {
+    const read = providerReads[0];
+    if (read === undefined) throw new Error('Missing synthetic read');
+    const log = vi.spyOn(console, 'log');
+    const errorLog = vi.spyOn(console, 'error');
+    const outbound = mockFetch(fixture, read, undefined, () => {
+      if (failure === 'status') return new Response('sentinel-provider-detail', { status: 500 });
+      if (failure === 'redirect') return Response.redirect('https://sentinel-redirect.example.com/provider');
+      if (failure === 'invalid-json') return new Response('sentinel-invalid-json', { headers: { 'Content-Type': 'application/json' } });
+      if (failure === 'projection') return Response.json({ unexpected: `sentinel-provider-data:${mintedToken}` });
+      throw new Error(`sentinel-provider-error:${mintedToken}:${accessAssertion}`);
+    });
+    const response = await handleRequest(toolRequest(version, read), environment(fixture), outbound);
+    const text = await response.text();
+    expect(text).toContain('CONNECTOR_READ_FAILED');
+    expectNoSecrets(text);
+    expect(outbound.mock.calls.map(([url]) => String(url))).toEqual([accessKeysEndpoint, tokenEndpoint, read.url]);
+    expect(log).not.toHaveBeenCalled();
+    expect(errorLog).not.toHaveBeenCalled();
+  });
+
+  it('does not read credentials or contact any endpoint without Access', async () => {
     const readSecret = vi.fn(() => serviceAccountSecret);
     const protectedEnv = { ...environment(fixture), get PROVIDER_TOKEN(): string { return readSecret(); } };
     const outbound = mockFetch(fixture);

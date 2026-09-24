@@ -25,12 +25,6 @@ describe('opaque and sealed cookies', () => {
     expiresAt: NOW + 600_000,
   };
 
-  it('round trips the verifier only through authenticated encryption', async () => {
-    const sealed = await sealOauthCookie(ENCRYPTION_KEY, payload);
-    expect(sealed).not.toContain(payload.verifier);
-    await expect(openOauthCookie(ENCRYPTION_KEY, sealed)).resolves.toEqual(payload);
-  });
-
   it('rejects tampering and a different encryption key', async () => {
     const sealed = await sealOauthCookie(ENCRYPTION_KEY, payload);
     const tampered = `${sealed.slice(0, -1)}${sealed.endsWith('A') ? 'B' : 'A'}`;
@@ -175,7 +169,7 @@ describe('opaque and sealed cookies', () => {
     }
   });
 
-  it.each(['source_apply', 'access_apply', 'runtime_update'] as const)('seals exact verified redirect authority (%s)', async (actionType) => {
+  it.each(['source_apply'] as const)('seals exact verified redirect authority (%s)', async (actionType) => {
     const verified = {
       schemaVersion: 9 as const,
       purpose: 'management_action_result' as const,

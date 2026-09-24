@@ -20,8 +20,8 @@ import {
 // same journal: a removed-key prefix and one pending deletion boundary.
 const REMOVAL_ORDER = Object.freeze(['dns_record', 'portal_access_policy', 'portal_access_application', 'portal',
   'source_access_policy', 'source_access_application', 'mcp_server']);
-const ACCESS_KINDS = Object.freeze(['portal_access_policy', 'portal_access_application',
-  'source_access_policy', 'source_access_application']);
+// One policy and one application exercise both asynchronous Access deletion branches.
+const ACCESS_KINDS = Object.freeze(['portal_access_policy', 'source_access_application']);
 const ADMIN = 'admin@example.com';
 const GRANT = 'synthetic-teardown-grant-never-store';
 const PROGRESS_KEY = 'ankka-mcp-gateway/root-teardown-progress/v1';
@@ -242,14 +242,12 @@ test('the plain executor removes every dependency within one pass', async () => 
   assert.deepEqual(t.deletes(), t.paths);
 }, { bounded: false }));
 
-// A callback can die at any pass boundary: the grant expires, the Worker is
-// evicted, or the browser never follows the redirect. Every boundary of the
-// bounded executor must resume under fresh consent without a repeated DELETE.
-// Each boundary is settled; the ones that enter a phase are also left to
-// expire unsettled, as a callback that died without reaching its settlement.
-const EXPIRED_BOUNDARIES = new Set([1, 2, 9, 10, 16, 17, 18, 19, 20, 26]);
-for (let interruptedAfter = 1; interruptedAfter < 27; interruptedAfter++) {
-  for (const release of EXPIRED_BOUNDARIES.has(interruptedAfter) ? ['settled', 'expired'] : ['settled']) {
+// Interrupt at phase transitions and both ends of the repeated resource passes.
+// Each boundary is settled and also left to expire, as a callback that died
+// before settlement. Repeated passes within the same phase share recovery logic.
+const INTERRUPTION_BOUNDARIES = [1, 2, 9, 10, 16, 17, 18, 19, 20, 26];
+for (const interruptedAfter of INTERRUPTION_BOUNDARIES) {
+  for (const release of ['settled', 'expired']) {
     test(`bounded removal interrupted after pass ${interruptedAfter} (${release}) resumes under fresh consent`, async (context) => fixture(async (t) => {
       const first = await t.consent(1);
       assert.equal(first.prepared.status, 200);
@@ -280,9 +278,10 @@ for (let interruptedAfter = 1; interruptedAfter < 27; interruptedAfter++) {
 }
 
 for (const [executor, bounded] of EXECUTORS) {
-  // A lost DELETE response (5xx, 429, transport failure) leaves `send_armed`.
-  // The provider may or may not have applied the deletion.
-  for (let index = 0; index < REMOVAL_ORDER.length; index++) {
+  // A lost DELETE response leaves `send_armed`, whether or not it was applied.
+  // Cover DNS, Access policy, Access application, Portal and server families;
+  // source and Portal Access resources share the same recovery handling.
+  for (const index of [0, 1, 2, 3, 6]) {
     for (const applied of [false, true]) {
       test(`${executor}: unknown DELETE response at ${REMOVAL_ORDER[index]} (${applied ? 'applied' : 'not applied'}) resumes from send_armed`, async () => fixture(async (t) => {
         answerOnce(t, index, 'DELETE', 1, (state) => {
@@ -356,8 +355,9 @@ for (const [executor, bounded] of EXECUTORS) {
 
   // A rejected DELETE (401/403 or 4xx) records `not_applied`: the deletion
   // was not performed, so a fresh grant sends it again after a fresh read.
+  // One middle resource covers both refusals with an existing deletion prefix.
   for (const [label, status] of [['auth', 403], ['blocked', 400]]) {
-    for (const index of [0, 3, 6]) {
+    for (const index of [3]) {
       test(`${executor}: ${label} DELETE at ${REMOVAL_ORDER[index]} leaves not_applied and is re-sent under fresh consent`, async () => fixture(async (t) => {
         answerOnce(t, index, 'DELETE', 1, () => envelope(null, status));
         const first = await t.consent(1);
@@ -375,10 +375,9 @@ for (const [executor, bounded] of EXECUTORS) {
     }
   }
 
-  // A read can fail transiently at three points: the preflight, the read
-  // before arming, and the verification after a DELETE. None may be taken as
-  // absence; each stops the attempt with the journal still exact.
-  for (let index = 0; index < REMOVAL_ORDER.length; index++) {
+  // Cover unknown reads at every phase on the first, middle and final resource.
+  // Unknown provider status is handled before kind-specific ownership matching.
+  for (const index of [0, 3, 6]) {
     for (const [label, nth] of [['preflight read', 1], ['read before arming', 2], ['verification after DELETE', 3]]) {
       test(`${executor}: unknown ${label} at ${REMOVAL_ORDER[index]} stops without inventing absence and resumes`, async () => fixture(async (t) => {
         answerOnce(t, index, 'GET', nth, () => envelope(null, 503));
@@ -439,7 +438,9 @@ for (const [executor, bounded] of EXECUTORS) {
   // until the resource reads exactly again. Before the first deletion the
   // attempt settles failed and holds no lock; after it, recovery-required.
   for (let index = 0; index < REMOVAL_ORDER.length; index++) {
-    for (const when of ['before any deletion', 'after the earlier deletions']) {
+    // Every kind must reject ownership drift. Repeat the later-deletion timing
+    // at the middle and final resources to cover recovery with a retained prefix.
+    for (const when of [3, 6].includes(index) ? ['before any deletion', 'after the earlier deletions'] : ['before any deletion']) {
       test(`${executor}: ownership conflict at ${REMOVAL_ORDER[index]} ${when} stops every consent until the read is exact again`, async () => fixture(async (t) => {
         const resource = t.resources[index];
         const drift = () => t.hook(({ record, state }) => {

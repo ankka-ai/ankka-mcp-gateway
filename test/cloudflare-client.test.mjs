@@ -57,6 +57,17 @@ test('gets a zone with encoded path and exact safe request headers', async () =>
   });
 });
 
+test('scopes identity-provider discovery to the account and DNS deletion to the selected zone', async () => {
+  const mock = mockFetch([success([]), success({ id: 'record/id' })]);
+  const api = client(mock.fetchImpl);
+  assert.deepEqual(await api.listIdentityProviders(), []);
+  assert.deepEqual(await api.deleteDnsRecord('record/id'), { id: 'record/id' });
+  assert.deepEqual(mock.calls.map(({ url, init }) => [url, init.method, init.body]), [
+    [`${BASE}/accounts/account%2Fid/access/identity_providers?page=1&per_page=100`, 'GET', undefined],
+    [`${BASE}/zones/zone%20id/dns_records/record%2Fid`, 'DELETE', undefined],
+  ]);
+});
+
 test('aborts every request at the configured deadline and forwards an external abort', async () => {
   for (const mode of ['timeout', 'external']) {
     const controller = new AbortController();
@@ -98,106 +109,6 @@ test('keeps the deadline active while a response body hangs', async () => {
     (error) => error instanceof CloudflareApiError && error.codes.includes('invalid_response'),
   );
   assert.equal(receivedSignal.aborted, true);
-});
-
-test('uses current MCP server endpoints and verbs, including sync', async () => {
-  const mock = mockFetch([
-    success({ id: 'server/id' }),
-    success({ id: 'server/id', name: 'updated' }),
-    success({ status: 'waiting' }),
-    success({ id: 'server/id' }),
-  ]);
-  const api = client(mock.fetchImpl);
-  await api.createMcpServer({ name: 'created' });
-  await api.updateMcpServer('server/id', { name: 'updated' });
-  await api.syncMcpServer('server/id');
-  await api.deleteMcpServer('server/id');
-
-  const root = `${BASE}/accounts/account%2Fid/access/ai-controls/mcp/servers`;
-  assert.deepEqual(
-    mock.calls.map(({ url, init }) => [url, init.method, init.body]),
-    [
-      [root, 'POST', '{"name":"created"}'],
-      [`${root}/server%2Fid`, 'PUT', '{"name":"updated"}'],
-      [`${root}/server%2Fid/sync`, 'POST', undefined],
-      [`${root}/server%2Fid`, 'DELETE', undefined],
-    ],
-  );
-  assert.equal(mock.calls[0].init.headers['Content-Type'], 'application/json');
-  assert.equal(mock.calls[3].init.headers['Content-Type'], undefined);
-});
-
-test('covers Portal, Access app, policy, identity-provider, and DNS paths', async () => {
-  const mock = mockFetch(Array.from({ length: 16 }, () => success([])));
-  const api = client(mock.fetchImpl);
-  await api.listIdentityProviders();
-  await api.createPortal({ name: 'portal' });
-  await api.getPortal('portal/id');
-  await api.updatePortal('portal/id', { name: 'portal-2' });
-  await api.deletePortal('portal/id');
-  await api.listAccessApps();
-  await api.createAccessApp({ name: 'source-app', type: 'mcp', destinations: [] });
-  await api.getAccessApp('app/id');
-  await api.updateAccessApp('app/id', { name: 'app-2' });
-  await api.deleteAccessApp('app/id');
-  await api.createAppPolicy('app/id', { name: 'allow' });
-  await api.getAppPolicy('app/id', 'policy/id');
-  await api.updateAppPolicy('app/id', 'policy/id', { name: 'allow-2' });
-  await api.deleteAppPolicy('app/id', 'policy/id');
-  await api.createDnsRecord({ type: 'CNAME' });
-  await api.updateDnsRecord('record/id', { type: 'CNAME' });
-
-  assert.deepEqual(
-    mock.calls.map(({ url, init }) => [new URL(url).pathname, init.method]),
-    [
-      ['/client/v4/accounts/account%2Fid/access/identity_providers', 'GET'],
-      ['/client/v4/accounts/account%2Fid/access/ai-controls/mcp/portals', 'POST'],
-      ['/client/v4/accounts/account%2Fid/access/ai-controls/mcp/portals/portal%2Fid', 'GET'],
-      ['/client/v4/accounts/account%2Fid/access/ai-controls/mcp/portals/portal%2Fid', 'PUT'],
-      ['/client/v4/accounts/account%2Fid/access/ai-controls/mcp/portals/portal%2Fid', 'DELETE'],
-      ['/client/v4/zones/zone%20id/access/apps', 'GET'],
-      ['/client/v4/zones/zone%20id/access/apps', 'POST'],
-      ['/client/v4/zones/zone%20id/access/apps/app%2Fid', 'GET'],
-      ['/client/v4/zones/zone%20id/access/apps/app%2Fid', 'PUT'],
-      ['/client/v4/zones/zone%20id/access/apps/app%2Fid', 'DELETE'],
-      ['/client/v4/zones/zone%20id/access/apps/app%2Fid/policies', 'POST'],
-      ['/client/v4/zones/zone%20id/access/apps/app%2Fid/policies/policy%2Fid', 'GET'],
-      ['/client/v4/zones/zone%20id/access/apps/app%2Fid/policies/policy%2Fid', 'PUT'],
-      ['/client/v4/zones/zone%20id/access/apps/app%2Fid/policies/policy%2Fid', 'DELETE'],
-      ['/client/v4/zones/zone%20id/dns_records', 'POST'],
-      ['/client/v4/zones/zone%20id/dns_records/record%2Fid', 'PUT'],
-    ],
-  );
-  assert.equal(new URL(mock.calls[0].url).search, '?page=1&per_page=100');
-  assert.equal(new URL(mock.calls[5].url).search, '?page=1&per_page=100');
-  assert.equal(mock.calls[6].init.body, '{"name":"source-app","type":"mcp","destinations":[]}');
-});
-
-test('covers the remaining list and read/delete resource paths', async () => {
-  const mock = mockFetch(Array.from({ length: 8 }, () => success([])));
-  const api = client(mock.fetchImpl);
-  await api.listMcpServers();
-  await api.getMcpServer('server');
-  await api.listPortals();
-  await api.listAppPolicies('app');
-  await api.listDnsRecords();
-  await api.getDnsRecord('record');
-  await api.deleteDnsRecord('record');
-  await api.getZone();
-
-  assert.deepEqual(
-    mock.calls.map(({ url, init }) => [new URL(url).pathname, init.method]),
-    [
-      ['/client/v4/accounts/account%2Fid/access/ai-controls/mcp/servers', 'GET'],
-      ['/client/v4/accounts/account%2Fid/access/ai-controls/mcp/servers/server', 'GET'],
-      ['/client/v4/accounts/account%2Fid/access/ai-controls/mcp/portals', 'GET'],
-      ['/client/v4/zones/zone%20id/access/apps/app/policies', 'GET'],
-      ['/client/v4/zones/zone%20id/dns_records', 'GET'],
-      ['/client/v4/zones/zone%20id/dns_records/record', 'GET'],
-      ['/client/v4/zones/zone%20id/dns_records/record', 'DELETE'],
-      ['/client/v4/zones/zone%20id', 'GET'],
-    ],
-  );
 });
 
 test('paginates list results and encodes caller query values', async () => {

@@ -68,7 +68,10 @@ function outbound(reply?: () => Response) {
 }
 describe.each(['2025-06-18', '2026-07-28'])('hosted BigQuery bridge, MCP %s', (version) => {
   it.each([false, true])('keeps the exact tool catalogue with query enablement %s', async (allowQueries) => {
-    const response = await handleRequest(request(version, 'tools/list', {}), environment(allowQueries), outbound());
+    const fetcher = outbound();
+    const response = await handleRequest(request(version, 'tools/list', {}), environment(allowQueries), fetcher);
+    expect(response.status).toBe(200);
+    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([keysUrl]);
     const text = await response.text();
     const payload = response.headers.get('content-type')?.startsWith('text/event-stream')
       ? text.split(/\r?\n/u).find((line) => line.startsWith('data:'))?.slice(5).trim() ?? '' : text;
@@ -79,7 +82,7 @@ describe.each(['2025-06-18', '2026-07-28'])('hosted BigQuery bridge, MCP %s', (v
     expect(sql.inputSchema.properties.query.const).toBe(allowQueries ? undefined : BIGQUERY_MCP_PROBE_QUERY);
   });
 
-  it.each([undefined, true, false])('forwards an enabled read query with dryRun %s to only the reviewed tool', async (dryRun) => {
+  it.each(version === '2026-07-28' ? [undefined, true, false] : [undefined])('forwards an enabled read query with dryRun %s to only the reviewed tool', async (dryRun) => {
     const args: QueryArguments = { ...queryArgs,
       query: 'SELECT event_name, COUNT(*) FROM sample_dataset.events GROUP BY event_name LIMIT 5' };
     if (dryRun !== undefined) args.dryRun = dryRun;
@@ -92,7 +95,7 @@ describe.each(['2025-06-18', '2026-07-28'])('hosted BigQuery bridge, MCP %s', (v
     });
   });
 
-  it.each([
+  const invalidQueryArguments = [
     { ...queryArgs, query: ' ' },
     { ...queryArgs, query: 'x'.repeat(BIGQUERY_MCP_QUERY_BYTES + 1) },
     { ...queryArgs, query: 'é'.repeat(BIGQUERY_MCP_QUERY_BYTES / 2 + 1) },
@@ -103,22 +106,15 @@ describe.each(['2025-06-18', '2026-07-28'])('hosted BigQuery bridge, MCP %s', (v
     { ...queryArgs, timeoutMs: 1000 },
     { ...queryArgs, location: 'EU' },
     { ...queryArgs, url: 'https://attacker.example.com' },
-  ])('rejects invalid enabled-query arguments before Google authentication', async (args) => {
+  ];
+  // Legacy transport keeps a rejection smoke case; current transport covers the shared validator.
+  it.each(version === '2026-07-28' ? invalidQueryArguments : invalidQueryArguments.slice(0, 1))('rejects invalid enabled-query arguments before Google authentication', async (args) => {
     const fetcher = outbound();
     const response = await handleRequest(request(version, 'tools/call', { name: 'execute_sql_readonly', arguments: args }), environment(true), fetcher);
     expect(await response.text()).not.toContain('synthetic Google result');
     expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([keysUrl]);
   });
 
-  it('lists only reviewed tools without contacting Google', async () => {
-    const fetcher = outbound();
-    const response = await handleRequest(request(version, 'tools/list', {}), environment(), fetcher);
-    const body = await response.text();
-    expect(response.status).toBe(200);
-    for (const name of ['list_table_ids', 'get_table_info', 'execute_sql_readonly']) expect(body).toContain(name);
-    expect(body).not.toContain('"name":"execute_sql"');
-    expect(fetcher.mock.calls.map(([url]) => String(url))).toEqual([keysUrl]);
-  });
   it.each([
     { name: 'list_table_ids', args: tableArgs },
     { name: 'get_table_info', args: { projectId: tableArgs.projectId, datasetId: tableArgs.datasetId, tableId: 'events_20260101' } },
@@ -149,7 +145,7 @@ describe.each(['2025-06-18', '2026-07-28'])('hosted BigQuery bridge, MCP %s', (v
       name, arguments: args,
     } });
   });
-  it.each([
+  const unauthorizedRequests = [
     { name: 'execute_sql', arguments: queryArgs },
     { name: 'execute_sql_readonly', arguments: { ...queryArgs, query: 'SELECT * FROM sample_dataset.events' } },
     { name: 'execute_sql_readonly', arguments: { ...queryArgs, projectId: 'unapproved-project' } },
@@ -158,7 +154,8 @@ describe.each(['2025-06-18', '2026-07-28'])('hosted BigQuery bridge, MCP %s', (v
     { name: 'get_table_info', arguments: { ...tableArgs, tableId: '../secrets' } },
     { name: 'list_table_ids', arguments: { ...tableArgs, pageSize: 5000 } },
     { name: 'list_table_ids', arguments: { ...tableArgs, url: 'https://attacker.example.com' } },
-  ])('rejects an unauthorized request before Google auth: $name', async (params) => {
+  ];
+  it.each(version === '2026-07-28' ? unauthorizedRequests : unauthorizedRequests.slice(0, 1))('rejects an unauthorized request before Google auth: $name', async (params) => {
     const fetcher = outbound();
     const response = await handleRequest(request(version, 'tools/call', params), environment(), fetcher);
     expect(await response.text()).not.toContain('synthetic Google result');

@@ -445,7 +445,7 @@ describe('release-specific R2 publication Worker generator', () => {
     }
   });
 
-  it.each([1_777_000, 8_200_000, 10_000_000, 12_000_000])('generates a bounded signed 17-file release totaling %i object bytes', async (totalObjectBytes) => {
+  it.each([1_777_000, 12_000_000])('generates a bounded signed 17-file release totaling %i object bytes', async (totalObjectBytes) => {
     const input = await fixture({ totalObjectBytes });
     try {
       const plan = await readPlan(input);

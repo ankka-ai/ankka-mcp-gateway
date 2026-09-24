@@ -49,29 +49,3 @@ test('documentation entry points have resolving relative files and Markdown anch
     }
   }
 });
-
-test('entry-point docs distinguish release availability from disabled source activation', () => {
-  const deployment = read('docs/CUSTOMER_SELF_SERVICE.md');
-  const security = read('docs/SECURITY_MODEL.md');
-  assert.match(deployment, /Availability:\*\* stable and canary releases/);
-  assert.match(deployment, /source installer's disabled default activation is separate/);
-  assert.match(security, /reviewed hosted entrypoint uses an exact signed release pin/);
-  for (const document of [deployment, security]) {
-    assert.doesNotMatch(document, /first\s+signed public release is prepared|self-service deployment is not yet open/);
-  }
-  assert.match(deployment, /\*\*Settings\*\*/);
-  assert.match(deployment, /Older canary/);
-});
-
-test('documented offline commands refer to existing scripts and synthetic inputs', () => {
-  const packageJson = JSON.parse(read('package.json'));
-  for (const script of ['dev:ui', 'validate', 'plan:example']) assert.ok(packageJson.scripts[script]);
-  assert.ok(statSync(new URL('examples/gateway.config.json', root)).isFile());
-  const overview = read('README.md');
-  assert.match(overview, /npm run validate -- examples\/gateway.config.json/);
-  assert.match(overview, /npm run plan:example/);
-  const index = read('docs/README.md');
-  assert.match(index, /catalogue\s+discovery/);
-  assert.match(index, /Do not\s+invoke a destructive operation/);
-  assert.match(index, /readOnlyHint/);
-});

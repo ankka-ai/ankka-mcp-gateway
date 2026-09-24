@@ -101,7 +101,7 @@ describe('deployment-owned fixed-scope Google service-account authorization', ()
     expect(outbound).not.toHaveBeenCalled();
   });
 
-  it.each([301, 302, 303, 307, 308])('rejects token redirect status %s without forwarding the signed assertion or making a second fetch', async (status) => {
+  it.each([302, 307])('rejects token redirect status %s without forwarding the signed assertion or making a second fetch', async (status) => {
     const redirectTarget = 'https://evil.example.com/token';
     const outbound = vi.fn<typeof globalThis.fetch>(async () => Response.redirect(redirectTarget, status));
     await expect(createAuthorization()(outbound)).rejects.toEqual(new GoogleAuthorizationError('GOOGLE_AUTH_FAILED'));

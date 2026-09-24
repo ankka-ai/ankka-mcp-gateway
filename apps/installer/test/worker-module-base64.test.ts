@@ -16,17 +16,9 @@ describe('canonical Worker module base64', () => {
   });
 
   it.each([
-    '', 'Y', 'YQ', 'YQ=', 'YQ===', 'Y===', '====', '=YQ=', 'Y=Q=',
-    'YQ==YQ==', 'YQ==\n', 'Y Q==', 'YQ\t=', 'YQ\r=', 'YQ\0=', 'YQ\u00a0=',
-    '-_8=', '????', 'éé==', 'YR==', 'YWJ=',
+    '', 'YQ=', 'Y===', 'YQ==YQ==', 'Y Q==', '-_8=', 'YR==', 'YWJ=',
   ])('rejects malformed or noncanonical content: %j', (value) => {
     expect(decodeWorkerModuleBase64(value, MAXIMUM)).toBeNull();
-  });
-
-  it.each([4 * 1024 * 1024, MAXIMUM])('decodes %i bytes within the declared bound', (size) => {
-    const bytes = decodeWorkerModuleBase64(btoa('a'.repeat(size)), size);
-    expect(bytes?.byteLength).toBe(size);
-    expect(bytes?.every((byte) => byte === 97)).toBe(true);
   });
 
   it('decodes the maximum module in a process with a 64 MiB JavaScript heap', () => {

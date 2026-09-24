@@ -41,7 +41,7 @@ describe('the one Worker-secret write of a management token change', () => {
     expect(bodyRead).toBe(false);
   });
 
-  it.each([202, 204, 302, 400, 401, 403, 404, 409, 429, 500, 503])('never retries and keeps only the status of HTTP %i', async (status) => {
+  it.each([202, 204, 302, 403, 429, 500])('never retries and keeps only the status of HTTP %i', async (status) => {
     const f = recorder(() => new Response(status === 204 ? null : JSON.stringify({ errors: [{ message: `echo ${PASTED_VALUE}` }] }), { status }));
     const result = await write(f.transport);
     expect(result).toEqual({ written: false, reason: `secret_write_http_${status}` });

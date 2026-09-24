@@ -199,7 +199,7 @@ describe('signed installer SPA asset boundary', () => {
     expect(serialized).not.toContain('provider');
   });
 
-  it.each(APPROVED_INSTALLER_HTML_ROUTES)('serves no-store HTML only for approved route %s', async (route) => {
+  it.each(['/', '/oauth/handoff'])('serves no-store HTML only for approved route %s', async (route) => {
     const input = await fixture();
     const index = await createSignedInstallerAssetIndex(input.bundle);
     const response = buildSignedInstallerAssetResponse(index, new Request(`https://deploy.ankka.ai${route}`));

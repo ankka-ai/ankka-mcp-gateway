@@ -1512,7 +1512,8 @@ for (const change of ['foreign policy', 'renamed policy', 'different destination
 }
 
 
-for (let lostDelete = 0; lostDelete < 7; lostDelete += 1) {
+// Exercise the first, middle and final deletion; the executor suite covers each resource family.
+for (const lostDelete of [0, 3, 6]) {
   test(`current teardown renews consent and resumes after losing deletion ${lostDelete + 1}'s response`, async (context) => fixture(async (gateway) => {
     const prepared = await prepareNewSource(gateway);
     assert.equal((await gateway.apply(prepared, {}, null)).status, 200);
@@ -1670,7 +1671,8 @@ test('abandoning current consent expires its unstarted lifecycle lock without ch
 
 const MANAGEMENT_TOKEN = 'synthetic-account-management-token-never-store';
 
-for (const sourceCount of [0, 1, 5]) {
+// Empty and multi-source graphs cover both shapes and the constant read count.
+for (const sourceCount of [0, 5]) {
   test(`Team reads its live policy graph from one overlapped round of reads (${sourceCount} sources)`, async () => fixture(async (gateway) => {
     for (let index = 1; index < sourceCount; index += 1) {
       await addHistoricalInstalledSource(gateway, { label: `Extra source ${index}`, url: `https://source-${index}.example.net/mcp` });

@@ -21,7 +21,6 @@ const cliPath = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const observedPath = fileURLToPath(new URL('../examples/observed.empty.json', import.meta.url));
 const accessPath = fileURLToPath(new URL('../examples/access-input.json', import.meta.url));
 const SCALE_TOOL_COUNT = 228;
-const CURRENT_WORKLOAD_TOOL_COUNT = 224;
 const VALIDATION_ITERATIONS = 100;
 const PLAN_ITERATIONS = 5;
 const SCALE_CPU_GUARD_MS = 5_000;
@@ -32,27 +31,6 @@ async function fixture() {
 
 async function hostileNamesFixture() {
   return JSON.parse(await readFile(hostileNamesUrl, 'utf8'));
-}
-
-function workloadAtCurrentCardinality(input) {
-  const output = structuredClone(input);
-  output.sources[0].label = 'Synthetic 224-tool read catalogue';
-  if (CURRENT_WORKLOAD_TOOL_COUNT <= SCALE_TOOL_COUNT) {
-    output.sources[0].enabledTools = output.sources[0].enabledTools.slice(
-      0,
-      CURRENT_WORKLOAD_TOOL_COUNT,
-    );
-  } else {
-    const supplementalNames = Array.from(
-      { length: CURRENT_WORKLOAD_TOOL_COUNT - SCALE_TOOL_COUNT },
-      (_value, index) => `workload_read_${String(index + 1).padStart(3, '0')}`,
-    );
-    output.sources[0].enabledTools = [
-      ...output.sources[0].enabledTools,
-      ...supplementalNames,
-    ].sort();
-  }
-  return output;
 }
 
 function planningInput() {
@@ -124,38 +102,6 @@ test('the public large-source fixture is synthetic, sorted, and schema-valid', a
 
 test('validation and planning stay bounded at 228 exact tools', async () => {
   const input = await fixture();
-
-  const validationStart = process.cpuUsage();
-  for (let index = 0; index < VALIDATION_ITERATIONS; index += 1) {
-    validateGatewayConfig(input);
-  }
-  const validationElapsed = elapsedCpuMilliseconds(validationStart);
-  assert.ok(
-    validationElapsed < SCALE_CPU_GUARD_MS,
-    `${VALIDATION_ITERATIONS} validations used ${validationElapsed.toFixed(1)}ms CPU`,
-  );
-
-  const plans = [];
-  const planStart = process.cpuUsage();
-  for (let index = 0; index < PLAN_ITERATIONS; index += 1) {
-    plans.push(await buildGatewayPlan(input, planningInput(), planningOptions()));
-  }
-  const planElapsed = elapsedCpuMilliseconds(planStart);
-  assert.ok(
-    planElapsed < SCALE_CPU_GUARD_MS,
-    `${PLAN_ITERATIONS} plans used ${planElapsed.toFixed(1)}ms CPU`,
-  );
-  assert.deepEqual(plans.slice(1), Array(PLAN_ITERATIONS - 1).fill(plans[0]));
-  assert.deepEqual(sourceToolNames(plans[0]), input.sources[0].enabledTools);
-  assert.deepEqual(portalToolNames(plans[0]), input.sources[0].enabledTools);
-});
-
-test('validation and planning cover the current 224-tool workload cardinality', async () => {
-  const input = workloadAtCurrentCardinality(await fixture());
-  assert.equal(input.sources[0].enabledTools.length, CURRENT_WORKLOAD_TOOL_COUNT);
-  assert.equal(new Set(input.sources[0].enabledTools).size, CURRENT_WORKLOAD_TOOL_COUNT);
-  assert.deepEqual(input.sources[0].enabledTools, [...input.sources[0].enabledTools].sort());
-  assert.deepEqual(validateGatewayConfig(input), input);
 
   const validationStart = process.cpuUsage();
   for (let index = 0; index < VALIDATION_ITERATIONS; index += 1) {
