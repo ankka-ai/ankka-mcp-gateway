@@ -4254,6 +4254,7 @@ async function installManagementSource(gateway, enabledTools = null, recover = n
   assert.deepEqual(application.oauth_configuration.dynamic_client_registration.allowed_uris, [
     'https://claude.ai/api/mcp/auth_callback', 'https://chatgpt.com/connector_platform_oauth_redirect',
     'https://chatgpt.com/connector/oauth/*', 'https://www.cursor.com/agents/mcp/oauth/callback',
+    'https://playground.ai.cloudflare.com/agents/playground/*',
     `${MANAGEMENT_ORIGIN}/__ankka/source-oauth/callback`,
     `https://dash.cloudflare.com/${ACCOUNT_ID}/one/access-controls/ai-controls/mcp-server/oauth-callback/${server.id}`,
     'https://oauth-callbacks.cloudflareaccess.com/cdn-cgi/access/outbound-oauth-callback',

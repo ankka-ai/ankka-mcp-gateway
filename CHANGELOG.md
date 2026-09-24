@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Allow the Cloudflare AI Playground's session-specific OAuth callbacks by
+  default on new gateways. Existing Portals can add the documented callback
+  path in Cloudflare's Managed OAuth settings.
+
 - Recognize OAuth-protected MCP sources even when they publish their tool
   catalogue without authentication. Gorgias now enters the sign-in flow before
   tools are enabled; dashboard authorization requests ticket-read access and

@@ -121,6 +121,7 @@ function exactPortalApp({
           'https://chatgpt.com/connector_platform_oauth_redirect',
           'https://chatgpt.com/connector/oauth/*',
           'https://www.cursor.com/agents/mcp/oauth/callback',
+          'https://playground.ai.cloudflare.com/agents/playground/*',
         ],
         allow_any_on_localhost: true,
         allow_any_on_loopback: true,
@@ -1169,6 +1170,7 @@ test('updates a receipt-owned base-only Portal app instead of replaying POST', a
     'https://chatgpt.com/connector_platform_oauth_redirect',
     'https://chatgpt.com/connector/oauth/*',
     'https://www.cursor.com/agents/mcp/oauth/callback',
+    'https://playground.ai.cloudflare.com/agents/playground/*',
   ]);
 });
 
