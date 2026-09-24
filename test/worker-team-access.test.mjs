@@ -266,6 +266,9 @@ async function fixture(run, claimInput) {
     if (request.url === `${gateway.env.CF_ACCESS_ISSUER}/cdn-cgi/access/certs`) {
       return Response.json({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] });
     }
+    if (request.url.startsWith('https://catalog.example.net/.well-known/oauth-protected-resource')) {
+      return new Response(null, { status: 404 });
+    }
     if (request.url === NEW_SOURCE_URL) {
       await sourceRequestHook?.(request);
       const message = await request.json();

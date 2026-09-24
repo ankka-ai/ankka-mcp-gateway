@@ -785,7 +785,7 @@ describe('SourcesPage', () => {
     const next = within(screen.getByLabelText('What happens next')).getAllByRole('listitem').map((item) => item.textContent)
     expect(next).toEqual([
       'Save this draft and install it. The gateway creates the connector with nothing enabled and nobody assigned, and does not attach it to your Portal.',
-      'Connect the connector once in Cloudflare, as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.',
+      'Authorize the connector as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.',
       'Come back to this page. It lists the connector’s real tools and you choose which to allow. Only those are attached.',
     ])
     // This gateway has nothing a rollback could restore, so saving decides nothing and says nothing about it.

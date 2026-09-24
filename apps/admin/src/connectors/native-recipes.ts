@@ -210,10 +210,10 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     status: 'compatibility_pending', endpoint: 'https://mcp.gorgias.com/mcp',
     authentication: 'oauth_dynamic_registration',
     upstreamControls: ['Prove a granular read-only provider OAuth grant before connecting any support account.', 'Keep replies, ticket updates and helpdesk configuration changes unavailable upstream.'],
-    requiredScopes: [], scopeNote: 'Granular scopes are advertised, but the exact minimal granted set through Cloudflare has not been proved.',
+    requiredScopes: ['tickets:read'], scopeNote: 'Dashboard authorization requests ticket-read and advertised identity/session scopes only. A real provider grant and upstream enforcement still need verification.',
     documentedReadTools: [],
-    blockers: ['Cloudflare’s actual requested and granted provider scopes remain unverified.', EXACT_TOOLS_BLOCKER, CANARY_BLOCKER, CATALOG_BLOCKER],
-    setupSteps: ['Finish the synthetic OAuth scope diagnostic before a real provider connection.', 'Use an approved isolated test identity; do not treat a production support account as an unattended canary.', 'Verify the complete authenticated tool catalogue and select only the required ticket reads.'],
+    blockers: ['Live provider scope enforcement and Cloudflare refresh remain unverified.', EXACT_TOOLS_BLOCKER, CANARY_BLOCKER, CATALOG_BLOCKER],
+    setupSteps: ['Use dashboard authorization to request the fixed ticket-read scope; broader or unconfirmed token grants are refused.', 'Use an approved isolated test identity; do not treat a production support account as an unattended canary.', 'Verify the complete authenticated tool catalogue and select only the required ticket reads.'],
     evidenceUrls: ['https://docs.gorgias.com/en-US/connect-your-ai-assistant-to-the-gorgias-mcp-6310546', 'https://updates.gorgias.com/publications/gorgias-mcp-is-now-in-open-beta'],
   },
   {

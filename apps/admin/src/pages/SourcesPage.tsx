@@ -227,9 +227,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     [catalog.sources, catalogSourceId],
   )
 
-  // A source that needs sign-in answers discovery with a challenge instead of a list: its tools are chosen after the
-  // operator has connected it, from the list Cloudflare syncs, so its draft is saved without any.
-  const signIn = discovery?.authentication === 'oauth' && discovery.tools.length === 0 && !discovery.connectionBlock
+  // OAuth sources can publish their catalogue before sign-in. Choose their
+  // tools from Cloudflare's connected list; never enable the public preview.
+  const signIn = discovery?.authentication === 'oauth' && !discovery.connectionBlock
   const enabledTools = useMemo(() => signIn ? [] : [...selected].sort(), [selected, signIn])
   const missingRecommendedTools = useMemo(() => {
     if (!catalogSource || !discovery || discovery.tools.length === 0) return []
@@ -619,7 +619,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   <div>
                     <h3 id="catalogue-title" className="text-sm font-semibold text-subheading">Tool allowlist</h3>
                     <p className="mt-1 text-xs leading-5 text-kumo-subtle">
-                      {discovery.authentication === 'oauth' && discovery.tools.length === 0
+                      {signIn && discovery.tools.length > 0
+                        ? `${discovery.tools.length} tools are advertised publicly. Sign in before choosing which tools to allow.`
+                        : discovery.authentication === 'oauth' && discovery.tools.length === 0
                         ? 'This connector needs sign-in, so its tools can only be listed after you connect it.'
                         : `${discovery.tools.length} tools discovered with MCP ${discovery.protocolVersion ?? 'compatible protocol'}.${catalogSource ? ' Catalog recommendations that still exist are preselected for review.' : ''}`}
                     </p>
@@ -635,20 +637,21 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   </p>
                 ) : null}
 
-                {discovery.authentication === 'oauth' && discovery.tools.length === 0 ? (
-                  signIn ? (
-                    <div className="mt-5 max-w-[80ch] text-xs leading-5 text-kumo-subtle" aria-label="What happens next">
-                      <p className="text-sm font-medium text-kumo-default">Nothing to choose yet. What happens next:</p>
-                      <ol className="mt-2 list-decimal space-y-1.5 pl-5">
-                        <li>Save this draft and install it. The gateway creates the connector with nothing enabled and nobody assigned, and does not attach it to your Portal.</li>
-                        <li>Connect the connector once in Cloudflare, as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.</li>
-                        <li>Come back to this page. It lists the connector’s real tools and you choose which to allow. Only those are attached.</li>
-                      </ol>
-                      {catalogSource ? (
-                        <p className="mt-3">The catalog recommends {catalogSource.implementation.recommendedTools.length} tool{catalogSource.implementation.recommendedTools.length === 1 ? '' : 's'} for this connector. Those that exist in its real list are preselected when you choose.</p>
-                      ) : null}
-                    </div>
-                  ) : null
+                {signIn ? (
+                  <div className="mt-5 max-w-[80ch] text-xs leading-5 text-kumo-subtle" aria-label="What happens next">
+                    <p className="text-sm font-medium text-kumo-default">Connect before choosing tools. What happens next:</p>
+                    <ol className="mt-2 list-decimal space-y-1.5 pl-5">
+                      <li>Save this draft and install it. The gateway creates the connector with nothing enabled and nobody assigned, and does not attach it to your Portal.</li>
+                      <li>Authorize the connector as a gateway operator. The connection is shared with the team members you later give access; its credential stays in your Cloudflare account.</li>
+                      <li>Come back to this page. It lists the connector’s real tools and you choose which to allow. Only those are attached.</li>
+                    </ol>
+                    {discovery.endpoint === 'https://mcp.gorgias.com/mcp' ? (
+                      <p className="mt-3">Gorgias authorization here is limited to reading tickets. Other Gorgias operations may be unavailable.</p>
+                    ) : null}
+                    {catalogSource ? (
+                      <p className="mt-3">The catalog recommends {catalogSource.implementation.recommendedTools.length} tool{catalogSource.implementation.recommendedTools.length === 1 ? '' : 's'} for this connector. Those that exist in its real list are preselected when you choose.</p>
+                    ) : null}
+                  </div>
                 ) : (
                   <div className="mt-5">
                     {missingRecommendedTools.length > 0 ? (

@@ -41,6 +41,9 @@ async function fixture(run) {
     calls.push(request.url);
     assert.equal(request.headers.get('authorization'), null);
     assert.equal(request.headers.get('cookie'), null);
+    if (request.method === 'GET' && new URL(request.url).pathname.startsWith('/.well-known/oauth-protected-resource')) {
+      return new Response(null, { status: 404 });
+    }
     const message = await request.json();
     assert.equal(message.method, 'tools/list', 'discovery must never execute a tool');
     if (responseMode === 'unreachable') throw new Error('synthetic-provider-sensitive-detail');

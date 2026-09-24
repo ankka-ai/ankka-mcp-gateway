@@ -1652,6 +1652,9 @@ test('management API preserves bounded discovery, draft capacity and shared oper
     let oversizedCatalogueBodyCancelled = false;
     globalThis.fetch = async (request) => {
       const url = new URL(request.url);
+      if (request.method === 'GET' && url.hostname.endsWith('.example.net') && url.pathname.startsWith('/.well-known/oauth-protected-resource')) {
+        return new Response(null, { status: 404 });
+      }
       if (url.href === `${env.CF_ACCESS_ISSUER}/cdn-cgi/access/certs`) {
         return new Response(JSON.stringify({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] }), {
           headers: { 'content-type': 'application/json; charset=utf-8' },

@@ -150,7 +150,7 @@ describe('native connector setup recipes', () => {
     expect(recipe('ahrefs').setupSteps[0]).toContain('Do not authenticate or run a canary')
     expect(recipe('ahrefs').documentedReadTools).toEqual([])
     expect(recipe('gorgias').documentedReadTools).toEqual([])
-    expect(recipe('gorgias').requiredScopes).toEqual([])
+    expect(recipe('gorgias').requiredScopes).toEqual(['tickets:read'])
     expect(recipe('gorgias').setupSteps.join(' ')).toContain('production support account')
   })
 

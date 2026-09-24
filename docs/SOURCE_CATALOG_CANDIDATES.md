@@ -155,11 +155,14 @@ documented use cases include both data reads and mutations such as replying to
 tickets and changing helpdesk configuration.
 
 Live OAuth metadata advertises dynamic registration and granular read and
-write scopes, but the current source contract does not select or attest OAuth
-scopes. An exact Portal tool allowlist is necessary but does not replace the
-upstream read-only boundary. A polished Gorgias entry therefore requires a
-design that proves read-only provider scopes or a provider-enforced read-only
-identity before connection.
+write scopes. Its public tool catalogue is recognized as OAuth protected by
+the gateway's metadata probe. Dashboard authorization for this exact endpoint
+requests `tickets:read` and advertised identity/session scopes only, and refuses
+a token response that omits the granted scope or adds unrequested permissions.
+The public catalogue does not enable tools: select an exact allowlist after
+connection. Synthetic tests cover these boundaries; a real isolated provider
+connection and upstream read/write enforcement remain to be proved before
+promoting a polished catalog entry.
 
 The official Registry currently returns no Gorgias record. The optional
 brand-specific endpoint also uses a query parameter, which the current gateway

@@ -1298,26 +1298,80 @@ async function discoverMcpTools(value) {
   if (!endpoint) throw new SourceDiscoveryError(400, 'source_url_invalid');
   const budget = createMcpDiscoveryBudget();
   try {
+    let discovered;
     try {
-      const discovered = await discoverModernMcpTools(endpoint, budget);
-      return Object.freeze({ endpoint, ...discovered });
+      discovered = await discoverModernMcpTools(endpoint, budget);
     } catch (error) {
       const stable = sourceFailure(error);
       if (stable.code !== 'source_protocol_unsupported') throw stable;
     }
-    try {
-      const discovered = await discoverLegacyMcpTools(endpoint, budget);
-      return Object.freeze({ endpoint, ...discovered });
-    } catch (error) {
-      const stable = sourceFailure(error);
-      if (stable.code === 'source_protocol_unsupported') {
-        throw new SourceDiscoveryError(502, 'source_response_invalid');
+    if (!discovered) {
+      try {
+        discovered = await discoverLegacyMcpTools(endpoint, budget);
+      } catch (error) {
+        const stable = sourceFailure(error);
+        if (stable.code === 'source_protocol_unsupported') {
+          throw new SourceDiscoveryError(502, 'source_response_invalid');
+        }
+        throw stable;
       }
-      throw stable;
     }
+    const protectedSource = bigQueryConnectionBlock(endpoint) || await publicCatalogueOauth(endpoint, budget);
+    return Object.freeze({ endpoint, authMode: protectedSource ? 'oauth' : 'none', ...discovered });
   } finally {
     budget.close();
   }
+}
+
+function sourceResourceMetadataUrls(sourceUrl) {
+  const source = new URL(sourceUrl);
+  return [`${source.origin}/.well-known/oauth-protected-resource${source.pathname}`,
+    `${source.origin}/.well-known/oauth-protected-resource`];
+}
+
+function validSourceResourceMetadata(value, sourceUrl) {
+  return isRecord(value) && value.resource === sourceUrl && Array.isArray(value.authorization_servers) &&
+    value.authorization_servers.length > 0 && value.authorization_servers.length <= 10 &&
+    value.authorization_servers.every((issuer) => oauthEndpoint(issuer) !== null);
+}
+
+// Listing tools is not proof that calling them is public. Probe only the
+// standard same-origin metadata URLs, within the existing discovery budget.
+async function publicCatalogueOauth(endpoint, budget) {
+  for (const candidate of sourceResourceMetadataUrls(endpoint)) {
+    const requestAbort = createMcpRequestAbort(budget);
+    try {
+      const response = await fetch(new Request(candidate, {
+        headers: { accept: 'application/json' }, redirect: 'manual', signal: requestAbort.signal,
+      }));
+      if ([404, 405].includes(response.status)) { await discardBody(response); continue; }
+      if (response.redirected || response.status >= 300 && response.status < 400) {
+        await discardBody(response);
+        throw new SourceDiscoveryError(502, 'source_protocol_invalid');
+      }
+      if (!response.ok) {
+        await discardBody(response);
+        throw new SourceDiscoveryError(502, 'source_unreachable');
+      }
+      // Some public servers route unknown paths to an HTML landing page.
+      if (!(response.headers.get('content-type') ?? '').toLowerCase().startsWith('application/json')) {
+        await discardBody(response); continue;
+      }
+      const serialized = await readBoundedTextRecord(response, Math.min(65_536, budget.responseLimit()));
+      if (!serialized || !budget.consume(serialized.byteLength)) {
+        throw new SourceDiscoveryError(502, 'source_response_invalid');
+      }
+      let metadata;
+      try { metadata = JSON.parse(serialized.text); } catch {
+        throw new SourceDiscoveryError(502, 'source_response_invalid');
+      }
+      if (!validSourceResourceMetadata(metadata, endpoint)) {
+        throw new SourceDiscoveryError(401, 'source_authentication_unsupported');
+      }
+      return true;
+    } finally { requestAbort.close(); }
+  }
+  return false;
 }
 
 export async function inspectMcpSource(value) {
@@ -1329,7 +1383,7 @@ export async function inspectMcpSource(value) {
   const connection = connectionBlock ? { connectionBlock } : {};
   try {
     const discovered = await discoverMcpTools(endpoint);
-    return Object.freeze({ authMode: connectionBlock ? 'oauth' : 'none', ...discovered, ...connection });
+    return Object.freeze({ ...discovered, ...connection });
   } catch (error) {
     const stable = sourceFailure(error);
     if (stable.code !== 'source_authentication_required') throw stable;
@@ -4682,18 +4736,14 @@ async function discoverSourceOauth(sourceUrl) {
   try { await challenge.body?.cancel(); } catch { /* Only the header is needed. */ }
   if (challenge.status >= 300 && challenge.status < 400) sourceOauthFailure();
   const advertised = /\bBearer\b/iu.test(header) ? /\bresource_metadata="([^"]+)"/iu.exec(header)?.[1] : null;
-  const candidates = advertised ? [advertised] : [
-    `${source.origin}/.well-known/oauth-protected-resource${source.pathname}`,
-    `${source.origin}/.well-known/oauth-protected-resource`,
-  ];
+  const candidates = advertised ? [advertised] : sourceResourceMetadataUrls(sourceUrl);
   let resourceMetadata;
   for (const candidate of candidates) {
     const endpoint = oauthEndpoint(candidate);
     if (!endpoint || endpoint.origin !== source.origin) sourceOauthFailure();
     try { resourceMetadata = await oauthJson(endpoint); break; } catch { /* Try the standard root fallback. */ }
   }
-  if (!resourceMetadata || resourceMetadata.resource !== sourceUrl || !Array.isArray(resourceMetadata.authorization_servers) ||
-      resourceMetadata.authorization_servers.length < 1 || resourceMetadata.authorization_servers.length > 10) sourceOauthFailure();
+  if (!validSourceResourceMetadata(resourceMetadata, sourceUrl)) sourceOauthFailure();
   const issuer = oauthEndpoint(resourceMetadata.authorization_servers[0]);
   if (!issuer) sourceOauthFailure();
   const metadata = await oauthJson(`${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`);
@@ -4710,14 +4760,36 @@ async function discoverSourceOauth(sourceUrl) {
     if (!endpoint || endpoint.origin !== issuer.origin) sourceOauthFailure();
     endpoints[name] = endpoint.href;
   }
-  const scopes = resourceMetadata.scopes_supported ?? metadata.scopes_supported ?? [];
-  if (!Array.isArray(scopes) || scopes.length > 100 || !scopes.every((scope) =>
-    oauthText(scope, 256) && /^[\x21\x23-\x5B\x5D-\x7E]+$/u.test(scope)) || scopes.join(' ').length > 4096) sourceOauthFailure();
+  const supported = resourceMetadata.scopes_supported ?? metadata.scopes_supported ?? [];
+  if (!Array.isArray(supported) || supported.length > 100 || !supported.every((scope) =>
+    oauthText(scope, 256) && /^[\x21\x23-\x5B\x5D-\x7E]+$/u.test(scope)) || supported.join(' ').length > 4096) sourceOauthFailure();
+  const scopes = sourceOauthScopes(sourceUrl, supported);
   return {
     config: { issuer: metadata.issuer, ...endpoints, resource: sourceUrl, scopes_supported: scopes },
     requireIssuer: metadata.authorization_response_iss_parameter_supported === true,
     scope: scopes.join(' '),
   };
+}
+
+const GORGIAS_MCP_URL = 'https://mcp.gorgias.com/mcp';
+// This connection is deliberately limited to ticket reads. Supported scopes
+// are a catalogue, not consent to all of the provider's read/write authority.
+const GORGIAS_TICKET_SCOPES = Object.freeze(['openid', 'email', 'profile', 'offline', 'tickets:read']);
+
+function sourceOauthScopes(sourceUrl, supported) {
+  if (sourceUrl !== GORGIAS_MCP_URL) return supported;
+  if (!supported.includes('tickets:read')) sourceOauthFailure('source_oauth_scope_unsupported');
+  return GORGIAS_TICKET_SCOPES.filter((scope) => supported.includes(scope));
+}
+
+function verifySourceOauthScope(sourceUrl, scope, requested) {
+  if (sourceUrl !== GORGIAS_MCP_URL) return;
+  if (!oauthText(scope, 4096)) sourceOauthFailure('source_oauth_scope_unsupported');
+  const granted = scope.split(' ');
+  if (!granted.includes('tickets:read') || granted.some((value) =>
+    !GORGIAS_TICKET_SCOPES.includes(value) || !requested.includes(value))) {
+    sourceOauthFailure('source_oauth_scope_unsupported');
+  }
 }
 
 async function ownedSourceOauthContext(storage, env, input) {
@@ -4774,6 +4846,7 @@ async function startSourceOauth(storage, env, input) {
   if (!oauthText(registered.client_id) || registered.client_secret !== undefined ||
       registered.token_endpoint_auth_method !== 'none' || !Array.isArray(registered.redirect_uris) ||
       registered.redirect_uris.length !== 1 || registered.redirect_uris[0] !== redirectUri) sourceOauthFailure();
+  if (registered.scope !== undefined) verifySourceOauthScope(context.source.url, registered.scope, config.scopes_supported);
   const registrationInfo = { ...registration, client_id: registered.client_id };
   const state = randomBase64Url(32), browser = randomBase64Url(32), verifier = randomBase64Url(32);
   const challenge = base64UrlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
@@ -4818,6 +4891,7 @@ async function finishSourceOauth(storage, env, input) {
       (response.refresh_token !== undefined && !oauthText(response.refresh_token, 16384)) ||
       (response.expires_in !== undefined && (!Number.isSafeInteger(response.expires_in) || response.expires_in <= 0)) ||
       (response.scope !== undefined && !oauthText(response.scope, 4096))) sourceOauthFailure();
+  verifySourceOauthScope(context.source.url, response.scope, attempt.config.scopes_supported);
   const tokens = { access_token: response.access_token, token_type: 'Bearer' };
   for (const key of ['refresh_token', 'expires_in', 'scope']) if (response[key] !== undefined) tokens[key] = response[key];
   // Consent and the token endpoint are external work. Recheck the provider

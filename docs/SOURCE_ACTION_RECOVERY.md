@@ -135,8 +135,8 @@ to renew again when eligible.
 
 ## Choosing the tools of a sign-in source
 
-A source that needs sign-in cannot list its tools before its operator has
-connected it, so its draft is saved, and installed, with none: the server is
+A source that needs sign-in may list tools publicly before its operator has
+connected it. Its draft is still saved, and installed, with none: the server is
 created without any tool override, its Access application denies everyone, and
 it is not attached to the Portal. That is the connection pause above. Two more
 fixed reasons use it: `source_tools_required` (connected and synced, nothing
@@ -195,6 +195,15 @@ endpoints, dynamic registration of a public client (`none`) and PKCE S256.
 Redirects, secret-bearing clients and unsupported metadata are refused; the
 Cloudflare link remains available. Manual OAuth and BigQuery restrictions are
 unchanged. This does not establish compatibility for an untested provider.
+
+For the exact Gorgias MCP endpoint, this flow requests only `tickets:read` and
+advertised identity/session scopes (`openid`, `email`, `profile`, `offline`).
+Registration must not expand those scopes. Before import, the token response
+must explicitly include `tickets:read` and no unrequested scope; an omitted
+scope is refused even though OAuth can otherwise permit omission. Cloudflare
+receives only the selected scope set in the refresh configuration. Synthetic
+tests cover this restriction and restart/replay; live Gorgias enforcement and
+Cloudflare refresh still require an isolated provider canary.
 
 The callback is `https://<management-hostname>/__ankka/source-oauth/callback`.
 One five-minute attempt binds a state hash and a Secure, HttpOnly, SameSite=Lax

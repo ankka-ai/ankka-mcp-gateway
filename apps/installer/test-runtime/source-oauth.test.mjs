@@ -15,8 +15,9 @@ const oauthKey = 'ankka-mcp-gateway/source-oauth/v1';
 const moduleCode = await build({ entryPoints: [fileURLToPath(new URL('./source-oauth-worker.mjs', import.meta.url))],
   bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022', external: ['cloudflare:workers'] });
 
-test('production source OAuth consumes its SQLite attempt once across concurrent callbacks and a workerd restart', async () => {
-  const gateway = await pausedGateway();
+async function assertSourceOauthRestart(endpoint) {
+  const gateway = await pausedGateway({ endpoint, publicCatalogue: endpoint !== sourceUrl });
+  const scope = endpoint === sourceUrl ? undefined : 'openid offline tickets:read';
   const directory = await mkdtemp(join(tmpdir(), 'ankka-source-oauth-runtime-'));
   let runtime, exchanges = 0, imports = 0;
   const trace = [];
@@ -27,15 +28,29 @@ test('production source OAuth consumes its SQLite attempt once across concurrent
   async function outbound(request) {
     const url = new URL(request.url);
     trace.push({ method: request.method, url: url.href });
-    if (url.href === sourceUrl) return new Response(null, { status: 401, headers: { 'www-authenticate': 'Bearer' } });
-    if (url.href === 'https://source.example.net/.well-known/oauth-protected-resource/mcp') return Response.json({ resource: sourceUrl, authorization_servers: [config.issuer] });
+    if (url.href === endpoint) return new Response(null, { status: 405 });
+    if (url.href === `${new URL(endpoint).origin}/.well-known/oauth-protected-resource/mcp`) {
+      const resource = { resource: endpoint, authorization_servers: [config.issuer] };
+      if (scope) resource.scopes_supported = [...scope.split(' '), 'tickets:write'];
+      return Response.json(resource);
+    }
     if (url.href === `${config.issuer}/.well-known/oauth-authorization-server`) return Response.json(config);
     if (url.href === config.registration_endpoint) return Response.json({ ...await request.json(), client_id: 'synthetic-public-client' });
-    if (url.href === config.token_endpoint) { exchanges++; return Response.json({ access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 60 }); }
+    if (url.href === config.token_endpoint) {
+      exchanges++;
+      const tokens = { access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 60 };
+      if (scope) tokens.scope = scope;
+      return Response.json(tokens);
+    }
     if (url.origin === 'https://api.cloudflare.com') {
       if (request.method === 'PUT') {
         const imported = JSON.parse((await request.json()).auth_credentials);
         assert.equal(imported.tokens.access_token, accessToken);
+        if (scope) {
+          assert.equal(imported.tokens.scope, scope);
+          assert.equal(imported.registration_info.scope, scope);
+          assert.deepEqual(imported.config.scopes_supported, scope.split(' '));
+        }
         imports++;
         return Response.json({ success: true, result: {} });
       }
@@ -65,6 +80,7 @@ test('production source OAuth consumes its SQLite attempt once across concurrent
       sourceId: gateway.source.id, revision: gateway.revision, actorEmail: 'admin@example.com' });
     assert.equal(started.status, 200, JSON.stringify({ response: await started.clone().json(), trace }));
     const authorization = new URL((await started.json()).authorizationUrl);
+    if (scope) assert.equal(authorization.searchParams.get('scope'), scope);
     const browser = started.headers.get('set-cookie').split(';')[0].split('=')[1];
     await runtime.dispose(); runtime = boot(); await runtime.ready;
     const input = { actorEmail: 'admin@example.com', state: authorization.searchParams.get('state'), browser,
@@ -76,4 +92,9 @@ test('production source OAuth consumes its SQLite attempt once across concurrent
     assert.equal(retained[oauthKey], undefined);
     assert.ok(!JSON.stringify(retained).includes(accessToken)); assert.ok(!JSON.stringify(retained).includes(refreshToken));
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
-});
+}
+
+for (const endpoint of [sourceUrl, 'https://mcp.gorgias.com/mcp']) {
+  test(`production source OAuth consumes its SQLite attempt once across callbacks and restart: ${endpoint}`,
+    () => assertSourceOauthRestart(endpoint));
+}
