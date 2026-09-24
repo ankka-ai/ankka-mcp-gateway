@@ -522,7 +522,10 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
     const index = policyCount++;
     return index < 14 ? String.fromCharCode('m'.charCodeAt(0) + index).repeat(32) : `policy${index.toString(16).padStart(26, '0')}`;
   };
-  const readJson = async (request) => JSON.parse(await request.text());
+  const readJson = async (request) => {
+    const body = await request.text();
+    return body ? JSON.parse(body) : null;
+  };
 
   const providerFetch = async (request) => {
     assert.equal(new URL(request.url).origin, API);

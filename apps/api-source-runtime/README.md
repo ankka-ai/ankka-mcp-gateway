@@ -32,7 +32,9 @@ or remove the gateway.
 ## Agent workflow
 
 Assign the relevant tools on the Gateway Management
-source. Existing management allowlists are not expanded automatically.
+source through **Edit tools** in Ankka. The installed release supplies the
+management catalogue; saving your selection syncs Cloudflare when needed.
+Existing management allowlists are not expanded automatically.
 
 1. Call `get_api_source_runtime` to list configured connections and the authoring
    guide. Call it with `connectionKey` to read that source’s code and revision. Read the API's documentation with the agent's existing tools.
