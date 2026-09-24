@@ -28,10 +28,10 @@ describe('native connector setup recipes', () => {
     expect(NATIVE_CONNECTOR_RECIPES.map((entry) => entry.id)).toEqual([
       'ahrefs', 'airtable', 'bigquery', 'confluence', 'github', 'gitlab',
       'google-drive', 'google-sheets', 'gorgias', 'hubspot', 'intercom-eu',
-      'intercom-us', 'jira', 'linear', 'notion', 'salesforce', 'sentry', 'slack', 'stripe',
+      'intercom-us', 'jira', 'linear', 'meta-ads', 'notion', 'salesforce', 'sentry', 'slack', 'stripe',
     ])
     expect(SOURCE_CATALOG.sources).toEqual([])
-    expect(NATIVE_RECIPE_RESEARCH_DATE).toBe('2026-08-30')
+    expect(NATIVE_RECIPE_RESEARCH_DATE).toBe('2026-09-24')
   })
 
   it('resolves every current recipe only to setup guidance, never an executable draft', () => {
@@ -116,6 +116,7 @@ describe('native connector setup recipes', () => {
       'intercom-us': 'https://mcp.intercom.com/mcp',
       jira: 'https://mcp.atlassian.com/v1/mcp/authv2',
       linear: 'https://mcp.linear.app/mcp/readonly',
+      'meta-ads': 'https://mcp.facebook.com/ads',
       notion: 'https://mcp.notion.com/mcp',
       salesforce: 'https://api.salesforce.com/platform/mcp/v1/platform/sobject-reads',
       sentry: 'https://mcp.sentry.dev/mcp',

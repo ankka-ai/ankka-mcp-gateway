@@ -61,7 +61,10 @@ async function choice() {
 describe('choosing the tools of a connected sign-in connector', () => {
   afterEach(cleanup)
 
-  it('saves an OAuth connector with a public catalogue without enabling its preview tools', async () => {
+  it.each([
+    ['Gorgias', 'https://mcp.gorgias.com/mcp', 'Gorgias authorization here is limited to reading tickets. Other Gorgias operations may be unavailable.'],
+    ['Meta Ads', 'https://mcp.facebook.com/ads', 'Meta Ads authorization here is limited to reporting. Your gateway checks Meta’s granted permissions before connecting; campaign, budget, and catalog changes are not allowed. Connect only the ad accounts you want to share with your team.'],
+  ])('saves %s without enabling its preview tools and explains its read-only connection', async (label, url, notice) => {
     const user = userEvent.setup()
     const api = pausedApi(null)
     api.getSources.mockResolvedValue({ schemaVersion: 1, revision: 4, applyMode: 'account_token', installationEnabled: true, sources: [] })
@@ -74,16 +77,16 @@ describe('choosing the tools of a connected sign-in connector', () => {
     add.focus()
     await user.keyboard('{Enter}')
     await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
-    await user.type(screen.getByLabelText('Connector name'), 'Gorgias')
-    await user.type(screen.getByLabelText('MCP URL'), 'https://mcp.gorgias.com/mcp')
+    await user.type(screen.getByLabelText('Connector name'), label)
+    await user.type(screen.getByLabelText('MCP URL'), url)
     await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
     expect(await screen.findByText('OAuth protected')).toBeVisible()
     expect(screen.getByText('3 tools are advertised publicly. Sign in before choosing which tools to allow.')).toBeVisible()
-    expect(screen.getByText(/Gorgias authorization here is limited to reading tickets/u)).toBeVisible()
+    expect(screen.getByText(notice)).toBeVisible()
     expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
     await waitFor(() => expect(api.saveSourceDraft).toHaveBeenCalledExactlyOnceWith(4, {
-      label: 'Gorgias', url: 'https://mcp.gorgias.com/mcp', authMode: 'oauth', enabledTools: [],
+      label, url, authMode: 'oauth', enabledTools: [],
     }))
   })
 

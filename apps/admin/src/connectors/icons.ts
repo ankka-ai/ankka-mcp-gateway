@@ -10,6 +10,7 @@ import hubspot from '../assets/connectors/hubspot.svg'
 import intercom from '../assets/connectors/intercom.svg'
 import jira from '../assets/connectors/jira.svg'
 import linear from '../assets/connectors/linear.svg'
+import meta from '../assets/connectors/meta.svg'
 import notion from '../assets/connectors/notion-light.svg'
 import salesforce from '../assets/connectors/salesforce.svg'
 import sentry from '../assets/connectors/sentry-light.svg'
@@ -34,6 +35,7 @@ export const PROVIDER_ICONS: ProviderIconMap = {
   'intercom-us': intercom,
   'jira': jira,
   'linear': linear,
+  'meta-ads': meta,
   'notion': notion,
   'salesforce': salesforce,
   'sentry': sentry,

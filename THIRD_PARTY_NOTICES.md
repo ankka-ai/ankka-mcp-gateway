@@ -72,7 +72,7 @@ not imply affiliation or endorsement.
 
 Provider icons under `apps/admin/src/assets/connectors/` include Dashboard Icons
 artwork published by Homarr Labs and contributors under Apache-2.0, and HubSpot,
-Intercom, and Linear artwork from Simple Icons contributors under CC0 1.0.
+Intercom, Linear, and Meta artwork from Simple Icons contributors under CC0 1.0.
 Their licenses are retained under `third_party/licenses/`; exact sources and
 modifications are listed in `ORIGINS.md`. Ahrefs and Gorgias icons are official
 website favicons used by maintainer request to identify those providers; no

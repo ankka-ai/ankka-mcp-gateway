@@ -16,31 +16,39 @@ const moduleCode = await build({ entryPoints: [fileURLToPath(new URL('./source-o
   bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022', external: ['cloudflare:workers'] });
 
 async function assertSourceOauthRestart(endpoint) {
-  const gateway = await pausedGateway({ endpoint, publicCatalogue: endpoint !== sourceUrl });
-  const scope = endpoint === sourceUrl ? undefined : 'openid offline tickets:read';
+  const meta = endpoint === 'https://mcp.facebook.com/ads';
+  const gateway = await pausedGateway({ endpoint, publicCatalogue: endpoint === 'https://mcp.gorgias.com/mcp' });
+  const scope = meta ? 'ads_mcp_management ads_read' : endpoint === sourceUrl ? undefined : 'openid offline tickets:read';
   const directory = await mkdtemp(join(tmpdir(), 'ankka-source-oauth-runtime-'));
   let runtime, exchanges = 0, imports = 0;
   const trace = [];
   const accessToken = randomBytes(32).toString('base64url'), refreshToken = randomBytes(32).toString('base64url');
-  const config = { issuer: 'https://identity.example.net', authorization_endpoint: 'https://identity.example.net/authorize',
+  const config = meta ? { issuer: 'https://www.facebook.com/ads', authorization_endpoint: 'https://www.facebook.com/v26.0/dialog/oauth',
+    token_endpoint: 'https://graph.facebook.com/v26.0/oauth/access_token', registration_endpoint: 'https://mcp.facebook.com/.well-known/register/ads',
+    code_challenge_methods_supported: ['S256'] } : { issuer: 'https://identity.example.net', authorization_endpoint: 'https://identity.example.net/authorize',
     token_endpoint: 'https://identity.example.net/token', registration_endpoint: 'https://identity.example.net/register',
     code_challenge_methods_supported: ['S256'] };
   async function outbound(request) {
     const url = new URL(request.url);
     trace.push({ method: request.method, url: url.href });
     if (url.href === endpoint) return new Response(null, { status: 405 });
-    if (url.href === `${new URL(endpoint).origin}/.well-known/oauth-protected-resource/mcp`) {
+    if (url.href === `${new URL(endpoint).origin}/.well-known/oauth-protected-resource${new URL(endpoint).pathname}`) {
       const resource = { resource: endpoint, authorization_servers: [config.issuer] };
-      if (scope) resource.scopes_supported = [...scope.split(' '), 'tickets:write'];
+      if (scope) resource.scopes_supported = [...scope.split(' '), meta ? 'ads_management' : 'tickets:write'];
       return Response.json(resource);
     }
-    if (url.href === `${config.issuer}/.well-known/oauth-authorization-server`) return Response.json(config);
+    const issuer = new URL(config.issuer);
+    if (url.href === `${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`) return Response.json(config);
     if (url.href === config.registration_endpoint) return Response.json({ ...await request.json(), client_id: 'synthetic-public-client' });
     if (url.href === config.token_endpoint) {
       exchanges++;
       const tokens = { access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 60 };
-      if (scope) tokens.scope = scope;
+      if (scope && !meta) tokens.scope = scope;
       return Response.json(tokens);
+    }
+    if (meta && url.href === 'https://graph.facebook.com/v26.0/me/permissions') {
+      assert.equal(request.headers.get('authorization'), `Bearer ${accessToken}`);
+      return Response.json({ data: scope.split(' ').map((permission) => ({ permission, status: 'granted' })) });
     }
     if (url.origin === 'https://api.cloudflare.com') {
       if (request.method === 'PUT') {
@@ -94,7 +102,7 @@ async function assertSourceOauthRestart(endpoint) {
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
 }
 
-for (const endpoint of [sourceUrl, 'https://mcp.gorgias.com/mcp']) {
+for (const endpoint of [sourceUrl, 'https://mcp.gorgias.com/mcp', 'https://mcp.facebook.com/ads']) {
   test(`production source OAuth consumes its SQLite attempt once across callbacks and restart: ${endpoint}`,
     () => assertSourceOauthRestart(endpoint));
 }

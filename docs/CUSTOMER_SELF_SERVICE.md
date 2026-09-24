@@ -256,6 +256,16 @@ Cloudflare. Broader Gorgias operations remain unavailable. An older Gorgias
 connector saved as **Public** must be removed and added again after updating
 the gateway; existing connector receipts are not rewritten automatically.
 
+For `https://mcp.facebook.com/ads`, authorization requests only
+`ads_mcp_management` and `ads_read`. The gateway permits Meta's exact reviewed
+OAuth endpoints across its three hosts, then checks the token's actual
+permissions at the fixed Graph API `/v26.0/me/permissions` endpoint before
+importing it into Cloudflare. Only those two granted permissions and Facebook's
+default `public_profile` identity permission are accepted. Missing reads,
+additional grants, unavailable permission evidence, and endpoint changes stop
+the connection. No permission response or provider token is retained in gateway
+state. See [Meta Ads](META_ADS.md) for setup and remaining live qualification.
+
 Credential-bearing URLs, private-network endpoints, custom credential headers,
 and manually supplied bearer tokens are rejected.
 
