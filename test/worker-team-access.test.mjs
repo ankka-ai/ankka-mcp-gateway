@@ -4208,15 +4208,19 @@ test('API source management is always advertised and requires live assignment an
   } };
   await installManagementSource(gateway, ['get_api_source_runtime', 'save_api_source_draft']);
   const listed = await managementRpc(gateway, 'tools/list', {});
-  assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), ['get_api_source_runtime', 'save_api_source_draft']);
+  assert.ok(listed.body.result.tools.some((tool) => tool.name === 'activate_api_source'));
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === MANAGEMENT_ID).enabledTools,
+    ['get_api_source_runtime', 'save_api_source_draft']);
   const definitionJson = '{\n"label":"Synthetic API",\n"tools":[]\n}';
   const saved = await managementRpc(gateway, 'tools/call', { name: 'save_api_source_draft', arguments: { connectionKey: 'inventory', revision: 1, definitionJson } });
   assert.equal(saved.body.result.structuredContent.ok, true);
   assert.deepEqual(seen, [{ operation: 'save', connectionKey: 'inventory', revision: 1, definitionJson }]);
-  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'activate_api_source', arguments: { revision: 2 } })).body.error.code, -32602);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'activate_api_source', arguments: { connectionKey: 'inventory', revision: 2 } })).body.error.code, -32602);
   assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_api_source_runtime' }, { email: MEMBER })).response.status, 401);
   delete gateway.env.API_SOURCE_RUNTIME;
-  assert.equal((await managementRpc(gateway, 'tools/list', {})).body.result.tools.length, 2);
+  assert.deepEqual((await managementRpc(gateway, 'tools/list', {})).body.result.tools, listed.body.result.tools);
+  gateway.env.ANKKA_GATEWAY_RELEASE = 'gateway-v0.1.82';
+  assert.equal((await managementRpc(gateway, 'tools/list', {})).body.result.tools.some((tool) => tool.name === 'get_api_source_runtime'), false);
   assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_api_source_runtime' })).body.result.structuredContent.ok, false);
   assert.equal(seen.length, 1);
 }));
@@ -4430,10 +4434,28 @@ test('assigned managers can finish lifecycle consent but do not gain dashboard o
   assert.equal(await verifyAccess(new Request(`${MANAGEMENT_ORIGIN}/__ankka/operation`, { headers }), gateway.env), false);
 }));
 
-test('management tool allowlists restrict discovery and execution, including direct calls', () => fixture(async (gateway) => {
-  await installManagementSource(gateway, ['get_gateway_status']);
+test('management discovery exposes new tools for selection without granting execution', () => fixture(async (gateway) => {
+  const { server } = await installManagementSource(gateway, ['get_gateway_status']);
+  const teamBefore = gateway.managementStorage.snapshot(TEAM_KEY);
   const listed = await managementRpc(gateway, 'tools/list', {});
-  assert.deepEqual(listed.body.result.tools.map((tool) => tool.name), ['get_gateway_status']);
+  assert.ok(listed.body.result.tools.some((tool) => tool.name === 'get_api_source_runtime'));
+  assert.ok(listed.body.result.tools.some((tool) => tool.name === 'get_installed_source_tools'));
+  // Simulate Cloudflare syncing the actual endpoint response, rather than a hand-written catalogue.
+  server.tools = listed.body.result.tools;
+  const catalogue = await (await gateway.api(installedToolsPath(MANAGEMENT_ID))).json();
+  assert.ok(catalogue.tools.some((tool) => tool.name === 'get_api_source_runtime'));
+  assert.deepEqual(catalogue.enabledTools, ['get_gateway_status']);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_installed_source_tools',
+    arguments: { sourceId: MANAGEMENT_ID } })).body.error.code, -32602);
+  const saved = await putInstalledTools(gateway, MANAGEMENT_ID, catalogue.revision,
+    ['get_gateway_status', 'get_installed_source_tools']);
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_installed_source_tools',
+    arguments: { sourceId: MANAGEMENT_ID } })).body.result.structuredContent.ok, true);
+  assert.deepEqual(portalMapping(gateway, server.id).updated_tools, [
+    { name: 'get_gateway_status', enabled: true }, { name: 'get_installed_source_tools', enabled: true },
+  ]);
+  assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY), teamBefore);
   const before = gateway.provider.requests.length;
   const denied = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: { expectedRevision: 1, members: [] } });
   assert.equal(denied.body.error.code, -32602);
@@ -4596,11 +4618,12 @@ test('management assignment synchronizes both policies and resumes an interrupte
 test('built-in API sources install, isolate data access, update Team policies and remove with normal receipts', () => fixture(async (gateway) => {
   const endpoint = `${MANAGEMENT_ORIGIN}/api/api-sources/inventory/mcp`;
   const tool = { name: 'getStock', description: 'Read stock.', inputSchema: { type: 'object' } };
+  const activeTools = [tool];
   const invoked = [];
   gateway.env.API_SOURCE_RUNTIME = { fetch: async (request) => {
     const command = await request.json();
     invoked.push(command);
-    return Response.json(command.operation === 'catalogue' ? [tool] : { ok: true, result: { quantity: 7 } });
+    return Response.json(command.operation === 'catalogue' ? activeTools : { ok: true, result: { quantity: 7 } });
   } };
   const current = await (await gateway.api('/api/sources')).json();
   const savedResponse = await gateway.api('/api/sources', { method: 'PUT', body: {
@@ -4648,6 +4671,25 @@ test('built-in API sources install, isolate data access, update Team policies an
   })));
   assert.equal(assigned.status, 200, await assigned.clone().text());
   assert.equal((await rpc('tools/call', { name: 'getStock', arguments: {} })).body.result.isError, false);
+  // A newly activated tool must be discoverable even though the installed allowlist predates it.
+  activeTools.push({ ...tool, name: 'listStock' });
+  const catalogue = await rpc('tools/list');
+  assert.deepEqual(catalogue.body.result.tools.map((entry) => entry.name), ['getStock', 'listStock']);
+  const callsBefore = invoked.filter((command) => command.operation === 'call').length;
+  assert.equal((await rpc('tools/call', { name: 'listStock', arguments: {} })).body.error.code, -32602);
+  assert.equal(invoked.filter((command) => command.operation === 'call').length, callsBefore);
+  server.tools = catalogue.body.result.tools;
+  const review = await (await gateway.api(installedToolsPath(source.id))).json();
+  assert.deepEqual(review.enabledTools, ['getStock']);
+  const selected = await putInstalledTools(gateway, source.id, review.revision, ['getStock', 'listStock']);
+  assert.equal(selected.status, 200, await selected.clone().text());
+  assert.equal((await rpc('tools/call', { name: 'listStock', arguments: {} })).body.result.isError, false);
+  const selectedRevision = (await selected.json()).revision;
+  const deselected = await putInstalledTools(gateway, source.id, selectedRevision, ['getStock']);
+  assert.equal(deselected.status, 200, await deselected.clone().text());
+  assert.equal((await rpc('tools/call', { name: 'listStock', arguments: {} })).body.error.code, -32602);
+  assert.deepEqual((await rpc('tools/list')).body.result.tools, catalogue.body.result.tools);
+
   assert.equal((await rpc('tools/call', { name: 'save_api_source_draft' })).body.error.code, -32602);
   assert.equal((await rpc('tools/call', { name: 'getStock' }, MEMBER, MANAGEMENT_AUDIENCE)).status, 401);
   assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: MEMBER, audience: native.aud })).response.status, 401);

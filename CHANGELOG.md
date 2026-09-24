@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let Cloudflare discover newly available Gateway Management and API-source
+  tools independently of the saved allowlist. After syncing capabilities,
+  operators can explicitly enable new tools on installed sources. Discovery
+  remains authenticated, and unselected tools remain blocked on execution.
+
 - Allow the Cloudflare AI Playground's session-specific OAuth callbacks by
   default on new gateways. Existing Portals can add the documented callback
   path in Cloudflare's Managed OAuth settings.

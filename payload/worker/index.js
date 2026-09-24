@@ -7392,7 +7392,7 @@ async function handleSourceDiscovery(request, env, authorizedAccess = null) {
   try {
     const discovered = input.url === managementSourceUrl(env)
       ? { endpoint: input.url, protocolVersion: '2025-06-18', authMode: 'oauth',
-        tools: managementToolDefinitions(null, env).map((tool) => ({ name: tool.name, description: tool.description,
+        tools: managementToolDefinitions(env).map((tool) => ({ name: tool.name, description: tool.description,
           readOnlyHint: tool.annotations.readOnlyHint, destructiveHint: tool.annotations.destructiveHint, defaultSelected: true })) }
       : await inspectMcpSource(input.url);
     const result = {
@@ -9550,9 +9550,9 @@ function mcpInputMatches(value, schema) {
     (!schema.enum || schema.enum.includes(value));
 }
 
-function managementToolDefinitions(allowed = null, env = {}) {
-  return MANAGEMENT_MCP_TOOLS.filter((tool) => (allowed === null || allowed.includes(tool.name)) &&
-    (env.ANKKA_GATEWAY_RELEASE !== 'gateway-v0.1.82' || !tool.route.startsWith('api-source:')))
+function managementToolDefinitions(env = {}) {
+  return MANAGEMENT_MCP_TOOLS.filter((tool) =>
+    env.ANKKA_GATEWAY_RELEASE !== 'gateway-v0.1.82' || !tool.route.startsWith('api-source:'))
     .map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
 }
 
@@ -9654,8 +9654,9 @@ async function handleApiSourceMcp(request, env) {
       const response = await invoke({ operation: 'catalogue' });
       const tools = response.ok ? await response.json() : null;
       if (!Array.isArray(tools)) return error(-32603, 'Source unavailable');
-      return rpc({ tools: tools.filter((tool) => !access.installed || access.enabledTools.includes(tool.name))
-        .map(({ name, description, inputSchema }) => ({ name, description, inputSchema,
+      // Discovery describes the active source; only tools/call applies the saved allowlist.
+      // Filtering here would prevent Cloudflare from ever syncing newly activated tools.
+      return rpc({ tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema,
           annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true } })) });
     }
     if (message.method !== 'tools/call') return error(-32601, 'Method not found');
@@ -9699,7 +9700,9 @@ async function handleManagementMcp(request, env) {
     instructions: 'Read current state and revisions before changes. Source assignments grant management authority. Provider sign-in remains a browser step. Never request credentials.' });
   }
   if (message.method === 'ping') return rpc({});
-  if (message.method === 'tools/list') return rpc({ tools: managementToolDefinitions(access.enabledTools, env) });
+  // Cloudflare must discover new management tools before an operator can select them.
+  // The authenticated source catalogue is separate from the per-call allowlist below.
+  if (message.method === 'tools/list') return rpc({ tools: managementToolDefinitions(env) });
   if (message.method !== 'tools/call') return error(-32601, 'Method not found');
   const params = message.params;
   if (!isRecord(params) || !isText(params.name) || Object.keys(params).some((key) => !['name', 'arguments', '_meta'].includes(key))) return error(-32602, 'Invalid params');

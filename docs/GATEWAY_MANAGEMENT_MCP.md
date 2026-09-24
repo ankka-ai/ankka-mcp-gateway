@@ -85,8 +85,16 @@ only when it is a group this gateway created for one of its teams, with its
 stable name.
 Service identities, an administrator token for a different audience, an unassigned
 identity, a missing assertion, and changed resource shapes are rejected. Calling
-the Worker directly does not bypass this check. Stored tool allowlists constrain
-both `tools/list` and `tools/call`.
+the Worker directly does not bypass this check. Authenticated `tools/list` returns the available management catalogue, including
+tools that are not selected. Stored tool allowlists constrain `tools/call`,
+including calls made directly to the Worker. Cloudflare's Portal mapping also
+keeps unselected tools disabled. Discovery does not grant execution permission.
+
+After a gateway upgrade adds tools, sync the Gateway Management server's
+capabilities in Cloudflare, then open **Edit tools** in Ankka and select
+**Check again** if the editor was already open. New tools appear unchecked; save
+the exact selection to enable them. Syncing alone does not change the allowlist
+or Team assignments.
 
 During installation only protocol initialization and tool discovery can use the
 receipt-owned paused draft. Tool execution requires a completed installation.
