@@ -49,6 +49,10 @@ source. Existing management allowlists are not expanded automatically.
    `apply_mcp_source` tools. Complete Managed OAuth sign-in, select the real synced
    tool names and grant the source through Team. New names need Portal sync and
    explicit selection; activation does not change Portal assignments or allowlists.
+   Authenticated endpoint discovery lists every active tool, including tools not
+   yet allowed. After activating a definition with new tools, sync the server's
+   capabilities in Cloudflare and select them in Ankka's **Edit tools** view.
+   Unselected tools remain uncallable, including through the endpoint directly.
 
 `discard_api_source_draft` preserves the active version. `disable_api_source`
 stops new tool calls without deleting the Portal source. Already running reads
