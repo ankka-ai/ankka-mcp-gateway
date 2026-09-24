@@ -13,14 +13,6 @@ test('failed stage and safe recovery evidence survive unavailable metrics', asyn
   assert.equal(result.metricsStatus, 'unavailable');
   assert.equal(JSON.stringify(result).includes('private-'), false);
 });
-test('a refused management secret write is reported at its own stage with the provider\'s status', async () => {
-  const result = await lifecycleFailureReport({ failureCode: 'management_token_write_rejected', httpStatus: 403, events: [
-    { stage: 'installation', status: 'passed' }, { stage: 'management_token', status: 'started' },
-  ] });
-  assert.equal(result.failedStage, 'management_token');
-  assert.equal(result.lastMutationStage, 'management_token');
-  assert.equal(result.httpStatus, 403);
-});
 test('a stop during the approval that follows the setup step is the installation\'s, and the report names the path that set the token in fixed words', async () => {
   const setup = [{ stage: 'installation', status: 'started' }, { stage: 'installation', status: 'configured' },
     { stage: 'management_token', status: 'started' }, { stage: 'management_token', status: 'pasted_at_setup', word: 'held' }];

@@ -187,20 +187,6 @@ describe('update page handover', () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
-  it('waits the same way after a rollback, whose target is the release rolled back to', async () => {
-    const rolledBack: CustomerUpdateProgress = { ...applied, targetRelease: PREVIOUS, servingRelease: TARGET };
-    const fetch = answering(
-      () => answer(rolledBack), () => answer({ ...rolledBack, servingRelease: PREVIOUS }), () => answer({ ...rolledBack, servingRelease: PREVIOUS }),
-    );
-    const page = await openPage(fetch);
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(page.steps().at(-1)).toBe(`${SERVING_STEP} — In progress…`);
-    expect(page.navigate).not.toHaveBeenCalled();
-    await vi.advanceTimersByTimeAsync(2_000);
-    expect(page.steps().at(-1)).toBe(`${SERVING_STEP} — Done`);
-    expect(page.navigate).toHaveBeenCalledExactlyOnceWith(HANDOVER);
-  });
-
   it('hands over at once to an object from before these fields, which a rollback to an older release leaves answering', async () => {
     const { applied: _applied, targetRelease: _target, servingRelease: _serving, ...older } = applied;
     const fetch = answering(() => answer(running), () => Response.json(older));

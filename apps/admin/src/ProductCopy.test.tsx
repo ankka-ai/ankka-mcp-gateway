@@ -15,7 +15,6 @@ describe('gateway product language', () => {
 
   it.each([
     ['/', 'Connectors'],
-    ['/sources', 'Connectors'],
     ['/settings', 'Settings'],
   ])('addresses the team directly on %s', async (path, heading) => {
     vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')

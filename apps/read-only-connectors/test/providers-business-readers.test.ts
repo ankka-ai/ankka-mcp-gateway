@@ -45,13 +45,6 @@ async function callTool(connector: ReadConnector, name: string, args: TestToolAr
 
 describe('Notion fixed read boundary', () => {
   const connector = createNotionConnector(notionConfig, credential);
-  const goodPlans: ReadRequestPlan[] = [
-    { method: 'GET', path: `/v1/pages/${pageId}` },
-    { method: 'GET', path: `/v1/blocks/${pageId}/children`, query: { page_size: '25' } },
-    { method: 'GET', path: `/v1/data_sources/${dataSourceId}` },
-    { method: 'POST', path: `/v1/data_sources/${dataSourceId}/query`, body: { page_size: 50, start_cursor: 'cursor_01' } },
-  ];
-  it.each(goodPlans)('allows only authored read plan %j', (plan) => expect(connector.allowRequest(plan)).toBe(true));
   it('pins the origin and API revision without accepting a URL or extra header configuration', () => {
     expect(connector.origin).toBe('https://api.notion.com');
     expect(connector.headers).toEqual({ Authorization: `Bearer ${credential}`, 'Notion-Version': NOTION_API_VERSION });
@@ -78,7 +71,7 @@ describe('Notion fixed read boundary', () => {
     ['notion_get_page', { pageId }, `/v1/pages/${pageId}`],
     ['notion_list_page_blocks', { pageId, pageSize: 10 }, `/v1/blocks/${pageId}/children`],
     ['notion_get_data_source', { dataSourceId }, `/v1/data_sources/${dataSourceId}`],
-    ['notion_list_data_source_pages', { dataSourceId, pageSize: 10 }, `/v1/data_sources/${dataSourceId}/query`],
+    ['notion_list_data_source_pages', { dataSourceId, pageSize: 50, startCursor: 'cursor_01' }, `/v1/data_sources/${dataSourceId}/query`],
   ] as const)('registers and executes %s with an allowed request', async (name, args, path) => {
     const execute = vi.fn<ReadExecutor>(async (plan) => {
       expect(connector.allowRequest(plan)).toBe(true);
@@ -102,11 +95,6 @@ describe('HubSpot selected-object and selected-property reads', () => {
   const connector = createHubSpotConnector(hubspotConfig, credential);
   const query = { properties: 'email', archived: 'false' };
   it.each<ReadRequestPlan>([
-    { method: 'GET', path: '/crm/v3/objects/contacts', query: { ...query, limit: '50', after: '101' } },
-    { method: 'GET', path: '/crm/v3/objects/contacts/101', query },
-    { method: 'POST', path: '/crm/v3/objects/contacts/batch/read', body: { properties: ['email'], inputs: [{ id: '101' }] } },
-  ])('allows exact object reads %j', (plan) => expect(connector.allowRequest(plan)).toBe(true));
-  it.each<ReadRequestPlan>([
     { method: 'POST', path: '/crm/v3/objects/contacts/101', body: { properties: { email: 'synthetic@example.com' } } },
     { method: 'GET', path: '/crm/v3/objects/contacts/../companies', query: { ...query, limit: '25' } },
     { method: 'GET', path: '/crm/v3/objects/tickets/101', query },
@@ -122,7 +110,7 @@ describe('HubSpot selected-object and selected-property reads', () => {
     { method: 'POST', path: '/crm/v3/objects/contacts/batch/read', body: { properties: ['email'], inputs: Array.from({ length: 26 }, (_, index) => ({ id: String(index + 1) })) } },
   ])('denies query, property, object and method widening %j', (plan) => expect(connector.allowRequest(plan)).toBe(false));
   it.each([
-    ['hubspot_list_records', { objectType: 'contacts', limit: 10 }, '/crm/v3/objects/contacts'],
+    ['hubspot_list_records', { objectType: 'contacts', limit: 50, after: '101' }, '/crm/v3/objects/contacts'],
     ['hubspot_get_record', { objectType: 'contacts', recordId: '101' }, '/crm/v3/objects/contacts/101'],
     ['hubspot_batch_read_records', { objectType: 'contacts', recordIds: ['101'] }, '/crm/v3/objects/contacts/batch/read'],
   ] as const)('executes %s and excludes provider-added properties and metadata', async (name, args, path) => {
@@ -163,12 +151,6 @@ describe('Zendesk fixed tenant and explicit resource reads', () => {
     expect(connector.headers).toEqual({ Authorization: `Bearer ${credential}` });
   });
   it.each<ReadRequestPlan>([
-    { method: 'GET', path: '/api/v2/organizations/101' },
-    { method: 'GET', path: '/api/v2/organizations/101/tickets', query: { 'page[size]': '50' } },
-    { method: 'GET', path: '/api/v2/tickets/201' },
-    { method: 'GET', path: '/api/v2/tickets/201/comments', query: { 'page[size]': '25', 'page[after]': 'cursor_01==' } },
-  ])('allows exact configured reads %j', (plan) => expect(connector.allowRequest(plan)).toBe(true));
-  it.each<ReadRequestPlan>([
     { method: 'POST', path: '/api/v2/tickets/201', body: {} },
     { method: 'GET', path: '/api/v2/tickets' },
     { method: 'GET', path: '/api/v2/tickets/202' },
@@ -183,9 +165,9 @@ describe('Zendesk fixed tenant and explicit resource reads', () => {
   ])('denies tenant-wide lists, side loads and mutations %j', (plan) => expect(connector.allowRequest(plan)).toBe(false));
   it.each([
     ['zendesk_get_organization', { organizationId: '101' }, '/api/v2/organizations/101'],
-    ['zendesk_list_organization_tickets', { organizationId: '101', pageSize: 10 }, '/api/v2/organizations/101/tickets'],
+    ['zendesk_list_organization_tickets', { organizationId: '101', pageSize: 50 }, '/api/v2/organizations/101/tickets'],
     ['zendesk_get_ticket', { ticketId: '201' }, '/api/v2/tickets/201'],
-    ['zendesk_list_ticket_comments', { ticketId: '201', pageSize: 10 }, '/api/v2/tickets/201/comments'],
+    ['zendesk_list_ticket_comments', { ticketId: '201', pageSize: 25, after: 'cursor_01==' }, '/api/v2/tickets/201/comments'],
   ] as const)('executes %s with the resource bound to the authored path', async (name, args, path) => {
     const execute = vi.fn<ReadExecutor>(async (plan) => {
       expect(connector.allowRequest(plan)).toBe(true);

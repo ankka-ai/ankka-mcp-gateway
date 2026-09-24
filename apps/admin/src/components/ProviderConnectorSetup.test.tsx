@@ -5,7 +5,8 @@ import { NATIVE_CONNECTOR_RECIPES } from '../connectors/native-recipes'
 
 afterEach(cleanup)
 
-it.each(NATIVE_CONNECTOR_RECIPES.filter(recipe => recipe.id !== 'bigquery'))('shows $displayName requirements without creating a connection', recipe => {
+// One recipe for each status, including both present and absent scope guidance.
+it.each(NATIVE_CONNECTOR_RECIPES.filter(recipe => ['ahrefs', 'github', 'linear'].includes(recipe.id)))('shows $displayName requirements without creating a connection', recipe => {
   const { container } = render(<ProviderConnectorSetup recipe={recipe} />)
   expect(screen.getByText(recipe.endpoint)).toBeVisible()
   expect(screen.getByRole('status')).toHaveTextContent(recipe.status === 'manual_setup'

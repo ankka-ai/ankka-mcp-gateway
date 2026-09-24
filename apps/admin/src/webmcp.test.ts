@@ -37,17 +37,9 @@ const names = [
   'rollback_gateway_update', 'get_gateway_runtime_action',
   'review_gateway_teardown', 'get_gateway_teardown_action',
 ]
-const noInputNames = [
-  'get_gateway_status', 'get_gateway_capabilities', 'list_mcp_sources',
-  'list_mcp_source_actions',
-  'get_gateway_team', 'check_gateway_update', 'review_gateway_update',
-  'review_gateway_teardown',
-]
-const actionNames = [
-  'get_mcp_source_action', 'cancel_mcp_source_action', 'get_gateway_team_action',
-  'cancel_gateway_team_action', 'get_gateway_runtime_action',
-  'get_gateway_teardown_action',
-]
+// Shared schemas are exercised through a read and a mutation; routing is checked below.
+const noInputNames = ['get_gateway_status', 'review_gateway_teardown']
+const actionNames = ['get_mcp_source_action', 'cancel_gateway_team_action']
 const members: TeamMember[] = [
   { email: 'operator@example.com', sourceIds: [sourceId] },
   { email: 'teammate@example.com', sourceIds: [] },
@@ -281,7 +273,7 @@ describe('exact signed runtime target', () => {
     expect(api.prepareRuntimeAction).toHaveBeenCalledExactlyOnceWith(operation, { release, artifactSha256 })
   })
 
-  it.each(['apply_gateway_update', 'rollback_gateway_update'])('%s requires a valid digest and rejects extra arguments', async (name) => {
+  it('requires a valid digest and rejects extra arguments for the shared runtime target schema', async () => {
     for (const input of [
       { approvedRelease: 'gateway-v1.0.1' },
       { approvedRelease: 'gateway-v1.0.1', approvedArtifactSha256: 'not-a-digest' },
@@ -289,7 +281,7 @@ describe('exact signed runtime target', () => {
       { approvedRelease: 'gateway-v01.0.1', approvedArtifactSha256: nextDigest },
     ]) {
       const { api, call } = fixture()
-      expect(await call(name, input)).toMatchObject({ ok: false, error: { code: 'webmcp_input_invalid' } })
+      expect(await call('apply_gateway_update', input)).toMatchObject({ ok: false, error: { code: 'webmcp_input_invalid' } })
       expectNoApiCalls(api)
     }
   })

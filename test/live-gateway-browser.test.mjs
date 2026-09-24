@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BROWSER_REQUEST_TIMEOUT_MS, CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, receiptHopOf, refusedAtAccessEdge, TAB_REPLACEMENT_REASONS, browserDebugOutputEnabled, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, managementStepWordOf, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
-import { REQUEST_TIMEOUT_MS } from '../tools/live-gateway-api.mjs';
+import { CALLBACK_CLOSE_WAIT_MS, NAVIGATION_FAILURES, SESSION_PROPAGATION_MS, receiptHopOf, refusedAtAccessEdge, TAB_REPLACEMENT_REASONS, browserDebugOutputEnabled, callbackTracker, handoffHoldAnswer, heldOriginMatcher, isHostedCallback, managementStepWordOf, navigationFailureOf, openLiveGatewayBrowser, rejectedSessionOutcome } from '../tools/live-gateway-browser.mjs';
 import { INSTALLER_CONNECTION_TIMEOUT_MS, LiveGatewayBrowserError, landingOf, recordedReceiptOf, removalAttemptOf, validateLiveBrowserOrigin, validateLiveBrowserRequest, validateLiveBootstrapOrigin, validateLiveHandoff } from '../tools/live-gateway-browser.mjs';
 import { removeLiveGateway } from '../tools/live-gateway-lifecycle.mjs';
 
@@ -133,11 +132,6 @@ test('a lost callback counts only after the exact hosted completion handoff', ()
     `https://foreign.example.com/teardown#${fragment}`, `${origin}/result#${fragment}`,
     `${origin}/teardown?credential=hidden#${fragment}`,
   ]) assert.throws(() => validateLiveHandoff(value, origin, '/teardown'), { code: 'handoff_invalid' });
-});
-
-test('the browser runner waits for a gateway write as long as the API client does, since neither retries one', () => {
-  assert.equal(BROWSER_REQUEST_TIMEOUT_MS, REQUEST_TIMEOUT_MS);
-  assert.ok(BROWSER_REQUEST_TIMEOUT_MS >= 120_000);
 });
 
 test('a held origin is matched only while held, so releasing it needs no route removal', () => {

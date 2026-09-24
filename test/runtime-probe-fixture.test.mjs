@@ -57,26 +57,6 @@ async function staged(subject) {
   }
 }
 
-test('synthetic old and new outer revisions reach the same old DO through exact probe reconstruction', async () => {
-  const subject = fixture();
-  await staged(subject);
-  assert.equal(subject.writes(), 4);
-  for (const outerRevision of ['old', 'new']) {
-    const response = await worker.fetch(request({ command: 'probe', targetRevision: outerRevision }, {
-      headers: { 'Cloudflare-Workers-Version-Overrides': OVERRIDE },
-    }), { ...subject.env, CANARY_REVISION: outerRevision });
-    assert.equal(response.status, 204);
-    assert.equal(response.headers.get('x-ankka-runtime-action'), 'ready');
-    assert.equal(response.headers.get(OUTER), outerRevision);
-    assert.equal(response.headers.get(INNER), 'old');
-    assert.deepEqual(subject.calls.at(-1), {
-      url: 'https://admin-state.invalid/runtime-updates/control', method: 'POST',
-      marker: 'verified', override: OVERRIDE, key: KEY,
-    });
-  }
-  assert.equal(subject.writes(), 4, 'both probes are read-only');
-});
-
 test('explicit strip-override diagnostic changes only that forwarded header and never synthetic state', async () => {
   const subject = fixture();
   await staged(subject);

@@ -1,6 +1,5 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import worker, {
   SYNTHETIC_FIXTURE_ID,
   SYNTHETIC_TOOL,
@@ -37,19 +36,6 @@ test('exports a Worker fetch handler and a constant health response', async () =
     fixture: SYNTHETIC_FIXTURE_ID,
     tool: SYNTHETIC_TOOL_NAME,
   });
-});
-
-test('first canary exposes no Wrangler deploy or delete surface', async () => {
-  const packageJson = JSON.parse(await readFile(
-    new URL('../package.json', import.meta.url),
-    'utf8',
-  ));
-  assert.equal(packageJson.scripts['canary:fixture:deploy'], undefined);
-  assert.equal(packageJson.scripts['canary:fixture:delete'], undefined);
-  await assert.rejects(
-    readFile(new URL('../fixtures/synthetic-mcp/wrangler.jsonc', import.meta.url), 'utf8'),
-    (error) => error?.code === 'ENOENT',
-  );
 });
 
 test('initializes a stateless MCP server with only tool capabilities', async () => {

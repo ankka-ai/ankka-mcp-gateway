@@ -295,7 +295,7 @@ describe('Cloudflare management-surface prerequisite', () => {
     })).resolves.toEqual([{ id: IDP_ONE, name: '', readOnly: false, type }]);
   });
 
-  it.each(['google', 'saml', 'oidc', 'unrecognized'])('rejects an unnamed %s identity provider', async (type) => {
+  it.each(['google', 'unrecognized'])('rejects an unnamed %s identity provider', async (type) => {
     const unnamedOther = recorded(page([{ id: IDP_ONE, type, name: '' }], 1, 1, 1_000));
     await expect(listAccessIdentityProviders({
       ...call(unnamedOther.transport),

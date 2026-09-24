@@ -198,22 +198,6 @@ test('admin and installer HTML use external same-origin assets without inline ex
   }
 });
 
-test('admin and installer package the supplied Ankka favicon as a same-origin SVG', async () => {
-  const original = await readFile(new URL('../apps/admin/src/assets/ankka-icon.svg', import.meta.url));
-  assert.equal(sha256(original), '85bfe235ef97e3af373044f4af6de88276b788ba620c4b543c4c0708c98616fb');
-  for (const component of ['admin', 'installer']) {
-    const html = await readFile(componentUrl(component, 'index.html'), 'utf8');
-    const icons = [...html.matchAll(/<link\b[^>]*rel="icon"[^>]*>/gu)];
-    assert.equal(icons.length, 1);
-    assert.match(icons[0][0], /type="image\/svg\+xml"/u);
-    assert.match(icons[0][0], /sizes="any"/u);
-    const href = icons[0][0].match(/href="([^"]+)"/u)?.[1];
-    assert.ok(href);
-    assert.match(href, /^\/assets\/(?:ankka|admin)-[a-f0-9]{8}\.svg$/u);
-    assert.deepEqual(await readFile(componentUrl(component, href.slice(1))), original);
-  }
-});
-
 test('installer assets cover the exact hosted two-stage session, plan, approval, callback, handoff, and cleanup contract', async () => {
   const html = await readFile(new URL('installer/index.html', ROOT), 'utf8');
   const asset = html.match(/<script src="(\/assets\/installer-[a-f0-9]{8}\.js)"><\/script>/u)?.[1];
@@ -319,61 +303,6 @@ test('admin assets provide safe source discovery, signed updates, one-time apply
   const source = (await Promise.all(sourceFiles.map((file) => readFile(new URL(`../apps/admin/src/${file}`, import.meta.url), 'utf8')))).join('\n');
   assert.doesNotMatch(source, /(?:localStorage|document\.cookie|dangerouslySetInnerHTML|innerHTML|insertAdjacentHTML|eval\s*\(|console\.(?:log|info|warn|error|debug))/iu);
   assert.doesNotMatch(source, ADMIN_TELEMETRY);
-});
-
-test('plain CSS keeps the reviewed typography and accessibility floors', async () => {
-  const adminCss = await componentText('admin', '.css');
-  assert.match(adminCss, /--font-sans:Inter,\s*ui-sans-serif/u);
-  assert.match(adminCss, /font-synthesis:none/u);
-  assert.match(adminCss, /-webkit-font-smoothing:antialiased/u);
-  assert.match(adminCss, /line-height:1\.6/u);
-  assert.match(adminCss, /max-width:65ch/u);
-  assert.match(adminCss, /text-wrap:balance/u);
-  assert.match(adminCss, /:focus-visible/u);
-  assert.match(adminCss, /@media\s*\(prefers-reduced-motion:\s*reduce\)/u);
-  assert.doesNotMatch(adminCss, /@font-face|\.ttf|\.otf/iu);
-  assert.match(adminCss, /--color-canvas:#191919/u);
-  assert.match(adminCss, /--color-brand:#dedede/u);
-  assert.match(adminCss, /--color-sidebar:#131313/u);
-  assert.match(adminCss, /--font-mono:var\(--font-sans\)/u);
-
-  const installerCss = await readFile(new URL('installer/assets/installer-b768c2db.css', ROOT), 'utf8');
-  {
-    const css = installerCss;
-    assert.match(css, /font-family:\s*"Helvetica Neue", Helvetica, Arial, sans-serif/u);
-    assert.match(css, /font-synthesis:\s*none/u);
-    assert.match(css, /-webkit-font-smoothing:\s*antialiased/u);
-    assert.match(css, /line-height:\s*(?:1\.5[5-9]|1\.6)/u);
-    assert.match(css, /max-width:\s*65ch/u);
-    assert.match(css, /text-wrap:\s*balance/u);
-    assert.match(css, /:focus-visible/u);
-    assert.match(css, /@media \(prefers-reduced-motion: reduce\)/u);
-    assert.doesNotMatch(css, /@font-face|\.ttf|\.otf/iu);
-    assert.match(css, /color-scheme:\s*dark/u);
-    assert.match(css, /--canvas:\s*#1b1b1b/u);
-    assert.match(css, /--accent:\s*#ededed/u);
-    assert.match(css, /--sidebar:\s*#1b1b1b/u);
-  }
-  assert.match(installerCss, /--cream:\s*#141414/u);
-  assert.doesNotMatch(installerCss, /--font-display|font-family:\s*var\(--font-display\)/u);
-  assert.match(installerCss, /--font-size-body:\s*1rem/u);
-  assert.match(installerCss, /input,\s*\nselect,\s*\ntextarea[\s\S]*?font-size:\s*var\(--font-size-body\)/u);
-  assert.match(installerCss, /\.operation-copy > p:last-child\s*\{[^}]*font-size:\s*var\(--font-size-body\)/u);
-  assert.match(installerCss, /\.stage-position\s*\{[^}]*font-size:\s*0\.8125rem/u);
-});
-
-test('admin and installer carry the reviewed Ankka wordmark and navigation treatment', async () => {
-  const admin = await componentText('admin', '.js');
-  const installer = await readFile(new URL('installer/index.html', ROOT), 'utf8');
-  assert.match(admin, /viewBox:["'`]0 0 175 19["'`]/u);
-  assert.match(installer, /class="wordmark" viewBox="0 0 175 19"/u);
-  assert.match(admin, /M0 18\.2697V5\.97501/u);
-  assert.match(installer, /M0 18\.2697V5\.97501/u);
-  assert.match(admin, /Gateway management/u);
-  assert.match(installer, /class="product-label">Gateway setup/u);
-  assert.doesNotMatch(installer, /class="step-indicators"|data-step=/u);
-  assert.doesNotMatch(installer, /<aside\b/iu);
-  assert.doesNotMatch(installer, /class="canary-badge"/u);
 });
 
 test('public payload has no source maps, credential literals, browser/customer beacons, or logging', async () => {

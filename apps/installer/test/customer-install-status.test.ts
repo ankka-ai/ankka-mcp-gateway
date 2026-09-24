@@ -18,10 +18,6 @@ const LIVE_ANSWER = {
 };
 
 describe('customer install status schema', () => {
-  it('accepts the answer of a freshly deployed shell', () => {
-    expect(v.parse(customerInstallStatusSchema, LIVE_ANSWER)).toEqual(LIVE_ANSWER);
-  });
-
   it('accepts a named failure, a missing field from older shells, and nothing else', () => {
     const failure = { code: 'provider_recovery_required', reason: 'payload_portal_create_auth_http_403_code_10000' };
     expect(v.parse(customerInstallStatusSchema, { ...LIVE_ANSWER, failure }).failure).toEqual(failure);

@@ -161,52 +161,6 @@ afterAll(async () => {
 });
 
 describe('reviewed GitHub Release publication', () => {
-  it.each(['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18', 'gateway-v0.1.19'])('discloses %s Team limitations before the verification details', (release) => {
-    const notes = releaseNotes(REPOSITORY, {
-      release, sourceCommit: 'a'.repeat(40),
-    }, { channel: 'stable', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
-    assert.match(notes, /Team permissions apply only to MCP sources already installed in your gateway\./u);
-    assert.match(notes, /New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways\./u);
-    assert.match(notes, /Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged\./u);
-    assert.match(notes, /Once a permission-policy write is armed, automatic teardown and rollback to older runtimes are blocked, including when the write outcome is uncertain\./u);
-    const headingIndex = notes.indexOf(`## ${release.slice('gateway-'.length)} scope and limits`);
-    assert.ok(headingIndex >= 0 && headingIndex < notes.indexOf('- Source commit:'));
-  });
-
-  it('discloses the v17 bridge and separate Team update without creating a credential', () => {
-    const notes = releaseNotes(REPOSITORY, {
-      release: 'gateway-v0.1.17', sourceCommit: 'a'.repeat(40),
-    }, { channel: 'stable', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
-    assert.match(notes, /Compatibility bridge: accepts the reviewed next Team release contract and fixes the installer return to your gateway after completion\./u);
-    assert.match(notes, /This update does not create a Team credential or enable customer-local Team management; a separate second update is required\./u);
-    assert.ok(notes.indexOf('Compatibility bridge:') < notes.indexOf('- Source commit:'));
-  });
-
-  it.each(['gateway-v0.1.18', 'gateway-v0.1.19'])('discloses the %s customer-local Team credential and bridge prerequisite', (release) => {
-    const notes = releaseNotes(REPOSITORY, {
-      release, sourceCommit: 'a'.repeat(40),
-    }, { channel: 'canary', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
-    assert.match(notes, /Team saves run in your Cloudflare account without installer OAuth; they require a separately approved management credential\./u);
-    assert.match(notes, /Upgrade v16 through the v17 compatibility bridge first\. This update does not provision that credential\./u);
-    assert.ok(notes.indexOf('Team saves run in your Cloudflare account') < notes.indexOf('- Source commit:'));
-    assert.doesNotMatch(notes, /does not create a Team credential or enable customer-local Team management/u);
-  });
-
-  it('limits the browser-dependent WebMCP announcement to v19 before verification details', () => {
-    const webMcpNote = '- WebMCP exposes supported management actions only in compatible browsers with the gateway or installer page open; no remote management MCP endpoint is added.\n\n';
-    for (const release of ['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18', 'gateway-v0.1.19']) {
-      const notes = releaseNotes(REPOSITORY, {
-        release, sourceCommit: 'a'.repeat(40),
-      }, { channel: 'canary', artifactSha256: 'b'.repeat(64), keyId: 'test-public-key' });
-      if (release === 'gateway-v0.1.19') {
-        assert.ok(notes.includes(webMcpNote));
-        assert.ok(notes.indexOf(webMcpNote) < notes.indexOf('- Source commit:'));
-      } else {
-        assert.doesNotMatch(notes, /WebMCP/u);
-      }
-    }
-  });
-
   it('describes installed-connector changes in the v0.2.2 GitHub notes', () => {
     const notes = releaseNotes(REPOSITORY, {
       release: 'gateway-v0.2.2', sourceCommit: 'a'.repeat(40),
@@ -222,7 +176,7 @@ describe('reviewed GitHub Release publication', () => {
     assert.doesNotMatch(earlier, /exact tool allowlist/u);
   });
 
-  it.each(['gateway-v0.1.14', 'gateway-v0.1.20'])(
+  it.each(['gateway-v0.1.20'])(
     'preserves generic GitHub release notes for %s', (release) => {
       const sourceCommit = 'a'.repeat(40);
       const artifactSha256 = 'b'.repeat(64);

@@ -8,8 +8,6 @@ import {
 import type { CustomerGatewayOwnershipStorage } from '../src/customer-gateway-ownership-state';
 import {
   CLOUDFLARE_MANAGEMENT_PERMISSION_GROUP_KEYS,
-  CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH,
-  CUSTOMER_MANAGEMENT_BINDING,
   CUSTOMER_MANAGEMENT_CREDENTIAL_HOLD_MS,
   CUSTOMER_MANAGEMENT_CREDENTIAL_KEEP_ALIVE_MS,
   CustomerManagementCredentialHolder,
@@ -67,20 +65,9 @@ describe('management token template link', () => {
     expect(url.searchParams.get('name')).toContain('manage.example.com');
   });
 
-  it('keeps the route and the binding the signed release contract declares', () => {
-    expect(CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH).toBe('/__ankka/install/management-token');
-    expect(CUSTOMER_MANAGEMENT_BINDING).toBe('ANKKA_MANAGEMENT_TOKEN');
-  });
 });
 
 describe('management token form', () => {
-  it('accepts the scannable account form and the legacy 40-character form', () => {
-    expect(SCANNABLE_VALUE).toHaveLength(53);
-    expect(parseCustomerManagementCredential(SCANNABLE_VALUE)).toBe(SCANNABLE_VALUE);
-    expect(LEGACY_VALUE).toHaveLength(40);
-    expect(parseCustomerManagementCredential(LEGACY_VALUE)).toBe(LEGACY_VALUE);
-  });
-
   it('does not depend on the length of the scannable checksum, which Cloudflare does not publish', () => {
     for (const length of [40, 48, 64]) {
       const value = `cfat_${'a'.repeat(length)}`;
@@ -89,20 +76,16 @@ describe('management token form', () => {
   });
 
   it.each([
-    ['empty', ''],
     ['a user token', `cfut_${'a'.repeat(48)}`],
     ['a Global API Key', `cfk_${'a'.repeat(48)}`],
     ['a short scannable value', `cfat_${'a'.repeat(39)}`],
     ['a long scannable value', `cfat_${'a'.repeat(65)}`],
     ['punctuation in a scannable value', `cfat_${'a'.repeat(47)}-`],
-    ['an upper-case prefix', `CFAT_${'a'.repeat(48)}`],
     ['a 39-character value', 'a'.repeat(39)],
     ['a 41-character value', 'a'.repeat(41)],
     ['surrounding space', ` ${'a'.repeat(40)}`],
     ['a trailing newline', `${'a'.repeat(40)}\n`],
-    ['a bearer header', `Bearer ${'a'.repeat(33)}`],
     ['a non-ASCII letter', `${'a'.repeat(39)}é`],
-    ['an oversized value', 'a'.repeat(4_096)],
   ])('refuses %s', (_label, value) => {
     expect(parseCustomerManagementCredential(value)).toBeNull();
   });

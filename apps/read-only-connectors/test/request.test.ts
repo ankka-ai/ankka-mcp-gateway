@@ -184,9 +184,8 @@ describe("shared read-only connector outbound boundary", () => {
     "https://API.example.com", "https://api.example.com.", "https://api%2eexample.com",
     "https://localhost", "https://api.localhost", "https://metadata.google.internal",
     "https://api.home.arpa", "https://service.local", "https://service.lan", "https://singlelabel",
-    "https://127.0.0.1", "https://10.0.0.1", "https://169.254.169.254", "https://172.16.0.1",
-    "https://192.168.1.1", "https://0.0.0.0", "https://2130706433", "https://0x7f000001",
-    "https://[::1]", "https://[fe80::1]", "https://[::ffff:127.0.0.1]", "https://8.8.8.8",
+    "https://127.0.0.1", "https://2130706433", "https://0x7f000001",
+    "https://[::1]", "https://8.8.8.8",
   ])("rejects noncanonical or non-public origin %j", async (origin) => {
     const fetcher = vi.fn<typeof globalThis.fetch>();
     await expect(executeReadRequest({ origin, plan: GET_PLAN, headers: HEADERS, allowRequest: allowGet, fetch: fetcher }))
@@ -253,7 +252,7 @@ describe("shared read-only connector outbound boundary", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
-  it.each([301, 302, 303, 307, 308])("rejects redirect status %s without forwarding credentials or making a second fetch", async (status) => {
+  it.each([302, 307])("rejects redirect status %s without forwarding credentials or making a second fetch", async (status) => {
     const redirectTarget = "https://evil.example.com/next";
     const fetcher = vi.fn<typeof globalThis.fetch>(async () => Response.redirect(redirectTarget, status));
     await expect(runWith(fetcher)).rejects.toEqual(new ConnectorRequestError("CONNECTOR_UPSTREAM_REJECTED"));

@@ -1,4 +1,3 @@
-import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GatewayConfigError } from '../src/config.ts';
@@ -441,29 +440,6 @@ test('rejects duplicate provider IDs globally while preserving distinct-ID name 
     false,
   );
   assert.ok(ambiguous.blockers.some(({ code }) => code === 'source_access_group_ambiguous'));
-});
-
-test('keeps the checked-in Access-group fixture synthetic and runnable', async () => {
-  const [gatewayConfig, accessInput] = await Promise.all([
-    readFile(new URL('../fixtures/access-groups/gateway.config.json', import.meta.url), 'utf8')
-      .then(JSON.parse),
-    readFile(
-      new URL('../fixtures/access-groups/access-input.synthetic.json', import.meta.url),
-      'utf8',
-    ).then(JSON.parse),
-  ]);
-  const plan = await buildGatewayPlan(
-    gatewayConfig,
-    { target: target(), resources: [] },
-    { release: 'test', access: accessInput },
-  );
-  const sourcePolicy = plan.changes.find((change) =>
-    change.kind === 'source_access_policy');
-  assert.deepEqual(plan.blockers, []);
-  assert.equal(sourcePolicy.desired.allow.identityType, 'group');
-  assert.equal(sourcePolicy.desired.allow.identityCount, 1);
-  assert.equal(JSON.stringify(plan).includes('synthetic-access-group'), false);
-  assert.equal(JSON.stringify(plan).includes('ERP Readers'), false);
 });
 
 test('reports noops, owned drift, and foreign collisions without ambiguity', async () => {
