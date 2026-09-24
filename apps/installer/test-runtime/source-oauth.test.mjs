@@ -39,8 +39,12 @@ async function assertSourceOauthRestart(endpoint) {
     }
     const issuer = new URL(config.issuer);
     if (url.href === `${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`) return Response.json(config);
-    if (url.href === config.registration_endpoint) return Response.json({ ...await request.json(), client_id: 'synthetic-public-client' });
+    if (url.href === config.registration_endpoint) {
+      assert.equal(meta, false, 'Meta must never attempt dynamic registration');
+      return Response.json({ ...await request.json(), client_id: 'synthetic-public-client' });
+    }
     if (url.href === config.token_endpoint) {
+      if (meta) assert.equal(new URLSearchParams(await request.text()).get('client_id'), '123456789012345');
       exchanges++;
       const tokens = { access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 60 };
       if (scope && !meta) tokens.scope = scope;
@@ -84,8 +88,10 @@ async function assertSourceOauthRestart(endpoint) {
   try {
     runtime = boot(); await runtime.ready;
     await post('/fixture/seed', Object.fromEntries(await gateway.storage.list()));
-    const started = await post('/source-oauth/start', { schemaVersion: 1, actionId: gateway.action.actionId,
-      sourceId: gateway.source.id, revision: gateway.revision, actorEmail: 'admin@example.com' });
+    const startInput = { schemaVersion: 1, actionId: gateway.action.actionId,
+      sourceId: gateway.source.id, revision: gateway.revision, actorEmail: 'admin@example.com' };
+    if (meta) startInput.metaAppId = '123456789012345';
+    const started = await post('/source-oauth/start', startInput);
     assert.equal(started.status, 200, JSON.stringify({ response: await started.clone().json(), trace }));
     const authorization = new URL((await started.json()).authorizationUrl);
     if (scope) assert.equal(authorization.searchParams.get('scope'), scope);

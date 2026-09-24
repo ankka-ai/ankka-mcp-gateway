@@ -10,6 +10,7 @@ const ISSUER = 'https://www.facebook.com/ads';
 const METADATA = 'https://www.facebook.com/.well-known/oauth-authorization-server/ads';
 const PERMISSIONS = 'https://graph.facebook.com/v26.0/me/permissions';
 const READ_SCOPE = 'ads_mcp_management ads_read';
+const APP_ID = '123456789012345'; // Synthetic public Meta App ID.
 const OAUTH_KEY = 'ankka-mcp-gateway/source-oauth/v1';
 const config = {
   issuer: ISSUER, authorization_endpoint: 'https://www.facebook.com/v26.0/dialog/oauth',
@@ -25,7 +26,7 @@ const permissionData = (granted = `${READ_SCOPE} public_profile`) => ({
 
 async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metadata = {},
   supported = [...READ_SCOPE.split(' '), 'ads_management', 'business_management', 'catalog_management'],
-  registeredScope, tokenScope, permissions = () => Response.json(permissionData()) } = {}) {
+  input = {}, tokenScope, permissions = () => Response.json(permissionData()) } = {}) {
   const gateway = await pausedGateway({ endpoint });
   const stub = gateway.env.ADMIN_STATE.get('v1:management');
   const registrations = [], imports = [], calls = [];
@@ -61,15 +62,12 @@ async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metad
     }
     if (url.href === METADATA) return Response.json({ ...config, ...metadata });
     if (url.href === config.registration_endpoint) {
-      const registration = await request.json();
-      registrations.push(registration);
-      const response = { ...registration, client_id: 'synthetic-meta-client' };
-      if (registeredScope !== undefined) response.scope = registeredScope;
-      return Response.json(response);
+      registrations.push(await request.json());
+      assert.fail('Meta must use the pre-registered App ID, not dynamic registration');
     }
     if (url.href === config.token_endpoint) {
       const body = new URLSearchParams(await request.text());
-      assert.equal(body.get('client_id'), 'synthetic-meta-client');
+      assert.equal(body.get('client_id'), APP_ID);
       assert.equal(body.get('resource'), endpoint);
       assert.ok(body.get('code_verifier'));
       const response = { access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 3600 };
@@ -78,8 +76,10 @@ async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metad
     }
     assert.fail(`Unexpected outbound destination: ${url.origin}`);
   }, async () => {
-    const started = await post('/source-oauth/start', { schemaVersion: 1, actionId: gateway.action.actionId,
-      sourceId: gateway.source.id, revision: gateway.revision, actorEmail: 'admin@example.com' });
+    const startInput = { schemaVersion: 1, actionId: gateway.action.actionId,
+      sourceId: gateway.source.id, revision: gateway.revision, actorEmail: 'admin@example.com' };
+    if (endpoint === ENDPOINT) startInput.metaAppId = APP_ID;
+    const started = await post('/source-oauth/start', { ...startInput, ...input });
     await run({ started, registrations, imports, calls, storage: gateway.storage, sourceId: gateway.source.id, accessToken, refreshToken,
       async finish() {
         const authorization = new URL((await started.clone().json()).authorizationUrl);
@@ -91,7 +91,7 @@ async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metad
   });
 }
 
-test('Meta uses the exact cross-origin OAuth endpoints and imports only provider-confirmed read permissions', async () => {
+test('Meta uses a pre-registered App ID with PKCE and imports only provider-confirmed read permissions', async () => {
   // Facebook can omit token scope; the fixed permissions read proves the grant.
   await metaFixture(async ({ started, finish, registrations, imports, calls, storage, accessToken, refreshToken }) => {
     assert.equal(started.status, 200);
@@ -99,13 +99,16 @@ test('Meta uses the exact cross-origin OAuth endpoints and imports only provider
     assert.equal(`${authorization.origin}${authorization.pathname}`, config.authorization_endpoint);
     assert.equal(authorization.searchParams.get('scope'), READ_SCOPE);
     assert.equal(authorization.searchParams.get('code_challenge_method'), 'S256');
-    assert.equal(registrations[0].scope, READ_SCOPE);
+    assert.equal(authorization.searchParams.get('client_id'), APP_ID);
+    assert.equal(registrations.length, 0);
     assert.equal((await finish()).status, 200);
     assert.equal(imports.length, 1);
     assert.equal(imports[0].tokens.access_token, accessToken);
     assert.equal(imports[0].tokens.refresh_token, refreshToken);
     assert.equal(imports[0].tokens.scope, `${READ_SCOPE} public_profile`);
     assert.equal(imports[0].registration_info.scope, READ_SCOPE);
+    assert.equal(imports[0].registration_info.client_id, APP_ID);
+    assert.equal(imports[0].registration_info.token_endpoint_auth_method, 'none');
     assert.deepEqual(imports[0].config.scopes_supported, READ_SCOPE.split(' '));
     assert.equal(imports[0].config.token_endpoint, config.token_endpoint);
     assert.equal(calls.filter((call) => call.url === PERMISSIONS).length, 1);
@@ -139,13 +142,33 @@ test('Meta refuses issuer drift and endpoint changes before registering or sendi
   }, options);
 });
 
-test('Meta refuses missing read capabilities and expanded registration scopes', async () => {
-  for (const options of [{ supported: ['ads_read'] }, { supported: ['ads_mcp_management', 'ads_management'] },
-    { registeredScope: `${READ_SCOPE} ads_management` }]) {
+test('Meta refuses missing read capabilities', async () => {
+  for (const options of [{ supported: ['ads_read'] }, { supported: ['ads_mcp_management', 'ads_management'] }]) {
     await metaFixture(async ({ started, imports, storage }) => {
       assert.equal(started.status, 409);
       assert.equal((await started.json()).error, 'source_oauth_scope_unsupported');
       assert.equal(imports.length, 0);
+      assert.equal(storage.snapshot(OAUTH_KEY), undefined);
+    }, options);
+  }
+});
+
+test('Meta requires a public numeric App ID and never falls back to registration or accepts secrets', async () => {
+  for (const metaAppId of [undefined, null, 12345, '', '0', '123 456', '1'.repeat(33), 'synthetic-app-secret']) {
+    await metaFixture(async ({ started, registrations, imports, storage }) => {
+      assert.equal(started.status, 409);
+      assert.equal((await started.json()).error, 'source_oauth_meta_app_required');
+      assert.equal(registrations.length, 0);
+      assert.equal(imports.length, 0);
+      assert.equal(storage.snapshot(OAUTH_KEY), undefined);
+    }, { input: { metaAppId } });
+  }
+  for (const options of [{ input: { client_secret: 'synthetic-never-accepted' } },
+    { endpoint: sourceUrl, input: { metaAppId: APP_ID } }]) {
+    await metaFixture(async ({ started, registrations, storage }) => {
+      assert.equal(started.status, 400);
+      assert.equal((await started.json()).error, 'source_oauth_invalid');
+      assert.equal(registrations.length, 0);
       assert.equal(storage.snapshot(OAUTH_KEY), undefined);
     }, options);
   }

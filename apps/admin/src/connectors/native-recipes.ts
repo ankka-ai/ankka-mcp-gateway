@@ -280,14 +280,14 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
   {
     id: 'meta-ads', displayName: 'Meta Ads',
     description: 'Read Facebook and Instagram campaign performance through Meta’s hosted MCP server.',
-    status: 'compatibility_pending', endpoint: 'https://mcp.facebook.com/ads',
-    authentication: 'oauth_dynamic_registration',
+    status: 'manual_setup', endpoint: 'https://mcp.facebook.com/ads',
+    authentication: 'oauth_manual_client',
     upstreamControls: ['Connect an identity with access only to the ad accounts your team should read.', 'Grant only ads_mcp_management and ads_read. Remove earlier write-capable app permissions before reconnecting.'],
     requiredScopes: ['ads_mcp_management', 'ads_read'],
     scopeNote: 'The gateway requests only these two permissions and checks the actual Meta grant before importing credentials. Facebook’s default public_profile identity permission is also accepted; other granted permissions are refused.',
     documentedReadTools: ['ads_get_ad_entities', 'ads_get_opportunity_score', 'ads_insights_performance_trend'],
-    blockers: ['Meta dynamic registration, permission inspection, and Cloudflare refresh need authenticated qualification.', CANARY_BLOCKER, CATALOG_BLOCKER],
-    setupSteps: ['Use a disposable ad account to qualify the connection before sharing it with your team.', 'Add the exact endpoint as a custom OAuth connector, install the empty draft, then choose Authorize connector.', 'After sign-in, review the real reporting tools and choose an exact allowlist before assigning Team access.'],
+    blockers: ['Meta rejects automatic registration for custom clients. Your developer app must have the Ads MCP use case and the exact gateway callback.', CANARY_BLOCKER, CATALOG_BLOCKER],
+    setupSteps: ['Create or reuse your Meta developer app and add the Create & manage ads with ads MCP server use case.', 'Add the exact endpoint as a custom OAuth connector and install the empty draft. Register the displayed callback in Facebook Login for Business, enter your public Meta App ID, then choose Authorize connector.', 'Use a test ad account. After sign-in, review the real reporting tools and choose an exact allowlist before assigning Team access.'],
     evidenceUrls: ['https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-get-started', 'https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-tools-comprehensive-reporting', 'https://developers.facebook.com/documentation/facebook-login/guides/permissions/request-revoke', 'https://www.facebook.com/.well-known/oauth-authorization-server/ads'],
   },
   {

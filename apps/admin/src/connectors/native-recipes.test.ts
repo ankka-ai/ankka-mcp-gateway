@@ -138,11 +138,11 @@ describe('native connector setup recipes', () => {
 
   it('keeps native manual-client paths separate from supported operator-shared OAuth', () => {
     expect(NATIVE_CONNECTOR_RECIPES.filter((entry) => entry.authentication === 'oauth_manual_client').map((entry) => entry.id)).toEqual([
-      'bigquery', 'github', 'google-drive', 'google-sheets', 'hubspot', 'salesforce', 'slack',
+      'bigquery', 'github', 'google-drive', 'google-sheets', 'hubspot', 'meta-ads', 'salesforce', 'slack',
     ])
     for (const entry of NATIVE_CONNECTOR_RECIPES.filter((candidate) => candidate.authentication === 'oauth_manual_client')) {
       expect(entry.status).toBe('manual_setup')
-      expect(entry.blockers.join(' ')).toContain('required shared operator connection')
+      expect(entry.blockers.join(' ')).toContain(entry.id === 'meta-ads' ? 'Meta rejects automatic registration' : 'required shared operator connection')
     }
   })
 

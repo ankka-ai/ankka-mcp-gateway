@@ -37,6 +37,8 @@ gateway URL. Opening it and selecting **Continue to provider** starts the existi
 PKCE flow. The code exchange and credential import run in the team's Worker and
 Cloudflare account. Agents then read the recorded action, select actual synced
 tools, and resume that action. A handoff is not successful authorization.
+For Meta Ads, the browser handoff links to Connectors so you can enter your
+public Meta App ID and configure the displayed callback before consent.
 
 Update and rollback require the exact reviewed release and artifact digest.
 Preparation persists a bounded action and returns the existing customer-hosted

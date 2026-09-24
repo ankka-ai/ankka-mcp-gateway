@@ -8,6 +8,9 @@ Notable public product and repository changes are recorded here.
   Saving a changed selection automatically refreshes Cloudflare's catalogue when
   needed, removing the separate capability-sync step after an upgrade. New tools
   remain disabled until explicitly selected.
+- Use your pre-registered Meta App ID for Meta Ads authorization. Meta rejects
+  automatic registration for custom clients; setup now shows the required app
+  use case and callback without accepting an app secret or broadening permissions.
 
 - Add read-only OAuth support for Meta's official Ads MCP endpoint, with exact
   provider endpoint checks and verification of the actual granted permissions

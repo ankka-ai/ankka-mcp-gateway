@@ -777,13 +777,13 @@ describe('the management token', () => {
 
 describe('connector provider authorization', () => {
   afterEach(() => vi.unstubAllGlobals())
-  it('binds authorization to the current action and draft revision', async () => {
+  it.each([undefined, '123456789012345'])('binds authorization to the current action and draft revision with optional Meta App ID %s', async (metaAppId) => {
     const result = { schemaVersion: 1, authorizationUrl: 'https://identity.example.net/authorize?state=synthetic', expiresAt: '2026-09-19T12:05:00Z' }
     const fetcher = vi.fn(async () => Response.json(result))
     vi.stubGlobal('fetch', fetcher)
-    await expect(new HttpGatewayAdminApi().authorizeSource('action_' + 'a'.repeat(32), 4, 'source-synthetic')).resolves.toEqual(result)
+    await expect(new HttpGatewayAdminApi().authorizeSource('action_' + 'a'.repeat(32), 4, 'source-synthetic', metaAppId)).resolves.toEqual(result)
     expect(fetcher).toHaveBeenCalledWith('/api/source-actions/action_' + 'a'.repeat(32) + '/authorize', expect.objectContaining({
-      method: 'POST', credentials: 'same-origin', redirect: 'error', body: JSON.stringify({ schemaVersion: 1, revision: 4, sourceId: 'source-synthetic' }),
+      method: 'POST', credentials: 'same-origin', redirect: 'error', body: JSON.stringify({ schemaVersion: 1, revision: 4, sourceId: 'source-synthetic', metaAppId }),
     }))
   })
   it('refuses navigation to unsafe authorization URLs or a response containing credentials', async () => {

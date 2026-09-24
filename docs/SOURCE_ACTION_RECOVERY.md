@@ -188,6 +188,12 @@ URL and expiry. It requires a human Access identity, a same-origin JSON request,
 the current draft and installation, the gateway's management token, and an owned
 Cloudflare source. Service identities cannot start or finish this flow.
 
+For the exact Meta Ads endpoint, include the public numeric `metaAppId` in that
+JSON request. Meta refuses automatic registration for custom clients, so the
+gateway uses this pre-registered App ID with PKCE and the displayed callback.
+The parameter is rejected for every other provider. App secrets and manually
+supplied provider tokens are never accepted. See [Meta Ads](META_ADS.md).
+
 The gateway discovers RFC 9728 resource metadata on the source's origin and
 RFC 8414 authorization metadata for its advertised issuer. This first path
 requires HTTPS public hostnames, same-issuer-origin authorization/token/registration

@@ -4921,6 +4921,7 @@ function sourceOauthCookie(value, maxAge) {
 
 async function startSourceOauth(storage, env, input) {
   if (!exactKeys(input, ['schemaVersion', 'actionId', 'sourceId', 'revision', 'actorEmail',
+      ...(Object.hasOwn(input ?? {}, 'metaAppId') ? ['metaAppId'] : []),
       ...(Object.hasOwn(input ?? {}, 'remote') ? ['remote'] : [])]) ||
       (Object.hasOwn(input ?? {}, 'remote') && input.remote !== true) || input.schemaVersion !== 1 ||
       !ACTION_ID.test(input.actionId) || !SOURCE_ID.test(input.sourceId) || !normalizedEmail(input.actorEmail) ||
@@ -4929,6 +4930,11 @@ async function startSourceOauth(storage, env, input) {
   if (context instanceof Response) return context;
   // Starting over invalidates the previous attempt, including after discovery fails.
   await storage.delete(SOURCE_OAUTH_KEY);
+  const meta = context.source.url === META_ADS_MCP_URL;
+  if (meta && (!isText(input.metaAppId) || !/^[1-9][0-9]{0,31}$/u.test(input.metaAppId))) {
+    sourceOauthFailure('source_oauth_meta_app_required');
+  }
+  if (!meta && Object.hasOwn(input, 'metaAppId')) return sourceToolsRefusal(400, 'source_oauth_invalid');
   const { config, scope, requireIssuer } = await discoverSourceOauth(context.source.url);
   const origin = `https://${parseManagementEnvironment(env).managementHostname}`;
   const redirectUri = `${origin}${input.remote ? `${MANAGEMENT_MCP_PATH}/oauth/callback` : SOURCE_OAUTH_CALLBACK}`;
@@ -4937,10 +4943,12 @@ async function startSourceOauth(storage, env, input) {
     grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
   };
   if (scope) registration.scope = scope;
-  const registered = await oauthJson(config.registration_endpoint, {
+  // Meta advertises DCR but rejects custom clients. Its documented custom-client
+  // flow uses your pre-registered, non-secret App ID with public-client PKCE.
+  const registered = meta ? { ...registration, client_id: input.metaAppId } : await oauthJson(config.registration_endpoint, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson(registration),
   }, 'client_registration');
-  // Secret-bearing or manually registered clients remain a Cloudflare setup flow.
+  // Secret-bearing clients remain a Cloudflare setup flow.
   if (!oauthText(registered.client_id) || registered.client_secret !== undefined ||
       registered.token_endpoint_auth_method !== 'none' || !Array.isArray(registered.redirect_uris) ||
       registered.redirect_uris.length !== 1 || registered.redirect_uris[0] !== redirectUri) sourceOauthFailure();
@@ -9066,7 +9074,8 @@ async function handleSourceActions(request, env, authorizedAccess = null) {
     if (access.actor.kind !== 'human' || (request.headers.has('sec-fetch-site') && request.headers.get('sec-fetch-site') !== 'same-origin') ||
         request.headers.get('content-type')?.split(';')[0] !== 'application/json') return sourceToolsRefusal(403, 'origin_required');
     const input = await readJsonInput(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES);
-    if (!exactKeys(input, ['schemaVersion', 'revision', 'sourceId'])) return sourceToolsRefusal(400, 'source_oauth_invalid');
+    if (!exactKeys(input, ['schemaVersion', 'revision', 'sourceId',
+      ...(Object.hasOwn(input ?? {}, 'metaAppId') ? ['metaAppId'] : [])])) return sourceToolsRefusal(400, 'source_oauth_invalid');
     try {
       return await stub.fetch(new Request('https://admin-state.invalid/source-oauth/start', {
         method: 'POST', headers: { 'content-type': 'application/json' },
@@ -9849,6 +9858,8 @@ async function managementMcpBrowser(request, env) {
   const sources = sourcesRead.ok ? safeManagementSources(await sourcesRead.json()) : null;
   const source = sources?.sources.find((item) => item.id === action.sourceId);
   if (!source) return sourceToolsRefusal(409, 'source_tools_unavailable');
+  if (source.url === META_ADS_MCP_URL && request.method === 'GET') return managementMcpPage('Connect Meta Ads',
+    '<p>Meta requires your developer app’s App ID and a registered callback. Enter the App ID on your connector to continue.</p><p><a href="/sources">Open Connectors</a></p>');
   if (request.method === 'GET') return managementMcpPage('Authorize your source',
     '<p>Continue to your provider to connect this source. Then return to your agent to finish setup.</p><form method="post"><button>Continue to provider</button></form>');
   if (!sameOriginMutation(request)) return sourceToolsRefusal(403, 'origin_required');
