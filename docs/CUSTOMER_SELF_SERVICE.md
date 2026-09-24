@@ -193,8 +193,8 @@ Cloudflare account, and team members authenticate only to the
 Gateway Portal. The current dashboard does not offer per-user upstream
 authentication. Ankka does not receive the upstream token.
 
-A source that needs sign-in cannot list its tools until it is connected, so you
-never type tool names for it. Save it and install it: the gateway creates it
+A source that needs sign-in may publish a public tool catalogue, but you choose
+its tools after connecting it. Save it and install it: the gateway creates it
 with nothing enabled, nobody assigned and no Portal attachment. Choose
 **Authorize source**, approve your provider's consent, then return to
 **Sources**: the paused installation lists the tools
@@ -233,6 +233,12 @@ Worker retains no upstream MCP session after discovery.
 
 A protected source is normally recognized from the standard Bearer
 `WWW-Authenticate` challenge with a public HTTPS `resource_metadata` URL.
+After successful public tool discovery, the gateway also checks the standard
+path-specific and root protected-resource metadata URLs on the same origin.
+Matching OAuth metadata marks the source as protected while retaining its
+public catalogue. Metadata requests share the discovery deadline, have bounded
+bodies and never follow redirects; invalid or unavailable metadata stops
+inspection instead of silently treating the source as public.
 The exact Google BigQuery MCP endpoint is also recognized as protected even
 though its tool catalogue is public. Its shared operator connection is currently
 blocked: Cloudflare's documented manual OAuth flow has no admin credential
@@ -241,6 +247,14 @@ not accept Google secrets or offer per-user Google authentication as a fallback.
 See [BigQuery Google authentication](BIGQUERY_GOOGLE_AUTH.md) for current
 compatibility evidence, least-privilege setup, cost-control gaps and acceptance
 gates.
+
+For `https://mcp.gorgias.com/mcp`, dashboard authorization requests only
+`tickets:read` and the advertised identity/session scopes `openid`, `email`,
+`profile`, and `offline`. The token response must explicitly confirm ticket
+read access without any unrequested scope before the grant is imported into
+Cloudflare. Broader Gorgias operations remain unavailable. An older Gorgias
+connector saved as **Public** must be removed and added again after updating
+the gateway; existing connector receipts are not rewritten automatically.
 
 Credential-bearing URLs, private-network endpoints, custom credential headers,
 and manually supplied bearer tokens are rejected.

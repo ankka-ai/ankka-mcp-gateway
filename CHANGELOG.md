@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Recognize OAuth-protected MCP sources even when they publish their tool
+  catalogue without authentication. Gorgias now enters the sign-in flow before
+  tools are enabled; dashboard authorization requests ticket-read access and
+  refuses broader or unconfirmed grants.
+
 - Grant full dashboard management access from Team with the explicit Dashboard
   administrator option. Administrators can grant and revoke access for team
   members; revocation also rejects existing dashboard sessions. Initial

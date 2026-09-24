@@ -10,7 +10,7 @@ const actionsKey = 'ankka-mcp-gateway/source-actions/v1';
 // Produce the seed through the actual installer, draft save, prepare and apply.
 // No hand-authored receipts or hashes can make the runtime test accept a state
 // that production would not create.
-export async function pausedGateway({ onRequest } = {}) {
+export async function pausedGateway({ onRequest, endpoint = sourceUrl, publicCatalogue = false } = {}) {
   const provider = cloudflareProvider({ onRequest(context) {
     const intercepted = onRequest?.(context);
     if (intercepted !== undefined) return intercepted;
@@ -29,7 +29,7 @@ export async function pausedGateway({ onRequest } = {}) {
     method: put ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson(body),
   }));
   const saved = await post('/sources', { schemaVersion: 1, revision: storage.snapshot(sourcesKey).revision,
-    source: { label: 'Synthetic sign-in', url: sourceUrl, authMode: 'oauth', enabledTools: [] } }, true);
+    source: { label: 'Synthetic sign-in', url: endpoint, authMode: 'oauth', enabledTools: [] } }, true);
   assert.equal(saved.status, 200, await saved.clone().text());
   const sources = await saved.json(), source = sources.sources.at(-1);
   const actionKey = randomBytes(32).toString('base64url'), issuedAt = Date.now();
@@ -41,9 +41,20 @@ export async function pausedGateway({ onRequest } = {}) {
   const body = canonicalJson({ schemaVersion: 1, actionId, actionKey, actorEmail: 'admin@example.com', accountId: ACCOUNT_ID,
     issuedAt, expiresAt: issuedAt + 600_000, cloudflareAccessToken: gateway.env.ANKKA_MANAGEMENT_TOKEN });
   const signature = createHmac('sha256', Buffer.from(actionKey, 'base64url')).update(body).digest('hex');
-  const applied = await withProviderFetch((request) => request.url === sourceUrl
-    ? Promise.resolve(new Response(null, { status: 401, headers: { 'www-authenticate': 'Bearer resource_metadata="https://source.example.net/.well-known/oauth-protected-resource/mcp"' } }))
-    : provider.fetch(request), () => worker.fetch(new Request('https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action', {
+  const metadataUrl = `${new URL(endpoint).origin}/.well-known/oauth-protected-resource/mcp`;
+  const applied = await withProviderFetch(async (request) => {
+    if (publicCatalogue && request.url === metadataUrl) {
+      return Response.json({ resource: endpoint, authorization_servers: ['https://identity.example.net'] });
+    }
+    if (request.url === endpoint) {
+      if (!publicCatalogue) return new Response(null, { status: 401,
+        headers: { 'www-authenticate': `Bearer resource_metadata="${metadataUrl}"` } });
+      const message = await request.json();
+      assert.equal(message.method, 'tools/list');
+      return Response.json({ jsonrpc: '2.0', id: message.id, result: { tools: [{ name: 'records_search' }] } });
+    }
+    return provider.fetch(request);
+  }, () => worker.fetch(new Request('https://ankka-gateway-test.tenant.workers.dev/__ankka/source-action', {
     method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-source-action-signature': `sha256=${signature}` }, body,
   }), gateway.env));
   assert.equal((await applied.json()).error, 'source_connection_required');

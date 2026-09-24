@@ -61,6 +61,32 @@ async function choice() {
 describe('choosing the tools of a connected sign-in connector', () => {
   afterEach(cleanup)
 
+  it('saves an OAuth connector with a public catalogue without enabling its preview tools', async () => {
+    const user = userEvent.setup()
+    const api = pausedApi(null)
+    api.getSources.mockResolvedValue({ schemaVersion: 1, revision: 4, applyMode: 'account_token', installationEnabled: true, sources: [] })
+    api.saveSourceDraft.mockResolvedValue({ schemaVersion: 1, revision: 5, applyMode: 'account_token', installationEnabled: true, sources: [signInDraft] })
+    api.discoverSource.mockImplementation(async (url) => ({ schemaVersion: 1, status: 'authorization_required',
+      endpoint: url, protocolVersion: '2025-06-18', authentication: 'oauth',
+      tools: REAL_TOOLS.map((tool) => ({ ...tool, defaultSelected: true })) }))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const add = await screen.findByRole('button', { name: 'Add connector' })
+    add.focus()
+    await user.keyboard('{Enter}')
+    await user.click(await screen.findByRole('menuitem', { name: 'Custom' }))
+    await user.type(screen.getByLabelText('Connector name'), 'Gorgias')
+    await user.type(screen.getByLabelText('MCP URL'), 'https://mcp.gorgias.com/mcp')
+    await user.click(screen.getByRole('button', { name: 'Inspect connector' }))
+    expect(await screen.findByText('OAuth protected')).toBeVisible()
+    expect(screen.getByText('3 tools are advertised publicly. Sign in before choosing which tools to allow.')).toBeVisible()
+    expect(screen.getByText(/Gorgias authorization here is limited to reading tickets/u)).toBeVisible()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save draft' }))
+    await waitFor(() => expect(api.saveSourceDraft).toHaveBeenCalledExactlyOnceWith(4, {
+      label: 'Gorgias', url: 'https://mcp.gorgias.com/mcp', authMode: 'oauth', enabledTools: [],
+    }))
+  })
+
   it('starts provider authorization for the current action and retains the manual fallback on failure', async () => {
     const user = userEvent.setup()
     const api = pausedApi(pause(), signInDraft, offered('connection_required'))
