@@ -97,6 +97,11 @@ this issuer and these exact endpoints for the exact Meta Ads resource:
 Endpoint or API-version changes require review and an update. This exception
 does not permit other providers to send credentials across arbitrary origins.
 The registration endpoint is checked as metadata but never called for Meta.
+The authorization-server metadata request identifies itself with the
+`Ankka-MCP-Gateway` User-Agent. A Cloudflare preview on 2026-09-24 confirmed
+that the unidentified request redirects to Facebook's `unsupportedbrowser`
+page, while this explicit identifier returns the reviewed metadata. Discovery
+still rejects redirects; no browser page is treated as OAuth metadata.
 Other providers retain their existing dynamic-registration flow; the Meta App
 ID parameter is rejected for them. Tokens and permission responses are never
 saved in Durable Object state or logged. Callback attempts are consumed before token exchange and cannot be

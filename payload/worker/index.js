@@ -4792,7 +4792,10 @@ async function discoverSourceOauth(sourceUrl) {
       resourceMetadata.authorization_servers[0] !== META_ADS_OAUTH.issuer)) sourceOauthFailure();
   const issuer = oauthEndpoint(resourceMetadata.authorization_servers[0]);
   if (!issuer) sourceOauthFailure();
-  const metadata = await oauthJson(`${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`);
+  // Meta redirects unidentified Workers requests to unsupportedbrowser. Identify
+  // this client explicitly; discovery redirects remain prohibited.
+  const headers = sourceUrl === META_ADS_MCP_URL ? { 'user-agent': 'Ankka-MCP-Gateway' } : undefined;
+  const metadata = await oauthJson(`${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`, { headers });
   if (metadata.issuer !== resourceMetadata.authorization_servers[0] ||
       !Array.isArray(metadata.code_challenge_methods_supported) || !metadata.code_challenge_methods_supported.includes('S256') ||
       (metadata.response_types_supported !== undefined && !metadata.response_types_supported?.includes('code')) ||

@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Fix Meta authorization discovery from Cloudflare Workers by explicitly
+  identifying the gateway client. Keep discovery redirects blocked and stop
+  attributing gateway startup failures to your Meta app configuration.
+
 - Show Gateway Management's available tools directly from the installed release.
   Saving a changed selection automatically refreshes Cloudflare's catalogue when
   needed, removing the separate capability-sync step after an upgrade. New tools
