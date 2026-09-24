@@ -105,6 +105,27 @@ describe('choosing the tools of a connected sign-in connector', () => {
     expect(api.chooseSourceActionTools).not.toHaveBeenCalled()
   })
 
+  it('requires a Meta App ID, shows the gateway callback, and passes it only to the authorization request', async () => {
+    const user = userEvent.setup()
+    const source = { ...signInDraft, label: 'Meta Ads', url: 'https://mcp.facebook.com/ads' }
+    const api = pausedApi(pause(), source, offered('connection_required'))
+    api.authorizeSource.mockRejectedValue(new GatewayApiError(409, 'source_oauth_unavailable'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const button = await screen.findByRole('button', { name: 'Authorize connector' })
+    const field = screen.getByLabelText('Meta App ID')
+    expect(button).toBeDisabled()
+    expect(screen.getByText(`${window.location.origin}/__ankka/source-oauth/callback`)).toBeVisible()
+    await user.type(field, 'synthetic-secret')
+    expect(button).toBeDisabled()
+    await user.clear(field)
+    await user.type(field, '123456789012345')
+    await waitFor(() => expect(button).toBeEnabled())
+    await user.click(button)
+    expect(api.authorizeSource).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, source.id, '123456789012345')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Check your app’s Ads MCP use case and callback URL')
+    expect(api.saveSourceDraft).not.toHaveBeenCalled()
+  })
+
   it('lists nothing until Cloudflare is connected and never offers a resume that could attach nothing', async () => {
     const user = userEvent.setup()
     const api = pausedApi(pause())

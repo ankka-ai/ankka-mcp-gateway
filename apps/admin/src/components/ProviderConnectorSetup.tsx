@@ -6,12 +6,12 @@ import { StatusPill } from './StatusPill'
 export function ProviderConnectorSetup({ recipe }: { recipe: NativeConnectorRecipe }) {
   return <article aria-label={`${recipe.displayName} connector requirements`}>
     <StatusPill tone="attention">{NATIVE_RECIPE_STATUS_LABELS[recipe.status]}</StatusPill>
-    <p role="status" className="mt-3 text-sm leading-6 text-kumo-subtle">{recipe.status === 'manual_setup'
-      ? 'This connector needs a sign-in method your gateway does not support yet.'
-      : recipe.status === 'provider_permission_required'
-        ? 'This connector needs permission from the provider before you can connect it through your gateway.'
-        : recipe.id === 'meta-ads'
-          ? 'Try Meta Ads as a custom connector with a test ad account. Authentication, token renewal, and read-only access still need live verification before sharing it with your team.'
+    <p role="status" className="mt-3 text-sm leading-6 text-kumo-subtle">{recipe.id === 'meta-ads'
+      ? 'Connect Meta Ads using your developer app’s public App ID and the callback shown in your gateway. Authentication, token renewal, and read-only access still need live verification with a test ad account.'
+      : recipe.status === 'manual_setup'
+        ? 'This connector needs a sign-in method your gateway does not support yet.'
+        : recipe.status === 'provider_permission_required'
+          ? 'This connector needs permission from the provider before you can connect it through your gateway.'
           : 'This connector is not available to add yet. Compatibility and read-only access through your gateway still need verification.'}</p>
     <p className="mt-3 text-xs text-kumo-subtle">Provider endpoint</p>
     <code className="mt-1 block select-all break-all text-xs leading-5 text-kumo-default">{recipe.endpoint}</code>

@@ -7,24 +7,42 @@ to the ad accounts you intend to share.
 
 > Implementation reviewed 2026-09-24. Synthetic tests cover the OAuth policy,
 > permission checks, credential custody, and SQLite callback replay protection.
-> An authenticated Meta/Cloudflare canary is still required to qualify dynamic
-> registration, real reporting, token refresh, revocation, and upstream mutation
-> denial. This is not a released Source Catalog preset.
+> Meta's advertised dynamic registration rejects custom clients. Use your own
+> Meta developer app and its public App ID. An authenticated Meta/Cloudflare
+> canary is still required to qualify consent, reporting, token refresh,
+> revocation, and upstream mutation denial. This is not a released Source Catalog preset.
 
 ## Connect a test account
 
-1. Open **Add connector → Custom**. Name it **Meta Ads** and use the exact URL
+1. Create or reuse your [Meta developer app](https://developers.facebook.com/apps)
+   and add the **Create & manage ads with ads MCP server** use case. Confirm that
+   your app and test identity are eligible for Ads MCP access.
+2. Open **Add connector → Custom**. Name it **Meta Ads** and use the exact URL
    `https://mcp.facebook.com/ads`.
-2. Inspect it, save the OAuth draft, and install it. Nothing is enabled or
+3. Inspect it, save the OAuth draft, and install it. Nothing is enabled or
    assigned while you connect.
-3. Choose **Authorize connector** and complete Meta's consent flow. The gateway
+4. In your app's **Facebook Login for Business** settings, register the exact
+   callback shown on the connector:
+   `https://<management-hostname>/__ankka/source-oauth/callback`.
+   Enter the app's public numeric **Meta App ID** in the gateway. No app secret
+   or access token is accepted. The App ID is not saved in the connector draft;
+   it is bound to the short-lived authorization attempt and imported with the
+   connection metadata only after consent and permission verification.
+5. Choose **Authorize connector** and complete Meta's consent flow. The gateway
    requests only `ads_mcp_management` and `ads_read`.
-4. Return to the gateway and check the connection. Review the actual synced
+6. Return to the gateway and check the connection. Review the actual synced
    tools and enable only the reporting tools you need. Documented candidates
    include `ads_get_ad_entities`, `ads_get_opportunity_score`, and
    `ads_insights_performance_trend`; their actual availability and permissions
    must be checked on your account.
-5. Qualify the connection in the test account before assigning it to your team.
+7. Qualify the connection in the test account before assigning it to your team.
+
+The `undefined: failed to register oauth client` error in Cloudflare's automatic
+setup does not indicate a missing Ankka client secret. Meta's advertised
+registration endpoint returns `invalid_client_metadata` and “Dynamic registration
+is not available for this client” for custom-client requests. The gateway uses
+your pre-registered App ID and skips that endpoint. Cloudflare's automatic setup
+cannot configure your Meta app or register your gateway callback for you.
 
 No Meta app secret, manually supplied bearer token, or provider credential is
 entered into Ankka's hosted installer. Source authorization and permission
@@ -64,8 +82,10 @@ Changing provider grants outside this flow requires renewed review.
 ## Reviewed OAuth boundary
 
 Meta's public discovery advertises public-client dynamic registration, PKCE
-S256, authorization-code and refresh-token grants. The gateway accepts only this
-issuer and these exact endpoints for the exact Meta Ads resource:
+S256, authorization-code and refresh-token grants. Advertising registration does
+not make it available to arbitrary clients: two synthetic probes on 2026-09-24,
+including a minimal registration request, were refused. The gateway accepts only
+this issuer and these exact endpoints for the exact Meta Ads resource:
 
 | Purpose | URL |
 | --- | --- |
@@ -76,13 +96,15 @@ issuer and these exact endpoints for the exact Meta Ads resource:
 
 Endpoint or API-version changes require review and an update. This exception
 does not permit other providers to send credentials across arbitrary origins.
-Tokens and permission responses are never saved in Durable Object state or
-logged. Callback attempts are consumed before token exchange and cannot be
+The registration endpoint is checked as metadata but never called for Meta.
+Other providers retain their existing dynamic-registration flow; the Meta App
+ID parameter is rejected for them. Tokens and permission responses are never
+saved in Durable Object state or logged. Callback attempts are consumed before token exchange and cannot be
 replayed after a process restart.
 
-Meta also documents manually registered apps and Employee-role system-user
-tokens. Those are not credential-entry modes in this gateway flow. Account
-eligibility and registration response compatibility still need live proof.
+Meta also documents Employee-role system-user tokens. Those are not a
+credential-entry mode in this gateway flow. Account eligibility and your app's
+public-client PKCE and refresh compatibility still need live proof.
 Meta's optional MCP action rules are in limited availability; they can reinforce
 read-only access but are not assumed to exist for every team.
 

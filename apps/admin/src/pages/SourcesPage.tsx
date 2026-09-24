@@ -442,7 +442,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         {guidance ? <p className="mt-2 max-w-[80ch] text-sm leading-6 text-kumo-subtle">{guidance}</p> : null}
         {preflightFailed ? <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Error code: {action.failureCode}</p> : null}
         {signInPause && actionSource && action.canRenew === true && sources.applyMode === 'account_token' && shown.failureCode === 'source_connection_required' ? (
-          <SourceAuthorization actionId={action.actionId} sourceId={actionSource.id} revision={sources.revision} disabled={!installationEnabled || isBusy || isCheckingSourceActions} />
+          <SourceAuthorization actionId={action.actionId} sourceId={actionSource.id} sourceUrl={actionSource.url} revision={sources.revision} disabled={!installationEnabled || isBusy || isCheckingSourceActions} />
         ) : null}
         {action.connectionUrl && action.state === 'recovery_required' ? (
           <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open connector in Cloudflare</a>
