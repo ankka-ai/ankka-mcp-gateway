@@ -59,7 +59,7 @@ held like the install grant: only in the owning Durable Object's memory,
 until the final runtime upload the install already makes writes it as a
 secret binding. It is never written to Durable Object storage, the install
 journal, a receipt, a log line, an error, a URL, or any response; an object
-restart loses it, and the install then completes without it. It is used only
+restart loses it, and setup remains incomplete until the token is provided again. It is used only
 with fixed Cloudflare API operations and is never returned to the browser.
 Cloudflare cannot scope it to the gateway's own resources: it can edit every
 Access policy in the account, and the setup page says so before asking for

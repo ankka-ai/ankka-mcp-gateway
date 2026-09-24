@@ -101,7 +101,7 @@ body {
 button,
 a { -webkit-tap-highlight-color: transparent; }
 
-button { user-select: none; }
+button { font-family: var(--font-sans); user-select: none; }
 
 ::selection {
   color: var(--color-ink);

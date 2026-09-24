@@ -15,13 +15,13 @@ reaches your gateway in one of two ways:
   Cloudflare approval. The page links to Cloudflare's token page with both
   permissions and a name filled in, and has one field to paste the token
   into. The value goes from your browser to your own Worker and nowhere else.
-- **On an installed gateway**, from **Settings → Add management token** (or
+- **On an older installed gateway**, from **Settings → Add management token** (or
   **Replace management token**): you approve one change in Cloudflare, and a
   page your own gateway serves afterwards has the same link and one field to
   paste the token into. Your gateway writes it as its own
   `ANKKA_MANAGEMENT_TOKEN` encrypted secret. This is the one way the product
-  offers for a gateway that runs without the token, whether setup skipped it,
-  lost it, or predates the step, and for replacing a token.
+  offers for a gateway that runs without the token because an earlier setup
+  skipped or lost it, or predates the step, and for replacing a token.
 
 Neither `deploy.ankka.ai` nor `auth.ankka.ai` serves a token-entry form or
 receives the value, and the gateway never returns it to a browser. The relay
@@ -58,17 +58,18 @@ kept the same way, in the same memory, for the same minutes:
   so it cannot disturb a callback that is still exchanging its code. The
   value is forgotten as soon as no approval can use it any more, and after
   thirty minutes at the latest.
-- If Cloudflare restarts the object anyway, the value is lost. The install
-  still completes, without the token, and the page that follows the install
-  says so. Add the token afterwards as described for an installed gateway.
+- If Cloudflare restarts the object before the final approval, the value is
+  lost and setup asks you to paste the token again. A restart during the final
+  approval can still leave an incomplete installation that needs recovery.
 
 The install status route (`/__ankka/install/status`) carries one fixed word
 about this step and never the value: `held`, `installed`, `skipped`, or
 `dropped`. The key is absent until you have chosen.
 
-Continuing without a token is allowed through an explicit control on the
-setup page. Until the token exists, adding sources and managing team access
-stay disabled; updates, rollback, and removal do not need it.
+New setup requires the token before the final Cloudflare approval. Older
+gateways without one can still add it from Settings. Until the token exists,
+adding sources and managing team access stay disabled; updates, rollback, and
+removal do not need it.
 
 ### What the Settings flow does with the value
 
@@ -168,7 +169,7 @@ the earlier form a 40-character alphanumeric string; tokens issued in that
 form also contain `-` and `_`, so both are accepted there. The checksum itself
 is not recomputed: its algorithm is not published. Should Cloudflare issue an
 account token in another form, the setup page refuses it with its fixed
-message and the install continues without it. The Settings page applies the
+message and setup cannot continue until you provide an accepted token. The Settings page applies the
 same check, so such a token is accepted only once a release widens the
 accepted forms.
 

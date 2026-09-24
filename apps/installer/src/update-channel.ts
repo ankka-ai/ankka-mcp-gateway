@@ -147,7 +147,6 @@ export function buildPublicUpdateChannel(bundle: VerifiedReleaseBundle): PublicU
         'After this update, check for updates again to install v0.2.0.',
       ] : []),
       ...(bundle.manifest.release === 'gateway-v0.2.0' ? [
-        'Requires Cloudflare Workers Paid in your account for the built-in API runtime, even if no API sources are configured. Enable Workers Paid in Cloudflare before updating; Ankka does not change your billing plan.',
         'Agent-authored API sources are built in. Existing v0.1 gateways upgrade through v0.1.82 first; no fresh installation is required.',
       ] : []),
       ...(['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18', 'gateway-v0.1.19'].includes(bundle.manifest.release) ? [

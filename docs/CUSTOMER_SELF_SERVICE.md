@@ -23,14 +23,12 @@ data and cannot deploy a gateway.
 Installation requires:
 
 - a Cloudflare account with an active zone (up to 100 active zones in the hosted setup);
-- **Workers Paid** on that account for v0.2 and later: the built-in API runtime
-  uses [Dynamic Workers](https://developers.cloudflare.com/dynamic-workers/pricing/);
 - Cloudflare Zero Trust configured for that account;
 - permission to create Workers, Durable Objects, DNS, Access applications and
   policies, and MCP Portal resources;
 - one hostname for the team's MCP Portal;
 - a different hostname for the management dashboard; and
-- the initial administrators, who also form the initial Portal audience; and
+- the initial administrator, who also forms the initial Portal audience; and
 - a Super Administrator or Administrator of the Cloudflare account, to create
   the gateway's one management token during setup (you can also add it later).
 
@@ -101,10 +99,10 @@ The public installer is designed to:
 1. start at [deploy.ankka.ai](https://deploy.ankka.ai) without entering gateway details;
 2. choose one Cloudflare account and approve initial Worker deployment and domain discovery;
 3. revoke that grant and open the setup page in your own Worker;
-4. choose a domain from the dropdown, gateway name, two hostnames, and administrators;
+4. choose a domain from the dropdown, gateway name, two hostnames, and an administrator;
 5. review the complete deployment plan and edit it if needed;
-6. create the management token from the link on that page and paste it into
-   your own gateway, or continue without it;
+6. create the required management token from the link on that page and paste it into
+   your own gateway;
 7. approve a fresh grant so your Worker can install and verify the remaining resources; and
 8. open the MCP URL and management URL.
 
@@ -120,11 +118,9 @@ and a name that contains your management hostname already filled in. You
 create the token there and paste it into the one field on your gateway's
 page. Your Worker keeps it only in memory, beside the approval that follows,
 and the install's last step saves it as the encrypted secret
-`ANKKA_MANAGEMENT_TOKEN`. It is never stored, logged, or shown again. If you
-continue without it, or if Cloudflare restarts your Worker's state before the
-install finishes and the value is lost, setup still completes: adding sources
-and managing team access stay disabled until you add the token as described
-in [Management token](MANAGEMENT_TOKEN.md).
+`ANKKA_MANAGEMENT_TOKEN`. It is never stored, logged, or shown again. If
+the value is lost before the install finishes, setup remains incomplete and
+asks you to paste the token again. See [Management token](MANAGEMENT_TOKEN.md).
 
 Installation does not add an upstream MCP source. The default-deny onboarding
 candidate restores a separate Sources workflow: discover and review the exact

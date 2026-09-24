@@ -56,11 +56,8 @@ const MAX_BODY_BYTES = 128 * 1024;
 const MAX_HANDOFF_BYTES = 60 * 1024;
 /** An account token is at most 69 characters here; nothing larger is read on the management step. */
 const MAX_MANAGEMENT_STEP_BYTES = 512;
-/** Either the pasted value or the explicit choice to continue without one; never both, never anything else. */
-const managementStepSchema = v.union([
-  v.strictObject({ managementToken: customerManagementCredentialSchema }),
-  v.strictObject({ skip: v.literal(true) }),
-]);
+/** The pasted account token is required before the final approval. */
+const managementStepSchema = v.strictObject({ managementToken: customerManagementCredentialSchema });
 
 export interface CustomerBootstrapStatePort {
   read(): Promise<CustomerBootstrapState | null | undefined>;
@@ -563,8 +560,7 @@ export function createCustomerBootstrapRouter(
           if (!reviewOpen) return json({ schemaVersion: 1, error: 'setup_locked' }, 409);
           const input = await managementStepInput(request);
           if (input === null) return json({ schemaVersion: 1, error: 'management_token_invalid' }, 400);
-          if ('skip' in input) await dependencies.managementCredential.skip();
-          else await dependencies.managementCredential.accept(input.managementToken);
+          await dependencies.managementCredential.accept(input.managementToken);
           return json({ schemaVersion: 1, managementCredential: await dependencies.managementCredential.word() ?? null });
         }
 
@@ -572,6 +568,10 @@ export function createCustomerBootstrapRouter(
           if (!sameOriginMutation(request)) return json({ schemaVersion: 1, error: 'forbidden' }, 403);
           const sessionSecret = readSessionCookie(request);
           if (sessionSecret === null) return json({ schemaVersion: 1, error: 'bootstrap_session_required' }, 403);
+          if (dependencies.managementCredential !== undefined &&
+              await dependencies.managementCredential.word() !== 'held') {
+            return json({ schemaVersion: 1, error: 'management_token_required' }, 409);
+          }
           const startedAt = now();
           const started = dependencies.randomBytes === undefined
             ? await startCustomerBootstrapOauth({ current, sessionSecret, now: startedAt })

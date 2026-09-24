@@ -12,8 +12,8 @@ const COMPONENTS = Object.freeze({
   admin: null,
   installer: [
     'assets/ankka-85bfe235.svg',
+    'assets/installer-06e206a1.css',
     'assets/installer-3b9796e1.js',
-    'assets/installer-b768c2db.css',
     'index.html',
   ],
   worker: ['index.js'],
@@ -21,7 +21,7 @@ const COMPONENTS = Object.freeze({
   'worker-retirement': ['index.js'],
 });
 const TREE_SHA256 = Object.freeze({
-  installer: 'd577fa29afc7705693390bfdcbd3ed689fdbe643fe8ce998a6bbd54a86b4f2ba',
+  installer: '1bbdba824f0c3ee424bacd3f00e0d95dc13c31cf123f236db02d9990faa896a1',
   worker: '09b1f8b50fb2fc4c77977aea0f7a772dffcc3069cd092393581a58e2d8734d04',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
@@ -183,7 +183,7 @@ test('admin and installer HTML use external same-origin assets without inline ex
     assert.match(html, /<meta name="viewport" content="width=device-width, initial-scale=1"\s*\/?\s*>/u);
     assert.doesNotMatch(html, /<(?:script|style)(?![^>]*\bsrc=)[^>]*>[^<]/iu);
     assert.doesNotMatch(html, /\s(?:on[a-z]+|style)\s*=/iu);
-    assert.doesNotMatch(html, /(?:href|src)="https?:\/\//iu);
+    assert.doesNotMatch(html, /<(?:script|link)\b[^>]*(?:href|src)="https?:\/\//iu);
     const sources = [...html.matchAll(/<(?:link|script)\b[^>]*(?:href|src)="([^"]+)"/giu)]
       .map((match) => match[1]);
     assert.equal(sources.length >= 2, true);
@@ -236,16 +236,16 @@ test('installer assets cover the exact hosted two-stage session, plan, approval,
     'Connect Cloudflare', 'Continue to Cloudflare', 'Finish secure setup', 'Start a fresh approval',
     'Remove the incomplete install',
   ]) assert.match(combined, new RegExp(copy, 'u'));
-  assert.match(html, /Approval 1/u);
-  assert.match(html, /Approval 2/u);
-  assert.match(html, /Installer grants are revoked/u);
+  assert.match(html, /First approval:/u);
+  assert.match(html, /Second approval:/u);
+  assert.match(html, /Access is revoked before setup continues/u);
   // The installer says before it starts that setup needs one account API token, who can create it, and where it goes.
-  assert.match(html, /an account administrator who can create one API token during setup/u);
-  assert.match(html, /Setup has three parts/u);
-  assert.match(html, /You paste it into your own gateway; it never passes through Ankka\./u);
+  assert.match(html, /Setup requires you to create an account API token/u);
+  assert.match(html, /Super Administrator or Administrator/u);
+  assert.match(html, /You enter the token into your own gateway, which saves it as an encrypted Worker secret; it never passes through Ankka/u);
   assert.doesNotMatch(html, /add an account-owned token directly to your gateway in Cloudflare/u);
   assert.match(html, /stores no Cloudflare token and sends no analytics/u);
-  assert.doesNotMatch(html, /target="_blank"/u);
+  assert.doesNotMatch(html, /target="_blank"(?! rel="noopener noreferrer")/u);
   assert.doesNotMatch(script, /window\.open/u);
   assert.match(script, /rate_limited: 'This installer is receiving too many requests/u);
   assert.match(script, /abuse_controls_unavailable: 'The installer request protection/u);

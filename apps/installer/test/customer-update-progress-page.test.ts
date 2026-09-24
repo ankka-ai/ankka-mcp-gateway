@@ -17,19 +17,35 @@ const SERVING_STEP = 'Wait for Cloudflare to serve the new version';
 
 interface PageNode {
   textContent: string;
+  className: string;
+  dataset: Record<string, string>;
+  hidden: boolean;
   replaceChildren(...children: readonly (PageNode | string)[]): void;
+  append(...children: readonly (PageNode | string)[]): void;
+  replaceWith(replacement: PageNode): void;
+  setParent(parent: PageNode): void;
+  replaceChild(current: PageNode, replacement: PageNode): void;
+  setAttribute(name: string, value: string): void;
   readonly shown: () => readonly (PageNode | string)[];
 }
 
 /** Enough of an element for the page: as in a document, assigning its text replaces its children. */
 function element(): PageNode {
-  let children: readonly (PageNode | string)[] = [];
-  return {
-    get textContent() { return children.filter((child) => v.is(v.string(), child)).join(''); },
+  let children: (PageNode | string)[] = [];
+  let parent: PageNode | null = null;
+  const node: PageNode = {
+    className: '', dataset: {}, hidden: false,
+    get textContent() { return children.map((child) => v.is(v.string(), child) ? child : child.textContent).join(''); },
     set textContent(text: string) { children = [text]; },
-    replaceChildren: (...next) => { children = next; },
+    replaceChildren: (...next) => { children = [...next]; for (const child of next) if (!v.is(v.string(), child)) child.setParent(node); },
+    append: (...next) => { children.push(...next); for (const child of next) if (!v.is(v.string(), child)) child.setParent(node); },
+    replaceWith: (replacement) => { if (parent) parent.replaceChild(node, replacement); },
+    setAttribute: () => undefined,
+    setParent: (value: PageNode) => { parent = value; },
+    replaceChild: (current: PageNode, replacement: PageNode) => { children = children.map((child) => child === current ? replacement : child); replacement.setParent(node); },
     shown: () => children,
   };
+  return node;
 }
 
 function unused(): never {
@@ -69,7 +85,14 @@ async function openPage(fetch: typeof globalThis.fetch) {
     message: () => node('#message').textContent,
     /** True while the loader is still part of the status line. */
     loading: () => node('#message').shown().includes(node('#loader')),
-    steps: () => node('#steps').shown().map((item) => v.is(v.string(), item) ? item : item.textContent),
+    steps: () => node('#steps').shown().map((item) => {
+      if (v.is(v.string(), item)) return item;
+      const heading = item.shown()[0];
+      if (heading === undefined || v.is(v.string(), heading)) return item.textContent;
+      const [name, detail] = heading.shown();
+      if (name === undefined || v.is(v.string(), name) || detail === undefined || v.is(v.string(), detail)) return item.textContent;
+      return detail.textContent === 'Waiting' ? name.textContent : `${name.textContent} — ${detail.textContent}`;
+    }),
   };
 }
 

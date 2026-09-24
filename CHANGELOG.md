@@ -8,6 +8,13 @@ Notable public product and repository changes are recorded here.
   identifying the gateway client. Keep discovery redirects blocked and stop
   attributing gateway startup failures to your Meta app configuration.
 
+- Give the installer and customer-hosted setup, update, failure, and recovery
+  screens the same frosted panel and Ankka wordmark treatment. The local UI
+  gallery now includes the update progress screen with its shared step list.
+  Setup asks for one administrator and requires the management token before
+  final approval. Button labels use the regular UI font, and setup and update
+  status text is shorter.
+
 - Show Gateway Management's available tools directly from the installed release.
   Saving a changed selection automatically refreshes Cloudflare's catalogue when
   needed, removing the separate capability-sync step after an upgrade. New tools

@@ -37,6 +37,7 @@ export const catalog: PreviewEntry[] = [
   worker('incomplete', 'Installation incomplete', 'customer-install-progress-page', 'Installation stopped before readiness.'),
   worker('denied', 'Approval rejected', 'customer-install-progress-page', 'Cloudflare did not approve the setup attempt.'),
   worker('operation-loading', 'Preparing change approval', 'customer-operation-router', 'The shared connector, update, and rollback authorization page.'),
+  worker('update-progress', 'Update · applying release', 'customer-operation-router', 'The Worker-hosted update progress page after Cloudflare approval, showing the real update steps.'),
   worker('operation-error', 'Change approval error', 'customer-operation-router', 'A change authorization link could not be started.'),
   worker('recovery-loading', 'Preparing setup recovery', 'customer-gateway-entrypoint', 'Requesting a fresh setup approval.'),
   worker('recovery-error', 'Setup recovery error', 'customer-gateway-entrypoint', 'The retry state for setup recovery.'),

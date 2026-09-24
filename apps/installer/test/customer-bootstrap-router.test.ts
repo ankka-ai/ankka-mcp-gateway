@@ -827,16 +827,17 @@ describe('management token step of setup', () => {
     test.holder.release();
   });
 
-  it('continues without a token through the explicit choice and forgets a value held before', async () => {
+  it('requires a held token before starting the final approval', async () => {
     const test = await reviewedSetup();
     await test.post('configuration', JSON.stringify(test.selection));
-    await test.paste({ managementToken: SCANNABLE_VALUE });
     const skipped = await test.paste({ skip: true });
-    expect(skipped.status).toBe(200);
-    expect(await skipped.json()).toEqual({ schemaVersion: 1, managementCredential: 'skipped' });
+    expect(skipped.status).toBe(400);
+    expect(await skipped.json()).toEqual({ schemaVersion: 1, error: 'management_token_invalid' });
+    const start = await test.post('oauth/start', '{}');
+    expect(start.status).toBe(409);
+    expect(await start.json()).toEqual({ schemaVersion: 1, error: 'management_token_required' });
     expect(test.holder.value()).toBeUndefined();
-    expect(await (await test.readSetup()).json()).toMatchObject({ managementCredential: { state: 'skipped' } });
-    expect(test.observable()).not.toContain(SCANNABLE_VALUE);
+    expect(await (await test.readSetup()).json()).toMatchObject({ managementCredential: { state: null } });
   });
 
   it('refuses every other body with one fixed error and keeps nothing of it', async () => {
@@ -986,7 +987,6 @@ describe('management token step of setup', () => {
   it('answers a failing host with the fixed unavailable error, and offers no step where the host has none', async () => {
     const failing = await reviewedSetup({ step: {
       accept: async () => { throw new Error(`storage refused ${SCANNABLE_VALUE}`); },
-      skip: async () => { throw new Error('storage refused'); },
       word: async () => undefined,
     } });
     const response = await failing.paste({ managementToken: SCANNABLE_VALUE });

@@ -14,7 +14,7 @@ import * as v from 'valibot';
  * pasted value in memory for the final runtime upload, `installed` once that
  * upload carried it, `skipped` when the customer continued without one, and
  * `dropped` when a provided value is no longer in memory (the object
- * restarted or the hold ran out), so the install finishes without it. The
+ * restarted or the hold ran out), so current setup waits for another paste. The
  * shell omits the key until the customer has chosen: a freshly deployed shell
  * answers exactly as before, and a hosted runtime that predates the key still
  * reads it during the readiness check, which happens before anyone can choose.

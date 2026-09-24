@@ -464,12 +464,12 @@ must explain the policy block without asking for broader permissions.
 9. On the same review page the Worker offers the management token step: a
    Cloudflare template link that fills in **Access: Apps and Policies Edit**,
    **MCP Portals Edit** and a name containing the management hostname, one
-   paste field, and an explicit control to continue without a token. The page
-   offers the second approval only once the customer has chosen. The pasted
+   paste field. The page offers the second approval only while the gateway
+   holds the required token. The pasted
    value is sent once by same-origin POST under the setup session, checked
    against Cloudflare's two account-token forms, and kept only in the
-   Durable Object's memory. Storage receives one fixed word about the
-   choice. The step is locked while an approval or an install runs.
+   Durable Object's memory. Storage records only that a token was provided.
+   The step is locked while an approval or an install runs.
 
 The restricted runtime exposes only:
 

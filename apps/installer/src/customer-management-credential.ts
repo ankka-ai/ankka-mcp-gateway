@@ -18,8 +18,8 @@ import type { CustomerStage2ConvergerResult } from './customer-stage2-converger'
  * install grant, until the final runtime upload writes it as a secret binding.
  * It is never written to Durable Object storage, the journal, a receipt, a
  * log line, an error, a URL, or any response, and it never passes through
- * anything Ankka hosts. An object restart loses it; the install then finishes
- * without it and says so.
+ * anything Ankka hosts. An object restart loses it; setup waits for another
+ * paste before the final approval can complete.
  */
 
 /** Where the customer's own setup page sends the pasted value, once, by same-origin POST. */
@@ -99,7 +99,7 @@ export const CUSTOMER_MANAGEMENT_CREDENTIAL_HOLD_MS = 30 * 60 * 1_000;
  * it carries nothing and does no work beyond forgetting the value when the
  * hold runs out. `tendCustomerManagementCredential` keeps the object from
  * being evicted while the customer approves in Cloudflare. An object that is
- * restarted anyway loses the value, and the install finishes without it.
+ * restarted anyway loses the value, and setup waits for another paste.
  */
 export class CustomerManagementCredentialHolder {
   #value: string | null = null;
@@ -253,8 +253,6 @@ export async function readCustomerManagementChoice(
 export interface CustomerManagementCredentialStep {
   /** Takes a validated value into memory and records only that one was provided. */
   readonly accept: (value: string) => Promise<void>;
-  /** Forgets any held value and records that the customer continued without one. */
-  readonly skip: () => Promise<void>;
   /** One fixed word, or undefined before the customer has chosen. */
   readonly word: () => Promise<CustomerManagementCredentialWord | undefined>;
 }
@@ -272,10 +270,6 @@ export function createCustomerManagementCredentialStep(
       // restart is reported as dropped rather than as never provided.
       await record('provided');
       holder.hold(value);
-    },
-    skip: async () => {
-      holder.release();
-      await record('skipped');
     },
     word: async () => holder.word(await readCustomerManagementChoice(storage)),
   });
