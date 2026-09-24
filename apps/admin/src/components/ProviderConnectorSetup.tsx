@@ -10,7 +10,9 @@ export function ProviderConnectorSetup({ recipe }: { recipe: NativeConnectorReci
       ? 'This connector needs a sign-in method your gateway does not support yet.'
       : recipe.status === 'provider_permission_required'
         ? 'This connector needs permission from the provider before you can connect it through your gateway.'
-        : 'This connector is not available to add yet. Compatibility and read-only access through your gateway still need verification.'}</p>
+        : recipe.id === 'meta-ads'
+          ? 'Try Meta Ads as a custom connector with a test ad account. Authentication, token renewal, and read-only access still need live verification before sharing it with your team.'
+          : 'This connector is not available to add yet. Compatibility and read-only access through your gateway still need verification.'}</p>
     <p className="mt-3 text-xs text-kumo-subtle">Provider endpoint</p>
     <code className="mt-1 block select-all break-all text-xs leading-5 text-kumo-default">{recipe.endpoint}</code>
     <div className="mt-4 grid gap-5 lg:grid-cols-2">

@@ -1,10 +1,11 @@
 # Native connector setup recipes
 
-> Documentation-only setup contracts, researched 2026-08-30. None is a released
+> Documentation-only setup contracts, researched 2026-08-30, with Meta Ads added
+> after review on 2026-09-24. None is a released
 > preset or a live-qualified connection. The production Source Catalog and the
 > existing BigQuery connection block are unchanged.
 
-The dashboard's native setup data covers 19 provider/region choices. It records
+The dashboard's native setup data covers 20 provider/region choices. It records
 the exact provider endpoint, documented read tools where available, upstream
 controls, scope requirements, provider evidence and remaining setup blockers.
 You can prepare the right provider settings without guessing an endpoint or
@@ -47,6 +48,7 @@ verified through Cloudflare. A documentary tool list is not `enabledTools`.
 | `intercom-eu`, `intercom-us` | Region-specific native endpoints | Conversation/contact-only read authority; prove article writes are unavailable; never switch regions automatically |
 | `stripe` | Current GET-only read tool and discovery tools | Actual read-only grant across the connection; no report, analytics, feedback or API writes by default |
 | `gorgias` | Provider beta remote endpoint | Prove actual granular read-only scopes before connecting a real support account |
+| `meta-ads` | Official remote MCP with dynamic registration | Use `ads_mcp_management` and `ads_read` only; the gateway verifies the actual grant before importing credentials; [setup and qualification](META_ADS.md) |
 | `ahrefs` | Provider hosted remote endpoint | Obtain provider confirmation for gateway/bridge use before authenticating |
 
 There is no native Zendesk recipe because no first-party remote endpoint was

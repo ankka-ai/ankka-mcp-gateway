@@ -35,6 +35,8 @@ installed release; a document or fixture is not a compatibility certification.
   from a reviewed specification without treating HTTP methods as authorization.
 - [Source access groups](SOURCE_ACCESS_GROUPS.md): per-source audience
   boundaries and what the dashboard exposes.
+- [Meta Ads](META_ADS.md): read-only OAuth setup, permission checks, and the
+  remaining live qualification for Meta's hosted MCP server.
 
 ## Develop and qualify
 

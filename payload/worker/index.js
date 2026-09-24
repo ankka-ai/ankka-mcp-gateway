@@ -4745,6 +4745,8 @@ async function discoverSourceOauth(sourceUrl) {
     try { resourceMetadata = await oauthJson(endpoint); break; } catch { /* Try the standard root fallback. */ }
   }
   if (!validSourceResourceMetadata(resourceMetadata, sourceUrl)) sourceOauthFailure();
+  if (sourceUrl === META_ADS_MCP_URL && (resourceMetadata.authorization_servers.length !== 1 ||
+      resourceMetadata.authorization_servers[0] !== META_ADS_OAUTH.issuer)) sourceOauthFailure();
   const issuer = oauthEndpoint(resourceMetadata.authorization_servers[0]);
   if (!issuer) sourceOauthFailure();
   const metadata = await oauthJson(`${issuer.origin}/.well-known/oauth-authorization-server${issuer.pathname === '/' ? '' : issuer.pathname}`);
@@ -4758,7 +4760,9 @@ async function discoverSourceOauth(sourceUrl) {
   const endpoints = {};
   for (const name of ['authorization_endpoint', 'token_endpoint', 'registration_endpoint']) {
     const endpoint = oauthEndpoint(metadata[name]);
-    if (!endpoint || endpoint.origin !== issuer.origin) sourceOauthFailure();
+    if (!endpoint || (sourceUrl === META_ADS_MCP_URL
+      ? metadata[name] !== META_ADS_OAUTH[name]
+      : endpoint.origin !== issuer.origin)) sourceOauthFailure();
     endpoints[name] = endpoint.href;
   }
   const supported = resourceMetadata.scopes_supported ?? metadata.scopes_supported ?? [];
@@ -4776,14 +4780,39 @@ const GORGIAS_MCP_URL = 'https://mcp.gorgias.com/mcp';
 // This connection is deliberately limited to ticket reads. Supported scopes
 // are a catalogue, not consent to all of the provider's read/write authority.
 const GORGIAS_TICKET_SCOPES = Object.freeze(['openid', 'email', 'profile', 'offline', 'tickets:read']);
+const META_ADS_MCP_URL = 'https://mcp.facebook.com/ads';
+// Meta's reviewed OAuth endpoints span three origins. Keep this exception
+// specific to this resource and these exact endpoints, including API version.
+const META_ADS_OAUTH = Object.freeze({
+  issuer: 'https://www.facebook.com/ads',
+  authorization_endpoint: 'https://www.facebook.com/v26.0/dialog/oauth',
+  token_endpoint: 'https://graph.facebook.com/v26.0/oauth/access_token',
+  registration_endpoint: 'https://mcp.facebook.com/.well-known/register/ads',
+});
+const META_ADS_READ_SCOPES = Object.freeze(['ads_mcp_management', 'ads_read']);
+// Facebook Login can include its default identity permission without a request.
+// No other unrequested permission, including other read scopes, is accepted.
+const META_ADS_GRANTED_SCOPES = Object.freeze([...META_ADS_READ_SCOPES, 'public_profile']);
+const META_ADS_PERMISSIONS_URL = 'https://graph.facebook.com/v26.0/me/permissions';
 
 function sourceOauthScopes(sourceUrl, supported) {
+  if (sourceUrl === META_ADS_MCP_URL) {
+    if (!META_ADS_READ_SCOPES.every((scope) => supported.includes(scope))) sourceOauthFailure('source_oauth_scope_unsupported');
+    return [...META_ADS_READ_SCOPES];
+  }
   if (sourceUrl !== GORGIAS_MCP_URL) return supported;
   if (!supported.includes('tickets:read')) sourceOauthFailure('source_oauth_scope_unsupported');
   return GORGIAS_TICKET_SCOPES.filter((scope) => supported.includes(scope));
 }
 
 function verifySourceOauthScope(sourceUrl, scope, requested) {
+  if (sourceUrl === META_ADS_MCP_URL) {
+    if (!oauthText(scope, 4096)) sourceOauthFailure('source_oauth_scope_unsupported');
+    const granted = scope.split(' ');
+    if (new Set(granted).size !== granted.length || !META_ADS_READ_SCOPES.every((value) => granted.includes(value) && requested.includes(value)) ||
+        granted.some((value) => !META_ADS_GRANTED_SCOPES.includes(value))) sourceOauthFailure('source_oauth_scope_unsupported');
+    return;
+  }
   if (sourceUrl !== GORGIAS_MCP_URL) return;
   if (!oauthText(scope, 4096)) sourceOauthFailure('source_oauth_scope_unsupported');
   const granted = scope.split(' ');
@@ -4791,6 +4820,30 @@ function verifySourceOauthScope(sourceUrl, scope, requested) {
     !GORGIAS_TICKET_SCOPES.includes(value) || !requested.includes(value))) {
     sourceOauthFailure('source_oauth_scope_unsupported');
   }
+}
+
+async function metaAdsGrantedScope(accessToken) {
+  // Inspect the actual app grant even if the token response declares scope:
+  // a previous Facebook login may have granted more than this request asked for.
+  // The token stays in memory and goes only to this fixed provider endpoint.
+  const permissions = await oauthJson(META_ADS_PERMISSIONS_URL, {
+    headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
+  }, 'permission_check');
+  if (permissions.error !== undefined || !Array.isArray(permissions.data) || permissions.data.length < 2 || permissions.data.length > 100 ||
+      (permissions.paging !== undefined && (!isRecord(permissions.paging) ||
+        permissions.paging.next !== undefined || permissions.paging.previous !== undefined))) {
+    sourceOauthFailure('source_oauth_scope_unsupported');
+  }
+  const seen = new Set(), granted = [];
+  for (const entry of permissions.data) {
+    if (!isRecord(entry) || !oauthText(entry.permission, 256) || seen.has(entry.permission) ||
+        !['granted', 'declined', 'expired'].includes(entry.status)) sourceOauthFailure('source_oauth_scope_unsupported');
+    seen.add(entry.permission);
+    if (entry.status === 'granted') granted.push(entry.permission);
+  }
+  const scope = granted.join(' ');
+  verifySourceOauthScope(META_ADS_MCP_URL, scope, META_ADS_READ_SCOPES);
+  return META_ADS_GRANTED_SCOPES.filter((value) => granted.includes(value)).join(' ');
 }
 
 async function ownedSourceOauthContext(storage, env, input) {
@@ -4892,9 +4945,15 @@ async function finishSourceOauth(storage, env, input) {
       (response.refresh_token !== undefined && !oauthText(response.refresh_token, 16384)) ||
       (response.expires_in !== undefined && (!Number.isSafeInteger(response.expires_in) || response.expires_in <= 0)) ||
       (response.scope !== undefined && !oauthText(response.scope, 4096))) sourceOauthFailure();
-  verifySourceOauthScope(context.source.url, response.scope, attempt.config.scopes_supported);
+  let confirmedScope = response.scope;
+  if (context.source.url === META_ADS_MCP_URL) {
+    if (confirmedScope !== undefined) verifySourceOauthScope(context.source.url, confirmedScope, attempt.config.scopes_supported);
+    confirmedScope = await metaAdsGrantedScope(response.access_token);
+  }
+  verifySourceOauthScope(context.source.url, confirmedScope, attempt.config.scopes_supported);
   const tokens = { access_token: response.access_token, token_type: 'Bearer' };
-  for (const key of ['refresh_token', 'expires_in', 'scope']) if (response[key] !== undefined) tokens[key] = response[key];
+  for (const key of ['refresh_token', 'expires_in']) if (response[key] !== undefined) tokens[key] = response[key];
+  if (confirmedScope !== undefined) tokens.scope = confirmedScope;
   // Consent and the token endpoint are external work. Recheck the provider
   // record immediately before writing so drift during exchange is refused too.
   const current = await ownedSourceOauthContext(storage, env, attempt);
@@ -6562,7 +6621,7 @@ export class AdminState {
           return result;
         } catch (error) {
           const diagnostic = error instanceof SourceDiscoveryError && error.diagnostic;
-          await record(diagnostic && ['discovery', 'client_registration', 'token_exchange'].includes(diagnostic.stage)
+          await record(diagnostic && ['discovery', 'client_registration', 'token_exchange', 'permission_check'].includes(diagnostic.stage)
             ? diagnostic : { stage: url.pathname.endsWith('/start') ? 'authorization_start' : 'authorization_callback',
               status: 'failed', httpStatus: null });
           return sourceToolsRefusal(error instanceof SourceDiscoveryError ? error.status : 502,

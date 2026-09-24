@@ -27,7 +27,7 @@ export interface NativeConnectorRecipe {
   readonly evidenceUrls: readonly string[]
 }
 
-export const NATIVE_RECIPE_RESEARCH_DATE = '2026-08-30'
+export const NATIVE_RECIPE_RESEARCH_DATE = '2026-09-24'
 export const NATIVE_RECIPE_NOTICE = 'Setup guidance only. These connections have not passed the gateway canary or catalog release review. No connector draft or tool permission is created.'
 export const NATIVE_RECIPE_STATUS_LABELS: Readonly<Record<NativeRecipeStatus, string>> = Object.freeze({
   compatibility_pending: 'Compatibility pending',
@@ -276,6 +276,19 @@ const authoredRecipes: readonly NativeConnectorRecipe[] = [
     blockers: [EXACT_TOOLS_BLOCKER, CANARY_BLOCKER, CATALOG_BLOCKER],
     setupSteps: ['Prepare an approved test workspace and limited connector identity.', 'Use the dedicated read-only URL and confirm the requested and granted provider permissions.', 'Capture the exact authenticated tool list before proposing a small issue/project allowlist.'],
     evidenceUrls: ['https://linear.app/docs/mcp'],
+  },
+  {
+    id: 'meta-ads', displayName: 'Meta Ads',
+    description: 'Read Facebook and Instagram campaign performance through Meta’s hosted MCP server.',
+    status: 'compatibility_pending', endpoint: 'https://mcp.facebook.com/ads',
+    authentication: 'oauth_dynamic_registration',
+    upstreamControls: ['Connect an identity with access only to the ad accounts your team should read.', 'Grant only ads_mcp_management and ads_read. Remove earlier write-capable app permissions before reconnecting.'],
+    requiredScopes: ['ads_mcp_management', 'ads_read'],
+    scopeNote: 'The gateway requests only these two permissions and checks the actual Meta grant before importing credentials. Facebook’s default public_profile identity permission is also accepted; other granted permissions are refused.',
+    documentedReadTools: ['ads_get_ad_entities', 'ads_get_opportunity_score', 'ads_insights_performance_trend'],
+    blockers: ['Meta dynamic registration, permission inspection, and Cloudflare refresh need authenticated qualification.', CANARY_BLOCKER, CATALOG_BLOCKER],
+    setupSteps: ['Use a disposable ad account to qualify the connection before sharing it with your team.', 'Add the exact endpoint as a custom OAuth connector, install the empty draft, then choose Authorize connector.', 'After sign-in, review the real reporting tools and choose an exact allowlist before assigning Team access.'],
+    evidenceUrls: ['https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-get-started', 'https://developers.facebook.com/documentation/ads-commerce/ads-ai-connectors/ads-mcp-server/ads-mcp-server-tools-comprehensive-reporting', 'https://developers.facebook.com/documentation/facebook-login/guides/permissions/request-revoke', 'https://www.facebook.com/.well-known/oauth-authorization-server/ads'],
   },
   {
     id: 'notion', displayName: 'Notion',

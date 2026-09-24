@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add read-only OAuth support for Meta's official Ads MCP endpoint, with exact
+  provider endpoint checks and verification of the actual granted permissions
+  before importing credentials. The connector library includes setup guidance;
+  authenticated Meta and Cloudflare qualification remains pending.
+
 - Let Cloudflare discover newly available Gateway Management and API-source
   tools independently of the saved allowlist. After syncing capabilities,
   operators can explicitly enable new tools on installed sources. Discovery

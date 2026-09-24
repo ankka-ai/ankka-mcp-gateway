@@ -87,6 +87,12 @@ The files in `apps/admin/src/assets/connectors/` were obtained and reviewed on
 - Gorgias: the unchanged PNG favicon linked from its official homepage,
   `https://cdn.prod.website-files.com/5e4ff204e7b6f80e402d407a/655f0a6ab7ecc73b0e8cbcad_Favicon%201.png`.
 
+Meta's `meta.svg` was added on 2026-09-24 from
+[Simple Icons](https://github.com/simple-icons/simple-icons/blob/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons/meta.svg)
+at the same pinned revision above, under CC0 1.0 Universal. The only modification
+is a blue fill. It was checked for scripts, external references, and private
+metadata; none were present. Meta owns the corresponding brand and trademark.
+
 The Ahrefs and Gorgias assets remain the property of their respective providers;
 no separate asset license was supplied. Their inclusion was requested by the
 repository maintainer for provider identification, not as a grant of broader
