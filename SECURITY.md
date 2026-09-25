@@ -32,7 +32,8 @@ a signed artifact does not imply production support.
 - The hosted installer uses a short-lived, operation-scoped Cloudflare OAuth
   grant. The grant exists only in request-local memory for the
   operator-approved operation and is not persisted or reused.
-- Gateway sources are read-only and use exact tool allowlists.
+- Connected MCP sources use exact tool allowlists for read and write access;
+  upstream permissions must independently enforce the intended operations.
 - Self-hosted gateways send no telemetry to Ankka.
 - Updates require signed release evidence and explicit operator approval.
   Removal additionally requires operator-owned, receipt-bound authority.

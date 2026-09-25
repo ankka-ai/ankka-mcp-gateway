@@ -40,7 +40,10 @@ they are explicitly documented as non-secret.
   notice must remain public; it must not add cookies, cross-session identifiers,
   account or user identifiers, IP or raw user-agent storage, provider-resource,
   credential, or free-form dimensions.
-- The initial capability boundary is read-only with explicit tool allowlists.
+- Connected MCP sources may expose read and write tools through explicit tool
+  allowlists. New tools stay disabled until selected; upgrades must not expand
+  existing allowlists or upstream grants. Dedicated read-only connectors retain
+  their narrower boundaries.
 - Prompts and tool names are not authorization boundaries; upstreams must also
   enforce the allowed operations.
 - Do not introduce arbitrary credential forwarding or open-proxy behavior.

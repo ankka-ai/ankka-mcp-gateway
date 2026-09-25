@@ -4806,7 +4806,22 @@ function putInstalledTools(gateway, sourceId, revision, enabledTools, options = 
   });
 }
 
-test('editing installed tools fetches the synced list and saves only the explicit selection', async () => fixture(async (gateway) => {
+test('current capability reporting accepts legacy status without changing stored status or receipts', async () => fixture(async (gateway) => {
+  const statusKey = 'ankka-mcp-gateway/public-status/v1';
+  const status = gateway.managementStorage.snapshot(statusKey);
+  const legacy = { ...status, gateway: { ...status.gateway, capabilityMode: 'read_only' } };
+  await gateway.managementStorage.put(statusKey, legacy);
+  const receipt = gateway.storage.snapshot();
+  const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const response = await gateway.api('/api/status');
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).gateway.capabilityMode, 'read_write');
+  assert.deepEqual(gateway.managementStorage.snapshot(statusKey), legacy);
+  assert.deepEqual(gateway.storage.snapshot(), receipt);
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), sources);
+}));
+
+test('edit tools stay disabled until selected and can be removed without changing assignments', async () => fixture(async (gateway) => {
   const current = await (await gateway.api('/api/sources')).json();
   const drafted = await gateway.api('/api/sources', { method: 'PUT', body: {
     schemaVersion: 1, revision: current.revision,
@@ -4826,7 +4841,8 @@ test('editing installed tools fetches the synced list and saves only the explici
     .find((entry) => entry.sourceId === draft.id);
   const installed = { source: draft, serverId: ownershipBefore.resources[0].provider.id, ownership: ownershipBefore };
   const server = gateway.provider.state.servers.get(installed.serverId);
-  server.tools.push({ name: 'company_export', inputSchema: { type: 'object' } });
+  server.tools.push({ name: 'company_update', inputSchema: { type: 'object' },
+    annotations: { readOnlyHint: false, destructiveHint: false } });
   const receiptBefore = canonicalJson(gateway.storage.snapshot());
   const teamBefore = gateway.managementStorage.snapshot(TEAM_KEY);
   const hashBefore = installed.ownership.resources[0].desiredHash;
@@ -4837,14 +4853,16 @@ test('editing installed tools fetches the synced list and saves only the explici
   assert.equal(listed.status, 200, await listed.clone().text());
   const catalogue = await listed.json();
   assert.equal(catalogue.state, 'ready');
-  assert.deepEqual(catalogue.tools.map((tool) => tool.name), ['company_export', 'company_lookup']);
+  assert.deepEqual(catalogue.tools.map((tool) => tool.name), ['company_lookup', 'company_update']);
   assert.deepEqual(catalogue.enabledTools, ['company_lookup']);
+  assert.equal(catalogue.tools.find((tool) => tool.name === 'company_update').readOnlyHint, false);
+  assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, [{ name: 'company_lookup', enabled: true }]);
   assert.equal(catalogue.pendingTools, null);
   assert.equal(catalogue.revision, revision);
   assertNoMutation(gateway.provider, readBaseline);
 
-  await refused(await putInstalledTools(gateway, installed.source.id, revision - 1, ['company_export', 'company_lookup']), 409, 'source_conflict');
-  await refused(await putInstalledTools(gateway, installed.source.id, revision, ['company_export', 'missing_tool']), 409, 'source_tools_mismatch');
+  await refused(await putInstalledTools(gateway, installed.source.id, revision - 1, ['company_lookup', 'company_update']), 409, 'source_conflict');
+  await refused(await putInstalledTools(gateway, installed.source.id, revision, ['company_update', 'missing_tool']), 409, 'source_tools_mismatch');
   await refused(await putInstalledTools(gateway, installed.source.id, revision, []), 400, 'source_tools_invalid');
   gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
   await refused(await gateway.serviceApi(installedToolsPath(installed.source.id)), 403, 'service_operation_denied');
@@ -4858,13 +4876,13 @@ test('editing installed tools fetches the synced list and saves only the explici
   assert.equal((await same.json()).revision, revision);
   assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY) ?? null, null);
 
-  const saved = await putInstalledTools(gateway, installed.source.id, revision, ['company_export', 'company_lookup']);
+  const saved = await putInstalledTools(gateway, installed.source.id, revision, ['company_lookup', 'company_update']);
   assert.equal(saved.status, 200, await saved.clone().text());
   const sources = await saved.json();
   assert.equal(sources.revision, revision + 1);
-  assert.deepEqual(sources.sources.find((source) => source.id === installed.source.id).enabledTools, ['company_export', 'company_lookup']);
+  assert.deepEqual(sources.sources.find((source) => source.id === installed.source.id).enabledTools, ['company_lookup', 'company_update']);
   assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, [
-    { name: 'company_export', enabled: true }, { name: 'company_lookup', enabled: true },
+    { name: 'company_lookup', enabled: true }, { name: 'company_update', enabled: true },
   ]);
   const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
     .find((entry) => entry.sourceId === installed.source.id);

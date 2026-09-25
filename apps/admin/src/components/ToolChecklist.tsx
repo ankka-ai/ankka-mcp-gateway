@@ -17,6 +17,7 @@ interface ToolChecklistProps {
 function annotation(tool: DiscoveredTool): string {
   const flags = []
   if (tool.readOnlyHint === true) flags.push('read-only hint')
+  if (tool.readOnlyHint === false) flags.push('may edit data')
   if (tool.destructiveHint === true) flags.push('destructive hint')
   if (tool.openWorldHint === true) flags.push('open-world hint')
   return flags.length ? flags.join(' · ') : 'No safety annotations'
@@ -77,6 +78,9 @@ export function ToolChecklist({ tools, selected, onChange, listLabel, missingDes
       </div>
       <p className="mt-2 text-xs text-kumo-subtle">
         Showing {visibleTools.length} of {tools.length} tools; {selected.length} selected.
+      </p>
+      <p className="mt-2 max-w-[80ch] text-xs leading-5 text-kumo-subtle">
+        You can allow read and edit tools. Everyone assigned to this connector can use the selected tools within the connected account’s permissions. Check what each tool can change before selecting it; provider permissions must enforce the access you intend.
       </p>
       <div className="mt-4 grid max-h-[38rem] gap-3 overflow-y-auto pr-1" tabIndex={0} aria-label={listLabel}>
         {visibleTools.map((tool) => (

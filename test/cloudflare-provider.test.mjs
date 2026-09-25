@@ -408,51 +408,55 @@ async function mutationFixture(kind, action, {
   };
 }
 
-test('creates, syncs, and reapplies an unauthenticated server using only strict fields', async () => {
-  const fixture = await mutationFixture('mcp_server', 'create');
-  const key = fixture.resource.key;
-  const root = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/servers`;
-  const mock = scriptedFetch([
-    { method: 'GET', path: `${root}/${key}`, response: notFound() },
-    { method: 'GET', response: success([]) },
-    { method: 'POST', path: root, response: success({ id: key }) },
-    { method: 'POST', path: `${root}/${key}/sync`, response: success({ status: 'waiting' }) },
-    { method: 'GET', path: `${root}/${key}`, response: success({
-      id: key,
-      status: 'ready',
-      tools: [{ name: 'company_prepare' }, { name: 'company_search' }],
-    }) },
-    { method: 'PUT', path: `${root}/${key}`, response: success({ id: key }) },
-  ]);
+for (const capabilityMode of ['read_only', 'read_write']) {
+  test(`creates, syncs, and reapplies an unauthenticated server using only strict fields (${capabilityMode})`, async () => {
+    const gatewayConfig = config();
+    gatewayConfig.policy.capabilityMode = capabilityMode;
+    const fixture = await mutationFixture('mcp_server', 'create', { gatewayConfig });
+    const key = fixture.resource.key;
+    const root = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/servers`;
+    const mock = scriptedFetch([
+      { method: 'GET', path: `${root}/${key}`, response: notFound() },
+      { method: 'GET', response: success([]) },
+      { method: 'POST', path: root, response: success({ id: key }) },
+      { method: 'POST', path: `${root}/${key}/sync`, response: success({ status: 'waiting' }) },
+      { method: 'GET', path: `${root}/${key}`, response: success({
+        id: key,
+        status: 'ready',
+        tools: [{ name: 'company_prepare' }, { name: 'company_search' }],
+      }) },
+      { method: 'PUT', path: `${root}/${key}`, response: success({ id: key }) },
+    ]);
 
-  assert.deepEqual(await provider(mock.fetchImpl).applyChange(fixture.input), {
-    status: 'submitted',
+    assert.deepEqual(await provider(mock.fetchImpl).applyChange(fixture.input), {
+      status: 'submitted',
+    });
+    assert.deepEqual(mock.calls[2].body, {
+      id: key,
+      auth_type: 'unauthenticated',
+      hostname: 'https://context.example.com/mcp',
+      name: 'Company context',
+      description: fixture.marker,
+      secure_web_gateway: false,
+      updated_prompts: [],
+      updated_tools: [
+        { name: 'company_prepare', enabled: true },
+        { name: 'company_search', enabled: true },
+      ],
+    });
+    assert.deepEqual(mock.calls[5].body, {
+      name: 'Company context',
+      description: fixture.marker,
+      secure_web_gateway: false,
+      updated_prompts: [],
+      updated_tools: [
+        { name: 'company_prepare', enabled: true },
+        { name: 'company_search', enabled: true },
+      ],
+    });
+    assert.equal(JSON.stringify(mock.calls[5].body).includes('auth_credentials'), false);
   });
-  assert.deepEqual(mock.calls[2].body, {
-    id: key,
-    auth_type: 'unauthenticated',
-    hostname: 'https://context.example.com/mcp',
-    name: 'Company context',
-    description: fixture.marker,
-    secure_web_gateway: false,
-    updated_prompts: [],
-    updated_tools: [
-      { name: 'company_prepare', enabled: true },
-      { name: 'company_search', enabled: true },
-    ],
-  });
-  assert.deepEqual(mock.calls[5].body, {
-    name: 'Company context',
-    description: fixture.marker,
-    secure_web_gateway: false,
-    updated_prompts: [],
-    updated_tools: [
-      { name: 'company_prepare', enabled: true },
-      { name: 'company_search', enabled: true },
-    ],
-  });
-  assert.equal(JSON.stringify(mock.calls[5].body).includes('auth_credentials'), false);
-});
+}
 
 test('never advances to sync after an outcome-unknown server POST', async () => {
   const fixture = await mutationFixture('mcp_server', 'create');
@@ -681,24 +685,28 @@ test('Portal create rejects a malformed same-host app before POST', async () => 
   assert.equal(mock.calls.some((call) => call.init.method === 'POST'), false);
 });
 
-test('inspects only an exact pending-created Portal with no same-host app candidates', async () => {
-  const fixture = await mutationFixture('portal', 'create');
-  const live = exactPendingPortal(fixture);
-  delete live.servers[0].updated_prompts;
-  const mock = scriptedFetch([
-    { method: 'GET', response: success(live) },
-    { method: 'GET', response: success([]) },
-    { method: 'GET', response: success([]) },
-  ]);
+for (const capabilityMode of ['read_only', 'read_write']) {
+  test(`inspects only an exact pending-created Portal with no same-host app candidates (${capabilityMode})`, async () => {
+    const gatewayConfig = config();
+    gatewayConfig.policy.capabilityMode = capabilityMode;
+    const fixture = await mutationFixture('portal', 'create', { gatewayConfig });
+    const live = exactPendingPortal(fixture);
+    delete live.servers[0].updated_prompts;
+    const mock = scriptedFetch([
+      { method: 'GET', response: success(live) },
+      { method: 'GET', response: success([]) },
+      { method: 'GET', response: success([]) },
+    ]);
 
-  assert.deepEqual(
-    await provider(mock.fetchImpl).inspectPendingPortalCreateRollback(fixture.input),
-    { status: 'ready', portalKey: fixture.resource.key },
-  );
-  assert.deepEqual(mock.calls.map((call) => call.init.method), ['GET', 'GET', 'GET']);
-  assert.equal(mock.calls[2].url.searchParams.get('name.exact'), fixture.resource.desired.hostname);
-  assert.equal(mock.calls[2].url.searchParams.get('match'), 'all');
-});
+    assert.deepEqual(
+      await provider(mock.fetchImpl).inspectPendingPortalCreateRollback(fixture.input),
+      { status: 'ready', portalKey: fixture.resource.key },
+    );
+    assert.deepEqual(mock.calls.map((call) => call.init.method), ['GET', 'GET', 'GET']);
+    assert.equal(mock.calls[2].url.searchParams.get('name.exact'), fixture.resource.desired.hostname);
+    assert.equal(mock.calls[2].url.searchParams.get('match'), 'all');
+  });
+}
 
 test('pending Portal rollback accepts an old receipt root when exact owned intent is unchanged', async () => {
   const fixture = await mutationFixture('portal', 'create', {

@@ -39,7 +39,7 @@ const gatewayStatusSchema = v.strictObject({
     name: v.string(),
     hostname: v.string(),
     mcpUrl: v.string(),
-    capabilityMode: v.literal('read_only'),
+    capabilityMode: v.picklist(['read_only', 'read_write']),
     codeMode: v.literal('default_on'),
   }),
   source: v.nullable(v.strictObject({

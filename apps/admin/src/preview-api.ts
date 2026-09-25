@@ -59,7 +59,7 @@ const status: GatewayStatus = {
     name: 'Example MCP Gateway',
     hostname: 'mcp.example.com',
     mcpUrl: 'https://mcp.example.com/mcp',
-    capabilityMode: 'read_only',
+    capabilityMode: 'read_write',
     codeMode: 'default_on',
   },
   source: null,

@@ -25,7 +25,7 @@
       "additionalProperties": false,
       "required": ["capabilityMode", "credentialCustody", "telemetry"],
       "properties": {
-        "capabilityMode": { "const": "read_only" },
+        "capabilityMode": { "enum": ["read_only", "read_write"] },
         "credentialCustody": { "const": "customer" },
         "telemetry": { "const": "off" }
       }

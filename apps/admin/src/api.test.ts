@@ -21,6 +21,12 @@ describe('HttpGatewayAdminApi', () => {
     updatedAt: '2026-08-29T00:00:00.000Z',
   } as const
 
+  it.each(['read_only', 'read_write'])('accepts gateway capability status %s', async (capabilityMode) => {
+    const status = { ...readyStatus, gateway: { ...readyStatus.gateway, capabilityMode } }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(status)))
+    expect((await new HttpGatewayAdminApi().getStatus()).gateway.capabilityMode).toBe(capabilityMode)
+  })
+
   it('removes the exact draft at its displayed revision through the same-origin API', async () => {
     const fetch = vi.fn(async () => Response.json({ schemaVersion: 1, revision: 5, applyMode: 'account_token', sources: [] }))
     vi.stubGlobal('fetch', fetch)

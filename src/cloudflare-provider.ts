@@ -1475,7 +1475,8 @@ function normalizeServerDesired(value: JsonObject, marker: string): ServerDesire
     'metadata', 'sourceId', 'name', 'endpoint', 'capabilityMode', 'secureWebGateway',
     'toolPolicy', 'authentication',
   ]);
-  if (value.capabilityMode !== 'read_only' || value.secureWebGateway !== false) fail('invalid_input');
+  if ((value.capabilityMode !== 'read_only' && value.capabilityMode !== 'read_write')
+    || value.secureWebGateway !== false) fail('invalid_input');
   const name = requireText(value.name);
   const endpoint = requireText(value.endpoint);
   if (name.length < 1 || name.length > 350) fail('invalid_input');
@@ -1548,7 +1549,8 @@ function normalizePortalDesired(value: JsonObject, marker: string): PortalDesire
     'metadata', 'name', 'hostname', 'capabilityMode', 'codeMode',
     'secureWebGateway', 'sourceMappings',
   ]);
-  if (value.capabilityMode !== 'read_only' || value.secureWebGateway !== false) fail('invalid_input');
+  if ((value.capabilityMode !== 'read_only' && value.capabilityMode !== 'read_write')
+    || value.secureWebGateway !== false) fail('invalid_input');
   const name = requireText(value.name);
   const hostname = requireText(value.hostname);
   if (name.length < 1 || name.length > 350) fail('invalid_input');

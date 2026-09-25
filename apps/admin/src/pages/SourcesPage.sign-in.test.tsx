@@ -192,6 +192,25 @@ describe('choosing the tools of a connected sign-in connector', () => {
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('allows an explicitly selected edit tool without enabling other tools', async () => {
+    const user = userEvent.setup()
+    const editTool = { name: 'records_update', title: 'Edit record', description: 'Update a record.',
+      readOnlyHint: false, destructiveHint: false, openWorldHint: true }
+    const api = pausedApi(pause({ failureCode: 'source_tools_required' }), signInDraft, offered('ready', [...REAL_TOOLS, editTool]))
+    api.chooseSourceActionTools.mockResolvedValue({ schemaVersion: 1, actionId: ACTION_ID, sourceId: signInDraft.id, revision: 5, enabledTools: ['records_update'] })
+    api.prepareSourceAction.mockResolvedValue({ schemaVersion: 1, actionId: ACTION_ID, status: 'succeeded', expiresAt: new Date(Date.now() + 600_000).toISOString() })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const region = await choice()
+    const edit = await within(region).findByRole('checkbox', { name: /records_update/u })
+    expect(edit).not.toBeChecked()
+    expect(within(region).getByText('may edit data · open-world hint')).toBeVisible()
+    expect(within(region).getByText(/Everyone assigned to this connector can use the selected tools/u)).toBeVisible()
+    await user.click(edit)
+    await user.click(within(region).getByRole('button', { name: 'Allow 1 tool and finish installation' }))
+    await waitFor(() => expect(api.chooseSourceActionTools).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, signInDraft.id, ['records_update']))
+    expect(within(region).getByRole('checkbox', { name: /records_delete/u })).not.toBeChecked()
+  })
+
   it('preselects the catalog recommendations that exist and names the ones that do not', async () => {
     const preset = SYNTHETIC_SOURCE_CATALOG.sources[0]
     if (!preset) throw new Error('Expected a synthetic preset')

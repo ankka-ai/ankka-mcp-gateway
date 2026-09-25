@@ -174,6 +174,7 @@ describe('strict deployment contracts', () => {
 
     expect(selection.firstSource).toBeNull();
     expect(plan.gatewayConfiguration.firstSource).toBeNull();
+    expect(plan.gatewayConfiguration.capabilityMode).toBe('read_write');
     expect(plan.gatewayResources.map((resource) => resource.kind)).toEqual([
       'portal',
       'portal_access_application',

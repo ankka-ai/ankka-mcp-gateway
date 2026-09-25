@@ -694,7 +694,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           <div className="empty-card">
             <div className="flex size-12 items-center justify-center rounded-2xl bg-kumo-tint text-kumo-subtle"><Database size={23} /></div>
             <h2 className="mt-4 text-base font-semibold text-kumo-strong">No connectors yet</h2>
-            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP connector and verify that each allowed tool is read-only.' : tokenIsMissing ? 'Your gateway needs its management token before it can install a connector.' : 'Connector installation is unavailable right now.'}</p>
+            <p className="mt-1.5 max-w-[48ch] text-pretty text-sm leading-6 text-kumo-subtle">{installationEnabled ? 'Add an MCP connector and choose which read and edit tools your team can use.' : tokenIsMissing ? 'Your gateway needs its management token before it can install a connector.' : 'Connector installation is unavailable right now.'}</p>
             <Button variant="secondary" className="pressable mt-5" disabled={!installationEnabled} onClick={openLibrary}><Plus size={16} weight="bold" /> Add your first connector</Button>
           </div>
         ) : (
