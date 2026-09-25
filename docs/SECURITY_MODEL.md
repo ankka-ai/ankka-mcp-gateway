@@ -85,10 +85,14 @@ path currently has a beta gap for individual policy API requests. See
 
 ## Authorization
 
-The initial data-source boundary is read-only with exact tool allowlists. Wildcards
-are rejected. Tool names, descriptions, and source-authored annotations are
-untrusted review aids; the upstream and Cloudflare policy must independently
-enforce allowed operations.
+Connected MCP sources support read and write tools through exact tool allowlists.
+Wildcards are rejected and new tools stay disabled until selected. Tool names,
+descriptions, and source-authored annotations are untrusted review aids; the
+upstream and Cloudflare policy must independently enforce allowed operations.
+Assignments grant access to the source's entire selected tool list, including
+edits, using the connected upstream identity. There is no separate per-person
+read/edit role or per-call approval layer. See [source capabilities](SOURCE_CAPABILITIES.md)
+for the operation risks, rollout boundary, and read-only connector exceptions.
 
 The optional [Gateway Management source](GATEWAY_MANAGEMENT_MCP.md) is an explicit
 management capability. Its ordinary source assignment grants fixed management

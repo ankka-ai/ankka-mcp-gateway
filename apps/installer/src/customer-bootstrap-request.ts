@@ -731,6 +731,8 @@ async function buildDesiredResources(
             sourceId: source.id,
             name: source.label,
             endpoint: source.url,
+            // Historical receipt-hash label; tools are authorized by the exact
+            // allowlist and upstream permissions. Keep in sync with the payload.
             capabilityMode: 'read_only',
             secureWebGateway: false,
             toolPolicy: {
@@ -769,6 +771,7 @@ async function buildDesiredResources(
         metadata,
         name: settings.connect.name,
         hostname: settings.connect.hostname,
+        // Preserve the receipt format used to verify existing installations.
         capabilityMode: 'read_only',
         codeMode: settings.connect.codeMode,
         secureWebGateway: false,

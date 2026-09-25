@@ -2,21 +2,23 @@
 
 This document records the boundary for two optional post-preview capabilities.
 The operator-run live Portal runner described below is implemented, but
-no gateway deployment or live result is part of this repository. The only
-implemented gateway capability mode remains `read_only`, with exact tool
-allowlists and independent upstream enforcement.
+no gateway deployment or live result is part of this repository. The
+gateway supports `read_only` and `read_write` declarations, with exact tool
+allowlists and independent upstream enforcement. Connected MCP servers can expose
+explicitly selected edit tools; see [source capabilities](SOURCE_CAPABILITIES.md).
 
 For the current founding-team dogfood deployment, one Access group and manual
 health/catalogue checks are sufficient. Multiple visibility partitions,
-scheduled machine identities, exact actor correlation, and every form of write
-execution are deferred until a present product need justifies them.
+scheduled machine identities, and exact actor correlation are deferred until a
+present product need justifies them. Read and edit tools use the existing source
+assignments and exact tool selection rather than a new permissions system.
 
 ## Readiness summary
 
 | Capability | Current state | Remaining gate |
 | --- | --- | --- |
 | Per-source Access groups | Implemented and optional; one group is enough for current dogfood | Live qualification only when a deployment actually needs more than one visibility audience |
-| Write tools | Parked; rejected by the schema-level capability boundary | A future user need and a new threat-model review; no current implementation plan |
+| Connected MCP write tools | Supported through explicit tool selection and upstream permissions | Verify the intended provider grant and behavior before enabling a real operation |
 | Scheduled live-source canary | Optional standalone bounded runner implemented; synthetic transport tests pass | Operator-owned scheduling and sink only if manual qualification stops being sufficient |
 
 ## Per-source Access groups
@@ -55,17 +57,18 @@ and any hosted UI that constructs the snapshot remain external integrations.
 Group names, tool names, and prompts are not authorization. The upstream source
 must still reject operations outside the caller's actual authority.
 
-## Writes are parked
+## Read and edit access
 
-The current product is read-only. A possible future `bls-admin` source remains
-physically separate from `bls-read`, but it is not part of this roadmap or a
-current implementation target. Existing write-risk notes are historical
-research only and must not drive approval workflows, idempotency machinery,
-policy engines, or generalized IAM into the founding-team deployment.
+Connected MCP sources can expose read and edit tools. Existing tool selections
+and upstream grants are preserved on update. Each source's assigned people can
+use its selected tools; there is no separate read/edit role or per-call approval
+workflow. Tool hints do not establish permission or classify an operation safely.
 
-If a real write use case arrives, start a new design from that operation, its
-current users, and its demonstrated failure modes. Never widen the `bls-read`
-credential or catalogue as a shortcut.
+Use a separate source and upstream identity when different people need different
+authority. Dedicated readers, including `bls-read`, retain their read-only
+credentials and catalogues. Agent-authored API sources and provider-specific
+read-only bridges are not widened by this change. The current operation risks
+and qualification boundary are documented in [source capabilities](SOURCE_CAPABILITIES.md).
 
 ## Operator-run live canary
 

@@ -75,6 +75,28 @@ async function createPlan(overrides = {}) {
   );
 }
 
+test('read/write plans bind the mode and exact tools without changing source identities or access', async () => {
+  const readConfig = config();
+  const read = await buildGatewayDesiredState(readConfig, { target: target(), access: access() });
+  const editConfig = structuredClone(readConfig);
+  editConfig.policy.capabilityMode = 'read_write';
+  editConfig.sources[0].enabledTools.push('records_update');
+  const edit = await buildGatewayDesiredState(editConfig, { target: target(), access: access() });
+  assert.equal(edit.installationId, read.installationId);
+  for (const resource of edit.resources) {
+    const previous = read.resources.find((entry) => entry.key === resource.key);
+    assert.ok(previous);
+    if (['mcp_server', 'portal'].includes(resource.kind)) {
+      assert.equal(resource.desired.capabilityMode, 'read_write');
+      assert.notEqual(resource.desiredHash, previous.desiredHash);
+      const policy = resource.kind === 'portal' ? resource.desired.sourceMappings[0] : resource.desired.toolPolicy;
+      assert.equal(policy.defaultDisabled, true);
+      assert.deepEqual(policy.allowedTools, ['company_prepare', 'company_search', 'records_update']);
+    } else assert.deepEqual(resource, previous);
+  }
+  assert.deepEqual(await buildGatewayDesiredState(readConfig, { target: target(), access: access() }), read);
+});
+
 function observedFromPlan(plan, owner = {}) {
   return plan.changes
     .filter((change) => change.desiredHash)

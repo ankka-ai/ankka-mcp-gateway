@@ -23,8 +23,8 @@ Ankka MCP Gateway is for teams using Cloudflare that want to:
 - review exact tool allowlists and an inspectable deployment and update path.
 
 It is not a hosted catalogue of provider accounts or a general-purpose proxy.
-You bring your own MCP sources and enforce read-only access upstream as well
-as at the gateway.
+You bring your own MCP sources, select the exact read and edit tools your team
+may use, and enforce the intended permissions upstream as well as at the gateway.
 
 ## Why this exists
 
@@ -39,10 +39,11 @@ team member or agent's MCP client
        -> approved MCP sources
 ```
 
-The initial capability boundary is read-only. Every source has an exact tool
-allowlist; wildcard tools are rejected. Tool names and source-authored safety
-annotations are useful for review, but they are not authorization by
-themselves.
+Connected MCP sources support read and edit tools. Every source has an exact
+tool allowlist; wildcard tools are rejected and new tools stay disabled until
+selected. Tool names and source-authored safety annotations are useful for review,
+but upstream permissions must independently enforce the intended access.
+See [read and edit access](docs/SOURCE_CAPABILITIES.md) for setup and limits.
 
 ## Run locally
 
@@ -94,7 +95,7 @@ replace them or route ordinary MCP traffic through an Ankka-hosted service.
 
 This repository adds an inspectable management layer around those resources:
 
-- **Configuration and planning:** secret-free configuration, exact read-only
+- **Configuration and planning:** secret-free configuration, exact
   tool allowlists, and deterministic plans for review.
 - **Self-hosted management:** a dashboard and Worker for source management
   and operator-approved lifecycle actions.
@@ -156,13 +157,15 @@ they never transit or persist at Ankka. The optional hosted installer uses a
 separate, short-lived Cloudflare grant for the operation you approve.
 That grant is not an upstream provider credential.
 
-### Does read-only access depend on tool names?
+### How are read and edit permissions enforced?
 
-No. Exact tool allowlists are required, but names, descriptions, and safety
+Exact tool allowlists are required, but names, descriptions, and safety
 annotations are not authorization boundaries. Each upstream must independently
-enforce the permitted operations. Read-only describes the exposed source
-capabilities; it does not prevent operator-approved management actions such as
-deployment, updates, or removal.
+enforce the permitted operations. For read-only access, use a read-only upstream
+identity or endpoint and select only read tools. For edit access, explicitly
+select the required tools and authorize the corresponding provider permissions.
+Everyone assigned to a source shares its tool selection. Deployment, updates,
+and removal retain their separate management authorization.
 
 ### Can I deploy it outside Cloudflare?
 

@@ -1689,6 +1689,10 @@ function marker(installationId, key) {
 }
 
 async function buildDesiredResources(settings, installationId, sourceDefaultDeny = false) {
+  // Keep the historical capabilityMode labels in receipt hashes. They are not
+  // sent to Cloudflare or used to authorize tools. Exact tool selections and
+  // upstream permissions govern execution; changing these labels would break
+  // ownership checks and removal of existing installations.
   const source = settings.sources[0] ?? null;
   const allowedEmails = [...settings.access.adminEmails, ...settings.access.memberEmails].sort(compareText);
   const identitiesHash = await sha256({ emails: allowedEmails });
@@ -2799,7 +2803,7 @@ function safePublicStatus(value) {
       !exactKeys(value.gateway, ['name', 'hostname', 'mcpUrl', 'capabilityMode', 'codeMode']) ||
       !isText(value.gateway.name) || !hostname(value.gateway.hostname) ||
       value.gateway.mcpUrl !== `https://${value.gateway.hostname}/mcp` ||
-      value.gateway.capabilityMode !== 'read_only' || value.gateway.codeMode !== 'default_on' ||
+      !['read_only', 'read_write'].includes(value.gateway.capabilityMode) || value.gateway.codeMode !== 'default_on' ||
       (value.source !== null && (
         !exactKeys(value.source, ['label', 'endpoint', 'enabledTools']) ||
         !isText(value.source.label) || !isText(value.source.endpoint) ||
@@ -2820,6 +2824,8 @@ function publicStatusFromReadyResponse(body) {
       name: body.settings.connect.name,
       hostname: body.settings.connect.hostname,
       mcpUrl: `https://${body.settings.connect.hostname}/mcp`,
+      // Retain the stored shape for rollback; status reads advertise this
+      // runtime's read/write support without changing persisted state.
       capabilityMode: 'read_only',
       codeMode: 'default_on',
     },
@@ -7043,7 +7049,10 @@ export class AdminState {
     }
     if (url.pathname === INTERNAL_STATUS_PATH) {
       const status = safePublicStatus(await this.state.storage.get(STATUS_KEY));
-      return status ? fixedJson(200, status) : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
+      // Describe this runtime's capabilities without rewriting stored legacy
+      // status, which an earlier release still needs to read after rollback.
+      return status ? fixedJson(200, { ...status, gateway: { ...status.gateway, capabilityMode: 'read_write' } })
+        : fixedJson(503, { schemaVersion: 1, status: 'unavailable' });
     }
     if (url.pathname === INTERNAL_SOURCES_PATH) {
       const sources = safeManagementSources(await this.state.storage.get(SOURCES_KEY));

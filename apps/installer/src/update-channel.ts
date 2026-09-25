@@ -152,7 +152,7 @@ export function buildPublicUpdateChannel(bundle: VerifiedReleaseBundle): PublicU
       ...(['gateway-v0.1.15', 'gateway-v0.1.16', 'gateway-v0.1.17', 'gateway-v0.1.18', 'gateway-v0.1.19'].includes(bundle.manifest.release) ? [
         'Team permissions apply only to MCP sources already installed in your gateway.',
         'New-source creation is unavailable in this release, including first-source onboarding for fresh empty gateways.',
-        'Administrators remain fixed; source write tools are not activated and existing read-only boundaries are unchanged.',
+        'Administrators, source tool selections, and upstream permissions are unchanged. New tools are not enabled automatically.',
         'Once a permission-policy write is armed, automatic teardown and rollback to older runtimes are blocked, including when the write outcome is uncertain.',
       ] : []),
       ...(bundle.manifest.release === 'gateway-v0.1.17' ? [

@@ -13,6 +13,21 @@ async function example() {
   );
 }
 
+test('accepts read and write declarations without changing exact-tool and credential boundaries', async () => {
+  const config = await example();
+  for (const capabilityMode of ['read_only', 'read_write']) {
+    config.policy.capabilityMode = capabilityMode;
+    assert.deepEqual(validateGatewayConfig(config), config);
+  }
+  config.sources[0].enabledTools = ['records_update'];
+  assert.deepEqual(validateGatewayConfig(config), config);
+  config.sources[0].enabledTools = ['*'];
+  assert.throws(() => validateGatewayConfig(config), /must not be a wildcard/u);
+  config.sources[0].enabledTools = ['records_update'];
+  config.policy.capabilityMode = 'unrestricted';
+  assert.throws(() => validateGatewayConfig(config), /must be read_only or read_write/u);
+});
+
 test('requires public sources to disable per-user upstream authentication', async () => {
   const config = await example();
   config.sources[0].authentication = { mode: 'none', onBehalfOfUser: true };

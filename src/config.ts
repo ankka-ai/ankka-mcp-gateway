@@ -25,7 +25,7 @@ const gatewayConfigSchema = v.strictObject({
     codeMode: v.picklist(['off', 'opt_in', 'default_on', 'enforced']),
   }),
   policy: v.strictObject({
-    capabilityMode: v.literal('read_only'),
+    capabilityMode: v.picklist(['read_only', 'read_write']),
     credentialCustody: v.literal('customer'),
     telemetry: v.literal('off'),
   }),
@@ -100,8 +100,8 @@ function validatePolicy(policy: JsonValue | undefined, errors: string[]): void {
     ['capabilityMode', 'credentialCustody', 'telemetry'],
     errors,
   );
-  if (policy.capabilityMode !== 'read_only') {
-    errors.push('policy.capabilityMode must be read_only');
+  if (policy.capabilityMode !== 'read_only' && policy.capabilityMode !== 'read_write') {
+    errors.push('policy.capabilityMode must be read_only or read_write');
   }
   if (policy.credentialCustody !== 'customer') {
     errors.push('policy.credentialCustody must be customer');

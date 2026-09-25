@@ -929,6 +929,7 @@ test('management status requires a verified Access JWT and exposes no provider o
       'access', 'controlPlaneOrigin', 'gateway', 'release', 'schemaVersion', 'serviceIdentity', 'source', 'status', 'updatedAt',
     ]);
     assert.equal(status.controlPlaneOrigin, 'https://deploy.ankka.ai');
+    assert.equal(status.gateway.capabilityMode, 'read_write');
     assert.equal(status.serviceIdentity, null); // no service identity configured for this deployment
     const serialized = JSON.stringify(status);
     assert.doesNotMatch(serialized, /(?:provider|receipt|journal|tombstone|installationId|accountId|zoneId)/iu);

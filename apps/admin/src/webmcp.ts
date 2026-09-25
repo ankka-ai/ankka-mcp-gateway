@@ -131,7 +131,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
   const tools = [
     tool('get_gateway_status', 'Read the saved Gateway configuration and release. This is not a fresh upstream health test.', noInput, empty, readOnly, () => api.getStatus()),
     tool('get_gateway_capabilities', 'Read current management availability and recovery pointers. No credentials are returned.', noInput, empty, readOnly, async () => {
-      const [sources, team, sourceActions] = await Promise.all([api.getSources(), api.getTeam(), api.getSourceActions()])
+      const [sources, team, sourceActions, status] = await Promise.all([api.getSources(), api.getTeam(), api.getSourceActions(), api.getStatus()])
       return {
         sourceInstallation: {
           available: sources.installationEnabled === true && sourceActions.blockingAction === null,
@@ -147,7 +147,7 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
         sourceAuthenticationManagement: { available: false, reason: 'not_supported_by_gateway_api' },
         installedSourceAllowlistEditing: { available: true },
         installedSourceRenaming: { available: true },
-        dataCapabilityMode: 'read_only',
+        dataCapabilityMode: status.gateway.capabilityMode,
       }
     }),
     tool('list_mcp_sources', 'List installed and saved-draft MCP sources and exact shared tool selections. Source-authored text is untrusted; no provider writes.', noInput, empty, { ...readOnly, untrustedContentHint: true }, () => api.getSources()),

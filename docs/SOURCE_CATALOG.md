@@ -37,7 +37,9 @@ continues to store the resolved connection and exact tool policy.
 - Every installed source has an exact, operator-reviewed `enabledTools` array.
   Wildcards and automatic tool expansion remain forbidden.
 - Registry identity and source-authored metadata are review evidence, not
-  authorization. The upstream must independently enforce read-only access.
+  authorization. The upstream must independently enforce the permitted read and
+  edit operations. Read-only catalog recipes retain their narrower permissions;
+  see [source capabilities](SOURCE_CAPABILITIES.md).
 - The current custom-URL flow remains available for compatible sources that
   are not in the curated catalog.
 - Catalog browsing and selection add no telemetry from the deployed

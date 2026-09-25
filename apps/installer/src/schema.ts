@@ -307,7 +307,7 @@ export interface StaticDeployPlan {
     zoneName: string;
     managementHostname: string;
     portalHostname: string;
-    capabilityMode: 'read_only';
+    capabilityMode: 'read_only' | 'read_write';
     codeMode: 'default_on';
     firstSource: {
       name: string;
@@ -405,7 +405,7 @@ const staticDeployPlanSchema = v.strictObject({
     zoneName: stringSchema,
     managementHostname: stringSchema,
     portalHostname: stringSchema,
-    capabilityMode: v.literal('read_only'),
+    capabilityMode: v.picklist(['read_only', 'read_write']),
     codeMode: v.literal('default_on'),
     firstSource: v.nullable(v.strictObject({
       name: stringSchema,
@@ -485,7 +485,7 @@ export async function buildStaticDeployPlan(
     zoneName: selection.basics.zoneName,
     managementHostname: selection.basics.managementHostname,
     portalHostname: selection.basics.portalHostname,
-    capabilityMode: 'read_only',
+    capabilityMode: 'read_write',
     codeMode: 'default_on',
     firstSource: selection.firstSource === null ? null : Object.freeze({
       name: selection.firstSource.name,

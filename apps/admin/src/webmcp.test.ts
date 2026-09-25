@@ -235,8 +235,10 @@ describe('Gateway WebMCP tool contracts', () => {
     expectNoApiCalls(api)
   })
 
-  it('reports compact current capabilities without exposing the roster or claiming health', async () => {
+  it.each(['read_only', 'read_write'] as const)('reports runtime capability %s without exposing the roster or claiming health', async (capabilityMode) => {
     const { api, call, team, sources } = fixture()
+    const status = await api.getStatus()
+    api.getStatus.mockResolvedValue({ ...status, gateway: { ...status.gateway, capabilityMode } })
     api.getSources.mockResolvedValue({ ...sources, installationEnabled: false, revision: 19 })
     api.getTeam.mockResolvedValue({ ...team, revision: 21 })
     const result = await call('get_gateway_capabilities')
@@ -253,7 +255,7 @@ describe('Gateway WebMCP tool contracts', () => {
       sourceAuthenticationManagement: { available: false },
       installedSourceAllowlistEditing: { available: true },
       installedSourceRenaming: { available: true },
-      dataCapabilityMode: 'read_only',
+      dataCapabilityMode: capabilityMode,
     } })
     expect(JSON.stringify(result)).not.toContain('operator@example.com')
     expect(JSON.stringify(result)).not.toContain('teammate@example.com')

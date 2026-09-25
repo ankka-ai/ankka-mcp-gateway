@@ -454,7 +454,7 @@ async function buildDesiredResources(
         sourceId: source.id,
         name: source.label,
         endpoint: source.url,
-        capabilityMode: 'read_only',
+        capabilityMode: config.policy.capabilityMode,
         secureWebGateway: false,
         toolPolicy: {
           defaultDisabled: true,
@@ -508,7 +508,7 @@ async function buildDesiredResources(
       metadata,
       name: config.gateway.name,
       hostname: config.gateway.hostname,
-      capabilityMode: 'read_only',
+      capabilityMode: config.policy.capabilityMode,
       codeMode: config.gateway.codeMode,
       secureWebGateway: false,
       sourceMappings,
