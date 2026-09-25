@@ -67,15 +67,15 @@
     "dev:runtime": "node apps/installer/scripts/dev-runtime.mjs"
   },
   "devDependencies": {
-    "@oxlint/plugins": "1.80.0",
+    "@oxlint/plugins": "1.85.0",
     "@types/node": "22.20.1",
-    "oxlint": "1.80.0",
+    "oxlint": "1.85.0",
     "playwright-core": "1.63.0",
     "typescript": "7.0.2",
     "miniflare": "5.20260826.0-alpha"
   },
   "dependencies": {
-    "valibot": "^1.4.2"
+    "valibot": "^1.5.0"
   },
   "overrides": {
     "sharp": "0.35.4"

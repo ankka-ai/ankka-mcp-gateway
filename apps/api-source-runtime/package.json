@@ -12,14 +12,14 @@
     "dev": "wrangler dev --local"
   },
   "dependencies": {
-    "@cloudflare/codemode": "0.5.1",
-    "jose": "6.2.10",
-    "zod": "4.5.4"
+    "@cloudflare/codemode": "0.5.2",
+    "jose": "6.2.12",
+    "zod": "4.6.5"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "~5.20260827.1",
+    "@cloudflare/workers-types": "~5.20260922.1",
     "typescript": "7.0.2",
     "vitest": "~4.1.9",
-    "wrangler": "~4.127.0"
+    "wrangler": "~4.136.3"
   }
 }
