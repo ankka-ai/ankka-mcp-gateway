@@ -58,7 +58,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
     if (metadata.some((entry) => choice.includes(entry.name) && entry.alias &&
       (!/^[a-zA-Z0-9]+([_-][a-zA-Z0-9]+)*$/.test(entry.alias) || entry.alias.length > 40 ||
        catalogue.tools.some((tool) => tool.name !== entry.name && tool.name === entry.alias) ||
-       metadata.some((other) => other.name !== entry.name && other.alias === entry.alias)))) {
+       metadata.some((other) => choice.includes(other.name) && other.name !== entry.name && other.alias === entry.alias)))) {
       setError('Use a unique tool name with letters, numbers, underscores or hyphens, up to 40 characters.')
       return
     }
