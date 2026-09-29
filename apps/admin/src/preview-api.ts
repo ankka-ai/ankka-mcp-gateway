@@ -435,10 +435,10 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     if (!source.enabledTools.includes('preview_export')) {
       tools.push({ name: 'preview_export', title: null, description: 'A tool in Cloudflare’s synced list that is not allowed yet.', readOnlyHint: true, destructiveHint: false, openWorldHint: false })
     }
-    return { schemaVersion: 1, sourceId, revision: this.#sources.revision, state: 'ready', tools, enabledTools: [...source.enabledTools], pendingTools: null }
+    return { schemaVersion: 1, sourceId, revision: this.#sources.revision, state: 'ready', tools, enabledTools: [...source.enabledTools], toolMetadata: source.toolMetadata ?? [], pendingTools: null, pendingToolMetadata: null }
   }
 
-  async updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[]): Promise<ManagedSources> {
+  async updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ManagedSources['sources'][number]['toolMetadata']): Promise<ManagedSources> {
     const source = this.#sources.sources.find((candidate) => candidate.id === sourceId)
     if (!source || source.status !== 'installed') throw new GatewayApiError(409, 'source_tools_unavailable')
     if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
@@ -446,7 +446,9 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     if (chosen.length === 0 || chosen.length > 500) throw new GatewayApiError(400, 'source_tools_invalid')
     const known = new Set((await this.getInstalledSourceTools(sourceId)).tools.map((tool) => tool.name))
     if (chosen.some((name) => !known.has(name))) throw new GatewayApiError(409, 'source_tools_mismatch')
-    if (chosen.join('\u0000') !== [...source.enabledTools].sort().join('\u0000')) {
+    const metadata = (toolMetadata ?? source.toolMetadata ?? []).filter((entry) => chosen.includes(entry.name))
+    if (JSON.stringify(metadata) !== JSON.stringify(source.toolMetadata ?? []) || chosen.join('\u0000') !== [...source.enabledTools].sort().join('\u0000')) {
+      source.toolMetadata = metadata
       source.enabledTools = chosen
       this.#sources.revision += 1
     }

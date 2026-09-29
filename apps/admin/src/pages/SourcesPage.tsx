@@ -716,8 +716,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             installNote={blocker ? null : rollbackNote}
             onAuthorize={(sourceId) => void authorize(sourceId)}
             onLoadSourceTools={(sourceId) => api.getInstalledSourceTools(sourceId)}
-            onSaveSourceTools={async (sourceId, revision, enabledTools) => {
-              await api.updateInstalledSourceTools(revision, sourceId, enabledTools)
+            onSaveSourceTools={async (sourceId, revision, enabledTools, toolMetadata) => {
+              await api.updateInstalledSourceTools(revision, sourceId, enabledTools, toolMetadata)
               await refreshSources()
             }}
             onRenameSource={async (sourceId, label) => {

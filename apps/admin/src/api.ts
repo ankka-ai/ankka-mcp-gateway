@@ -55,6 +55,13 @@ const gatewayStatusSchema = v.strictObject({
   serviceIdentity: v.optional(v.nullable(v.strictObject({ clientId: v.string() }))),
   updatedAt: v.string(),
 })
+export const toolMetadataSchema = v.array(v.strictObject({
+  name: v.string(),
+  alias: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(40), v.regex(/^[a-zA-Z0-9]+([_-][a-zA-Z0-9]+)*$/u))),
+  description: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(2000))),
+}))
+export type ToolMetadata = v.InferOutput<typeof toolMetadataSchema>
+interface InstalledToolsInput { schemaVersion: number; revision: number; enabledTools: string[]; toolMetadata?: ToolMetadata }
 const managedSourceSchema = v.strictObject({
   id: v.string(),
   label: v.string(),
@@ -63,6 +70,7 @@ const managedSourceSchema = v.strictObject({
   onBehalfOfUser: v.boolean(),
   enabledTools: v.array(v.string()),
   status: sourceStatusSchema,
+  toolMetadata: v.optional(toolMetadataSchema),
 })
 const managedSourcesSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -186,6 +194,8 @@ const installedSourceToolsSchema = v.strictObject({
   tools: sourceActionToolsSchema.entries.tools,
   enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.maxLength(500)),
   catalogueSource: v.optional(v.literal('gateway')),
+  toolMetadata: v.optional(toolMetadataSchema),
+  pendingToolMetadata: v.optional(v.nullable(toolMetadataSchema)),
   pendingTools: v.nullable(v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.minLength(1), v.maxLength(500))),
 })
 const sourceAuthorizationSchema = v.strictObject({
@@ -421,7 +431,7 @@ export interface GatewayAdminApi {
   /** Cloudflare’s synced catalogue for an installed connector, plus the saved allowlist. New tools are not selected. */
   getInstalledSourceTools(sourceId: string): Promise<InstalledSourceTools>
   /** Replaces an installed connector’s allowlist and its Portal tool configuration. Assignments stay as they are. */
-  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[]): Promise<ManagedSources>
+  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<ManagedSources>
   /** Renames an installed connector in the gateway, in Team, and on its Access policy. Assignments stay as they are. */
   renameInstalledSource(revision: number, sourceId: string, label: string): Promise<ManagedSources>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
@@ -522,6 +532,7 @@ const ERROR_MESSAGES = new Map([
   ['source_tools_required', 'The connector is connected and nothing is enabled yet. Choose its tools below to finish installation.'],
   ['source_tools_mismatch', 'A selected tool is not in the list Cloudflare synced from this connector. Review the selection below.'],
   ['source_tools_unavailable', 'This installation is not waiting for a tool choice. Check its recorded status.'],
+  ['source_tool_metadata_invalid', 'Use unique custom names with letters, numbers, underscores or hyphens, up to 40 characters. Descriptions can have up to 2,000 characters.'],
   ['source_tools_invalid', 'Select between 1 and 500 tools from the list, then try again.'],
   ['source_tools_unsupported', 'Cloudflare’s synced list for this connector cannot be offered here. Nothing was enabled.'],
   ['source_catalogue_unavailable', 'Cloudflare did not return this connector’s server record. Try again in a moment.'],
@@ -740,10 +751,12 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, installedSourceToolsSchema)
   }
 
-  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[]): Promise<ManagedSources> {
+  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<ManagedSources> {
+    const body: InstalledToolsInput = { schemaVersion: 1, revision, enabledTools: [...new Set(enabledTools)].sort() }
+    if (toolMetadata !== undefined) body.toolMetadata = toolMetadata
     return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, managedSourcesSchema, {
       method: 'PUT',
-      body: JSON.stringify({ schemaVersion: 1, revision, enabledTools: [...new Set(enabledTools)].sort() }),
+      body: JSON.stringify(body),
     })
   }
 

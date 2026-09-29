@@ -1,5 +1,5 @@
 import { useEffect, useId, useState } from 'react'
-import { GatewayApiError, type InstalledSourceTools, type ManagedSource } from '../api'
+import { GatewayApiError, type InstalledSourceTools, type ManagedSource, type ToolMetadata } from '../api'
 import { Button } from './Button'
 import { syncedHintSummary } from './SourceToolChoice'
 import { ToolChecklist } from './ToolChecklist'
@@ -8,7 +8,7 @@ interface InstalledSourceToolsProps {
   source: ManagedSource
   disabled: boolean
   onLoad(sourceId: string): Promise<InstalledSourceTools>
-  onSave(sourceId: string, revision: number, enabledTools: string[]): Promise<void>
+  onSave(sourceId: string, revision: number, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<void>
 }
 
 const WAITING = {
@@ -30,6 +30,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
   const [open, setOpen] = useState(false)
   const [catalogue, setCatalogue] = useState<InstalledSourceTools | null>(null)
   const [selected, setSelected] = useState<string[]>([])
+  const [metadata, setMetadata] = useState<ToolMetadata>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -41,6 +42,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
       const next = await onLoad(source.id)
       setCatalogue(next)
       setSelected(selectedFrom(next))
+      setMetadata(next.pendingToolMetadata ?? next.toolMetadata ?? [])
       setOpen(true)
     } catch (cause) {
       setError(cause instanceof GatewayApiError ? cause.message : 'The gateway request failed. Refresh and try again.')
@@ -53,10 +55,23 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
   async function save() {
     if (!catalogue) return
     const choice = catalogue.pendingTools ?? [...selected].sort()
+    if (metadata.some((entry) => choice.includes(entry.name) && entry.alias &&
+      (!/^[a-zA-Z0-9]+([_-][a-zA-Z0-9]+)*$/.test(entry.alias) || entry.alias.length > 40 ||
+       catalogue.tools.some((tool) => tool.name !== entry.name && tool.name === entry.alias) ||
+       metadata.some((other) => other.name !== entry.name && other.alias === entry.alias)))) {
+      setError('Use a unique tool name with letters, numbers, underscores or hyphens, up to 40 characters.')
+      return
+    }
     setSaving(true)
     setError(null)
     try {
-      await onSave(source.id, catalogue.revision, choice)
+      const overrides = catalogue.pendingToolMetadata ?? metadata.filter((entry) => choice.includes(entry.name)).map((entry) => {
+        const result: ToolMetadata[number] = { name: entry.name }
+        if (entry.alias) result.alias = entry.alias
+        if (entry.description?.trim()) result.description = entry.description.trim()
+        return result
+      }).filter((entry) => entry.alias || entry.description)
+      await onSave(source.id, catalogue.revision, choice, overrides)
       setOpen(false)
       setCatalogue(null)
     } catch (cause) {
@@ -109,10 +124,17 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
                     listLabel={`${source.label} ${builtin ? 'available' : 'synced'} tools`}
                     missingDescription={builtin ? 'This tool has no description in the installed gateway release.' : 'This tool has no description in Cloudflare’s synced list.'}
                     disabled={busy || pending !== null}
+                    renderDetails={(tool) => selected.includes(tool.name) ? (
+                      <ToolPresentation name={tool.name} upstreamDescription={tool.description ?? ''}
+                        value={metadata.find((entry) => entry.name === tool.name)} disabled={busy || pending !== null}
+                        onChange={(entry) => setMetadata((current) => [
+                          ...current.filter((item) => item.name !== tool.name), ...(entry ? [entry] : []),
+                        ].sort((a, b) => a.name.localeCompare(b.name)))} />
+                    ) : null}
                   />
                 </div>
               ) : null}
-              <p className="mt-4 text-xs leading-5 text-kumo-subtle">This updates the gateway’s allowlist and the Portal configuration for this connector. Who can use it does not change.</p>
+              <p className="mt-4 text-xs leading-5 text-kumo-subtle">Custom names and descriptions help your client choose tools. Original names still control the allowlist. Reconnect your client after saving to refresh its tool list.</p>
               <Button type="button" variant="primary" className="pressable mt-3" disabled={busy || !canSave} loading={saving} onClick={() => void save()}>
                 {pending ? 'Finish tool update' : 'Save tools'}
               </Button>
@@ -170,5 +192,39 @@ export function InstalledSourceName({ source, disabled, onRename }: {
       {error ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{error}</p> : null}
       <Button type="button" variant="secondary" className="pressable mt-3" disabled={busy || unchanged || !nameIsValid(name)} loading={saving} onClick={() => void save()}>Save name</Button>
     </div>
+  )
+}
+
+function ToolPresentation({ name, upstreamDescription, value, disabled, onChange }: {
+  name: string
+  upstreamDescription: string
+  value: ToolMetadata[number] | undefined
+  disabled: boolean
+  onChange(value: ToolMetadata[number] | null): void
+}) {
+  const id = useId()
+  function change(field: 'alias' | 'description', next: string) {
+    const entry = { ...value, name, [field]: next }
+    if (!entry.alias) delete entry.alias
+    if (!entry.description) delete entry.description
+    onChange(entry.alias || entry.description ? entry : null)
+  }
+  return (
+    <details className="mt-2 rounded-lg border border-kumo-line p-3">
+      <summary className="cursor-pointer text-xs font-medium text-kumo-default">{value ? 'Custom name and description' : 'Customize name and description'}</summary>
+      <div className="mt-3 grid gap-3">
+        <label htmlFor={`${id}-alias`} className="text-xs text-kumo-subtle">Name shown to your client
+          <input id={`${id}-alias`} className="text-input mt-1.5 w-full" placeholder={name} value={value?.alias ?? ''}
+            maxLength={40} disabled={disabled} onChange={(event) => change('alias', event.target.value)} />
+        </label>
+        <label htmlFor={`${id}-description`} className="text-xs text-kumo-subtle">Description shown to your client
+          <textarea id={`${id}-description`} className="text-input mt-1.5 min-h-28 w-full" placeholder={upstreamDescription || 'Use the upstream description'}
+            maxLength={2000} value={value?.description ?? ''} disabled={disabled}
+            onChange={(event) => change('description', event.target.value)} />
+        </label>
+        <p className="text-xs leading-5 text-kumo-subtle">Original tool: <code>{name}</code>. Leave either field empty to use its upstream value.</p>
+        {value ? <Button type="button" variant="secondary" disabled={disabled} onClick={() => onChange(null)}>Reset to upstream values</Button> : null}
+      </div>
+    </details>
   )
 }
