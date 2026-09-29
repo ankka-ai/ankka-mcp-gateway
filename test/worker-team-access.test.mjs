@@ -5701,3 +5701,81 @@ test('dashboard fields are strictly typed and deployment administrators cannot b
   }
   assertNoMutation(gateway.provider, baseline);
 }));
+
+
+test('tool metadata preserves routing, other sources, authority and supports reset by an older client', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const ownership = canonicalJson(gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership);
+  const otherMappings = structuredClone(gateway.provider.state.portal.servers.filter((entry) => entry.server_id !== installed.serverId));
+  const metadata = [{ name: 'company_lookup', alias: 'catalog_lookup', description: 'Find a company by its exact identifier.' }];
+  const write = (rev, overrides) => putInstalledTools(gateway, installed.source.id, rev, ['company_lookup'], {
+    body: { schemaVersion: 1, revision: rev, enabledTools: ['company_lookup'], toolMetadata: overrides },
+  });
+  const response = await write(revision, metadata);
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, [{ ...metadata[0], enabled: true }]);
+  assert.deepEqual(gateway.provider.state.portal.servers.filter((entry) => entry.server_id !== installed.serverId), otherMappings);
+  assert.equal(canonicalJson(gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership), ownership);
+  const catalogue = await (await gateway.api(installedToolsPath(installed.source.id))).json();
+  assert.deepEqual(catalogue.toolMetadata, metadata);
+  assert.deepEqual(catalogue.enabledTools, ['company_lookup']);
+  assert.equal(catalogue.pendingToolMetadata, null);
+  assert.ok(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease);
+  const same = await putInstalledTools(gateway, installed.source.id, revision + 1, ['company_lookup']);
+  assert.equal(same.status, 200, await same.clone().text());
+  assert.equal((await same.json()).revision, revision + 1, 'legacy client preserves metadata');
+  const reset = await write(revision + 1, []);
+  assert.equal(reset.status, 200, await reset.clone().text());
+  assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, [{ name: 'company_lookup', enabled: true }]);
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === installed.source.id).toolMetadata, undefined);
+}));
+
+test('tool metadata rejects invalid values, disabled original-name collisions and Code Mode collisions before writes', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  gateway.provider.state.servers.get(installed.serverId).tools.push({ name: 'company_export', inputSchema: { type: 'object' } });
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  for (const metadata of [null, [{ name: 'missing', alias: 'lookup' }], [{ name: 'company_lookup' }],
+    [{ name: 'company_lookup', alias: '*' }], [{ name: 'company_lookup', alias: 'a'.repeat(41) }],
+    [{ name: 'company_lookup', alias: 'company_export' }], [{ name: 'company_lookup', alias: 'company-export' }],
+    [{ name: 'company_lookup', description: 'x'.repeat(2001) }], [{ name: 'company_lookup', description: '' }],
+    [{ name: 'company_lookup', alias: 'lookup', enabled: true }],
+    [{ name: 'company_lookup', alias: 'lookup' }, { name: 'company_lookup', alias: 'lookup_again' }],
+  ]) {
+    const before = gateway.provider.requests.length;
+    await refused(await putInstalledTools(gateway, installed.source.id, revision, ['company_lookup'], {
+      body: { schemaVersion: 1, revision, enabledTools: ['company_lookup'], toolMetadata: metadata },
+    }), 400, 'source_tool_metadata_invalid');
+    assertNoMutation(gateway.provider, before);
+    assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY) ?? null, null);
+  }
+}));
+
+test('tool metadata resumes a lost write with Cloudflare response fields and keeps pending metadata immutable', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const toolMetadata = [{ name: 'company_lookup', alias: 'catalog_lookup', description: 'Look up a company.' }];
+  const update = (metadata = toolMetadata) => putInstalledTools(gateway, installed.source.id, revision, ['company_lookup'], {
+    body: { schemaVersion: 1, revision, enabledTools: ['company_lookup'], toolMetadata: metadata },
+  });
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'PUT' || !record.pathname.includes('/mcp/portals/')) return undefined;
+    state.portal = { id: state.portal.id, ...record.body, servers: record.body.servers.map((mapping) => ({
+      ...mapping, server_id: mapping.id, updated_tools: mapping.updated_tools.map(({ name, enabled, alias, description }) => ({
+        name, enabled, portal_alias: alias ?? null, portal_description: description ?? null, server_alias: null, server_description: null,
+      })),
+    })) };
+    throw new Error('lost portal response');
+  });
+  await refused(await update(), 409, 'source_tools_recovery_required');
+  const catalogue = await (await gateway.api(installedToolsPath(installed.source.id))).json();
+  assert.deepEqual(catalogue.pendingToolMetadata, toolMetadata);
+  await refused(await update([]), 409, 'source_tools_pending');
+  gateway.provider.hook(undefined);
+  const before = gateway.provider.requests.length;
+  const resumed = await update();
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assertNoMutation(gateway.provider, before);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY), null);
+  assert.deepEqual((await (await gateway.api(installedToolsPath(installed.source.id))).json()).toolMetadata, toolMetadata);
+}));

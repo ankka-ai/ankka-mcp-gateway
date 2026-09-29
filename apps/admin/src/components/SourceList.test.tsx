@@ -129,7 +129,7 @@ describe('SourceList', () => {
 
     await user.click(screen.getByRole('checkbox', { name: /export_document/ }))
     await user.click(screen.getByRole('button', { name: 'Save tools' }))
-    expect(onSaveSourceTools).toHaveBeenCalledExactlyOnceWith(sources[0].id, 4, ['export_document', 'fetch_document', 'search'])
+    expect(onSaveSourceTools).toHaveBeenCalledExactlyOnceWith(sources[0].id, 4, ['export_document', 'fetch_document', 'search'], [])
   })
 
   it('renames an installed connector and leaves a draft unnamed', async () => {

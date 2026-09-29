@@ -5,7 +5,7 @@ import { InstalledSourceName, InstalledSourceToolsEditor } from './InstalledSour
 import { SourceRemoval } from './SourceRemoval'
 import { Check, Clock, MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
-import type { InstalledSourceTools, ManagedSource } from '../api'
+import type { InstalledSourceTools, ManagedSource, ToolMetadata } from '../api'
 
 const filters = [
   { value: 'all', label: 'All' },
@@ -35,7 +35,7 @@ interface SourceListProps {
   removeDisabled?: boolean
   onRemoveDraft?(sourceId: string): void
   onLoadSourceTools?(sourceId: string): Promise<InstalledSourceTools>
-  onSaveSourceTools?(sourceId: string, revision: number, enabledTools: string[]): Promise<void>
+  onSaveSourceTools?(sourceId: string, revision: number, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<void>
   onRenameSource?(sourceId: string, label: string): Promise<void>
   sourceToolsDisabled?: boolean
 }

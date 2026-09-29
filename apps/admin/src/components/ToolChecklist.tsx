@@ -1,5 +1,5 @@
 import { Checkbox } from './Checkbox'
-import { useId, useMemo, useState } from 'react'
+import { type ReactNode, useId, useMemo, useState } from 'react'
 import type { DiscoveredTool } from '../api'
 import { Button } from './Button'
 
@@ -11,6 +11,7 @@ interface ToolChecklistProps {
   listLabel: string
   /** Shown for a tool whose origin supplied no description. */
   missingDescription: string
+  renderDetails?(tool: DiscoveredTool): ReactNode
   disabled?: boolean
 }
 
@@ -28,7 +29,7 @@ function annotation(tool: DiscoveredTool): string {
  * source fills it from Cloudflare's synced list after the operator has connected it. Names, descriptions and hints are
  * source-authored either way: review aids, never an authorization boundary.
  */
-export function ToolChecklist({ tools, selected, onChange, listLabel, missingDescription, disabled = false }: ToolChecklistProps) {
+export function ToolChecklist({ tools, selected, onChange, listLabel, missingDescription, renderDetails, disabled = false }: ToolChecklistProps) {
   const [filter, setFilter] = useState('')
   const filterId = useId()
   const selectedNames = useMemo(() => new Set(selected), [selected])
@@ -84,7 +85,8 @@ export function ToolChecklist({ tools, selected, onChange, listLabel, missingDes
       </p>
       <div className="mt-4 grid max-h-[38rem] gap-3 overflow-y-auto pr-1" tabIndex={0} aria-label={listLabel}>
         {visibleTools.map((tool) => (
-          <label key={tool.name} className="tool-option-card">
+          <div key={tool.name}>
+          <label className="tool-option-card">
             <Checkbox
               checked={selectedNames.has(tool.name)}
               disabled={disabled}
@@ -98,6 +100,8 @@ export function ToolChecklist({ tools, selected, onChange, listLabel, missingDes
               <small className="mt-1 block text-[0.6875rem] text-kumo-inactive">{annotation(tool)}</small>
             </span>
           </label>
+          {renderDetails?.(tool)}
+          </div>
         ))}
         {visibleTools.length === 0 ? (
           <p className="rounded-lg border border-dashed border-kumo-line p-5 text-center text-sm text-kumo-subtle">No tools match this filter.</p>

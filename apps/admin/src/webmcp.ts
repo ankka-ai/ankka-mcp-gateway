@@ -1,6 +1,6 @@
 import * as v from 'valibot'
 import {
-  GatewayApiError, safeGatewayErrorCode, validHandoffUrl,
+  GatewayApiError, safeGatewayErrorCode, validHandoffUrl, toolMetadataSchema,
   type GatewayAdminApi, type PreparedAction, type RuntimeOperation,
 } from './api'
 
@@ -155,16 +155,20 @@ export function createGatewayWebMcpTools(api: GatewayAdminApi, installationEnabl
       { type: 'object', additionalProperties: false, required: ['sourceId'], properties: { sourceId: { type: 'string', pattern: SOURCE_ID } } },
       v.strictObject({ sourceId: v.pipe(v.string(), v.regex(new RegExp(SOURCE_ID, 'u'))) }),
       { ...readOnly, openWorldHint: true, untrustedContentHint: true }, ({ sourceId }) => api.getInstalledSourceTools(sourceId)),
-    tool('update_installed_source_tools', 'Replace an installed connector’s allowlist with the exact tools you reviewed. This updates the Portal configuration for that connector. Assignments do not change. New catalogue tools stay off unless named.',
+    tool('update_installed_source_tools', 'Replace an installed connector’s allowlist with the exact tools you reviewed. Optional toolMetadata customizes names and descriptions by original tool name; omit to preserve or pass [] to reset. Assignments do not change. New catalogue tools stay off unless named.',
       { type: 'object', additionalProperties: false, required: ['sourceId', 'revision', 'enabledTools'], properties: {
         sourceId: { type: 'string', pattern: SOURCE_ID }, revision: { type: 'integer', minimum: 1 },
         enabledTools: { type: 'array', minItems: 1, maxItems: 500, uniqueItems: true, items: { type: 'string', minLength: 1, maxLength: 128 } },
+        toolMetadata: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: false, required: ['name'], properties: {
+          name: { type: 'string' }, alias: { type: 'string', minLength: 1, maxLength: 40, pattern: '^[a-zA-Z0-9]+([_-][a-zA-Z0-9]+)*$' }, description: { type: 'string', minLength: 1, maxLength: 2000 },
+        } } },
       } },
       v.strictObject({
         sourceId: v.pipe(v.string(), v.regex(new RegExp(SOURCE_ID, 'u'))),
         revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
         enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.minLength(1), v.maxLength(500), v.check((names) => new Set(names).size === names.length)),
-      }), mutation, ({ sourceId, revision, enabledTools }) => api.updateInstalledSourceTools(revision, sourceId, enabledTools)),
+        toolMetadata: v.optional(toolMetadataSchema),
+      }), mutation, ({ sourceId, revision, enabledTools, toolMetadata }) => api.updateInstalledSourceTools(revision, sourceId, enabledTools, toolMetadata)),
     tool('rename_installed_source', 'Rename an installed connector. This updates the name in the gateway, in Team, and on its Access policy. Assignments, the URL, and the tool allowlist do not change.',
       { type: 'object', additionalProperties: false, required: ['sourceId', 'revision', 'label'], properties: {
         sourceId: { type: 'string', pattern: SOURCE_ID }, revision: { type: 'integer', minimum: 1 },
