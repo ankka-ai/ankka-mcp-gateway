@@ -43,3 +43,18 @@ it('resets saved metadata while keeping the allowlist', async () => {
   await user.click(screen.getByRole('button', { name: 'Save tools' }))
   expect(onSave).toHaveBeenLastCalledWith(source.id, 4, ['lookup'], [])
 })
+
+it('can reuse an alias from a tool removed from the selection', async () => {
+  const user = userEvent.setup()
+  const onSave = vi.fn(async () => {})
+  const listed: InstalledSourceTools = { ...catalogue, toolMetadata: [{ name: 'lookup', alias: 'catalog_lookup' }],
+    tools: [...catalogue.tools, { name: 'lookup_other', title: null, description: 'Find another record.', readOnlyHint: true, destructiveHint: false, openWorldHint: false }] }
+  render(<InstalledSourceToolsEditor source={source} disabled={false} onLoad={async () => listed} onSave={onSave} />)
+  await user.click(screen.getByRole('button', { name: 'Edit tools' }))
+  await user.click(screen.getByRole('checkbox', { name: /^lookuplookup/u }))
+  await user.click(screen.getByRole('checkbox', { name: /^lookup_otherlookup_other/u }))
+  await user.click(screen.getByText('Customize name and description'))
+  await user.type(screen.getByRole('textbox', { name: 'Name shown to your client' }), 'catalog_lookup')
+  await user.click(screen.getByRole('button', { name: 'Save tools' }))
+  expect(onSave).toHaveBeenLastCalledWith(source.id, 4, ['lookup_other'], [{ name: 'lookup_other', alias: 'catalog_lookup' }])
+})
