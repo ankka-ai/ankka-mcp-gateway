@@ -3,14 +3,14 @@ import { DisclosureTrigger } from './Disclosure'
 import { SourceIcon } from './SourceIcon'
 import { InstalledSourceName, InstalledSourceToolsEditor } from './InstalledSourceTools'
 import { SourceRemoval } from './SourceRemoval'
-import { Check, Clock, MagnifyingGlass } from '@phosphor-icons/react'
+import { MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
 import type { InstalledSourceTools, ManagedSource, ToolMetadata } from '../api'
 
 const filters = [
   { value: 'all', label: 'All' },
-  { value: 'installed', label: 'Installed' },
-  { value: 'draft', label: 'Drafts' },
+  { value: 'installed', label: 'Active' },
+  { value: 'draft', label: 'Incomplete' },
 ] as const
 
 interface SourceListProps {
@@ -117,10 +117,10 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                   </td>
                   <td className="px-3 py-3">
                     {pendingRemovalSourceId === source.id ? <span className="text-warning-strong">Removal started</span> : source.status === 'installed' ? (
-                      <span className="inline-flex items-center gap-2 text-success-strong"><Check aria-hidden="true" size={17} className="shrink-0" />Installed</span>
+                      <span className="inline-flex items-center rounded-full bg-success/10 px-2.5 py-1 text-xs font-medium text-success-strong">Active</span>
                     ) : (
                       <div className="flex flex-wrap items-center gap-2">
-                        <span className="inline-flex items-center gap-1.5 text-warning-strong"><Clock aria-hidden="true" size={16} />{draftLabel?.(source.id) ?? 'Draft'}</span>
+                        <span className="inline-flex items-center rounded-full bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning-strong">{draftLabel?.(source.id) ?? 'Incomplete'}</span>
                         <Button
                           type="button"
                           variant="secondary"
@@ -152,7 +152,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                       <p className="mt-4 text-xs font-medium text-kumo-subtle">{source.enabledTools.length === 0
                         // Only a sign-in source can be saved without tools: its real list exists once it is connected.
                         ? 'No tools chosen yet. Nothing is enabled; you choose from the connector’s real list after connecting it.'
-                        : `${source.enabledTools.length} exact tool${source.enabledTools.length === 1 ? '' : 's'}`}</p>
+                        : `${source.enabledTools.length} tool${source.enabledTools.length === 1 ? '' : 's'}`}</p>
                       <div className="mt-2 flex max-h-52 flex-wrap gap-2 overflow-y-auto pr-1" role="region" aria-label={`${source.label} allowed tools`} tabIndex={0}>
                         {source.enabledTools.map((tool) => <code key={tool} className="tool-chip break-all">{tool}</code>)}
                       </div>
@@ -188,7 +188,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
             )
           })}
           {visibleSources.length === 0 ? (
-            <tr><td colSpan={3} className="px-3 py-10 text-center text-kumo-subtle">{query ? 'No matching connectors.' : filter === 'installed' ? 'No installed connectors.' : filter === 'draft' ? 'No drafts.' : 'No connectors yet.'}</td></tr>
+            <tr><td colSpan={3} className="px-3 py-10 text-center text-kumo-subtle">{query ? 'No matching connectors.' : filter === 'installed' ? 'No active connectors.' : filter === 'draft' ? 'No incomplete connectors.' : 'No connectors yet.'}</td></tr>
           ) : null}
         </tbody>
       </table>

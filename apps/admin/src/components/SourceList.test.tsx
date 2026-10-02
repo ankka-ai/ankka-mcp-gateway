@@ -18,12 +18,12 @@ describe('SourceList', () => {
     render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
     const filters = within(screen.getByRole('group', { name: 'Filter connectors' }))
 
-    await user.click(filters.getByRole('button', { name: 'Installed' }))
-    expect(filters.getByRole('button', { name: 'Installed' })).toHaveAttribute('aria-pressed', 'true')
+    await user.click(filters.getByRole('button', { name: 'Active' }))
+    expect(filters.getByRole('button', { name: 'Active' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Catalogue' })).not.toBeInTheDocument()
 
-    await user.click(filters.getByRole('button', { name: 'Drafts' }))
+    await user.click(filters.getByRole('button', { name: 'Incomplete' }))
     expect(screen.queryByRole('button', { name: 'Knowledge' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Catalogue' })).toBeInTheDocument()
 
@@ -45,7 +45,7 @@ describe('SourceList', () => {
     expect(source).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText(sources[0].url)).toBeInTheDocument()
     expect(screen.getByText('Operator-connected OAuth')).toBeInTheDocument()
-    expect(screen.getByText('2 exact tools')).toBeInTheDocument()
+    expect(screen.getByText('2 tools')).toBeInTheDocument()
     expect(within(screen.getByRole('region', { name: 'Knowledge allowed tools' })).getByText('search')).toBeInTheDocument()
 
     await user.keyboard('{Enter}')
@@ -70,8 +70,8 @@ describe('SourceList', () => {
   it('shows an empty filtered state without hiding the filters', async () => {
     const user = userEvent.setup()
     render(<SourceList sources={[sources[0]]} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
-    await user.click(screen.getByRole('button', { name: 'Drafts' }))
-    expect(screen.getByText('No drafts.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Incomplete' }))
+    expect(screen.getByText('No incomplete connectors.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'All' }))
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeInTheDocument()
   })
@@ -89,7 +89,7 @@ describe('SourceList', () => {
     await user.clear(search)
     await user.type(search, 'catalogue.example.com')
     expect(screen.getByRole('button', { name: 'Catalogue' })).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Installed' }))
+    await user.click(screen.getByRole('button', { name: 'Active' }))
     expect(screen.getByText('No matching connectors.')).toBeInTheDocument()
 
     await user.clear(search)

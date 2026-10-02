@@ -55,7 +55,7 @@ const actionLabels = {
 } satisfies Record<SourceActionSummary['state'], string>
 
 function sourceDraftLabel(action: SourceActionSummary | undefined): string {
-  return action && (action.state !== 'failed' || isBigQueryPreflightFailure(action.failureCode)) ? actionLabel(action) : 'Saved draft'
+  return action && (action.state !== 'failed' || isBigQueryPreflightFailure(action.failureCode)) ? actionLabel(action) : 'Incomplete'
 }
 
 function actionLabel(action: SourceActionSummary): string {

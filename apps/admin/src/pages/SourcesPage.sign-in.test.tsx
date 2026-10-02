@@ -355,6 +355,6 @@ describe('choosing the tools of a connected sign-in connector', () => {
     render(<GatewayProvider api={pausedApi(null)}><SourcesPage /></GatewayProvider>)
     await user.click(await screen.findByRole('button', { name: signInDraft.label }))
     expect(screen.getByText('No tools chosen yet. Nothing is enabled; you choose from the connector’s real list after connecting it.')).toBeVisible()
-    expect(screen.queryByText('0 exact tools')).not.toBeInTheDocument()
+    expect(screen.queryByText('0 tools')).not.toBeInTheDocument()
   })
 })

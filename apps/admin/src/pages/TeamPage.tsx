@@ -2,7 +2,7 @@ import { Button } from '../components/Button'
 import { AddUserDialog } from '../components/AddUserDialog'
 import { MemberAccessDialog } from '../components/MemberAccessDialog'
 import { TeamGrantDialog } from '../components/TeamGrantDialog'
-import { Check, Trash, X } from '@phosphor-icons/react'
+import { Trash, X } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type Team, type TeamAction, type TeamGrant, type TeamMember } from '../api'
 import { ManagementTokenCard } from '../components/ManagementTokenCard'
@@ -381,7 +381,7 @@ export function TeamPage() {
 
             <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
               <Button variant="primary" className="pressable inline-flex items-center gap-2" loading={isBusy || saving} disabled={!team.editingEnabled || loading || saving || isBusy || needsRefresh || callbackId !== null || action?.status === 'applying' || (recorded ? team.proposedMembers === null : !changed)} onClick={() => void save()}>
-                <Check size={16} /> {action?.status === 'recovery_required' ? 'Resume recorded change' : recorded ? 'Save recorded change' : 'Save'}
+                {action?.status === 'recovery_required' ? 'Resume recorded change' : recorded ? 'Save recorded change' : 'Save'}
               </Button>
               {canCancel ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving || loading || needsRefresh || callbackId !== null} onClick={() => void cancelRecordedChange()}><X size={16} /> Cancel recorded change</Button> : null}
               {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving} onClick={() => { setDraft(effectiveMembers); setTeamDraft(effectiveTeams) }}>Discard unsaved changes</Button> : null}

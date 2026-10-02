@@ -4,6 +4,13 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Customize names and descriptions for installed connector tools from Edit
+  tools. Original names continue to control the allowlist; reconnect your
+  client after saving to refresh its tool list.
+- Label ready connectors Active and unfinished connectors Incomplete, with
+  matching filters and status badges. Simplify tool counts and the Team save
+  button.
+
 - Fix Meta authorization discovery from Cloudflare Workers by explicitly
   identifying the gateway client. Keep discovery redirects blocked and stop
   attributing gateway startup failures to your Meta app configuration.
