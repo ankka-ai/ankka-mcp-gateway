@@ -273,8 +273,8 @@ describe('connector installation recovery', () => {
     cleanup()
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const sourceRow = await within(await screen.findByRole('table', { name: 'Connector list' }))
-      .findByRole('row', { name: new RegExp(`${draft.label} Public Installed`, 'u') })
-    expect(within(sourceRow).getByText('Installed')).toBeVisible()
+      .findByRole('row', { name: new RegExp(`${draft.label} Public Active`, 'u') })
+    expect(within(sourceRow).getByText('Active')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Install connector' })).not.toBeInTheDocument()
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
@@ -744,9 +744,9 @@ describe('SourcesPage', () => {
     })
     const savedSource = await screen.findByRole('button', { name: 'Large read API' })
     expect(savedSource).toHaveAttribute('aria-expanded', 'false')
-    expect(screen.queryByText(`${toolCount} exact tools`)).not.toBeInTheDocument()
+    expect(screen.queryByText(`${toolCount} tools`)).not.toBeInTheDocument()
     await user.click(savedSource)
-    expect(screen.getByText(`${toolCount} exact tools`)).toBeInTheDocument()
+    expect(screen.getByText(`${toolCount} tools`)).toBeInTheDocument()
   }, 15_000)
 
   it('says why a sign-in connector lists no tools and what happens next, and saves it without any', async () => {
