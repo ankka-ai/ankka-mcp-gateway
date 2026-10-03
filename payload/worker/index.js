@@ -2363,7 +2363,7 @@ async function createResource(state, kind, token) {
     path = `/accounts/${account}/access/ai-controls/mcp/servers`;
     body = {
       id: desired.key,
-      name: desired.desired.name,
+      name: state.source?.company ? sourceDisplayName(state.source) : desired.desired.name,
       hostname: desired.desired.endpoint,
       auth_type: oauth ? 'oauth' : 'unauthenticated',
       secure_web_gateway: false,
@@ -2969,10 +2969,60 @@ function safeToolMetadata(value, enabledTools) {
   return Object.freeze(entries.sort((left, right) => compareText(left.name, right.name)));
 }
 
+function validSourceCompany(value) {
+  return isText(value) && value.length <= 80 && value.trim() === value && !hasControlCharacter(value);
+}
+
+function sourceDisplayName(source) {
+  return source.company ? `${source.company} · ${source.label}` : source.label;
+}
+
+// Full upstream text is kept separately from operator overrides. This makes
+// retries deterministic and clearing Company restore upstream inheritance.
+function safeCompanyDescriptions(value, enabledTools = null) {
+  if (!Array.isArray(value) || value.length > MAX_ENABLED_TOOLS_PER_SOURCE) return null;
+  const names = new Set();
+  for (const entry of value) {
+    if (!exactKeys(entry, ['name', 'description']) || !toolName(entry.name) ||
+        (enabledTools && !enabledTools.includes(entry.name)) || names.has(entry.name) ||
+        !isText(entry.description) || entry.description.length > 65_536) return null;
+    names.add(entry.name);
+  }
+  return Object.freeze(value.map((entry) => Object.freeze({ ...entry })).sort((a, b) => compareText(a.name, b.name)));
+}
+
+function captureCompanyDescriptions(source, server) {
+  if (sourceConnectionFailure(server, source) ||
+      (server.updated_tools != null && (!Array.isArray(server.updated_tools) || server.updated_tools.some((entry) => !isRecord(entry)))) ||
+      new Set(server.tools.map((entry) => entry.name)).size !== server.tools.length) return null;
+  return safeCompanyDescriptions(source.enabledTools.map((name) => {
+    const tool = server.tools.find((entry) => entry.name === name);
+    const override = server.updated_tools?.find((entry) => entry.name === name);
+    return { name, description: override?.description ?? tool.description ?? '' };
+  }), source.enabledTools);
+}
+
+function withCompany(source, company, descriptions) {
+  const next = { ...source };
+  delete next.company;
+  delete next.companyDescriptions;
+  if (company) {
+    next.company = company;
+    if (descriptions) next.companyDescriptions = descriptions;
+  }
+  return next;
+}
+
 function portalTools(source) {
-  return source.enabledTools.map((name) => Object.freeze({ name, enabled: true,
-    ...source.toolMetadata?.find((entry) => entry.name === name),
-  }));
+  return source.enabledTools.map((name) => {
+    const metadata = source.toolMetadata?.find((entry) => entry.name === name);
+    const tool = { name, enabled: true, ...metadata };
+    if (source.company) {
+      const description = metadata?.description ?? source.companyDescriptions?.find((entry) => entry.name === name)?.description ?? '';
+      tool.description = `Company: ${JSON.stringify(source.company)}.${description ? `\n\n${description}` : ''}`;
+    }
+    return Object.freeze(tool);
+  });
 }
 
 function safeManagedSource(value) {
@@ -2981,6 +3031,8 @@ function safeManagedSource(value) {
   const current = exactKeys(value, [
     'id', 'label', 'url', 'authMode', 'onBehalfOfUser', 'enabledTools', 'status',
     ...(Object.hasOwn(value ?? {}, 'toolMetadata') ? ['toolMetadata'] : []),
+    ...(Object.hasOwn(value ?? {}, 'company') ? ['company'] : []),
+    ...(Object.hasOwn(value ?? {}, 'companyDescriptions') ? ['companyDescriptions'] : []),
     ...(value?.id === MANAGEMENT_SOURCE_ID ? ['initialManager'] : []),
     ...(Object.hasOwn(value ?? {}, 'initialDashboardEmails') ? ['initialDashboardEmails'] : []),
   ]);
@@ -3012,6 +3064,15 @@ function safeManagedSource(value) {
     enabledTools,
     status: value.status,
   };
+  if (Object.hasOwn(value, 'company')) {
+    if (!validSourceCompany(value.company) || !value.company) return null;
+    parsedSource.company = value.company;
+  }
+  if (Object.hasOwn(value, 'companyDescriptions')) {
+    const descriptions = safeCompanyDescriptions(value.companyDescriptions, enabledTools);
+    if (!value.company || !descriptions || descriptions.length !== enabledTools.length) return null;
+    parsedSource.companyDescriptions = descriptions;
+  }
   const toolMetadata = safeToolMetadata(Object.hasOwn(value, 'toolMetadata') ? value.toolMetadata : [], enabledTools);
   if (!toolMetadata) return null;
   if (toolMetadata.length > 0) parsedSource.toolMetadata = toolMetadata;
@@ -3086,12 +3147,13 @@ async function initialManagementSources(status) {
 
 export function parseSourceSave(value) {
   const validSource = isRecord(value?.source) && exactKeys(
-    value.source, ['label', 'url', 'authMode', 'enabledTools'],
+    value.source, ['label', 'url', 'authMode', 'enabledTools', ...(Object.hasOwn(value.source, 'company') ? ['company'] : [])],
   );
   if (!exactKeys(value, ['schemaVersion', 'revision', 'source']) || value.schemaVersion !== 1 ||
       !Number.isSafeInteger(value.revision) || value.revision < 1 ||
       !validSource ||
-      !validSourceLabel(value.source.label)) return null;
+      !validSourceLabel(value.source.label) ||
+      (Object.hasOwn(value.source, 'company') && !validSourceCompany(value.source.company))) return null;
   const url = publicMcpUrl(value.source.url);
   const authMode = value.source.authMode;
   // Only a sign-in source may be saved without tools: its real list exists
@@ -3103,12 +3165,9 @@ export function parseSourceSave(value) {
     authMode === 'oauth' ? 0 : 1,
   );
   if (!url || !enabledTools || (authMode !== 'none' && authMode !== 'oauth')) return null;
-  return Object.freeze({
-    revision: value.revision,
-    source: Object.freeze({
-      label: value.source.label, url, authMode, enabledTools,
-    }),
-  });
+  const source = { label: value.source.label, url, authMode, enabledTools };
+  if (Object.hasOwn(value.source, 'company')) source.company = value.source.company;
+  return Object.freeze({ revision: value.revision, source: Object.freeze(source) });
 }
 
 export async function saveDraftSource(current, input, management = null, apiSource = false) {
@@ -3130,6 +3189,8 @@ export async function saveDraftSource(current, input, management = null, apiSour
     enabledTools: [...input.source.enabledTools],
     status: 'draft',
   };
+  const company = input.source.company ?? existing?.company;
+  if (company) source.company = company;
   if (management) source.initialManager = existing?.initialManager ?? management.actorEmail;
   const sources = existing
     ? current.sources.map((candidate) => candidate.id === id ? source : candidate)
@@ -3471,6 +3532,7 @@ export async function managedSourceHash(source) {
     onBehalfOfUser: source.onBehalfOfUser,
     enabledTools: source.enabledTools,
   };
+  if (source.company) identity.company = source.company;
   if (source.id === MANAGEMENT_SOURCE_ID) identity.initialManager = source.initialManager;
   if (source.initialDashboardEmails) identity.initialDashboardEmails = source.initialDashboardEmails;
   return sha256(identity);
@@ -3828,7 +3890,8 @@ function normalizedPortalMappings(value) {
       const metadata = { name: tool.name };
       if (alias != null) metadata.alias = alias;
       if (description != null) metadata.description = description;
-      if ((alias != null || description != null) && !safeToolMetadata([metadata], [tool.name])) return null;
+      if (alias != null && !safeToolMetadata([{ name: tool.name, alias }], [tool.name])) return null;
+      if (description != null && (!isText(description) || description.length > 66_000)) return null;
       tools.push(Object.freeze({ ...metadata, enabled: true }));
     }
     tools.sort((left, right) => compareText(left.name, right.name));
@@ -4053,9 +4116,24 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     });
     if (!action) return actionRecovery('source_action_state_unavailable');
   }
-  const refreshed = await storedSourceActionContext(storage, action.actionId);
+  let refreshed = await storedSourceActionContext(storage, action.actionId);
   if (!refreshed) return actionRecovery('source_action_state_unavailable');
   action = refreshed.action;
+  const source = refreshed.sources.sources.find((entry) => entry.id === action.sourceId);
+  if (source?.company && !source.companyDescriptions) {
+    const server = await providerCall(`/accounts/${encodeURIComponent(refreshed.control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(action.resources[0].provider.id)}`, parsed.claim.cloudflareAccessToken);
+    if (server.status !== 'ok' || !mcpMatches(server.result, desiredState.desiredResources[0])) return failSourceAction(storage, action, 'source_action_recovery_required');
+    const failure = sourceConnectionFailure(server.result, source);
+    if (failure) return failSourceAction(storage, action, failure);
+    const descriptions = captureCompanyDescriptions(source, server.result);
+    const next = descriptions && safeManagementSources({ ...refreshed.sources,
+      sources: refreshed.sources.sources.map((entry) => entry.id === source.id ? withCompany(entry, source.company, descriptions) : entry),
+    });
+    if (!next || !managementSourcesInstallProjectionFits(next)) return failSourceAction(storage, action, 'source_context_too_large');
+    if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
+    await storage.put(SOURCES_KEY, next);
+    refreshed = { ...refreshed, sources: next };
+  }
   const mappings = portalServerMappings(refreshed.control, refreshed.sources, action);
   if (!mappings) return failSourceAction(storage, action, 'source_action_drift');
   const portalBody = {
@@ -4260,7 +4338,7 @@ async function chooseSourceActionTools(storage, env, input) {
     ...sources,
     revision: sources.revision + 1,
     sources: sources.sources.map((candidate) => candidate.id === source.id
-      ? { ...candidate, enabledTools: [...enabledTools] }
+      ? withCompany({ ...candidate, enabledTools: [...enabledTools] }, candidate.company)
       : candidate),
   });
   if (!nextSources || !managementSourcesInstallProjectionFits(nextSources)) {
@@ -4311,7 +4389,8 @@ function safeReceiptSourceToolBaseline(value) {
 function safeSourceToolEdit(value) {
   if (value === undefined || value === null) return null;
   if (!exactKeys(value, ['schemaVersion', 'sourceId', 'fromRevision', 'enabledTools', 'phase', 'receiptBaseline',
-    ...(Object.hasOwn(value ?? {}, 'toolMetadata') ? ['toolMetadata'] : [])]) ||
+    ...(Object.hasOwn(value ?? {}, 'toolMetadata') ? ['toolMetadata'] : []),
+    ...(Object.hasOwn(value ?? {}, 'companyDescriptions') ? ['companyDescriptions'] : [])]) ||
       value.schemaVersion !== 1 || !SOURCE_ID.test(value.sourceId) ||
       !Number.isSafeInteger(value.fromRevision) || value.fromRevision < 1 ||
       !['portal_armed', 'portal_submitted'].includes(value.phase)) return false;
@@ -4325,6 +4404,11 @@ function safeSourceToolEdit(value) {
     phase: value.phase, receiptBaseline,
   };
   if (Object.hasOwn(value, 'toolMetadata')) result.toolMetadata = toolMetadata;
+  if (Object.hasOwn(value, 'companyDescriptions')) {
+    const descriptions = safeCompanyDescriptions(value.companyDescriptions, enabledTools);
+    if (!descriptions || descriptions.length !== enabledTools.length) return false;
+    result.companyDescriptions = descriptions;
+  }
   return Object.freeze(result);
 }
 
@@ -4531,6 +4615,15 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   if (toolMetadata.some((entry) => entry.alias) && new Set(effectiveNames).size !== effectiveNames.length) {
     return sourceToolsRefusal(400, 'source_tool_metadata_invalid');
   }
+  let companyDescriptions = edit?.companyDescriptions;
+  if (source.company && !companyDescriptions) {
+    const raw = await providerCall(`/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`, managementCredential(env));
+    const desired = (await buildDesiredResources(teardownSettings(control, source, aliasesReceipt ? 'company-context' : source.id), control.installationId))[0];
+    if (raw.status !== 'ok' || !mcpMatches(raw.result, desired)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+    companyDescriptions = captureCompanyDescriptions({ ...source, enabledTools }, raw.result);
+    if (!companyDescriptions) return sourceToolsRefusal(409, 'source_context_too_large');
+  }
+  const nextSource = withCompany({ ...source, enabledTools, toolMetadata }, source.company, companyDescriptions);
   const nextBaseline = edit?.receiptBaseline ?? (aliasesReceipt && !control.receiptSourceToolBaseline
     ? { sourceId: source.id, enabledTools: [...source.enabledTools], label: source.label } : control.receiptSourceToolBaseline ?? null);
   const nextResources = aliasesReceipt ? ownership.resources
@@ -4545,7 +4638,7 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   if (nextBaseline) nextControlValue.receiptSourceToolBaseline = nextBaseline;
   const nextSources = safeManagementSources({
     ...sources, revision: sources.revision + 1,
-    sources: sources.sources.map((candidate) => candidate.id === source.id ? { ...candidate, enabledTools, toolMetadata } : candidate),
+    sources: sources.sources.map((candidate) => candidate.id === source.id ? nextSource : candidate),
   });
   const nextControl = safeManagementControl(nextControlValue);
   if (!nextSources || !nextControl || !await teardownAuthorityState(root, nextControl, nextSources, environment)) {
@@ -4553,7 +4646,7 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   }
   const before = installedPortalMappings(control, sources);
   const after = before?.map((mapping) => mapping.server_id === serverId ? Object.freeze({
-    ...mapping, updated_tools: portalTools({ enabledTools, toolMetadata }),
+    ...mapping, updated_tools: portalTools(nextSource),
   }) : mapping);
   if (!before || !after || before.filter((mapping) => mapping.server_id === serverId).length !== 1) {
     return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
@@ -4583,6 +4676,7 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
         phase: 'portal_submitted', receiptBaseline: introducingBaseline ? nextBaseline : null,
       };
       if (metadataChanged || toolMetadata.length > 0) pending.toolMetadata = toolMetadata;
+      if (companyDescriptions) pending.companyDescriptions = companyDescriptions;
       edit = safeSourceToolEdit(pending);
       if (!edit) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
       await storage.put(SOURCE_TOOL_EDIT_KEY, edit);
@@ -4615,17 +4709,23 @@ function sourcePolicyDisplayName(label, policy) {
 
 function safeSourceLabelEdit(value) {
   if (value === undefined || value === null) return null;
-  if (!exactKeys(value, ['schemaVersion', 'sourceId', 'fromRevision', 'label', 'phase', 'receiptBaseline']) ||
+  if (!exactKeys(value, ['schemaVersion', 'sourceId', 'fromRevision', 'label', 'phase', 'receiptBaseline',
+    ...(Object.hasOwn(value, 'company') ? ['company', 'companyDescriptions'] : [])]) ||
       value.schemaVersion !== 1 || !SOURCE_ID.test(value.sourceId) ||
       !Number.isSafeInteger(value.fromRevision) || value.fromRevision < 1 ||
       value.phase !== 'policies_submitted' || !validSourceLabel(value.label)) return false;
+  if (Object.hasOwn(value, 'company') && (!validSourceCompany(value.company) ||
+      !safeCompanyDescriptions(value.companyDescriptions))) return false;
   const receiptBaseline = value.receiptBaseline === null ? null : safeReceiptSourceToolBaseline(value.receiptBaseline);
   if ((value.receiptBaseline !== null && !receiptBaseline) ||
       (receiptBaseline && receiptBaseline.sourceId !== value.sourceId)) return false;
-  return Object.freeze({
-    schemaVersion: 1, sourceId: value.sourceId, fromRevision: value.fromRevision, label: value.label,
-    phase: value.phase, receiptBaseline,
-  });
+  const result = { schemaVersion: 1, sourceId: value.sourceId, fromRevision: value.fromRevision, label: value.label,
+    phase: value.phase, receiptBaseline };
+  if (Object.hasOwn(value, 'company')) {
+    result.company = value.company;
+    result.companyDescriptions = value.companyDescriptions;
+  }
+  return Object.freeze(result);
 }
 
 /** True when a rename is corrupt or belongs to a different source. A null source blocks every rename. */
@@ -4637,10 +4737,10 @@ async function sourceLabelEditBlocks(storage, sourceId = null) {
 }
 
 async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEmail) {
-  const label = exactKeys(input, ['schemaVersion', 'revision', 'label']) && input.schemaVersion === 1 &&
+  const label = exactKeys(input, ['schemaVersion', 'revision', 'label', ...(Object.hasOwn(input ?? {}, 'company') ? ['company'] : [])]) && input.schemaVersion === 1 &&
       Number.isSafeInteger(input.revision) && input.revision >= 1 && validSourceLabel(input.label)
     ? input.label : null;
-  if (!label) return sourceToolsRefusal(400, 'source_label_invalid');
+  if (!label || (Object.hasOwn(input, 'company') && !validSourceCompany(input.company))) return sourceToolsRefusal(400, 'source_label_invalid');
   const loaded = await loadInstalledSource(storage, env, sourceId, actorEmail);
   if (loaded instanceof Response) return loaded;
   const { sources, control, source } = loaded;
@@ -4656,8 +4756,9 @@ async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEm
   if (await recordedLifecycleBlocks(storage, Date.now(), null, true, null, null, source.id) || await teamActionBlocksLifecycle(storage)) {
     return sourceActionConflict('lifecycle_pending');
   }
-  if (edit && edit.label !== label) return sourceToolsRefusal(409, 'source_label_pending');
-  if (!edit && source.label === label) return fixedJson(200, sources);
+  const company = input.company ?? edit?.company ?? source.company ?? '';
+  if (edit && (edit.label !== label || (edit.company ?? source.company ?? '') !== company)) return sourceToolsRefusal(409, 'source_label_pending');
+  if (!edit && source.label === label && (source.company ?? '') === company) return fixedJson(200, sources);
   const policies = ownership.resources.filter((resource) => sourcePolicyKind(resource.kind));
   if (policies.length === 0 || policies.some((policy) => !teamName(sourcePolicyDisplayName(label, policy)))) {
     return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
@@ -4690,18 +4791,35 @@ async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEm
     )),
   };
   if (nextBaseline) nextControlValue.receiptSourceToolBaseline = nextBaseline;
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const signal = AbortSignal.timeout(30_000);
+  const serverId = ownership.resources[0]?.provider?.id;
+  const serverPath = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`;
+  const serverDesired = (await buildDesiredResources(teardownSettings(control, source, aliasesReceipt ? 'company-context' : source.id), control.installationId))[0];
+  const server = await providerCall(serverPath, token, { signal });
+  if (server.status === 'auth') return sourceToolsRefusal(409, 'management_credential_required');
+  if (server.status !== 'ok' || !mcpMatches(server.result, serverDesired)) return sourceToolsRefusal(409, edit ? 'source_label_recovery_required' : 'source_label_drift');
+  const companyDescriptions = company ? edit?.companyDescriptions ?? source.companyDescriptions ?? captureCompanyDescriptions(source, server.result) : [];
+  if (!companyDescriptions) return sourceToolsRefusal(409, 'source_context_too_large');
+  const nextSource = withCompany({ ...source, label }, company, companyDescriptions);
   const nextSources = safeManagementSources({
     ...sources, revision: sources.revision + 1,
-    sources: sources.sources.map((candidate) => candidate.id === source.id ? { ...candidate, label } : candidate),
+    sources: sources.sources.map((candidate) => candidate.id === source.id ? nextSource : candidate),
   });
   const nextControl = safeManagementControl(nextControlValue);
   if (!nextSources || !nextControl || !await teardownAuthorityState(root, nextControl, nextSources, environment)) {
     return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
   }
   const introducingBaseline = Boolean(nextBaseline) && !storedBaseline;
-  const token = managementCredential(env);
-  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
-  const signal = AbortSignal.timeout(30_000);
+  const before = installedPortalMappings(control, sources);
+  const after = installedPortalMappings(nextControl, nextSources);
+  if (!before || !after) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+  const portalPath = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`;
+  const portal = await providerCall(portalPath, token, { signal });
+  if (portal.status !== 'ok' || (!portalExact(portal.result, control, before) && !portalExact(portal.result, control, after))) return sourceToolsRefusal(409, edit ? 'source_label_recovery_required' : 'source_portal_drift');
+  const portalDone = portalExact(portal.result, control, after);
+  const serverDone = server.result.name === sourceDisplayName(nextSource);
   const livePolicies = [];
   for (const policy of policies) {
     const read = await providerCall(
@@ -4722,17 +4840,34 @@ async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEm
     }
     livePolicies.push({ policy, selectors, nextName, done: matches(nextName) });
   }
-  if (livePolicies.some((entry) => !entry.done)) {
+  if (!serverDone || !portalDone || livePolicies.some((entry) => !entry.done)) {
     if (!edit) {
-      if (introducingBaseline && !await armSourceCompatibility(storage, env)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+      if (!await armSourceCompatibility(storage, env)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
       edit = safeSourceLabelEdit({
         schemaVersion: 1, sourceId: source.id, fromRevision: sources.revision, label,
         phase: 'policies_submitted', receiptBaseline: introducingBaseline ? nextBaseline : null,
+        company, companyDescriptions,
       });
       if (!edit) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
       await storage.put(SOURCE_LABEL_EDIT_KEY, edit);
-    } else if (introducingBaseline && !await armSourceCompatibility(storage, env)) {
+    } else if (!await armSourceCompatibility(storage, env)) {
       return sourceToolsRefusal(409, 'source_label_recovery_required');
+    }
+    if (!serverDone) {
+      const written = await providerCall(serverPath, token, { method: 'PUT', signal, body: canonicalJson({ name: sourceDisplayName(nextSource) }) });
+      if (written.status !== 'ok') return sourceToolsRefusal(409, 'source_label_recovery_required');
+      const verified = await providerCall(serverPath, token, { signal });
+      if (verified.status !== 'ok' || !mcpMatches(verified.result, serverDesired) || verified.result.name !== sourceDisplayName(nextSource)) return sourceToolsRefusal(409, 'source_label_recovery_required');
+    }
+    if (!portalDone) {
+      const written = await providerCall(portalPath, token, { method: 'PUT', signal, body: canonicalJson({
+        name: control.portal.name, hostname: control.portal.hostname, description: control.portal.marker,
+        code_mode: 'default_on', secure_web_gateway: false,
+        servers: after.map((mapping) => ({ ...mapping, id: mapping.server_id })),
+      }) });
+      if (written.status !== 'ok') return sourceToolsRefusal(409, 'source_label_recovery_required');
+      const verified = await providerCall(portalPath, token, { signal });
+      if (verified.status !== 'ok' || !portalExact(verified.result, control, after)) return sourceToolsRefusal(409, 'source_label_recovery_required');
     }
     for (const entry of livePolicies) {
       if (entry.done) continue;
@@ -4744,7 +4879,7 @@ async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEm
         return sourceToolsRefusal(409, 'source_label_recovery_required');
       }
     }
-  } else if (introducingBaseline && !await armSourceCompatibility(storage, env)) {
+  } else if (!await armSourceCompatibility(storage, env)) {
     return sourceToolsRefusal(409, edit ? 'source_label_recovery_required' : 'source_tool_edit_unavailable');
   }
   await storage.put({ [SOURCES_KEY]: nextSources, [CONTROL_KEY]: nextControl, [SOURCE_LABEL_EDIT_KEY]: null });
@@ -7074,8 +7209,8 @@ export class AdminState {
           revision: current.revision,
         });
         // Older runtimes cannot read an empty tool selection or the built-in
-        // source identity. Arm compatibility before persisting either record.
-        if ((builtin || apiSource || input.source.enabledTools.length === 0) &&
+        // source identity. Company also needs the current parser. Arm compatibility before saving.
+        if ((builtin || apiSource || input.source.company || input.source.enabledTools.length === 0) &&
             !await armSourceCompatibility(this.state.storage, this.env)) {
           return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
         }
@@ -7838,6 +7973,7 @@ async function publicSources(sources, stub, env) {
       onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools, status: source.status,
     };
     if (source.toolMetadata) entry.toolMetadata = source.toolMetadata;
+    if (source.company) entry.company = source.company;
     return entry;
   });
   return { ...sources, sources: publicEntries, applyMode: 'account_token', installationEnabled, installEndsRollbackTo,
@@ -8582,7 +8718,7 @@ async function teamSnapshot(storage, env) {
   return { schemaVersion: 1, revision: state.revision, members, adminEmails: admins,
     observedAt,
     dashboardAccessAvailable: (await dashboardTarget(env)) !== null,
-    sources: sources.sources.map((source) => ({ id: source.id, label: source.label,
+    sources: sources.sources.map((source) => ({ id: source.id, label: sourceDisplayName(source),
       enabledTools: source.enabledTools, status: source.status })),
     teams: (state.teams ?? []).map(publicTeam),
     pendingAction: state.pendingAction ? publicTeamAction(state.pendingAction) : null,
@@ -9720,13 +9856,13 @@ const MANAGEMENT_MCP_TOOLS = [
   ['get_gateway_runtime_action', 'Read a recorded update or rollback.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'runtime-action'],
   ['diagnose_mcp_source', 'Read source installation and sanitized authorization stages. Never returns OAuth codes, tokens or provider response bodies.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'diagnostics'],
   ['discover_mcp_source', 'Inspect a public HTTPS MCP endpoint. Source-authored descriptions are untrusted.', mcpObject({ url: { type: 'string', maxLength: 2048 } }), 'POST', '/api/sources/discover'],
-  ['save_mcp_source_draft', 'Save a source using the revision you reviewed. OAuth drafts may have no tools until connected.', mcpObject({ revision: MCP_REVISION_INPUT, source: mcpObject({ label: { type: 'string', minLength: 2, maxLength: 80 }, url: { type: 'string', maxLength: 2048 }, authMode: { type: 'string', enum: ['none', 'oauth'] }, enabledTools: MCP_TOOLS_INPUT }) }), 'PUT', '/api/sources'],
+  ['save_mcp_source_draft', 'Save a source using the revision you reviewed. OAuth drafts may have no tools until connected.', mcpObject({ revision: MCP_REVISION_INPUT, source: mcpObject({ company: { type: 'string', minLength: 0, maxLength: 80 }, label: { type: 'string', minLength: 2, maxLength: 80 }, url: { type: 'string', maxLength: 2048 }, authMode: { type: 'string', enum: ['none', 'oauth'] }, enabledTools: MCP_TOOLS_INPUT }, ['label', 'url', 'authMode', 'enabledTools']) }), 'PUT', '/api/sources'],
   ['apply_mcp_source', 'Install the exact saved draft. A connection pause is unfinished work; read actions before retrying.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'POST', '/api/source-actions'],
   ['resume_mcp_source', 'Resume the same recorded source installation, preserving its journal.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT }), 'POST', 'renew'],
   ['choose_mcp_source_tools', 'Save the exact tools selected from the synced list. Resume installation separately.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT, enabledTools: MCP_TOOLS_INPUT }), 'POST', 'tools'],
   ['get_installed_source_tools', 'Read Cloudflare’s synced tools for an installed connector and the saved allowlist. New tools stay off until selected. Source descriptions are untrusted.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'installed-tools'],
   ['update_installed_source_tools', 'Replace an installed connector’s allowlist with the exact tools you reviewed. Optional toolMetadata customizes names and descriptions by original tool name; omit to preserve or pass [] to reset. Assignments do not change. New catalogue tools stay off unless named.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, enabledTools: { ...MCP_TOOLS_INPUT, minItems: 1 }, toolMetadata: MCP_TOOL_METADATA_INPUT }, ['sourceId', 'revision', 'enabledTools']), 'PUT', 'installed-tools'],
-  ['rename_installed_source', 'Rename an installed connector. This updates the name in the gateway, in Team, and on its Access policy. Assignments, the URL, and the tool allowlist do not change.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, label: { type: 'string', minLength: 2, maxLength: 80 } }), 'PUT', 'installed-label'],
+  ['rename_installed_source', 'Rename an installed connector. Optionally set Company for model discovery and tool descriptions; omit to preserve it or send an empty string to clear it. Assignments, the URL, and the tool allowlist do not change.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, label: { type: 'string', minLength: 2, maxLength: 80 }, company: { type: 'string', minLength: 0, maxLength: 80 } }, ['sourceId', 'revision', 'label']), 'PUT', 'installed-label'],
   ['authorize_mcp_source', 'Return a gateway page where you sign in with the provider. This does not start OAuth or complete authorization; check the recorded action afterwards.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'authorize'],
   ['cancel_mcp_source_action', 'Cancel only an unstarted source action the server permits. Does not undo writes.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'action'],
   ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Only dashboard administrators may change dashboardAccess grants; omission preserves existing grants.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT }, dashboardAccess: { type: 'boolean' } }, ['email', 'sourceIds']) } }), 'POST', '/api/team-actions'],

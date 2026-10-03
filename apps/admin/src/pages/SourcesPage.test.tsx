@@ -511,6 +511,7 @@ describe('SourcesPage', () => {
     expect(screen.getByRole('dialog', { name: `Set up ${preset.displayName}` })).toBeVisible()
     expect(screen.queryByRole('dialog', { name: 'Connector library' })).not.toBeInTheDocument()
     expect(screen.getByLabelText('Connector name')).toHaveValue(preset.displayName)
+    await user.type(screen.getByLabelText('Company (optional)'), 'Company B')
     expect(screen.getByLabelText('MCP URL')).toHaveValue(preset.implementation.deployment.url)
     expect(screen.getByLabelText('MCP URL')).toHaveAttribute('readonly')
     expect(screen.getByLabelText('Catalog-recommended tools')).toHaveTextContent('properties.list')
@@ -528,6 +529,7 @@ describe('SourcesPage', () => {
     await user.click(screen.getByRole('button', { name: 'Save draft' }))
     expect(saveSourceDraft).toHaveBeenCalledWith(4, {
       label: preset.displayName,
+      company: 'Company B',
       url: preset.implementation.deployment.url,
       authMode: 'oauth',
       enabledTools: [],
@@ -904,11 +906,12 @@ describe('Add BigQuery setup', () => {
     await user.click(await screen.findByRole('button', { name: 'Set up BigQuery' }))
     expect(screen.getByRole('button', { name: 'Continue to Cloudflare' })).toBeDisabled()
     expect(screen.queryByLabelText('Google service-account JSON key')).not.toBeInTheDocument()
+    await user.type(screen.getByLabelText('Company (optional)'), 'Company B')
     await user.type(screen.getByLabelText('Query project ID'), 'query-project')
     await user.type(screen.getByLabelText('Datasets to discover'), 'data-project.reporting')
     await user.click(screen.getByRole('checkbox', { name: /dedicated service account/ }))
     await user.click(screen.getByRole('button', { name: 'Continue to Cloudflare' }))
-    await waitFor(() => expect(api.prepareBigQuery).toHaveBeenCalledExactlyOnceWith({ revision: 4, label: 'BigQuery',
+    await waitFor(() => expect(api.prepareBigQuery).toHaveBeenCalledExactlyOnceWith({ revision: 4, label: 'BigQuery', company: 'Company B',
       configuration: { queryProjectId: 'query-project', allowedDatasets: [{ projectId: 'data-project', datasetId: 'reporting' }] }, readOnlyConfirmed: true }))
     expect(await screen.findByRole('alert')).toHaveTextContent('existing BigQuery setup')
     expect(api.prepareSourceAction).not.toHaveBeenCalled()

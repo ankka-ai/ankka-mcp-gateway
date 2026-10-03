@@ -36,7 +36,7 @@ interface SourceListProps {
   onRemoveDraft?(sourceId: string): void
   onLoadSourceTools?(sourceId: string): Promise<InstalledSourceTools>
   onSaveSourceTools?(sourceId: string, revision: number, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<void>
-  onRenameSource?(sourceId: string, label: string): Promise<void>
+  onRenameSource?(sourceId: string, label: string, company?: string): Promise<void>
   sourceToolsDisabled?: boolean
 }
 
@@ -48,7 +48,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
   const query = search.trim().toLocaleLowerCase()
   const visibleSources = sources.filter((source) => (
     (filter === 'all' || source.status === filter)
-    && (!query || source.label.toLocaleLowerCase().includes(query) || source.url.toLocaleLowerCase().includes(query))
+    && (!query || `${source.company ?? ''} ${source.label}`.toLocaleLowerCase().includes(query) || source.url.toLocaleLowerCase().includes(query))
   ))
 
   return (
@@ -109,7 +109,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                       onClick={() => setExpanded(isExpanded ? null : source.id)}
                     >
                       <SourceIcon key={`${source.id}:${source.url}`} source={source} />
-                      <span className="min-w-0 flex-1 break-words">{source.label}</span>
+                      <span className="min-w-0 flex-1 break-words">{source.company ? `${source.company} · ${source.label}` : source.label}</span>
                     </DisclosureTrigger>
                   </th>
                   <td className="hidden px-3 py-3 text-kumo-subtle sm:table-cell">

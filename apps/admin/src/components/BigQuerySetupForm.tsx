@@ -23,6 +23,7 @@ export function parseBigQueryDatasets(text: string): BigQuerySetupInput['configu
 export function BigQuerySetupForm({ disabled, embedded = false }: { disabled: boolean; embedded?: boolean }) {
   const { api, sources, refreshSources, refreshSourceActions } = useGateway()
   const [label, setLabel] = useState('BigQuery')
+  const [company, setCompany] = useState('')
   const [queryProjectId, setQueryProjectId] = useState('')
   const [datasets, setDatasets] = useState('')
   const [confirmed, setConfirmed] = useState(false)
@@ -39,8 +40,10 @@ export function BigQuerySetupForm({ disabled, embedded = false }: { disabled: bo
     setError(null)
     setSubmitting(true)
     try {
-      const prepared = await api.prepareBigQuery({ revision: sources.revision, label: label.trim(),
-        configuration: { queryProjectId: queryProjectId.trim(), allowedDatasets }, readOnlyConfirmed: true })
+      const input: BigQuerySetupInput = { revision: sources.revision, label: label.trim(),
+        configuration: { queryProjectId: queryProjectId.trim(), allowedDatasets }, readOnlyConfirmed: true }
+      if (company.trim()) input.company = company.trim()
+      const prepared = await api.prepareBigQuery(input)
       const destination = validHandoffUrl(prepared.handoffUrl, window.location.origin)
       if (destination === null) throw new Error('The gateway returned an invalid authorization link.')
       window.location.assign(destination)
@@ -67,6 +70,10 @@ export function BigQuerySetupForm({ disabled, embedded = false }: { disabled: bo
             <Input label="Query project ID" placeholder="analytics-query-project" value={queryProjectId} maxLength={63} onChange={(event) => setQueryProjectId(event.target.value)} required />
           </div>
           <p className="mt-2 text-xs leading-5 text-kumo-subtle">Google runs and bills query jobs in this project. It may differ from the projects containing your data.</p>
+          <div className="mt-5 max-w-md">
+            <Input label="Company (optional)" placeholder="Company B" value={company} maxLength={80} onChange={(event) => setCompany(event.target.value)} />
+            <p className="mt-2 text-xs leading-5 text-kumo-subtle">Helps your LLM choose the right company’s data. Shown in connector discovery and tool descriptions.</p>
+          </div>
           <label htmlFor="bigquery-datasets" className="mb-1.5 mt-5 block text-sm font-medium text-kumo-default">Datasets to discover</label>
           <textarea id="bigquery-datasets" className="text-input min-h-24 w-full" placeholder={'analytics-data-project.reporting'} value={datasets} maxLength={18_000} required onChange={(event) => setDatasets(event.target.value)} />
           <p className="mt-1.5 text-xs leading-5 text-kumo-subtle">One project.dataset per line. Google IAM controls which data SQL can read; keep its dataset permissions scoped to this list.</p>

@@ -31,6 +31,8 @@ installed release; a document or fixture is not a compatibility certification.
   fields, access, and retention responsibilities.
 - [Large sources and Code Mode](LARGE_SOURCES_AND_CODE_MODE.md): tested local
   limits, name handling, and the additional live qualification required.
+- [MCP context choices](MCP_CONTEXT.md): where to use names, descriptions,
+  company context, resources, recipes, and skills; current support and proposals.
 - [OpenAPI allowlists](OPENAPI_ALLOWLISTS.md): derive exact tool selections
   from a reviewed specification without treating HTTP methods as authorization.
 - [Source access groups](SOURCE_ACCESS_GROUPS.md): per-source audience

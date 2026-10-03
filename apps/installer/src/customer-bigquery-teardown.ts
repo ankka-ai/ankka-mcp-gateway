@@ -11,7 +11,7 @@ const PROGRESS = 'ankka-mcp-gateway/bigquery-teardown-progress/v1';
 const id = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{1,128}$/u));
 const hash = v.pipe(v.string(), v.regex(/^sha256:[a-f0-9]{64}$/u));
 const requestId = v.pipe(v.string(), v.regex(/^[A-Za-z0-9_-]{22}$/u));
-const sourceSchema = v.object({ id: v.string(), label: v.string(), url: v.string(), authMode: v.string(),
+const sourceSchema = v.object({ id: v.string(), label: v.string(), company: v.optional(v.string()), url: v.string(), authMode: v.string(),
   onBehalfOfUser: v.boolean(), enabledTools: v.array(v.string()), status: v.string() });
 const snapshotSchema = v.object({ actions: v.array(v.object({ actionId: v.string(), sourceId: v.string(),
   sourceHash: hash, actorEmail: v.string(), bigquerySetupStarted: v.optional(v.literal(true)) })),

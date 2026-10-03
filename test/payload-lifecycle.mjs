@@ -552,6 +552,12 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
     if (pathname.startsWith(`${SERVERS}/`)) {
       const id = decodeURIComponent(pathname.slice(SERVERS.length + 1));
       if (method === 'GET') return state.servers.has(id) ? envelope(state.servers.get(id)) : envelope(null, 404);
+      if (method === 'PUT') {
+        if (!state.servers.has(id)) return envelope(null, 404);
+        assert.deepEqual(Object.keys(record.body), ['name']);
+        Object.assign(state.servers.get(id), record.body);
+        return envelope(state.servers.get(id));
+      }
       if (method === 'DELETE') {
         if (!state.servers.has(id)) return envelope(null, 404);
         state.servers.delete(id);

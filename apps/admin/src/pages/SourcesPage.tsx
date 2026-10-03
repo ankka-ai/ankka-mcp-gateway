@@ -2,7 +2,7 @@ import { DropdownMenu, Input } from '@cloudflare/kumo'
 import { Button } from '../components/Button'
 import { Books, CaretDown, Database, GlobeSimple, MagnifyingGlass, Plus, X } from '@phosphor-icons/react'
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { GatewayApiError, GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type ManagementCredentialChoice, type SourceActionSummary, type SourceActionTools, type SourceDiscovery, type BigQuerySetups, isBigQueryPreflightFailure, rollbackEndsMessage, validHandoffUrl } from '../api'
+import { GatewayApiError, GOOGLE_SHARED_OAUTH_BLOCK_MESSAGE, SOURCE_ADDITION_PAUSED_MESSAGE, type SourceDraftInput, type ManagementCredentialChoice, type SourceActionSummary, type SourceActionTools, type SourceDiscovery, type BigQuerySetups, isBigQueryPreflightFailure, rollbackEndsMessage, validHandoffUrl } from '../api'
 import { SOURCE_CATALOG, type SourceCatalog, type SourceCatalogSource } from '../catalog'
 import { useGateway } from '../GatewayContext'
 import { GatewayEndpoint } from '../components/GatewayEndpoint'
@@ -212,6 +212,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   }, [getTeam, refreshSources, tokenInQuestion])
   const [catalogSourceId, setCatalogSourceId] = useState<string | null>(null)
   const [label, setLabel] = useState('')
+  const [company, setCompany] = useState('')
   const [url, setUrl] = useState('')
   const [discovery, setDiscovery] = useState<SourceDiscovery | null>(null)
   const [selected, setSelected] = useState<string[]>([])
@@ -304,6 +305,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   const clearDraftForm = () => {
     setCatalogSourceId(null)
     setLabel('')
+    setCompany('')
     setUrl('')
     setDiscovery(null)
     setSelected([])
@@ -375,12 +377,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     }
     setFormError(null)
     try {
-      await saveSourceDraft({
-        label: label.trim(),
-        url: discovery.endpoint,
-        authMode: discovery.authentication,
-        enabledTools,
-      })
+      const draft: SourceDraftInput = { label: label.trim(), url: discovery.endpoint, authMode: discovery.authentication, enabledTools }
+      if (company.trim()) draft.company = company.trim()
+      await saveSourceDraft(draft)
       clearDraftForm()
       setShowForm(false)
     } catch (error) { setFormError(error instanceof Error ? error.message : 'The connector draft could not be saved.') }
@@ -603,6 +602,10 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                     onChange={(event) => { setUrl(event.target.value); setDiscovery(null) }}
                   />
                 </div>
+                <div className="mt-5 max-w-md">
+                  <Input className="w-full" label="Company (optional)" placeholder="Company B" value={company} maxLength={80} onChange={(event) => setCompany(event.target.value)} />
+                  <p className="mt-2 text-xs leading-5 text-kumo-subtle">Helps your LLM choose the right company’s data. Shown in connector discovery and tool descriptions.</p>
+                </div>
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <Button type="button" variant="secondary" className="pressable" loading={isBusy} onClick={() => void inspect()}>
                     <MagnifyingGlass size={16} /> Inspect connector
@@ -720,8 +723,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
               await api.updateInstalledSourceTools(revision, sourceId, enabledTools, toolMetadata)
               await refreshSources()
             }}
-            onRenameSource={async (sourceId, label) => {
-              await api.renameInstalledSource(sources.revision, sourceId, label)
+            onRenameSource={async (sourceId, label, company) => {
+              await api.renameInstalledSource(sources.revision, sourceId, label, company)
               await refreshSources()
             }}
             sourceToolsDisabled={isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || Boolean(blocker && blocker.kind !== 'source_removal')}

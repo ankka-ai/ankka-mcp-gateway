@@ -61,8 +61,10 @@ export const toolMetadataSchema = v.array(v.strictObject({
   description: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(2000))),
 }))
 export type ToolMetadata = v.InferOutput<typeof toolMetadataSchema>
+interface InstalledSourceDetailsInput { schemaVersion: number; revision: number; label: string; company?: string }
 interface InstalledToolsInput { schemaVersion: number; revision: number; enabledTools: string[]; toolMetadata?: ToolMetadata }
 const managedSourceSchema = v.strictObject({
+  company: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(80))),
   id: v.string(),
   label: v.string(),
   url: v.string(),
@@ -118,6 +120,7 @@ const bigQueryPreparedSchema = v.strictObject({
 export type BigQuerySetups = v.InferOutput<typeof bigQuerySetupsSchema>
 export type BigQueryPrepared = v.InferOutput<typeof bigQueryPreparedSchema>
 export interface BigQuerySetupInput {
+  company?: string
   revision: number
   label: string
   configuration: { queryProjectId: string; allowedDatasets: { projectId: string; datasetId: string }[] }
@@ -130,7 +133,7 @@ export function isBigQueryPreflightFailure(code: string | null): code is string 
 }
 
 const sourceActionFailureCodes = new Set([
-  'source_action_denied', 'source_action_recovery_required', 'source_action_state_unavailable',
+  'source_context_too_large', 'source_action_denied', 'source_action_recovery_required', 'source_action_state_unavailable',
   'source_action_conflict', 'source_action_drift', 'source_discovery_failed', 'source_action_invalid',
   'source_action_authorization_failed', 'source_resource_collision', 'source_action_legacy_policy',
   'source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'bigquery_setup_required',
@@ -373,6 +376,7 @@ export type DiscoveredTool = v.InferOutput<typeof discoveredToolSchema>
 export type SourceDiscovery = v.InferOutput<typeof sourceDiscoverySchema>
 
 export interface SourceDraftInput {
+  company?: string
   label: string
   url: string
   authMode: SourceAuthMode
@@ -433,7 +437,7 @@ export interface GatewayAdminApi {
   /** Replaces an installed connector’s allowlist and its Portal tool configuration. Assignments stay as they are. */
   updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<ManagedSources>
   /** Renames an installed connector in the gateway, in Team, and on its Access policy. Assignments stay as they are. */
-  renameInstalledSource(revision: number, sourceId: string, label: string): Promise<ManagedSources>
+  renameInstalledSource(revision: number, sourceId: string, label: string, company?: string): Promise<ManagedSources>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
   getRuntimeAction(actionId: string): Promise<RuntimeAction>
   prepareTeardownAction(): Promise<PreparedAction>
@@ -542,11 +546,12 @@ const ERROR_MESSAGES = new Map([
   ['source_tools_recovery_required', 'The tool update could not be confirmed. Retry the same selection; the gateway continues from the saved progress.'],
   ['source_portal_drift', 'The Portal configuration does not match this gateway’s record, so the tool selection was not saved. Review the connector in Cloudflare, then try again.'],
   ['source_tool_edit_unavailable', 'This connector’s saved ownership could not be verified, so its tools were not changed. Refresh and try again.'],
-  ['source_label_invalid', 'Enter a name of 2 to 80 characters. It was not saved.'],
+  ['source_context_too_large', 'The connector’s tool descriptions exceed the context limit. Company was not saved. Shorten the upstream descriptions and try again.'],
+  ['source_label_invalid', 'Use 2–80 characters for the name and up to 80 for Company, without surrounding spaces or control characters.'],
   ['source_label_unavailable', 'Only an installed connector can be renamed.'],
   ['source_label_pending', 'A rename for this connector is already in progress. Refresh and save that same name to finish it.'],
-  ['source_label_recovery_required', 'The rename could not be confirmed. Retry the same name; the gateway continues from the saved progress.'],
-  ['source_label_drift', 'The Access policy name does not match this connector, so the name was not saved. Review the connector in Cloudflare, then try again.'],
+  ['source_label_recovery_required', 'The rename could not be confirmed. Retry the same name and Company; the gateway continues from the saved progress.'],
+  ['source_label_drift', 'The connector or its Access policy does not match the saved state, so the name was not saved. Review the connector in Cloudflare, then try again.'],
   ['source_label_unconfirmed', 'The connector’s Access policy could not be read, so the name was not saved. Try again.'],
   ['source_unreachable', 'The MCP endpoint could not be reached within the discovery deadline.'],
   ['source_url_invalid', 'Enter a public HTTPS MCP endpoint without credentials, query parameters, or a custom port.'],
@@ -760,10 +765,12 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
 
-  renameInstalledSource(revision: number, sourceId: string, label: string): Promise<ManagedSources> {
+  renameInstalledSource(revision: number, sourceId: string, label: string, company?: string): Promise<ManagedSources> {
+    const input: InstalledSourceDetailsInput = { schemaVersion: 1, revision, label }
+    if (company !== undefined) input.company = company
     return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/label`, managedSourcesSchema, {
       method: 'PUT',
-      body: JSON.stringify({ schemaVersion: 1, revision, label }),
+      body: JSON.stringify(input),
     })
   }
 

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import test from 'node:test';
+import { managedSourceHash, parseSourceSave, safeManagementSources } from '../payload/worker/index.js';
 import * as v from 'valibot';
 
 import { APPROVED_CLOUDFLARE_CONTRACT } from '../apps/installer/scripts/sign-gateway-release.mjs';
@@ -269,7 +270,7 @@ async function fixture(run, claimInput) {
     if (request.url.startsWith('https://catalog.example.net/.well-known/oauth-protected-resource')) {
       return new Response(null, { status: 404 });
     }
-    if (request.url === NEW_SOURCE_URL) {
+    if ([NEW_SOURCE_URL, 'https://catalog.example.net/mcp-b'].includes(request.url)) {
       await sourceRequestHook?.(request);
       const message = await request.json();
       if (message.method === 'initialize') return Response.json({ jsonrpc: '2.0', id: message.id, result: {
@@ -315,16 +316,16 @@ function assertNoMutation(provider, baseline) {
   assert.deepEqual(provider.requests.slice(baseline).filter(({ method }) => method !== 'GET'), []);
 }
 
-async function prepareNewSource(gateway) {
+async function prepareNewSource(gateway, extra = {}) {
   const current = await (await gateway.api('/api/sources')).json();
   const savedResponse = await gateway.api('/api/sources', { method: 'PUT', body: {
     schemaVersion: 1, revision: current.revision,
-    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'] },
+    source: { label: 'Additional source', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'], ...extra },
   } });
   assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
   const sources = await savedResponse.json();
   assert.equal(sources.installationEnabled, true);
-  const source = sources.sources.find((candidate) => candidate.url === NEW_SOURCE_URL);
+  const source = sources.sources.find((candidate) => candidate.url === (extra.url ?? NEW_SOURCE_URL));
   return { source, sources, ...await authorizeNewSource(gateway, source.id, sources.revision) };
 }
 
@@ -338,10 +339,7 @@ async function authorizeNewSource(gateway, sourceId, revision, renewActionId = n
     method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson({ schemaVersion: 1,
       actionId: claim.actionId, sourceId, sourceRevision: revision, actorEmail: ADMIN,
       issuedAt: claim.expiresAt - 600_000, expiresAt: claim.expiresAt,
-      actionKeyHash: await prefixedSha256(claim.actionKey), sourceHash: await prefixedSha256({
-        id: source.id, label: source.label, url: source.url, authMode: source.authMode,
-        onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools,
-      }),
+      actionKeyHash: await prefixedSha256(claim.actionKey), sourceHash: await managedSourceHash(source),
     }),
   }));
   assert.equal(response.status, 200, await response.clone().text());
@@ -4787,8 +4785,8 @@ test('built-in API sources install, isolate data access, update Team policies an
 
 const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
 
-async function installAdditionalSource(gateway) {
-  const prepared = await prepareNewSource(gateway);
+async function installAdditionalSource(gateway, extra = {}) {
+  const prepared = await prepareNewSource(gateway, extra);
   const applied = await gateway.apply(prepared, {}, null);
   assert.equal(applied.status, 200, await applied.clone().text());
   const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
@@ -5042,7 +5040,7 @@ function sourcePolicy(gateway, resource) {
     .find((policy) => policy.id === resource.provider.id);
 }
 
-test('renaming an installed connector updates the gateway and Access policy names only', async () => fixture(async (gateway) => {
+test('renaming an installed connector updates discovery, gateway and Access policy names', async () => fixture(async (gateway) => {
   const drafted = await prepareNewSource(gateway);
   await refused(await putLabel(gateway, drafted.source.id, drafted.sources.revision, 'Renamed source'), 409, 'source_label_unavailable');
   assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY) ?? null, null);
@@ -5060,7 +5058,6 @@ test('renaming an installed connector updates the gateway and Access policy name
   const ownershipBefore = installed.ownership;
   const policyResource = ownershipBefore.resources.find((resource) => resource.kind === 'source_access_policy');
   const server = gateway.provider.state.servers.get(installed.serverId);
-  const serverName = server.name;
   const toolsBefore = [...gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === sourceId).enabledTools];
   const otherResources = canonicalJson(ownershipBefore.resources.slice(1));
   const hashBefore = ownershipBefore.resources[0].desiredHash;
@@ -5094,7 +5091,7 @@ test('renaming an installed connector updates the gateway and Access policy name
   const renamed = sources.sources.find((source) => source.id === sourceId);
   assert.equal(renamed.label, 'Renamed source');
   assert.deepEqual(renamed.enabledTools, toolsBefore);
-  assert.equal(server.name, serverName);
+  assert.equal(server.name, 'Renamed source');
   assert.equal(canonicalJson(gateway.provider.state.portal), portalBefore);
   assert.equal(sourcePolicy(gateway, policyResource).name, `Renamed source users [${policyResource.marker}]`);
   const ownership = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership
@@ -5778,4 +5775,132 @@ test('tool metadata resumes a lost write with Cloudflare response fields and kee
   assertNoMutation(gateway.provider, before);
   assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY), null);
   assert.deepEqual((await (await gateway.api(installedToolsPath(installed.source.id))).json()).toolMetadata, toolMetadata);
+}));
+
+function putCompany(gateway, source, company, label = source.label) {
+  return gateway.api(labelPath(source.id), { method: 'PUT', body: {
+    schemaVersion: 1, revision: gateway.managementStorage.snapshot(SOURCES_KEY).revision, label, company,
+  } });
+}
+
+test('Company is optional, bounded and part of the authorized source identity', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const source = installed.source;
+  const originalHash = await managedSourceHash(source);
+  assert.notEqual(await managedSourceHash({ ...source, company: 'Company B' }), originalHash);
+  for (const company of [null, 42, ' padded', 'trailing ', 'two\nlines', 'x'.repeat(81)]) {
+    const before = gateway.provider.requests.length;
+    await refused(await putCompany(gateway, source, company), 400, 'source_label_invalid');
+    assertNoMutation(gateway.provider, before);
+    assert.equal(parseSourceSave({ schemaVersion: 1, revision: 1, source: {
+      label: 'Search Console', url: NEW_SOURCE_URL, authMode: 'none', enabledTools: ['company_lookup'], company,
+    } }), null);
+  }
+  const saved = await putCompany(gateway, source, 'B');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal((await saved.json()).sources.find((entry) => entry.id === source.id).company, 'B');
+  assert.ok(safeManagementSources(gateway.managementStorage.snapshot(SOURCES_KEY)));
+}));
+
+test('Company on installation reaches discovery names and preserves full upstream tool text', async () => fixture(async (gateway) => {
+  const description = `Read Google organic clicks.\n${'Synthetic schema guidance. '.repeat(150)} `;
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method === 'GET' && record.pathname.includes('/mcp/servers/')) {
+      const server = state.servers.get(record.pathname.split('/').at(-1));
+      if (server?.hostname === NEW_SOURCE_URL) server.tools[0].description = description;
+    }
+  });
+  const installed = await installAdditionalSource(gateway, { label: 'Google Search Console', company: 'Company B' });
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  assert.equal(server.name, 'Company B · Google Search Console');
+  assert.deepEqual(portalMapping(gateway, server.id).updated_tools, [{ name: 'company_lookup', enabled: true,
+    description: `Company: "Company B".\n\n${description}` }]);
+  const publicSource = (await (await gateway.api('/api/sources')).json()).sources.find((entry) => entry.id === installed.source.id);
+  assert.equal(publicSource.company, 'Company B');
+  assert.equal(Object.hasOwn(publicSource, 'companyDescriptions'), false);
+  assert.equal(Object.hasOwn(publicSource, 'toolMetadata'), false);
+  assert.equal(server.tools[0].description, description);
+  assert.equal((await removeSource(gateway, installed.source.id)).status, 200);
+}));
+
+test('Company edits preserve aliases, permissions, other companies and description reset semantics', async () => fixture(async (gateway) => {
+  const a = await installAdditionalSource(gateway, { label: 'Google Search Console', company: 'Company A' });
+  const b = await installAdditionalSource(gateway, { label: 'Google Search Console', url: 'https://catalog.example.net/mcp-b' });
+  const server = gateway.provider.state.servers.get(b.serverId);
+  server.tools[0].description = 'Clicks and impressions from Google Search Console.';
+  const authority = canonicalJson(gateway.managementStorage.snapshot(CONTROL_KEY));
+  const team = canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY));
+  const aMapping = canonicalJson(portalMapping(gateway, a.serverId));
+  let saved = await putCompany(gateway, b.source, 'Company B');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(server.name, 'Company B · Google Search Console');
+  assert.equal(gateway.provider.state.servers.get(a.serverId).name, 'Company A · Google Search Console');
+  const teamView = await gateway.view();
+  assert.equal(teamView.sources.find((source) => source.id === a.source.id).label, 'Company A · Google Search Console');
+  assert.equal(teamView.sources.find((source) => source.id === b.source.id).label, 'Company B · Google Search Console');
+  const tool = () => portalMapping(gateway, b.serverId).updated_tools[0];
+  assert.equal(tool().description, 'Company: "Company B".\n\nClicks and impressions from Google Search Console.');
+  assert.equal(canonicalJson(gateway.managementStorage.snapshot(CONTROL_KEY)), authority);
+  assert.equal(canonicalJson(gateway.managementStorage.snapshot(TEAM_KEY)), team);
+  const metadata = [{ name: 'company_lookup', alias: 'organic_clicks', description: 'Read organic clicks; no revenue attribution.' }];
+  const revision = () => gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  saved = await gateway.api(installedToolsPath(b.source.id), { method: 'PUT', body: {
+    schemaVersion: 1, revision: revision(), enabledTools: ['company_lookup'], toolMetadata: metadata,
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(tool().alias, 'organic_clicks');
+  assert.equal(tool().description, 'Company: "Company B".\n\nRead organic clicks; no revenue attribution.');
+  // A legacy rename omits Company and preserves it.
+  saved = await putLabel(gateway, b.source.id, revision(), 'Organic search');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(server.name, 'Company B · Organic search');
+  saved = await putCompany(gateway, b.source, '', 'Organic search');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(server.name, 'Organic search');
+  assert.deepEqual(tool(), { ...metadata[0], enabled: true });
+  const source = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((entry) => entry.id === b.source.id);
+  assert.equal(Object.hasOwn(source, 'company'), false);
+  assert.equal(Object.hasOwn(source, 'companyDescriptions'), false);
+  assert.equal(canonicalJson(portalMapping(gateway, a.serverId)), aMapping);
+  assert.equal((await removeSource(gateway, b.source.id)).status, 200);
+}));
+
+for (const interrupted of ['server', 'portal']) test(`Company resumes after a lost ${interrupted} response using its saved descriptions`, async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  server.tools[0].description = 'Original upstream description.';
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  let lost = false;
+  gateway.provider.hook(({ record, state }) => {
+    if (lost || record.method !== 'PUT') return;
+    if (interrupted === 'server' && record.pathname.endsWith(`/servers/${server.id}`)) {
+      server.name = record.body.name;
+    } else if (interrupted === 'portal' && record.pathname.includes('/mcp/portals/')) {
+      state.portal = { ...state.portal, ...record.body };
+    } else return;
+    lost = true;
+    return envelope(null, 503);
+  });
+  await refused(await putCompany(gateway, installed.source, 'Company B'), 409, 'source_label_recovery_required');
+  assert.equal(lost, true);
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).revision, revision);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY).company, 'Company B');
+  await refused(await putCompany(gateway, installed.source, 'Company C'), 409, 'source_label_pending');
+  server.tools[0].description = 'New upstream text during retry.';
+  const writes = gateway.provider.requests.filter((record) => record.method === 'PUT' && record.pathname.includes(`/mcp/${interrupted === 'server' ? 'servers' : 'portals'}/`)).length;
+  const resumed = await putCompany(gateway, installed.source, 'Company B');
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_LABEL_EDIT_KEY), null);
+  assert.equal(portalMapping(gateway, server.id).updated_tools[0].description, 'Company: "Company B".\n\nOriginal upstream description.');
+  assert.equal(gateway.provider.requests.filter((record) => record.method === 'PUT' && record.pathname.includes(`/mcp/${interrupted === 'server' ? 'servers' : 'portals'}/`)).length, writes);
+}));
+
+test('Company on the original receipt-owned source preserves teardown and tool selection', async () => fixture(async (gateway) => {
+  await gateway.view();
+  const source = gateway.managementStorage.snapshot(SOURCES_KEY).sources[0];
+  const saved = await putCompany(gateway, source, 'Company A');
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const tools = await putInstalledTools(gateway, source.id, (await saved.json()).revision, [source.enabledTools[0]]);
+  assert.equal(tools.status, 200, await tools.clone().text());
+  assert.equal((await gateway.currentTeardown(5)).prepared.status, 200);
 }));
