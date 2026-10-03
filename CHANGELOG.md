@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add optional Company context to connectors. Discovery and Team show names
+  such as Company B · Google Search Console, and tool descriptions retain their
+  original or custom text beneath the company context. Reconnect your LLM
+  client after saving. Connector renames now also update Cloudflare discovery.
+
 - Customize names and descriptions for installed connector tools from Edit
   tools. Original names continue to control the allowlist; reconnect your
   client after saving to refresh its tool list.
