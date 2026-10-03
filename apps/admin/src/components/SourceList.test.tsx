@@ -198,6 +198,16 @@ describe('SourceList', () => {
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeVisible()
   })
 
+  it('explains when an unfinished gateway change pauses a connection check', async () => {
+    const user = userEvent.setup()
+    const check = vi.fn().mockResolvedValue({ schemaVersion: 1, sourceId: sources[0].id,
+      state: 'unknown', reason: 'lifecycle_pending', checkedAt: null })
+    render(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Check paused'))
+    await user.click(screen.getByRole('button', { name: 'Knowledge' }))
+    expect(screen.getByText(/Connection checking is paused while a gateway change is unfinished/)).toBeVisible()
+  })
+
   it('does not retain a green badge when rechecking fails', async () => {
     const user = userEvent.setup()
     const check = vi.fn().mockImplementationOnce(checkConnection).mockRejectedValue(new Error('unavailable'))
