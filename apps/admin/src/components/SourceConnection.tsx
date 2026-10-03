@@ -66,7 +66,7 @@ export function connectionLabel(result?: ConnectionCheck) {
     case 'forbidden': return 'Access denied'
     case 'unavailable': return 'Connection failed'
     case 'user_managed': return 'Individual sign-in'
-    default: return 'Not verified'
+    default: return result?.reason === 'lifecycle_pending' ? 'Check paused' : 'Not verified'
   }
 }
 
@@ -97,7 +97,7 @@ export function ConnectionDetails({ result }: { result: ConnectionCheck | undefi
               : result?.state === 'waiting' ? 'Waiting for other connection checks to finish before testing this one.'
                 : result?.reason === 'management_credential_required' ? 'Configure or renew your gateway’s management token in Settings to check connections.'
                   : result?.reason === 'configuration_changed' ? 'The Cloudflare configuration differs from this gateway’s saved configuration. The connection was not tested.'
-                    : result?.reason === 'lifecycle_pending' ? 'Finish the current gateway change, then check the connection again.'
+                    : result?.reason === 'lifecycle_pending' ? 'Connection checking is paused while a gateway change is unfinished. Finish or resolve that change, then check again.'
                       : result?.reason === 'check_pending' ? 'Cloudflare has not finished checking this connection. Check again shortly.'
                         : 'The connection could not be verified. Check again to get its current status.'
   return <div className="mt-3 text-xs leading-5 text-kumo-subtle">

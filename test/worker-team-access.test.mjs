@@ -6187,6 +6187,71 @@ test('Company on the original receipt-owned source preserves teardown and tool s
 
 const connectionPath = (sourceId) => `/api/sources/${sourceId}/connection`;
 
+test('installed connections remain checkable with a draft or another installation paused for sign-in or tools', () => signInFixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const draft = await saveSignInDraft(gateway);
+  const check = async () => {
+    gateway.provider.hook(({ record }) => {
+      if (record.pathname === `${SERVERS_PATH}/${installed.serverId}/sync`) return envelope({ status: 'ready' });
+    });
+    const before = canonicalJson([gateway.managementStorage.snapshot(SOURCES_KEY), gateway.managementStorage.snapshot(CONTROL_KEY),
+      gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), gateway.managementStorage.snapshot(TEAM_KEY), gateway.provider.state.portal]);
+    const baseline = gateway.provider.requests.length;
+    const response = await gateway.api(connectionPath(installed.source.id), { method: 'POST' });
+    assert.equal(response.status, 200, await response.clone().text());
+    const result = await response.json();
+    assert.equal(result.state, 'connected', JSON.stringify(result));
+    assert.deepEqual(gateway.provider.requests.slice(baseline).filter(r => r.method !== 'GET').map(r => [r.method, r.pathname]),
+      [['POST', `${SERVERS_PATH}/${installed.serverId}/sync`]]);
+    assert.equal(canonicalJson([gateway.managementStorage.snapshot(SOURCES_KEY), gateway.managementStorage.snapshot(CONTROL_KEY),
+      gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), gateway.managementStorage.snapshot(TEAM_KEY), gateway.provider.state.portal]), before);
+  };
+  await check();
+  await installSignInSource(gateway, { draft });
+  const saved = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  for (const failureCode of ['source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'source_tools_required', 'source_tools_chosen']) {
+    await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { ...saved, actions: saved.actions.map(action =>
+      action.sourceId === draft.source.id ? { ...action, failureCode } : action) });
+    await check();
+  }
+  // Retained installer consent that has not begun any provider write is safe too.
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { ...saved, actions: saved.actions.map(action =>
+    action.sourceId === draft.source.id ? { ...action, status: 'authorization_required', resources: [], failureCode: null } : action) });
+  await check();
+  assert.equal((await gateway.api(connectionPath(draft.source.id), { method: 'POST' })).status, 409);
+}));
+
+test('connection checks still refuse active, uncertain or corrupt installation writes and Portal drift', () => signInFixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const paused = await installSignInSource(gateway);
+  const saved = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+  for (const changes of [
+    { status: 'applying' },
+    { status: 'failed' },
+    { portalUpdate: { phase: 'send_armed', desiredHash: `sha256:${'a'.repeat(64)}` } },
+    { resources: paused.action.resources.slice(0, -1), pending: {
+      kind: paused.action.resources.at(-1).kind, phase: 'send_armed', provider: null,
+    } },
+    { failureCode: 'source_action_recovery_required' },
+    { sourceId: installed.source.id },
+    { status: 'corrupt' },
+  ]) {
+    await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, { ...saved, actions: saved.actions.map(action =>
+      action.sourceId === paused.source.id ? { ...action, ...changes } : action) });
+    const baseline = gateway.provider.requests.length;
+    const result = await (await gateway.api(connectionPath(installed.source.id), { method: 'POST' })).json();
+    assert.equal(result.state, 'unknown', JSON.stringify(changes));
+    assert.equal(result.reason, 'lifecycle_pending');
+    assertNoMutation(gateway.provider, baseline);
+  }
+  await gateway.managementStorage.put(SOURCE_ACTIONS_KEY, saved);
+  portalMapping(gateway, installed.serverId).default_disabled = false;
+  const baseline = gateway.provider.requests.length;
+  const result = await (await gateway.api(connectionPath(installed.source.id), { method: 'POST' })).json();
+  assert.equal(result.reason, 'configuration_changed');
+  assertNoMutation(gateway.provider, baseline);
+}));
+
 test('source connection checks use a fresh Cloudflare result, redact errors and preserve grants', () => fixture(async (gateway) => {
   const installed = await installAdditionalSource(gateway);
   const sourceId = installed.source.id;
