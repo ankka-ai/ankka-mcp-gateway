@@ -229,6 +229,10 @@ installation, removal, Team, or tool change queued before it, and a change
 waits for running checks. Each check has a 20-second deadline that includes
 this wait. A check that runs out returns **Not verified** without contacting
 Cloudflare, and the page stops waiting for any check after 25 seconds.
+An unrelated draft waiting for initial consent, provider sign-in, or tool
+selection does not block checks of installed connectors. Active or uncertain
+writes and other unfinished gateway changes still block checks, which show
+**Check paused** with recovery guidance.
 
 The connection badge reflects that fresh result, not installation state or
 Cloudflare's previously saved `ready` flag. Upstream 401 and 403 responses
