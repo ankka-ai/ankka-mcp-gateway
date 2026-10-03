@@ -442,6 +442,7 @@ export interface GatewayAdminApi {
   /** The real tools of a paused sign-in installation, once Cloudflare has synced them. */
   getSourceActionTools(actionId: string): Promise<SourceActionTools>
   authorizeSource(actionId: string, revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization>
+  reconnectSource(revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization>
   /** Saves the tool choice as its own revision-bound step; the recorded installation is resumed separately. */
   chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice>
   /** Cloudflare’s synced catalogue for an installed connector, plus the saved allowlist. New tools are not selected. */
@@ -756,6 +757,12 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   authorizeSource(actionId: string, revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization> {
     return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/authorize`, sourceAuthorizationSchema, {
       method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, sourceId, metaAppId }),
+    })
+  }
+
+  reconnectSource(revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization> {
+    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/authorize`, sourceAuthorizationSchema, {
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, metaAppId }),
     })
   }
 

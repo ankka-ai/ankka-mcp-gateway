@@ -188,6 +188,17 @@ URL and expiry. It requires a human Access identity, a same-origin JSON request,
 the current draft and installation, the gateway's management token, and an owned
 Cloudflare source. Service identities cannot start or finish this flow.
 
+Installed shared OAuth connectors use **Reconnect** and
+`POST /api/sources/<sourceId>/authorize` with `{ schemaVersion: 1, revision }`.
+This reuses the same provider sign-in, PKCE, browser binding and single-use callback.
+The gateway verifies receipt ownership and exact default-disabled Portal mappings
+before starting, before exchanging the code and immediately before importing the
+new credentials. Changes to saved configuration invalidate the attempt. Reconnect
+preserves allowed tools and Team assignments. When Cloudflare exposes the previous
+requested scopes in its non-secret summary, the gateway retains them and rejects
+expanded token grants. Individual sign-in connectors use
+their MCP client's flow. **Open in Cloudflare** remains the manual fallback.
+
 For the exact Meta Ads endpoint, include the public numeric `metaAppId` in that
 JSON request. Meta refuses automatic registration for custom clients, so the
 gateway uses this pre-registered App ID with PKCE and the displayed callback.

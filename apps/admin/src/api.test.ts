@@ -792,6 +792,15 @@ describe('connector provider authorization', () => {
       method: 'POST', credentials: 'same-origin', redirect: 'error', body: JSON.stringify({ schemaVersion: 1, revision: 4, sourceId: 'source-synthetic', metaAppId }),
     }))
   })
+  it('starts reconnect for the exact installed source and current revision', async () => {
+    const result = { schemaVersion: 1, authorizationUrl: 'https://identity.example.net/authorize?state=synthetic', expiresAt: '2026-09-19T12:05:00Z' }
+    const fetcher = vi.fn(async () => Response.json(result))
+    vi.stubGlobal('fetch', fetcher)
+    await expect(new HttpGatewayAdminApi().reconnectSource(4, 'source-synthetic')).resolves.toEqual(result)
+    expect(fetcher).toHaveBeenCalledWith('/api/sources/source-synthetic/authorize', expect.objectContaining({
+      method: 'POST', credentials: 'same-origin', redirect: 'error', body: JSON.stringify({ schemaVersion: 1, revision: 4 }),
+    }))
+  })
   it('refuses navigation to unsafe authorization URLs or a response containing credentials', async () => {
     for (const authorizationUrl of ['not a URL', 'javascript:alert(1)', 'http://identity.example.net/authorize', 'https://private@identity.example.net/authorize', 'https://identity.example.net/authorize#private']) {
       vi.stubGlobal('fetch', vi.fn(async () => Response.json({ schemaVersion: 1, authorizationUrl, expiresAt: '2026-09-19T12:05:00Z' })))
