@@ -63,6 +63,15 @@ export const toolMetadataSchema = v.array(v.strictObject({
 export type ToolMetadata = v.InferOutput<typeof toolMetadataSchema>
 interface InstalledSourceDetailsInput { schemaVersion: number; revision: number; label: string; company?: string }
 interface InstalledToolsInput { schemaVersion: number; revision: number; enabledTools: string[]; toolMetadata?: ToolMetadata }
+const sourceConnectionSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  sourceId: v.string(),
+  state: v.picklist(['connected', 'authorization_required', 'forbidden', 'unavailable', 'unknown', 'user_managed']),
+  reason: v.nullable(v.picklist(['management_credential_required', 'lifecycle_pending', 'configuration_changed', 'check_failed', 'check_pending'])),
+  checkedAt: v.nullable(v.pipe(v.string(), v.isoTimestamp())),
+})
+export type SourceConnection = v.InferOutput<typeof sourceConnectionSchema>
+
 const managedSourceSchema = v.strictObject({
   company: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(80))),
   id: v.string(),
@@ -414,6 +423,7 @@ export interface GatewayAdminApi {
   resumeBigQuery(actionId: string): Promise<BigQueryPrepared>
   prepareBigQueryRemoval(revision: number, sourceId: string): Promise<BigQueryPrepared>
   getSources(): Promise<ManagedSources>
+  checkSourceConnection(sourceId: string): Promise<SourceConnection>
   getTeam(): Promise<Team>
   prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
@@ -656,6 +666,9 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
+  checkSourceConnection(sourceId: string): Promise<SourceConnection> {
+    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/connection`, sourceConnectionSchema, { method: 'POST' })
+  }
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
 
   prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult> {

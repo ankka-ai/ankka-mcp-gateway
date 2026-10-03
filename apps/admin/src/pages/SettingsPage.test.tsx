@@ -39,7 +39,7 @@ function api(): GatewayAdminApi {
   return {
     removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status),
-    getSources: vi.fn(async () => sources),
+    checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn(),

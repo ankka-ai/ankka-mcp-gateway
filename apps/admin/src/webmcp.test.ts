@@ -108,7 +108,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
   const api = {
     removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status),
-    getSources: vi.fn(async () => sources),
+    checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
     getTeam: vi.fn(async () => team),
     prepareTeamAction: vi.fn(async (_revision: number, _members: TeamMember[]) => teamResult),
     getTeamAction: vi.fn(async (_actionId: string) => teamAction),
