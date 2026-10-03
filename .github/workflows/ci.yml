@@ -8,6 +8,8 @@ on:
 
 permissions:
   contents: read
+  actions: read
+  pull-requests: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -15,13 +17,17 @@ concurrency:
 
 # The gates of `npm run check` run as parallel jobs on one cached module
 # tree. The final `check` job is the required status on main; it passes only
-# when every gate passed, so the branch rule is unchanged.
+# when every gate passed, or the exact merged tree already passed this workflow
+# on its PR. PRs always run the full gate; missing evidence also runs it in full.
 jobs:
   install:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
       modules-key: ${{ steps.key.outputs.key }}
+      reused: ${{ steps.source.outputs.reused }}
+      source-commit: ${{ steps.source.outputs.source-commit }}
+      source-tree: ${{ steps.source.outputs.source-tree }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -29,20 +35,28 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm run check:toolchain
+      - id: source
+        name: Check for identical PR validation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/reuse-pr-check.mjs
       - id: key
+        if: steps.source.outputs.reused != 'true'
         run: echo "key=node-modules-v1-${{ runner.os }}-${{ hashFiles('.nvmrc', 'package-lock.json') }}" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        if: steps.source.outputs.reused != 'true'
         id: modules
         with:
           path: |
             node_modules
             apps/*/node_modules
           key: ${{ steps.key.outputs.key }}
-      - if: steps.modules.outputs.cache-hit != 'true'
+      - if: steps.source.outputs.reused != 'true' && steps.modules.outputs.cache-hit != 'true'
         run: npm ci
 
   lint-typecheck:
     needs: install
+    if: needs.install.outputs.reused != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -66,6 +80,7 @@ jobs:
 
   build-app-tests:
     needs: install
+    if: needs.install.outputs.reused != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -89,6 +104,7 @@ jobs:
 
   core-tests:
     needs: install
+    if: needs.install.outputs.reused != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -122,21 +138,14 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        id: modules
-        with:
-          path: |
-            node_modules
-            apps/*/node_modules
-          key: ${{ needs.install.outputs.modules-key }}
-      - if: steps.modules.outputs.cache-hit != 'true'
-        run: npm ci
+      # These checks use only Node built-ins. History must be checked again
+      # after merge even when the file tree is identical to the tested PR.
       - run: npm run check:toolchain
       - run: npm run check:boundary
       - run: npm run check:history
 
   check:
-    needs: [lint-typecheck, build-app-tests, core-tests, boundary-history]
+    needs: [install, lint-typecheck, build-app-tests, core-tests, boundary-history]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -144,11 +153,47 @@ jobs:
       - name: Every gate passed
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
+          REUSED: ${{ needs.install.outputs.reused }}
+          INSTALL_RESULT: ${{ needs.install.result }}
+          HISTORY_RESULT: ${{ needs.boundary-history.result }}
         run: |
           echo "gate results: $RESULTS"
+          if [ "$INSTALL_RESULT" = "success" ] && [ "$HISTORY_RESULT" = "success" ] && [ "$REUSED" = "true" ]; then
+            for result in $RESULTS; do
+              if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
+                exit 1
+              fi
+            done
+            echo "The exact merged source already passed the full PR gate."
+            exit 0
+          fi
           for result in $RESULTS; do
             if [ "$result" != "success" ]; then
               echo "a gate did not pass"
               exit 1
             fi
           done
+      - name: Record the source that passed every gate
+        if: needs.install.outputs.reused != 'true'
+        env:
+          TESTED_COMMIT: ${{ needs.install.outputs.source-commit }}
+          TESTED_TREE: ${{ needs.install.outputs.source-tree }}
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          fs.writeFileSync('checked-source.json', JSON.stringify({
+            schemaVersion: 1,
+            repository: process.env.GITHUB_REPOSITORY,
+            runId: Number(process.env.GITHUB_RUN_ID),
+            runAttempt: Number(process.env.GITHUB_RUN_ATTEMPT),
+            testedCommit: process.env.TESTED_COMMIT,
+            tree: process.env.TESTED_TREE,
+          }));
+          NODE
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: needs.install.outputs.reused != 'true'
+        with:
+          name: checked-source-${{ github.run_attempt }}
+          path: checked-source.json
+          retention-days: 7
+          if-no-files-found: error
