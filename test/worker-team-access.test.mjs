@@ -5333,6 +5333,100 @@ function ruleGroups(entry) {
   return entry.include.filter((rule) => rule.group).map((rule) => rule.group.id);
 }
 
+test('Team imports external changes to owned group assignments without rewriting policies', async () => fixture(async (gateway) => {
+  await addHistoricalInstalledSource(gateway);
+  const before = await gateway.view();
+  const [first, second] = before.sources.filter(({ status }) => status === 'installed').map(({ id }) => id);
+  const team = { id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [first] };
+  const created = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members, teams: [team],
+  } });
+  assert.equal(created.status, 200, await created.clone().text());
+  const saved = await gateway.view();
+  const groupId = [...gateway.provider.groups.values()][0].id;
+  const previous = sourceAccessPolicy(gateway, first);
+  previous.include = previous.include.filter((rule) => !rule.group);
+  if (previous.include.length === 0) {
+    previous.decision = 'deny';
+    previous.include = [{ everyone: {} }];
+  }
+  const next = sourceAccessPolicy(gateway, second);
+  next.include = next.decision === 'deny' ? [] : next.include;
+  next.decision = 'allow';
+  next.include.push({ group: { id: groupId } });
+  const manual = addManualPolicies(gateway);
+  const policies = structuredClone(gateway.provider.state.policies);
+  const baseline = gateway.provider.requests.length;
+  const after = await gateway.view();
+  assert.ok(after.observedAt);
+  assert.equal(after.revision, saved.revision + 1);
+  assert.deepEqual(after.teams, [{ ...team, sourceIds: [second] }]);
+  assert.deepEqual(after.members, saved.members);
+  const stale = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: saved.revision, members: saved.members, teams: saved.teams,
+  } });
+  assert.equal(stale.status, 409);
+  gateway.reloadManagement();
+  const reloaded = await gateway.view();
+  assert.equal(reloaded.revision, after.revision);
+  assert.deepEqual(reloaded.teams, after.teams);
+  assert.deepEqual(gateway.provider.state.policies, policies);
+  assertManualPoliciesUnchanged(gateway, manual, baseline);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+for (const change of ['foreign_source_group', 'missing_portal_group', 'renamed_group', 'unreadable_group']) {
+  test(`Team refuses to import group assignments with ${change}`, async () => fixture(async (gateway) => {
+    const before = await gateway.view();
+    const sourceId = installedSourceId(before);
+    const created = await gateway.api('/api/team-actions', { method: 'POST', body: {
+      schemaVersion: 1, expectedRevision: before.revision, members: before.members,
+      teams: [{ id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [] }],
+    } });
+    assert.equal(created.status, 200, await created.clone().text());
+    await gateway.view();
+    const stored = gateway.managementStorage.snapshot(TEAM_KEY);
+    const group = [...gateway.provider.groups.values()][0];
+    sourceAccessPolicy(gateway, sourceId).include.push({ group: { id: group.id } });
+    if (change === 'foreign_source_group') {
+      sourceAccessPolicy(gateway, sourceId).include.push({ group: { id: 'synthetic-foreign-group' } });
+    } else if (change === 'missing_portal_group') {
+      policy(gateway, 'mcp_portal').include = policy(gateway, 'mcp_portal').include.filter((rule) => !rule.group);
+    } else if (change === 'renamed_group') group.name = 'Unowned group';
+    else gateway.provider.hook(({ record }) => record.pathname.endsWith(`/access/groups/${group.id}`) ? envelope(null, 403) : undefined);
+    const baseline = gateway.provider.requests.length;
+    const response = await gateway.api('/api/team');
+    assert.equal(response.status, 503);
+    assert.equal((await response.json()).reason, ['renamed_group', 'unreadable_group'].includes(change)
+      ? 'team_group_unavailable' : 'team_group_bindings_changed');
+    assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY), stored);
+    assertNoMutation(gateway.provider, baseline);
+  }));
+}
+
+test('Team imports a management group assignment only when both owned audiences agree', async () => fixture(async (gateway) => {
+  const { source, application } = await installManagementSource(gateway);
+  const before = await gateway.view();
+  const team = { id: FINANCE_TEAM, name: 'Finance', memberEmails: [NEW_PERSON], sourceIds: [] };
+  const created = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: before.revision, members: before.members, teams: [team],
+  } });
+  assert.equal(created.status, 200, await created.clone().text());
+  await gateway.view();
+  const stored = gateway.managementStorage.snapshot(TEAM_KEY);
+  const groupId = [...gateway.provider.groups.values()][0].id;
+  sourceAccessPolicy(gateway, source.id).include.push({ group: { id: groupId } });
+  const baseline = gateway.provider.requests.length;
+  const inconsistent = await gateway.api('/api/team');
+  assert.equal(inconsistent.status, 503);
+  assert.equal((await inconsistent.json()).reason, 'team_management_audience_changed');
+  assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY), stored);
+  gateway.provider.state.policies.get(application.id)[0].include.push({ group: { id: groupId } });
+  const after = await gateway.view();
+  assert.deepEqual(after.teams, [{ ...team, sourceIds: [source.id] }]);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
 test('a named team creates one Access group and a later membership edit does not rewrite policies', async () => fixture(async (gateway) => {
   const before = await gateway.view();
   const sourceId = installedSourceId(before);
