@@ -248,6 +248,10 @@ function releaseTitle(release, channel) {
 export function releaseNotes(repository, manifest, receipt) {
   const commitUrl = `https://github.com/${repository}/commit/${manifest.sourceCommit}`;
   const channelLabel = receipt.channel === 'canary' ? 'Canary pre-release' : 'Stable release';
+  const manualPolicyReleaseNotes = manifest.release === 'gateway-v0.2.19'
+    ? '- Fix Team failing to load when additional Cloudflare Access policies are attached to a gateway application. Team reads and saves only the Ankka-managed policy by its saved ID.\n' +
+      '- Preserve manual policies during Team changes, management-token verification, and Gateway Management operations. Ownership and managed-policy validation remain enforced.\n\n'
+    : '';
   const companyReleaseNotes = manifest.release === 'gateway-v0.2.18'
     ? '- Set optional Company context when adding a connector or editing its details. Discovery and Team show names such as Company B · Google Search Console.\n' +
       '- Tool descriptions include Company while preserving upstream or custom text. Tool allowlists and permissions stay unchanged. Reconnect your LLM client after saving.\n' +
@@ -285,6 +289,7 @@ export function releaseNotes(repository, manifest, receipt) {
       ? '- Agent-authored API sources are built in, with no feature flag or separate runtime deployment. Existing v0.1 gateways upgrade through v0.1.82 first; no fresh installation is required.\n\n'
       : '';
   return `${channelLabel} of Ankka MCP Gateway. This GitHub Release mirrors the exact signed artifact already committed to the customer update channel.\n\n` +
+    manualPolicyReleaseNotes +
     companyReleaseNotes +
     connectorReleaseNotes +
     apiSourceReleaseNotes +

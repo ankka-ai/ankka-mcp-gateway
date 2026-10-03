@@ -12,7 +12,7 @@ import { addHistoricalInstalledSource } from '../../../test/historical-source-fi
 const origin = 'https://manage.example.com';
 const teamKey = 'ankka-mcp-gateway/team-access/v1';
 
-test('Team resumes seven-source access from SQLite after restart without replaying committed writes', async () => {
+test('Team resumes seven-source access after restart without replaying writes or changing manual policies', async () => {
   let writes = 0;
   const provider = cloudflareProvider({ onRequest: ({ record, state }) => {
     const envelope = (result) => Response.json({ success: true, errors: [], result });
@@ -20,8 +20,10 @@ test('Team resumes seven-source access from SQLite after restart without replayi
     if (record.method !== 'PUT' || !record.pathname.includes('/policies/')) return;
     const parts = record.pathname.split('/');
     const policy = { id: parts.at(-1), ...record.body };
-    assert.ok(state.policies.get(parts.at(-3)).some(({ id }) => id === policy.id));
-    state.policies.set(parts.at(-3), [policy]);
+    const policies = state.policies.get(parts.at(-3));
+    const index = policies.findIndex(({ id }) => id === policy.id);
+    assert.ok(index >= 0);
+    policies[index] = policy;
     // The provider committed the third write, but its response was lost.
     if (++writes === 3) return new Response(null, { status: 503 });
     return envelope(policy);
@@ -29,6 +31,13 @@ test('Team resumes seven-source access from SQLite after restart without replayi
   const gateway = await installReadyGateway({ provider });
   for (let index = 1; index < 7; index += 1) {
     await addHistoricalInstalledSource(gateway, { label: `Source ${index}`, url: `https://source-${index}.example.net/mcp` });
+  }
+  const manualPolicies = new Map();
+  for (const [applicationId, policies] of provider.state.policies) {
+    const manual = { id: `${applicationId}-manual`, name: 'Synthetic benchmark', decision: 'non_identity',
+      include: [{ service_token: { token_id: 'synthetic-benchmark-service-token' } }], exclude: [], require: [] };
+    policies.unshift(manual);
+    manualPolicies.set(applicationId, structuredClone(manual));
   }
   gateway.env.ANKKA_MANAGEMENT_TOKEN = 'synthetic-team-token-never-store';
   const management = Object.fromEntries(await gateway.objects.get('v1:management').storage.list());
@@ -86,6 +95,10 @@ test('Team resumes seven-source access from SQLite after restart without replayi
     const finished = await (await runtime.dispatchFetch(`${origin}/fixture/state`)).json();
     assert.equal(finished[teamKey].pendingAction.status, 'succeeded');
     assert.equal(finished[teamKey].members.find(({ email }) => email === 'new-person@example.com').sourceIds.length, 7);
+    for (const [applicationId, manual] of manualPolicies) {
+      assert.deepEqual(provider.state.policies.get(applicationId).find(({ id }) => id === manual.id), manual);
+      assert.ok(provider.requests.every(({ pathname }) => !pathname.endsWith(`/policies/${manual.id}`)));
+    }
     assert.ok(!JSON.stringify(finished).includes(gateway.env.ANKKA_MANAGEMENT_TOKEN));
     assert.deepEqual(await (await runtime.dispatchFetch(`${origin}/fixture/state`, { headers: { 'x-fixture-root': 'true' } })).json(), root);
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }

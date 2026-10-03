@@ -312,6 +312,32 @@ function policy(gateway, type = 'mcp') {
   return gateway.provider.state.policies.get(app(gateway, type).id)[0];
 }
 
+function addManualPolicies(gateway) {
+  const added = new Map();
+  for (const [applicationId, policies] of gateway.provider.state.policies) {
+    const manual = ['allow', 'non_identity', 'deny', 'bypass'].map((decision) => ({
+      id: `${applicationId}-manual-${decision}`, name: policies[0].name, decision,
+      include: decision === 'non_identity'
+        ? [{ service_token: { token_id: 'synthetic-benchmark-service-token' } }]
+        : [{ email: { email: 'external-only@example.com' } }],
+      exclude: [], require: [],
+    }));
+    // Even a same-named rule ahead of ours must not be adopted or modified.
+    policies.unshift(...manual);
+    added.set(applicationId, structuredClone(manual));
+  }
+  return added;
+}
+
+function assertManualPoliciesUnchanged(gateway, manual, baseline) {
+  for (const [applicationId, expected] of manual) {
+    const ids = new Set(expected.map(({ id }) => id));
+    assert.deepEqual(gateway.provider.state.policies.get(applicationId).filter(({ id }) => ids.has(id)), expected);
+    assert.ok(gateway.provider.requests.slice(baseline).filter(({ method }) => method !== 'GET')
+      .every(({ pathname }) => !ids.has(pathname.split('/').at(-1))));
+  }
+}
+
 function assertNoMutation(provider, baseline) {
   assert.deepEqual(provider.requests.slice(baseline).filter(({ method }) => method !== 'GET'), []);
 }
@@ -1668,6 +1694,47 @@ test('abandoning current consent expires its unstarted lifecycle lock without ch
 }));
 
 const MANAGEMENT_TOKEN = 'synthetic-account-management-token-never-store';
+
+for (const embedded of [true, false]) {
+  test(`Team reads and saves only receipt-owned policies with manual rules present (embedded: ${embedded})`, async () => fixture(async (gateway) => {
+    const before = await gateway.view();
+    const manual = addManualPolicies(gateway);
+    if (!embedded) gateway.provider.hook(({ record, state }) =>
+      record.method === 'GET' && record.pathname.endsWith('/access/apps') ? envelope([...state.apps.values()]) : undefined);
+    const baseline = gateway.provider.requests.length;
+    const view = await gateway.view();
+    assert.ok(view.observedAt);
+    assert.equal(view.editingEnabled, true);
+    assert.equal(view.revision, before.revision);
+    assert.deepEqual(view.members, before.members);
+    const response = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(view) });
+    assert.equal(response.status, 200, await response.clone().text());
+    assert.equal((await response.json()).action.status, 'succeeded');
+    const after = await gateway.view();
+    assert.ok(after.members.some(({ email }) => email === NEW_PERSON));
+    assert.ok(!JSON.stringify(after).includes('external-only@example.com'));
+    assertManualPoliciesUnchanged(gateway, manual, baseline);
+    assert.equal(gateway.provider.requests.slice(baseline).filter(({ method }) => method === 'PUT').length, 2);
+  }));
+}
+
+for (const type of ['mcp_portal', 'mcp']) {
+  for (const change of ['missing', 'duplicate', 'altered']) {
+    test(`Team refuses a ${change} owned ${type} policy despite same-named manual rules`, async () => fixture(async (gateway) => {
+      const before = await gateway.view();
+      const owned = policy(gateway, type);
+      addManualPolicies(gateway);
+      const policies = gateway.provider.state.policies.get(app(gateway, type).id);
+      if (change === 'missing') policies.splice(policies.indexOf(owned), 1);
+      if (change === 'duplicate') policies.push(structuredClone(owned));
+      if (change === 'altered') owned.require = [{ everyone: {} }];
+      const baseline = gateway.provider.requests.length;
+      assert.equal((await gateway.api('/api/team')).status, 503);
+      assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(before) })).status, 409);
+      assertNoMutation(gateway.provider, baseline);
+    }));
+  }
+}
 
 // Empty and multi-source graphs cover both shapes and the constant read count.
 for (const sourceCount of [0, 5]) {
@@ -3510,9 +3577,19 @@ test('verification writes nothing to a resource that no longer matches the recei
   await gateway.view();
   assert.equal((await verifyToken(gateway)).status, 'verified');
 
-  // A second policy on the Portal's application, or a deleted one, is drift too.
-  gateway.provider.state.policies.get(app(gateway, 'mcp_portal').id).push({ ...edited, id: 'y'.repeat(32) });
+  // A same-named manual policy cannot replace the receipt-owned policy.
+  gateway.provider.state.policies.set(app(gateway, 'mcp_portal').id, [{ ...edited, id: 'y'.repeat(32) }]);
   assert.equal((await verifyToken(gateway)).accessPolicies, 'drift');
+}));
+
+test('management-token verification preserves additional manual policies', async () => fixture(async (gateway) => {
+  await gateway.view();
+  const manual = addManualPolicies(gateway);
+  const baseline = gateway.provider.requests.length;
+  assert.deepEqual(await verifyToken(gateway), {
+    schemaVersion: 1, status: 'verified', token: 'active', portals: 'verified', accessPolicies: 'verified',
+  });
+  assertManualPoliciesUnchanged(gateway, manual, baseline);
 }));
 
 test('verification says missing, rejected, busy or unconfirmed without writing, each with the calls it needs and no more', async () => fixture(async (gateway) => {
@@ -4320,8 +4397,11 @@ test('Gateway Management installs as an ordinary assigned source with its own pr
   assert.equal(JSON.stringify(status.body).includes(gateway.env.ANKKA_MANAGEMENT_TOKEN), false);
 }));
 
-test('management source assignment authorizes a non-administrator and live removal rejects the same token', () => fixture(async (gateway) => {
+test('management source assignment ignores manual policies and live removal rejects the same token', () => fixture(async (gateway) => {
   const { source } = await installManagementSource(gateway);
+  const manual = addManualPolicies(gateway);
+  const baseline = gateway.provider.requests.length;
+  assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: 'external-only@example.com' })).response.status, 401);
   let team = await (await gateway.api('/api/team')).json();
   const member = team.members.find((item) => item.email === MEMBER);
   assert.ok(member);
@@ -4345,6 +4425,7 @@ test('management source assignment authorizes a non-administrator and live remov
   } })).status, 200);
   const denied = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} }, { email: MEMBER });
   assert.equal(denied.response.status, 401);
+  assertManualPoliciesUnchanged(gateway, manual, baseline);
 }));
 
 test('management MCP rejects unassigned callers, other audiences, drift, cross-origin requests and arbitrary tools', () => fixture(async (gateway) => {
