@@ -220,7 +220,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   async checkSourceConnection(sourceId: string): Promise<SourceConnection> {
     const source = this.#sources.sources.find(candidate => candidate.id === sourceId)
     if (!source || source.status !== 'installed') throw new GatewayApiError(404, 'source_not_found')
-    if (this.#scenario === 'connection-reconnect') return {
+    if (this.#scenario === 'connection-reconnect' && source.authMode === 'oauth' && !source.onBehalfOfUser) return {
       schemaVersion: 1, sourceId, state: 'authorization_required', checkedAt: new Date().toISOString(), reason: null,
       reconnectUrl: 'https://dash.cloudflare.com/' + 'a'.repeat(32) + '/one/access-controls/ai-controls/mcp-server/edit/server-synthetic',
     }
@@ -431,6 +431,10 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const ready = Date.now() - this.#firstToolRead >= 2_000
     return structuredClone({ schemaVersion: 1, actionId, sourceId: action.sourceId,
       state: ready ? 'ready' : 'connection_required', tools: ready ? SIGN_IN_TOOLS : [] })
+  }
+
+  async reconnectSource(): Promise<SourceAuthorization> {
+    throw new GatewayApiError(409, 'source_oauth_unavailable')
   }
 
   async authorizeSource(): Promise<SourceAuthorization> {

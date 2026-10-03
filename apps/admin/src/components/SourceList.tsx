@@ -34,6 +34,7 @@ interface SourceListProps {
   onRemove?(sourceId: string): Promise<void>
   onRefresh?(): Promise<void>
   onAuthorize(sourceId: string): void
+  onReconnect?(sourceId: string, reconnectUrl?: string): void
   canRemove?(sourceId: string): boolean
   removeDisabled?: boolean
   onRemoveDraft?(sourceId: string): void
@@ -43,7 +44,7 @@ interface SourceListProps {
   sourceToolsDisabled?: boolean
 }
 
-export function SourceList({ sources, connectionRevision, onCheckConnection, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, onRenameSource, sourceToolsDisabled = false }: SourceListProps) {
+export function SourceList({ sources, connectionRevision, onCheckConnection, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, onReconnect, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, onRenameSource, sourceToolsDisabled = false }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -130,7 +131,9 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
                   </td>
                   <td className="px-3 py-3">
                     {pendingRemovalSourceId === source.id ? <span className="text-warning-strong">Removal started</span> : source.status === 'installed' ? (
-                      <ConnectionStatus result={connections[source.id]} label={source.label} />
+                      <ConnectionStatus result={connections[source.id]} label={source.label} disabled={isBusy || sourceToolsDisabled}
+                        onReconnect={source.authMode === 'oauth' && !source.onBehalfOfUser && onReconnect
+                          ? () => { const result = connections[source.id]; onReconnect(source.id, result && 'reconnectUrl' in result ? result.reconnectUrl : undefined) } : undefined} />
                     ) : (
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="inline-flex items-center rounded-full bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning-strong">{draftLabel?.(source.id) ?? 'Incomplete'}</span>

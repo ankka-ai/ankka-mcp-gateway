@@ -5191,7 +5191,59 @@ async function metaAdsGrantedScope(accessToken) {
   return META_ADS_GRANTED_SCOPES.filter((value) => granted.includes(value)).join(' ');
 }
 
+function verifyReconnectScope(sourceUrl, scope, requested) {
+  const allowed = sourceUrl === META_ADS_MCP_URL ? [...requested, 'public_profile'] : requested;
+  if (!oauthText(scope, 4096) || scope.split(' ').some(value => !allowed.includes(value))) {
+    sourceOauthFailure('source_oauth_scope_unsupported');
+  }
+}
+
+// Reconnect only a receipt-owned, installed shared OAuth connection. Recheck
+// this binding before exchange and import; consent must not outlive a source edit.
+async function installedSourceOauthContext(storage, env, input) {
+  const loaded = await loadInstalledSource(storage, env, input.sourceId, input.actorEmail);
+  if (loaded instanceof Response) return loaded;
+  const { sources, control, source } = loaded;
+  if (input.revision !== sources.revision) return sourceActionConflict('draft_changed');
+  if (source.status !== 'installed' || source.authMode !== 'oauth' || source.onBehalfOfUser !== false) sourceOauthFailure();
+  if (await recordedLifecycleBlocks(storage, Date.now()) || await teamActionBlocksLifecycle(storage)) {
+    return sourceActionConflict('lifecycle_pending');
+  }
+  const token = managementCredential(env);
+  if (!token) return sourceToolsRefusal(409, 'management_credential_required');
+  const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
+  const serverId = ownership?.resources[0]?.provider?.id;
+  const environment = parseManagementEnvironment(env);
+  const evidence = environment && await rootTeardownAuthority(storage, environment, control.installationId, env);
+  const root = evidence && {
+    schemaVersion: 1, status: 'ready', installationId: control.installationId, receipt: evidence.root.receipt, teardown: null,
+  };
+  const layout = root && teardownResources(root, control.sourceOwnership, false, control.removedInitialSource ?? null);
+  if (!safeProviderId(serverId) || !layout) sourceOauthFailure();
+  const desired = (await buildDesiredResources(teardownSettings(control, source,
+    layout.receiptSourceOwner === source.id ? 'company-context' : source.id), control.installationId))[0];
+  const signal = AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS);
+  const path = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`;
+  const server = await providerCall(path, token, { signal });
+  if (server.status !== 'ok') sourceOauthFailure();
+  if (!desired || !mcpMatches(server.result, desired) || desired.key !== serverId) sourceOauthFailure();
+  // Sync can discover new tools. Only proceed with the receipt-owned Portal's
+  // exact default-disabled mappings, so discovery cannot enable any of them.
+  const mappings = installedPortalMappings(control, sources);
+  const portal = await providerCall(`/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`, token, { signal });
+  if (portal.status !== 'ok') sourceOauthFailure();
+  if (!mappings || !portalExact(portal.result, control, mappings)) sourceOauthFailure();
+  // Cloudflare's summary is non-secret. Keep a previously selected scope set
+  // when available, instead of requesting every newly advertised permission.
+  const scope = server.result.auth_config_summary?.registration_info?.scope;
+  if (scope !== undefined && (!isText(scope) || scope.length > 4096 ||
+      (scope !== '' && !scope.split(' ').every(value => /^[\x21\x23-\x5B\x5D-\x7E]+$/u.test(value))))) sourceOauthFailure();
+  // Bind the attempt to saved ownership and permissions, not transient connection health.
+  return { ...loaded, path, scope, binding: { sources, control, scope: scope ?? null } };
+}
+
 async function ownedSourceOauthContext(storage, env, input) {
+  if (input.actionId === null) return installedSourceOauthContext(storage, env, input);
   const recorded = await recordedSourceToolAction(storage, input.actionId);
   if (recorded instanceof Response) return recorded;
   if (await otherLifecycleBlocksSource(storage, Date.now(), input.actionId) || await teamActionBlocksLifecycle(storage)) {
@@ -5213,7 +5265,7 @@ async function ownedSourceOauthContext(storage, env, input) {
   const path = `/accounts/${encodeURIComponent(context.control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(receipt.provider.id)}`;
   const server = await providerCall(path, token, { signal: AbortSignal.timeout(10_000) });
   if (server.status !== 'ok' || !mcpMatches(server.result, desired)) sourceOauthFailure();
-  return { ...context, path };
+  return { ...context, path, binding: context.action };
 }
 
 function sourceOauthCookie(value, maxAge) {
@@ -5225,7 +5277,8 @@ async function startSourceOauth(storage, env, input) {
       ...(Object.hasOwn(input ?? {}, 'metaAppId') ? ['metaAppId'] : []),
       ...(Object.hasOwn(input ?? {}, 'remote') ? ['remote'] : [])]) ||
       (Object.hasOwn(input ?? {}, 'remote') && input.remote !== true) || input.schemaVersion !== 1 ||
-      !ACTION_ID.test(input.actionId) || !SOURCE_ID.test(input.sourceId) || !normalizedEmail(input.actorEmail) ||
+      (input.actionId !== null && !ACTION_ID.test(input.actionId)) || (input.actionId === null && input.remote) ||
+      !SOURCE_ID.test(input.sourceId) || !normalizedEmail(input.actorEmail) ||
       !Number.isSafeInteger(input.revision) || input.revision < 1) return sourceToolsRefusal(400, 'source_oauth_invalid');
   const context = await ownedSourceOauthContext(storage, env, input);
   if (context instanceof Response) return context;
@@ -5236,7 +5289,13 @@ async function startSourceOauth(storage, env, input) {
     sourceOauthFailure('source_oauth_meta_app_required');
   }
   if (!meta && Object.hasOwn(input, 'metaAppId')) return sourceToolsRefusal(400, 'source_oauth_invalid');
-  const { config, scope, requireIssuer } = await discoverSourceOauth(context.source.url);
+  const discovered = await discoverSourceOauth(context.source.url);
+  const { config, requireIssuer } = discovered;
+  const scope = context.scope ?? discovered.scope;
+  if (context.scope !== undefined) {
+    config.scopes_supported = scope ? scope.split(' ') : [];
+    verifySourceOauthScope(context.source.url, scope, config.scopes_supported);
+  }
   const origin = `https://${parseManagementEnvironment(env).managementHostname}`;
   const redirectUri = `${origin}${input.remote ? `${MANAGEMENT_MCP_PATH}/oauth/callback` : SOURCE_OAUTH_CALLBACK}`;
   const registration = {
@@ -5253,14 +5312,17 @@ async function startSourceOauth(storage, env, input) {
   if (!oauthText(registered.client_id) || registered.client_secret !== undefined ||
       registered.token_endpoint_auth_method !== 'none' || !Array.isArray(registered.redirect_uris) ||
       registered.redirect_uris.length !== 1 || registered.redirect_uris[0] !== redirectUri) sourceOauthFailure();
-  if (registered.scope !== undefined) verifySourceOauthScope(context.source.url, registered.scope, config.scopes_supported);
+  if (registered.scope !== undefined) {
+    verifySourceOauthScope(context.source.url, registered.scope, config.scopes_supported);
+    if (input.actionId === null) verifyReconnectScope(context.source.url, registered.scope, config.scopes_supported);
+  }
   const registrationInfo = { ...registration, client_id: registered.client_id };
   const state = randomBase64Url(32), browser = randomBase64Url(32), verifier = randomBase64Url(32);
   const challenge = base64UrlEncode(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
   const expiresAt = Date.now() + SOURCE_OAUTH_TTL_MS;
   await storage.put(SOURCE_OAUTH_KEY, {
     ...input, expiresAt, stateHash: await sha256(state), browserHash: await sha256(browser), verifier,
-    actionHash: await sha256(context.action), config, registrationInfo, requireIssuer, redirectUri,
+    actionHash: await sha256(context.binding), config, registrationInfo, requireIssuer, redirectUri,
   });
   const authorize = new URL(config.authorization_endpoint);
   const params = new URLSearchParams({ response_type: 'code', client_id: registered.client_id, redirect_uri: redirectUri,
@@ -5288,7 +5350,7 @@ async function finishSourceOauth(storage, env, input) {
   if (!oauthText(input.code, 4096)) sourceOauthFailure('source_oauth_invalid');
   const context = await ownedSourceOauthContext(storage, env, attempt);
   if (context instanceof Response) return context;
-  if (await sha256(context.action) !== attempt.actionHash) sourceOauthFailure('source_oauth_invalid');
+  if (await sha256(context.binding) !== attempt.actionHash) sourceOauthFailure('source_oauth_invalid');
   const response = await oauthJson(attempt.config.token_endpoint, {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ grant_type: 'authorization_code', code: input.code, code_verifier: attempt.verifier,
@@ -5304,6 +5366,7 @@ async function finishSourceOauth(storage, env, input) {
     confirmedScope = await metaAdsGrantedScope(response.access_token);
   }
   verifySourceOauthScope(context.source.url, confirmedScope, attempt.config.scopes_supported);
+  if (attempt.actionId === null && confirmedScope !== undefined) verifyReconnectScope(context.source.url, confirmedScope, attempt.config.scopes_supported);
   const tokens = { access_token: response.access_token, token_type: 'Bearer' };
   for (const key of ['refresh_token', 'expires_in']) if (response[key] !== undefined) tokens[key] = response[key];
   if (confirmedScope !== undefined) tokens.scope = confirmedScope;
@@ -5311,7 +5374,7 @@ async function finishSourceOauth(storage, env, input) {
   // record immediately before writing so drift during exchange is refused too.
   const current = await ownedSourceOauthContext(storage, env, attempt);
   if (current instanceof Response) return current;
-  if (await sha256(current.action) !== attempt.actionHash || current.path !== context.path) sourceOauthFailure('source_oauth_invalid');
+  if (await sha256(current.binding) !== attempt.actionHash || current.path !== context.path) sourceOauthFailure('source_oauth_invalid');
   // Observed Cloudflare dashboard import contract, exercised by the disposable
   // OAuth proof. Keep this undocumented format confined to this one write.
   const imported = await providerCall(context.path, managementCredential(env), {
@@ -5322,7 +5385,30 @@ async function finishSourceOauth(storage, env, input) {
   const synced = await providerCall(`${context.path}/sync`, managementCredential(env), {
     method: 'POST', signal: AbortSignal.timeout(10_000),
   });
-  return fixedJson(200, { result: synced.status === 'ok' ? 'connected' : 'sync_pending' });
+  return fixedJson(200, { result: attempt.actionId === null
+    ? (synced.status === 'ok' ? 'reconnected' : 'reconnect_sync_pending')
+    : (synced.status === 'ok' ? 'connected' : 'sync_pending') });
+}
+
+async function handleSourceReconnect(request, env) {
+  if (request.method !== 'POST') return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  if (access.actor.kind !== 'human' || !sameOriginMutation(request) ||
+      (request.headers.has('sec-fetch-site') && request.headers.get('sec-fetch-site') !== 'same-origin') ||
+      request.headers.get('content-type')?.split(';')[0] !== 'application/json') return sourceToolsRefusal(403, 'origin_required');
+  const input = await readJsonInput(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES);
+  if (!exactKeys(input, ['schemaVersion', 'revision', ...(Object.hasOwn(input ?? {}, 'metaAppId') ? ['metaAppId'] : [])])) {
+    return sourceToolsRefusal(400, 'source_oauth_invalid');
+  }
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return sourceToolsRefusal(503, 'sources_unavailable');
+  try {
+    return await stub.fetch(new Request('https://admin-state.invalid/source-oauth/start', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ ...input, actionId: null, sourceId: new URL(request.url).pathname.split('/').at(-2), actorEmail: access.actorEmail }),
+    }));
+  } catch { return sourceToolsRefusal(503, 'source_oauth_unavailable'); }
 }
 
 async function handleSourceOauthCallback(request, env) {
@@ -5347,7 +5433,7 @@ async function handleSourceOauthCallback(request, env) {
           code: query.get('code'), denied: query.has('error'), issuer: query.get('iss') }),
       }));
       const body = await response.json();
-      if (response.ok && ['connected', 'sync_pending', 'cancelled'].includes(body.result)) result = body.result;
+      if (response.ok && ['connected', 'sync_pending', 'reconnected', 'reconnect_sync_pending', 'cancelled'].includes(body.result)) result = body.result;
     } catch { /* Never echo a code, token or provider error. */ }
   }
   return new Response(null, { status: 303, headers: { ...PUBLIC_HEADERS,
@@ -10232,6 +10318,7 @@ export default {
     if (/^\/api\/sources\/source-[a-f0-9]{16}$/u.test(url.pathname)) return handleSourceRemoval(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/icon$/u.test(url.pathname)) return handleSourceIcon(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/connection$/u.test(url.pathname)) return handleSourceConnection(request, env);
+    if (/^\/api\/sources\/source-[a-f0-9]{16}\/authorize$/u.test(url.pathname)) return handleSourceReconnect(request, env);
     if (url.pathname === '/api/sources') return handleSources(request, env);
     if (url.pathname === '/api/team' || url.pathname === '/api/team-actions' || url.pathname.startsWith('/api/team-actions/')) {
       return handleTeam(request, env);

@@ -20,8 +20,9 @@ Notable public product and repository changes are recorded here.
   filters, fresh Cloudflare checks, and reconnection guidance. Installed sources
   no longer appear healthy merely because setup completed. Per-user connections
   are identified separately. Simplify tool counts and the Team save button.
-- Add Reconnect in Cloudflare beside expired operator connections, opening the
-  exact server page with guidance for returning to verify the connection.
+- Reconnect expired operator connections through the gateway’s provider sign-in
+  flow. Keep Open in Cloudflare as a secondary manual fallback. Reconnection
+  preserves installed tool selections and Team assignments.
 
 - Fix Meta authorization discovery from Cloudflare Workers by explicitly
   identifying the gateway client. Keep discovery redirects blocked and stop

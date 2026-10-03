@@ -3753,6 +3753,98 @@ async function sourceOauthFixture(run, before = null) {
   }, await portalOnlyClaim());
 }
 
+async function installedOauthReconnect(gateway) {
+  connectSignInSource(gateway, gateway.installed.serverId);
+  assert.equal((await chooseTools(gateway, gateway.installed, ['records_search'])).status, 200);
+  const resumed = await resumeInstallation(gateway, gateway.installed);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const start = (overrides = {}) => gateway.api(`/api/sources/${gateway.installed.source.id}/authorize`, {
+    method: 'POST', body: { schemaVersion: 1, revision: sources.revision }, ...overrides,
+  });
+  const begin = async () => {
+    const response = await start();
+    assert.equal(response.status, 200, await response.clone().text());
+    const body = await response.json();
+    return { body, url: new URL(body.authorizationUrl), cookie: response.headers.get('set-cookie').split(';')[0] };
+  };
+  return { start, begin, sources };
+}
+
+test('installed source OAuth reconnect preserves ownership, allowed tools and team access with single-use PKCE', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    const reconnect = await installedOauthReconnect(gateway);
+    const control = gateway.managementStorage.snapshot(CONTROL_KEY);
+    const portal = structuredClone(gateway.provider.state.portal);
+    const attempt = await reconnect.begin();
+    assert.equal(attempt.url.searchParams.get('code_challenge_method'), 'S256');
+    const callbacks = await Promise.all([gateway.finish(attempt), gateway.finish(attempt)]);
+    assert.deepEqual(callbacks.map(response => response.headers.get('location')).sort(), [
+      `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`, `${MANAGEMENT_ORIGIN}/sources?source_oauth=reconnected`,
+    ]);
+    assert.equal(gateway.exchanges.length, 1);
+    assert.equal(gateway.imports.length, 1);
+    assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), reconnect.sources);
+    assert.deepEqual(gateway.managementStorage.snapshot(CONTROL_KEY), control);
+    assert.deepEqual(gateway.provider.state.portal, portal);
+    assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
+    const evidence = JSON.stringify([attempt.body, callbacks.map(response => [...response.headers]), gateway.managementStorage.writes]);
+    assert.ok(!evidence.includes(gateway.accessToken));
+    assert.ok(!evidence.includes(gateway.refreshToken));
+  });
+});
+
+test('installed reconnect refuses cross-origin starts, stale revisions, invalid bodies and source drift during consent', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    const reconnect = await installedOauthReconnect(gateway);
+    assert.equal((await reconnect.start({ extraHeaders: { origin: 'https://elsewhere.example.net' } })).status, 403);
+    assert.equal((await reconnect.start({ extraHeaders: { 'sec-fetch-site': 'cross-site' } })).status, 403);
+    assert.equal((await reconnect.start({ body: { schemaVersion: 1, revision: 999 } })).status, 409);
+    assert.equal((await reconnect.start({ body: { schemaVersion: 1, revision: reconnect.sources.revision, sourceId: gateway.installed.source.id } })).status, 400);
+    assert.equal(gateway.registrations.length, 0);
+    const attempt = await reconnect.begin();
+    gateway.provider.state.servers.get(gateway.installed.serverId).description = 'different-owner';
+    assert.equal((await gateway.finish(attempt)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+    assert.equal(gateway.exchanges.length, 0);
+    assert.equal(gateway.imports.length, 0);
+  });
+});
+
+test('installed reconnect preserves the previous requested scopes and refuses expanded token grants', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    const reconnect = await installedOauthReconnect(gateway);
+    gateway.provider.state.servers.get(gateway.installed.serverId).auth_config_summary = {
+      registration_info: { scope: 'records:read' },
+    };
+    gateway.oauthHook(request => {
+      if (request.url === 'https://signin.example.net/.well-known/oauth-protected-resource') return Response.json({
+        resource: SIGN_IN_URL, authorization_servers: [OAUTH_ISSUER], scopes_supported: ['records:read', 'records:write'],
+      });
+      if (request.url === `${OAUTH_ISSUER}/token`) return Response.json({
+        access_token: gateway.accessToken, token_type: 'Bearer', scope: 'records:read records:write',
+      });
+    });
+    const attempt = await reconnect.begin();
+    assert.equal(attempt.url.searchParams.get('scope'), 'records:read');
+    assert.equal(gateway.registrations[0].scope, 'records:read');
+    assert.equal((await gateway.finish(attempt)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+    assert.equal(gateway.imports.length, 0);
+  });
+});
+
+test('installed reconnect rechecks portal permissions after exchange before importing credentials', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    const reconnect = await installedOauthReconnect(gateway);
+    const attempt = await reconnect.begin();
+    gateway.oauthHook(request => {
+      if (request.url === `${OAUTH_ISSUER}/token`) gateway.provider.state.portal.servers = [];
+    });
+    assert.equal((await gateway.finish(attempt)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+    assert.equal(gateway.exchanges.length, 1);
+    assert.equal(gateway.imports.length, 0);
+  });
+});
+
 test('source OAuth connects through the customer callback with PKCE; tokens never enter storage or browser responses', async () => {
   await sourceOauthFixture(async (gateway) => {
     const attempt = await gateway.begin();

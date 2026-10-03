@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { Button } from './Button'
 import type { SourceConnection } from '../api'
 
 export type ConnectionCheck = SourceConnection | { state: 'checking'; checkedAt: null; reason: null }
@@ -45,25 +46,25 @@ export function connectionLabel(result?: ConnectionCheck) {
   }
 }
 
-export function ConnectionStatus({ result, label }: { result: ConnectionCheck | undefined; label: string }) {
+export function ConnectionStatus({ result, label, onReconnect, disabled }: { result: ConnectionCheck | undefined; label: string; onReconnect?: (() => void) | undefined; disabled?: boolean }) {
   const color = result?.state === 'connected' ? 'bg-success/10 text-success-strong'
     : ['authorization_required', 'forbidden', 'unavailable'].includes(result?.state ?? '') ? 'bg-warning/10 text-warning-strong'
       : 'bg-kumo-tint text-kumo-subtle'
   return <div className="flex flex-wrap items-center gap-2">
     <span role="status" className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${color}`}>{connectionLabel(result)}</span>
+    {result?.state === 'authorization_required' && onReconnect ? <Button variant="primary" disabled={disabled} onClick={onReconnect} aria-label={`Reconnect ${label}`}>Reconnect</Button> : null}
     {result?.state === 'authorization_required' && result.reconnectUrl ? <a
-      className="gateway-button pressable inline-flex min-h-9 items-center rounded-md px-3 py-1.5 text-xs font-medium"
-      data-gateway-variant="secondary"
+      className="text-xs text-kumo-subtle underline underline-offset-4"
       href={result.reconnectUrl} target="_blank" rel="noopener noreferrer"
-      aria-label={`Reconnect ${label} in Cloudflare (opens a new tab)`}
-    >Reconnect in Cloudflare</a> : null}
+      aria-label={`Open ${label} in Cloudflare (opens a new tab)`}
+    >Open in Cloudflare</a> : null}
   </div>
 }
 
 export function ConnectionDetails({ result }: { result: ConnectionCheck | undefined }) {
   const message = result?.state === 'connected' ? 'Cloudflare successfully connected to this server. Individual tool calls can still require additional permissions.'
     : result?.state === 'authorization_required' ? result.reconnectUrl
-      ? 'Reconnect in Cloudflare opens this connector’s server page in a new tab. Complete its authorization there, then return here and select Check connections. Keep Require user auth off for this shared connection.'
+      ? 'Choose Reconnect to sign in again. If authorization does not work here, use Open in Cloudflare for manual setup, then return and check the connection. Keep Require user auth off for this shared connection.'
       : 'The connector needs authorization. Reconnect it in Cloudflare → MCP Portals → MCP servers, then check again.'
       : result?.state === 'forbidden' ? 'The server denied access. Review the connected account’s permissions in Cloudflare and the provider.'
         : result?.state === 'unavailable' ? 'Cloudflare could not connect to this server. Check the provider and try again.'

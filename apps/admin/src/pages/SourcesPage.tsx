@@ -169,6 +169,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   const checkSourceConnection = useCallback((sourceId: string) => api.checkSourceConnection(sourceId), [api])
   const addConnector = useRef<HTMLButtonElement>(null)
   const [showForm, setShowForm] = useState(false)
+  const [reconnect, setReconnect] = useState<{ sourceId: string; url?: string | undefined } | null>(null)
   const [managementError, setManagementError] = useState<string | null>(null)
   const [addingManagement, setAddingManagement] = useState(false)
   const managementInstalled = sources?.sources.some((source) => source.id === 'source-616e6b6b616d6370') === true
@@ -693,6 +694,16 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
           </form>
       </ConnectorSetupDialog>
 
+      <ConnectorSetupDialog open={reconnect !== null} onOpenChange={open => { if (!open) setReconnect(null) }}
+        description="Sign in with your provider to reconnect this connector for your team." closeLabel="Close reconnect" finalFocus={false}
+        title={`Reconnect ${sources.sources.find(source => source.id === reconnect?.sourceId)?.label ?? 'connector'}`}>
+        {reconnect && sources.sources.filter(source => source.id === reconnect.sourceId).map(source => <div key={source.id}>
+          <SourceAuthorization actionId={null} sourceId={source.id} sourceUrl={source.url} revision={sources.revision}
+            disabled={isBusy || isCheckingSourceActions || sourceActions === null || sourceActionsError !== null || Boolean(blocker)} />
+          {reconnect.url ? <p className="mt-4 text-sm text-kumo-subtle">Having trouble? <a className="underline underline-offset-4" href={reconnect.url} target="_blank" rel="noopener noreferrer">Open in Cloudflare</a> for manual setup.</p> : null}
+        </div>)}
+      </ConnectorSetupDialog>
+
       <section className="mt-7" aria-label="MCP connectors">
         {sources.sources.length === 0 ? (
           <div className="empty-card">
@@ -706,6 +717,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             sources={sources.sources}
             connectionRevision={sources.revision}
             onCheckConnection={checkSourceConnection}
+            onReconnect={(sourceId, url) => setReconnect({ sourceId, url })}
             installationEnabled={installationEnabled}
             removalEnabled={sources.removalEnabled}
             removalCredentialConfigured={sources.removalCredentialConfigured}
