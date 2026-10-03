@@ -12,6 +12,7 @@ import type {
   RuntimeUpdate,
   RuntimeVersion,
   SourceAction,
+  SourceConnection,
   SourceActions,
   SourceActionSummary,
   SourceActionTools,
@@ -216,6 +217,12 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   }
 
   async getSources(): Promise<ManagedSources> { return structuredClone(this.#sources) }
+  async checkSourceConnection(sourceId: string): Promise<SourceConnection> {
+    const source = this.#sources.sources.find(candidate => candidate.id === sourceId)
+    if (!source || source.status !== 'installed') throw new GatewayApiError(404, 'source_not_found')
+    return { schemaVersion: 1, sourceId, state: source.onBehalfOfUser ? 'user_managed' : 'connected',
+      checkedAt: source.onBehalfOfUser ? null : new Date().toISOString(), reason: null }
+  }
   async getTeam(): Promise<Team> {
     if (this.#scenario === 'error') throw new Error('Synthetic preview error: team access could not be loaded.')
     // Once the Portal's policies are gone, a gateway with a management credential cannot read its Team.

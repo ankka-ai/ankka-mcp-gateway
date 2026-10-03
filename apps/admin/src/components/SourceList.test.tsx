@@ -1,7 +1,7 @@
-import { cleanup, render, screen, within } from '@testing-library/react'
+import { cleanup, render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import type { ManagedSource } from '../api'
+import type { ManagedSource, SourceConnection } from '../api'
 import { SourceList } from './SourceList'
 
 const sources: [ManagedSource, ManagedSource] = [
@@ -9,21 +9,26 @@ const sources: [ManagedSource, ManagedSource] = [
   { id: 'source-2222222222222222', label: 'Catalogue', url: 'https://catalogue.example.com/mcp', authMode: 'none', onBehalfOfUser: false, enabledTools: ['list_products'], status: 'draft' },
 ]
 
+const checkConnection = async (sourceId: string): Promise<SourceConnection> => ({
+  schemaVersion: 1, sourceId, state: 'connected', checkedAt: '2026-10-03T10:00:00.000Z', reason: null,
+})
+
 describe('SourceList', () => {
   afterEach(cleanup)
 
-  it('filters installed connectors and drafts without changing them', async () => {
+  it('filters verified connections and connectors needing attention without changing them', async () => {
     const user = userEvent.setup()
     const onAuthorize = vi.fn()
-    render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
+    render(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
     const filters = within(screen.getByRole('group', { name: 'Filter connectors' }))
 
-    await user.click(filters.getByRole('button', { name: 'Active' }))
-    expect(filters.getByRole('button', { name: 'Active' })).toHaveAttribute('aria-pressed', 'true')
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    await user.click(filters.getByRole('button', { name: 'Connected' }))
+    expect(filters.getByRole('button', { name: 'Connected' })).toHaveAttribute('aria-pressed', 'true')
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Catalogue' })).not.toBeInTheDocument()
 
-    await user.click(filters.getByRole('button', { name: 'Incomplete' }))
+    await user.click(filters.getByRole('button', { name: 'Needs attention' }))
     expect(screen.queryByRole('button', { name: 'Knowledge' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Catalogue' })).toBeInTheDocument()
 
@@ -35,7 +40,7 @@ describe('SourceList', () => {
 
   it('keeps details collapsed until the connector is expanded with the keyboard', async () => {
     const user = userEvent.setup()
-    render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    render(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
     const source = screen.getByRole('button', { name: 'Knowledge' })
     expect(source).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText(sources[0].url)).not.toBeInTheDocument()
@@ -56,22 +61,23 @@ describe('SourceList', () => {
   it('preserves draft authorization and respects installation and busy restrictions', async () => {
     const user = userEvent.setup()
     const onAuthorize = vi.fn()
-    const { rerender } = render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
+    const { rerender } = render(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
 
     await user.click(screen.getByRole('button', { name: 'Install connector' }))
     expect(onAuthorize).toHaveBeenCalledExactlyOnceWith(sources[1].id)
 
-    rerender(<SourceList sources={sources} installationEnabled={false} isBusy={false} onAuthorize={onAuthorize} />)
+    rerender(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled={false} isBusy={false} onAuthorize={onAuthorize} />)
     expect(screen.getByRole('button', { name: 'Installation unavailable' })).toBeDisabled()
-    rerender(<SourceList sources={sources} installationEnabled isBusy onAuthorize={onAuthorize} />)
+    rerender(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled isBusy onAuthorize={onAuthorize} />)
     expect(screen.getByRole('button', { name: /Install connector/u })).toBeDisabled()
   })
 
   it('shows an empty filtered state without hiding the filters', async () => {
     const user = userEvent.setup()
-    render(<SourceList sources={[sources[0]]} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
-    await user.click(screen.getByRole('button', { name: 'Incomplete' }))
-    expect(screen.getByText('No incomplete connectors.')).toBeInTheDocument()
+    render(<SourceList onCheckConnection={checkConnection} sources={[sources[0]]} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    await user.click(screen.getByRole('button', { name: 'Needs attention' }))
+    expect(screen.getByText('No connectors need attention.')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'All' }))
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeInTheDocument()
   })
@@ -79,7 +85,7 @@ describe('SourceList', () => {
   it('searches names and URLs alongside the status filter', async () => {
     const user = userEvent.setup()
     const onAuthorize = vi.fn()
-    render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
+    render(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled isBusy={false} onAuthorize={onAuthorize} />)
     const search = screen.getByRole('searchbox', { name: 'Search connectors' })
 
     await user.type(search, 'KNOWLEDGE')
@@ -89,7 +95,7 @@ describe('SourceList', () => {
     await user.clear(search)
     await user.type(search, 'catalogue.example.com')
     expect(screen.getByRole('button', { name: 'Catalogue' })).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: 'Active' }))
+    await user.click(screen.getByRole('button', { name: 'Connected' }))
     expect(screen.getByText('No matching connectors.')).toBeInTheDocument()
 
     await user.clear(search)
@@ -111,11 +117,11 @@ describe('SourceList', () => {
       ],
     }))
     const onSaveSourceTools = vi.fn(async () => {})
-    const { rerender } = render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    const { rerender } = render(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
     await user.click(screen.getByRole('button', { name: 'Knowledge' }))
     expect(screen.queryByRole('button', { name: 'Edit tools' })).not.toBeInTheDocument()
 
-    rerender(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} onLoadSourceTools={onLoadSourceTools} onSaveSourceTools={onSaveSourceTools} />)
+    rerender(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} onLoadSourceTools={onLoadSourceTools} onSaveSourceTools={onSaveSourceTools} />)
     await user.click(screen.getByRole('button', { name: 'Edit tools' }))
     expect(onLoadSourceTools).toHaveBeenCalledExactlyOnceWith(sources[0].id)
     expect(await screen.findByRole('checkbox', { name: /export_document/ })).not.toBeChecked()
@@ -135,7 +141,7 @@ describe('SourceList', () => {
   it('renames an installed connector and leaves a draft unnamed', async () => {
     const user = userEvent.setup()
     const onRenameSource = vi.fn(async () => {})
-    render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} onRenameSource={onRenameSource} />)
+    render(<SourceList onCheckConnection={checkConnection} sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} onRenameSource={onRenameSource} />)
     await user.click(screen.getByRole('button', { name: 'Catalogue' }))
     expect(screen.queryByRole('button', { name: 'Save details' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Knowledge' }))
@@ -151,7 +157,7 @@ describe('SourceList', () => {
     const user = userEvent.setup()
     const onRenameSource = vi.fn(async () => {})
     const scoped = { ...sources[0], company: 'Company B' }
-    render(<SourceList sources={[scoped]} installationEnabled isBusy={false} onAuthorize={vi.fn()} onRenameSource={onRenameSource} />)
+    render(<SourceList onCheckConnection={checkConnection} sources={[scoped]} installationEnabled isBusy={false} onAuthorize={vi.fn()} onRenameSource={onRenameSource} />)
     await user.click(screen.getByRole('button', { name: 'Company B · Knowledge' }))
     const company = screen.getByLabelText('Company (optional)')
     expect(company).toHaveValue('Company B')
@@ -161,6 +167,43 @@ describe('SourceList', () => {
     expect(onRenameSource).toHaveBeenCalledExactlyOnceWith(scoped.id, 'Knowledge', '')
     await user.type(company, 'Company A')
     expect(screen.getByText('Company A · Knowledge')).toBeVisible()
+  })
+
+  it('shows an installed connector as requiring reconnection and replaces earlier success', async () => {
+    const user = userEvent.setup()
+    const check = vi.fn().mockImplementationOnce(checkConnection).mockResolvedValue({
+      schemaVersion: 1, sourceId: sources[0].id, state: 'authorization_required',
+      checkedAt: '2026-10-03T10:01:00.000Z', reason: null,
+    })
+    render(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    await user.click(screen.getByRole('button', { name: 'Check connections' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Reconnect required'))
+    await user.click(screen.getByRole('button', { name: 'Knowledge' }))
+    expect(screen.getByText(/Reconnect it in Cloudflare/)).toBeVisible()
+    expect(document.querySelector('time')).toHaveAttribute('datetime', '2026-10-03T10:01:00.000Z')
+    await user.click(screen.getByRole('button', { name: 'Connected' }))
+    expect(screen.queryByRole('button', { name: 'Knowledge' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Needs attention' }))
+    expect(screen.getByRole('button', { name: 'Knowledge' })).toBeVisible()
+  })
+
+  it('does not retain a green badge when rechecking fails', async () => {
+    const user = userEvent.setup()
+    const check = vi.fn().mockImplementationOnce(checkConnection).mockRejectedValue(new Error('unavailable'))
+    render(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    await user.click(screen.getByRole('button', { name: 'Check connections' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Not verified'))
+  })
+
+  it('does not infer health from installation or individual sign-in', async () => {
+    const { rerender } = render(<SourceList sources={sources} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Not verified')
+    const check = vi.fn().mockResolvedValue({ schemaVersion: 1, sourceId: sources[0].id,
+      state: 'user_managed', checkedAt: null, reason: null })
+    rerender(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Individual sign-in'))
   })
 
 })

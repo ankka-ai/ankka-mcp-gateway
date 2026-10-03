@@ -32,7 +32,7 @@ function actionSnapshot(action: SourceActionSummary): SourceActions {
 function actionApi(snapshot: SourceActions): GatewayAdminApi {
   return {
     removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
-    getStatus: vi.fn(async () => status), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
+    getStatus: vi.fn(async () => status), checkSourceConnection: vi.fn(), getSources: vi.fn(async () => ({ ...sources, sources: [draft] })), getUpdate: vi.fn(async () => update),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -273,8 +273,8 @@ describe('connector installation recovery', () => {
     cleanup()
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     const sourceRow = await within(await screen.findByRole('table', { name: 'Connector list' }))
-      .findByRole('row', { name: new RegExp(`${draft.label} Public Active`, 'u') })
-    expect(within(sourceRow).getByText('Active')).toBeVisible()
+      .findByRole('row', { name: new RegExp(`${draft.label} Public Not verified`, 'u') })
+    expect(await within(sourceRow).findByText('Not verified')).toBeVisible()
     expect(screen.queryByRole('button', { name: 'Install connector' })).not.toBeInTheDocument()
     expect(api.prepareSourceAction).not.toHaveBeenCalled()
   })
@@ -322,7 +322,7 @@ describe('SourcesPage', () => {
     }
     const api: GatewayAdminApi = {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
-      getStatus: vi.fn(async () => status), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
+      getStatus: vi.fn(async () => status), checkSourceConnection: vi.fn(), getSources: vi.fn(async () => current), getUpdate: vi.fn(async () => update),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
@@ -358,7 +358,7 @@ describe('SourcesPage', () => {
     const prepared = { schemaVersion: 1 as const, actionId: `action_${'m'.repeat(32)}`, status: 'authorization_required' as const, expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `${window.location.origin}/__ankka/operation#${'a'.repeat(40)}` }
     const api: GatewayAdminApi = {
       ...actionApi({ schemaVersion: 1, actions: [], blockingAction: null }),
-      getSources: vi.fn(async () => current),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => current),
       getTeam: vi.fn(async () => ({
         schemaVersion: 1 as const, revision: 1, editingEnabled: false, editingDisabledReason: 'management_credential_missing' as const,
         managementCredentialConfigured: false, managementCredentialChoice: 'provided' as const, members: [], adminEmails: ['admin@example.com'],
@@ -387,7 +387,7 @@ describe('SourcesPage', () => {
     const current: ManagedSources = { ...sources, applyMode: 'account_token', installationEnabled: false, sources: [draft] }
     const unreadable: GatewayAdminApi = {
       ...actionApi({ schemaVersion: 1, actions: [], blockingAction: null }),
-      getSources: vi.fn(async () => current), getTeam: vi.fn(async () => { throw new GatewayApiError(503, 'team_unavailable') }),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => current), getTeam: vi.fn(async () => { throw new GatewayApiError(503, 'team_unavailable') }),
     }
     render(<GatewayProvider api={unreadable}><SourcesPage /></GatewayProvider>)
     expect(await screen.findByText(/Connector installation needs a working management token\. Check it in/u)).toBeVisible()
@@ -405,7 +405,7 @@ describe('SourcesPage', () => {
     const disabled: ManagedSources = { ...sources, applyMode: 'account_token', installationEnabled: false, sources: [draft] }
     const api: GatewayAdminApi = {
       ...actionApi({ schemaVersion: 1, actions: [], blockingAction: null }),
-      getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(disabled).mockResolvedValue({ ...disabled, installationEnabled: true }),
+      checkSourceConnection: vi.fn(), getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(disabled).mockResolvedValue({ ...disabled, installationEnabled: true }),
       getTeam: vi.fn(async () => ({
         schemaVersion: 1 as const, revision: 1, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
         members: [], adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null,
@@ -431,7 +431,7 @@ describe('SourcesPage', () => {
     const api: GatewayAdminApi = {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
-      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
+      getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(), checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources), getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1, status: 'authorization_required', endpoint: url, protocolVersion: '2026-07-28',
         authentication: 'oauth', connectionBlock: 'source_google_shared_oauth_unsupported',
@@ -478,7 +478,7 @@ describe('SourcesPage', () => {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      getSources: vi.fn(async () => sources),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1,
@@ -545,7 +545,7 @@ describe('SourcesPage', () => {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      getSources: vi.fn(async () => sources),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1,
@@ -582,7 +582,7 @@ describe('SourcesPage', () => {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      getSources: vi.fn(async () => sources),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1, status: 'discovered', endpoint: url, protocolVersion: '2026-07-28', authentication: 'none',
@@ -634,7 +634,7 @@ describe('SourcesPage', () => {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      getSources: vi.fn(async () => sources),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource,
       prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft,
@@ -688,7 +688,7 @@ describe('SourcesPage', () => {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      getSources: vi.fn(async () => sources),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1,
@@ -758,7 +758,7 @@ describe('SourcesPage', () => {
       removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
       getStatus: vi.fn(async () => status),
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
-      getSources: vi.fn(async () => sources),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
       getUpdate: vi.fn(async () => update),
       discoverSource: vi.fn(async (url): Promise<SourceDiscovery> => ({
         schemaVersion: 1,

@@ -212,6 +212,30 @@ MCP server record. Draft deletion requires no
 provider credential. Managed BigQuery bridge deletion is not a routine token
 operation: its Worker and stored Google key require separate authorization.
 
+The Sources page checks connection health when opened and when you select
+**Check connections**. Each `POST /api/sources/:sourceId/connection` checks
+administrator identity, same origin, saved resource ownership, and the exact
+default-disabled Portal mappings before asking Cloudflare to
+[sync that server's capabilities](https://developers.cloudflare.com/api/resources/zero_trust/subresources/access/subresources/ai_controls/subresources/mcp/subresources/servers/methods/sync/).
+This exercises the operator connection using credentials held by Cloudflare;
+the gateway receives only the sync result. It never calls a source tool or
+changes allowlists, upstream grants, or Team access. Newly discovered tools
+remain disabled by the Portal mapping.
+
+The connection badge reflects that fresh result, not installation state or
+Cloudflare's previously saved `ready` flag. Upstream 401 and 403 responses
+become **Reconnect required** and **Access denied**; connection errors become
+**Connection failed**. A missing management credential, a failed management
+request, configuration drift, or an unfinished sync returns **Not verified**,
+never a successful connection. Only fixed states and a check timestamp reach
+the browser; provider error text and credentials are neither returned nor
+persisted. Results are held in the current page, with no background polling.
+The time of the check and recovery guidance appear in the connector details.
+Connectors using per-user OAuth show **Individual sign-in** without a sync:
+an administrator check cannot establish the health of each user's session.
+A successful connection check does not guarantee every tool's permissions or
+the health of an already-open client session.
+
 ## Setup and verified endpoint permissions
 
 During installation, the setup page in your own Worker does these steps with

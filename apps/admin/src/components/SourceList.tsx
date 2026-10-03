@@ -3,18 +3,21 @@ import { DisclosureTrigger } from './Disclosure'
 import { SourceIcon } from './SourceIcon'
 import { InstalledSourceName, InstalledSourceToolsEditor } from './InstalledSourceTools'
 import { SourceRemoval } from './SourceRemoval'
+import { ConnectionDetails, ConnectionStatus, useSourceConnections } from './SourceConnection'
 import { MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
-import type { InstalledSourceTools, ManagedSource, ToolMetadata } from '../api'
+import type { InstalledSourceTools, ManagedSource, SourceConnection, ToolMetadata } from '../api'
 
 const filters = [
   { value: 'all', label: 'All' },
-  { value: 'installed', label: 'Active' },
-  { value: 'draft', label: 'Incomplete' },
+  { value: 'connected', label: 'Connected' },
+  { value: 'attention', label: 'Needs attention' },
 ] as const
 
 interface SourceListProps {
   sources: ManagedSource[]
+  connectionRevision?: number
+  onCheckConnection?(sourceId: string): Promise<SourceConnection>
   installationEnabled: boolean
   authorizeDisabled?: boolean
   isBusy: boolean
@@ -40,14 +43,19 @@ interface SourceListProps {
   sourceToolsDisabled?: boolean
 }
 
-export function SourceList({ sources, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, onRenameSource, sourceToolsDisabled = false }: SourceListProps) {
+export function SourceList({ sources, connectionRevision, onCheckConnection, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, onRenameSource, sourceToolsDisabled = false }: SourceListProps) {
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
   const detailsId = useId()
+  const { results: connections, recheck, checking } = useSourceConnections(
+    sources.filter(source => source.status === 'installed' && source.id !== pendingRemovalSourceId).map(source => source.id).sort().join(','),
+    onCheckConnection, connectionRevision,
+  )
   const query = search.trim().toLocaleLowerCase()
   const visibleSources = sources.filter((source) => (
-    (filter === 'all' || source.status === filter)
+    (filter === 'all' || (filter === 'connected' ? connections[source.id]?.state === 'connected'
+      : source.status === 'draft' || !['connected', 'checking', 'user_managed'].includes(connections[source.id]?.state ?? 'unknown')))
     && (!query || `${source.company ?? ''} ${source.label}`.toLocaleLowerCase().includes(query) || source.url.toLocaleLowerCase().includes(query))
   ))
 
@@ -81,12 +89,17 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
         </label>
       </div>
 
+      {onCheckConnection ? <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="text-xs text-kumo-subtle">Connections are checked when you open this page. Expand a connector for details.</p>
+        <Button variant="secondary" disabled={checking || isBusy} onClick={recheck}>{checking ? 'Checking connections…' : 'Check connections'}</Button>
+      </div> : null}
+
       <table className="w-full table-fixed border-collapse text-left text-sm" aria-label="Connector list">
         <thead className="text-kumo-subtle">
           <tr className="border-b border-kumo-line">
             <th scope="col" className="w-[55%] px-3 py-3 font-normal sm:w-[45%]">Connector</th>
-            <th scope="col" className="hidden w-[25%] px-3 py-3 font-normal sm:table-cell">Connection</th>
-            <th scope="col" className="px-3 py-3 font-normal">Status</th>
+            <th scope="col" className="hidden w-[25%] px-3 py-3 font-normal sm:table-cell">Authentication</th>
+            <th scope="col" className="px-3 py-3 font-normal">Connection</th>
           </tr>
         </thead>
         <tbody>
@@ -117,7 +130,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                   </td>
                   <td className="px-3 py-3">
                     {pendingRemovalSourceId === source.id ? <span className="text-warning-strong">Removal started</span> : source.status === 'installed' ? (
-                      <span className="inline-flex items-center rounded-full bg-success/10 px-2.5 py-1 text-xs font-medium text-success-strong">Active</span>
+                      <ConnectionStatus result={connections[source.id]} />
                     ) : (
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="inline-flex items-center rounded-full bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning-strong">{draftLabel?.(source.id) ?? 'Incomplete'}</span>
@@ -148,6 +161,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
                   <tr id={sourceDetailsId} className="border-b border-kumo-line/70 bg-kumo-tint/40">
                     <td colSpan={3} className="px-5 py-5 sm:pl-14">
                       <p className="text-xs text-kumo-subtle">{connection}</p>
+                      {source.status === 'installed' ? <ConnectionDetails result={connections[source.id]} /> : null}
                       <code className="mt-2 block select-all break-all text-xs text-kumo-default">{source.url}</code>
                       <p className="mt-4 text-xs font-medium text-kumo-subtle">{source.enabledTools.length === 0
                         // Only a sign-in source can be saved without tools: its real list exists once it is connected.
@@ -188,7 +202,7 @@ export function SourceList({ sources, installationEnabled, authorizeDisabled = f
             )
           })}
           {visibleSources.length === 0 ? (
-            <tr><td colSpan={3} className="px-3 py-10 text-center text-kumo-subtle">{query ? 'No matching connectors.' : filter === 'installed' ? 'No active connectors.' : filter === 'draft' ? 'No incomplete connectors.' : 'No connectors yet.'}</td></tr>
+            <tr><td colSpan={3} className="px-3 py-10 text-center text-kumo-subtle">{query ? 'No matching connectors.' : filter === 'connected' ? 'No verified connections.' : filter === 'attention' ? 'No connectors need attention.' : 'No connectors yet.'}</td></tr>
           ) : null}
         </tbody>
       </table>

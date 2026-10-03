@@ -166,6 +166,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     sourceNotice,
     sources,
   } = useGateway()
+  const checkSourceConnection = useCallback((sourceId: string) => api.checkSourceConnection(sourceId), [api])
   const addConnector = useRef<HTMLButtonElement>(null)
   const [showForm, setShowForm] = useState(false)
   const [managementError, setManagementError] = useState<string | null>(null)
@@ -703,6 +704,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         ) : (
           <SourceList
             sources={sources.sources}
+            connectionRevision={sources.revision}
+            onCheckConnection={checkSourceConnection}
             installationEnabled={installationEnabled}
             removalEnabled={sources.removalEnabled}
             removalCredentialConfigured={sources.removalCredentialConfigured}

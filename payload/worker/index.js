@@ -4569,6 +4569,81 @@ async function readInstalledSourceTools(storage, env, sourceId, actorEmail) {
   return installedSourceToolsView(source, sources, offeredInstalledCatalogue(source, catalogue), edit);
 }
 
+// A fresh capability sync exercises the operator connection inside Cloudflare.
+// Never export upstream credentials or pass through provider-authored errors.
+async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail) {
+  const loaded = await loadInstalledSource(storage, env, sourceId, actorEmail);
+  if (loaded instanceof Response) return loaded;
+  const { sources, control, source } = loaded;
+  if (source.status !== 'installed') return sourceToolsRefusal(409, 'source_tools_unavailable');
+  const view = (state, reason = null, checkedAt = null) => fixedJson(200, {
+    schemaVersion: 1, sourceId, state, reason, checkedAt,
+  });
+  // An administrator's successful sync cannot prove another user's OAuth session.
+  if (source.onBehalfOfUser) return view('user_managed');
+  const token = managementCredential(env);
+  if (!token) return view('unknown', 'management_credential_required');
+  if (await recordedLifecycleBlocks(storage, Date.now()) || await teamActionBlocksLifecycle(storage)) {
+    return view('unknown', 'lifecycle_pending');
+  }
+  const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
+  const serverId = ownership?.resources[0]?.provider?.id;
+  const environment = parseManagementEnvironment(env);
+  const evidence = environment && await rootTeardownAuthority(storage, environment, control.installationId, env);
+  const root = evidence && {
+    schemaVersion: 1, status: 'ready', installationId: control.installationId, receipt: evidence.root.receipt, teardown: null,
+  };
+  const layout = root && teardownResources(root, control.sourceOwnership, false, control.removedInitialSource ?? null);
+  if (!safeProviderId(serverId) || !layout) return view('unknown', 'configuration_changed');
+  const desired = (await buildDesiredResources(teardownSettings(control, source,
+    layout.receiptSourceOwner === source.id ? 'company-context' : source.id), control.installationId))[0];
+  const signal = AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS);
+  const path = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`;
+  const server = await providerCall(path, token, { signal });
+  if (server.status === 'auth') return view('unknown', 'management_credential_required');
+  if (server.status !== 'ok') return view('unknown', 'check_failed');
+  if (!desired || !mcpMatches(server.result, desired) || desired.key !== serverId) return view('unknown', 'configuration_changed');
+  // Sync can discover new tools. Only proceed with the receipt-owned Portal's
+  // exact default-disabled mappings, so discovery cannot enable any of them.
+  const mappings = installedPortalMappings(control, sources);
+  const portal = await providerCall(`/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`, token, { signal });
+  if (portal.status === 'auth') return view('unknown', 'management_credential_required');
+  if (portal.status !== 'ok') return view('unknown', 'check_failed');
+  if (!mappings || !portalExact(portal.result, control, mappings)) return view('unknown', 'configuration_changed');
+  if (['required', 'stale'].includes(server.result.authentication_status)) {
+    return view('authorization_required', null, new Date().toISOString());
+  }
+  const synced = await providerCall(`${path}/sync`, token, { method: 'POST', signal });
+  // A failed management request says nothing about the upstream connection.
+  if (synced.status === 'auth') return view('unknown', 'management_credential_required');
+  if (synced.status !== 'ok' || !isRecord(synced.result)) return view('unknown', 'check_failed');
+  const checkedAt = new Date().toISOString();
+  const result = synced.result;
+  if (result.error_details?.status_code === 401) return view('authorization_required', null, checkedAt);
+  if (result.error_details?.status_code === 403) return view('forbidden', null, checkedAt);
+  if (result.status === 'error' || result.error || result.error_details) return view('unavailable', null, checkedAt);
+  if (result.status === 'ready') return view('connected', null, checkedAt);
+  // Waiting, stale or an incomplete response must not reuse an older Ready flag.
+  return view('unknown', 'check_pending');
+}
+
+async function handleSourceConnection(request, env) {
+  if (request.method !== 'POST') return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+  const sourceId = new URL(request.url).pathname.split('/').at(-2);
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return sourceToolsRefusal(503, 'sources_unavailable');
+  try {
+    return await stub.fetch(new Request(`https://admin-state.invalid/sources/${sourceId}/connection`, {
+      method: 'POST', headers: { 'x-ankka-actor-email': access.actorEmail },
+    }));
+  } catch {
+    return fixedJson(200, { schemaVersion: 1, sourceId, state: 'unknown', reason: 'check_failed', checkedAt: null });
+  }
+}
+
 async function updateInstalledSourceTools(storage, env, sourceId, input, actorEmail) {
   const enabledTools = exactKeys(input, ['schemaVersion', 'revision', 'enabledTools',
     ...(Object.hasOwn(input ?? {}, 'toolMetadata') ? ['toolMetadata'] : [])]) && input.schemaVersion === 1 &&
@@ -7230,6 +7305,10 @@ export class AdminState {
         const actorEmail = normalizedActor(request.headers.get('x-ankka-actor-email'));
         if (!actorEmail) return sourceToolsRefusal(403, 'access_required');
         return updateInstalledSourceLabel(this.state.storage, this.env, installedLabel[1], await readJsonInput(request, 1_024), actorEmail);
+      }
+      const sourceConnection = /^\/sources\/(source-[a-f0-9]{16})\/connection$/u.exec(url.pathname);
+      if (sourceConnection && request.method === 'POST') {
+        return checkInstalledSourceConnection(this.state.storage, this.env, sourceConnection[1], request.headers.get('x-ankka-actor-email'));
       }
       const installedTools = /^\/sources\/(source-[a-f0-9]{16})\/tools$/u.exec(url.pathname);
       if (installedTools && (request.method === 'GET' || request.method === 'PUT')) {
@@ -10145,6 +10224,7 @@ export default {
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/label$/u.test(url.pathname)) return handleInstalledSourceLabel(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}$/u.test(url.pathname)) return handleSourceRemoval(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/icon$/u.test(url.pathname)) return handleSourceIcon(request, env);
+    if (/^\/api\/sources\/source-[a-f0-9]{16}\/connection$/u.test(url.pathname)) return handleSourceConnection(request, env);
     if (url.pathname === '/api/sources') return handleSources(request, env);
     if (url.pathname === '/api/team' || url.pathname === '/api/team-actions' || url.pathname.startsWith('/api/team-actions/')) {
       return handleTeam(request, env);

@@ -16,9 +16,10 @@ Notable public product and repository changes are recorded here.
 - Customize names and descriptions for installed connector tools from Edit
   tools. Original names continue to control the allowlist; reconnect your
   client after saving to refresh its tool list.
-- Label ready connectors Active and unfinished connectors Incomplete, with
-  matching filters and status badges. Simplify tool counts and the Team save
-  button.
+- Show verified connection health on Sources, with Connected and Needs attention
+  filters, fresh Cloudflare checks, and reconnection guidance. Installed sources
+  no longer appear healthy merely because setup completed. Per-user connections
+  are identified separately. Simplify tool counts and the Team save button.
 
 - Fix Meta authorization discovery from Cloudflare Workers by explicitly
   identifying the gateway client. Keep discovery redirects blocked and stop

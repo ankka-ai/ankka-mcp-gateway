@@ -36,7 +36,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
   return {
     removeSource: vi.fn(), getBigQuerySetups: vi.fn(async () => ({ schemaVersion: 1 as const, available: false, setups: [] })), prepareBigQuery: vi.fn(), resumeBigQuery: vi.fn(),
     getStatus: vi.fn(async () => status),
-    getSources: vi.fn(async () => sources),
+    checkSourceConnection: vi.fn(), getSources: vi.fn(async () => sources),
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     getUpdate: vi.fn(async () => update),
     discoverSource: vi.fn(),
@@ -169,7 +169,7 @@ describe('GatewayProvider', () => {
 
   it('surfaces an observational refresh failure in the existing dashboard error state', async () => {
     const user = userEvent.setup()
-    const client = api({ getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockRejectedValueOnce(new Error('Saved connectors could not be refreshed.')) })
+    const client = api({ checkSourceConnection: vi.fn(), getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockRejectedValueOnce(new Error('Saved connectors could not be refreshed.')) })
     render(<GatewayProvider api={client}><Probe /><ExternalRefreshProbe /></GatewayProvider>)
     await screen.findByText('loaded')
     await user.click(screen.getByRole('button', { name: 'External refresh' }))
@@ -196,7 +196,7 @@ describe('GatewayProvider', () => {
 
   it('blocks programmatic draft save and authorization before either API request when connector addition is paused', async () => {
     const user = userEvent.setup()
-    const client = api({ getSources: vi.fn(async () => ({ ...sources, installationEnabled: false })) })
+    const client = api({ checkSourceConnection: vi.fn(), getSources: vi.fn(async () => ({ ...sources, installationEnabled: false })) })
     render(<GatewayProvider api={client}><PausedSourceProbe /></GatewayProvider>)
     await screen.findByText('ready')
     await user.click(screen.getByRole('button', { name: 'Save blocked draft' }))
@@ -210,7 +210,7 @@ describe('GatewayProvider', () => {
     const actionId = `action_${'a'.repeat(32)}`
     window.history.replaceState(null, '', `/sources?sourceAction=${actionId}`)
     const client = api({
-      getSources: vi.fn(async () => ({ ...sources, installationEnabled: false })),
+      checkSourceConnection: vi.fn(), getSources: vi.fn(async () => ({ ...sources, installationEnabled: false })),
       getSourceActions: vi.fn(async () => pendingActions),
     })
     render(<GatewayProvider api={client}><PausedSourceProbe /></GatewayProvider>)
@@ -293,7 +293,7 @@ describe('GatewayProvider', () => {
         .mockResolvedValueOnce(pendingActions)
         .mockResolvedValueOnce({ ...pendingActions, actions: [{ ...pendingAction, state: 'applying', status: 'applying', canCancel: false }] })
         .mockResolvedValue(succeeded),
-      getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockResolvedValue(installedSources),
+      checkSourceConnection: vi.fn(), getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockResolvedValue(installedSources),
     })
     render(<GatewayProvider api={client}><SourceActionsProbe /></GatewayProvider>)
     await act(async () => {})
@@ -384,7 +384,7 @@ describe('GatewayProvider', () => {
 
   it('preserves the precise stale-draft error while refreshing connectors and actions after a conflict', async () => {
     const client = api({
-      getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockResolvedValue({ ...sources, revision: 9 }),
+      checkSourceConnection: vi.fn(), getSources: vi.fn<GatewayAdminApi['getSources']>().mockResolvedValueOnce(sources).mockResolvedValue({ ...sources, revision: 9 }),
       prepareSourceAction: vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })),
     })
     render(<GatewayProvider api={client}><SourceActionsProbe /></GatewayProvider>)

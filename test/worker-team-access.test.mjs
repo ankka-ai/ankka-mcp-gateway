@@ -6087,3 +6087,106 @@ test('Company on the original receipt-owned source preserves teardown and tool s
   assert.equal(tools.status, 200, await tools.clone().text());
   assert.equal((await gateway.currentTeardown(5)).prepared.status, 200);
 }));
+
+const connectionPath = (sourceId) => `/api/sources/${sourceId}/connection`;
+
+test('source connection checks use a fresh Cloudflare result, redact errors and preserve grants', () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const sourceId = installed.source.id;
+  const before = canonicalJson([gateway.managementStorage.snapshot(SOURCES_KEY), gateway.managementStorage.snapshot(CONTROL_KEY),
+    gateway.managementStorage.snapshot(TEAM_KEY), gateway.provider.state.portal]);
+  const cases = [
+    [{ status: 'ready' }, 'connected', null],
+    [{ status: 'error', error: 'synthetic-private-provider-error', error_details: { status_code: 401, cause: 'synthetic-private-detail' } }, 'authorization_required', null],
+    [{ status: 'error', error_details: { status_code: 403 } }, 'forbidden', null],
+    [{ status: 'error', error_details: { status_code: 503 } }, 'unavailable', null],
+    [{ status: 'waiting' }, 'unknown', 'check_pending'],
+    [{}, 'unknown', 'check_pending'],
+  ];
+  for (const [result, expected, reason] of cases) {
+    const baseline = gateway.provider.requests.length;
+    gateway.provider.hook(({ record }) => {
+      if (record.pathname === `${SERVERS_PATH}/${installed.serverId}/sync`) return envelope(result);
+    });
+    const response = await gateway.api(connectionPath(sourceId), { method: 'POST' });
+    assert.equal(response.status, 200, await response.clone().text());
+    const body = await response.json();
+    assert.equal(body.state, expected, JSON.stringify(body));
+    assert.equal(body.reason, reason);
+    assert.equal(body.sourceId, sourceId);
+    assert.equal(body.checkedAt === null, expected === 'unknown');
+    assert.equal(JSON.stringify(body).includes('synthetic-private'), false);
+    assert.deepEqual(gateway.provider.requests.slice(baseline).filter(r => r.method !== 'GET').map(r => [r.method, r.pathname]),
+      [['POST', `${SERVERS_PATH}/${installed.serverId}/sync`]]);
+    assert.equal(canonicalJson([gateway.managementStorage.snapshot(SOURCES_KEY), gateway.managementStorage.snapshot(CONTROL_KEY),
+      gateway.managementStorage.snapshot(TEAM_KEY), gateway.provider.state.portal]), before);
+  }
+}));
+
+test('source connection checks distinguish management failure from upstream authentication and refuse drift', () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const path = connectionPath(installed.source.id);
+  const baseline = gateway.provider.requests.length;
+  const token = gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  delete gateway.env.ANKKA_MANAGEMENT_TOKEN;
+  assert.equal((await (await gateway.api(path, { method: 'POST' })).json()).reason, 'management_credential_required');
+  gateway.env.ANKKA_MANAGEMENT_TOKEN = token;
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  const originalHostname = server.hostname;
+  server.hostname = 'https://foreign.example.com/mcp';
+  assert.equal((await (await gateway.api(path, { method: 'POST' })).json()).reason, 'configuration_changed');
+  server.hostname = originalHostname;
+  const mapping = portalMapping(gateway, installed.serverId);
+  mapping.default_disabled = false;
+  assert.equal((await (await gateway.api(path, { method: 'POST' })).json()).reason, 'configuration_changed');
+  mapping.default_disabled = true;
+  assertNoMutation(gateway.provider, baseline);
+  for (const status of [401, 503]) {
+    gateway.provider.hook(({ record }) => {
+      if (record.pathname === `${SERVERS_PATH}/${installed.serverId}/sync`) return envelope(null, status);
+    });
+    const body = await (await gateway.api(path, { method: 'POST' })).json();
+    assert.equal(body.state, 'unknown');
+    assert.equal(body.reason, status === 401 ? 'management_credential_required' : 'check_failed');
+  }
+}));
+
+test('source connection checks require the administrator and same origin and do not claim per-user health', () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const path = connectionPath(installed.source.id);
+  let baseline = gateway.provider.requests.length;
+  assert.equal((await gateway.api(path)).status, 405);
+  assert.equal((await gateway.api(path, { method: 'POST', email: MEMBER })).status, 401);
+  assert.equal((await gateway.api(path, { method: 'POST', extraHeaders: { origin: 'https://foreign.example.com' } })).status, 403);
+  assertNoMutation(gateway.provider, baseline);
+  const { source } = await installManagementSource(gateway, ['get_gateway_status']);
+  baseline = gateway.provider.requests.length;
+  const result = await (await gateway.api(connectionPath(source.id), { method: 'POST' })).json();
+  assert.equal(result.state, 'user_managed');
+  assert.equal(result.checkedAt, null);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('source connection checks expose expired operator OAuth through the strict dashboard contract', () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway, { enabledTools: ['records_search'] });
+  connectSignInSource(gateway, installed.serverId);
+  const resumed = await resumeInstallation(gateway, installed);
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  let syncs = 0;
+  gateway.provider.hook(({ record }) => {
+    if (record.pathname === `${SERVERS_PATH}/${installed.serverId}/sync`) {
+      syncs += 1;
+      return envelope({ status: 'error', error_details: { status_code: 401, cause: 'synthetic-invalid-token' } });
+    }
+  });
+  await dashboardClient(gateway, async dashboard => {
+    const result = await dashboard.checkSourceConnection(installed.source.id);
+    assert.equal(result.state, 'authorization_required');
+    assert.ok(result.checkedAt);
+    assert.equal((await dashboard.getSources()).sources.find(source => source.id === installed.source.id).status, 'installed');
+  });
+  assert.equal(syncs, 1);
+  gateway.provider.state.servers.get(installed.serverId).authentication_status = 'stale';
+  assert.equal((await (await gateway.api(connectionPath(installed.source.id), { method: 'POST' })).json()).state, 'authorization_required');
+  assert.equal(syncs, 1, 'known expired administrative authorization does not start another sync');
+}));
