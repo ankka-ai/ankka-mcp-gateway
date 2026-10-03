@@ -4573,6 +4573,23 @@ async function readInstalledSourceTools(storage, env, sourceId, actorEmail) {
   return installedSourceToolsView(source, sources, offeredInstalledCatalogue(source, catalogue), edit);
 }
 
+async function sourceConnectionLifecycleBlocks(storage, sources, sourceId, now) {
+  if (await recordedLifecycleBlocks(storage, now, null, false) || await teamActionBlocksLifecycle(storage)) return true;
+  const raw = await storage.get(ACTIONS_KEY);
+  if (raw === undefined) return false;
+  const actions = safeSourceActions(raw);
+  if (!actions) return true;
+  return actions.actions.some((action) => {
+    if (action.status === 'succeeded' || (action.status === 'failed' && !sourceActionHasWriteEvidence(action))) return false;
+    // A different draft can wait for consent or tool selection without touching
+    // the installed Portal. Active or uncertain writes still block every sync.
+    const otherDraft = action.sourceId !== sourceId && sources.sources.some((source) =>
+      source.id === action.sourceId && source.status === 'draft');
+    return !otherDraft || !(sourceActionConnectionPaused(action) ||
+      (action.status === 'authorization_required' && !sourceActionHasWriteEvidence(action)));
+  });
+}
+
 // A fresh capability sync exercises the operator connection inside Cloudflare.
 // Never export upstream credentials or pass through provider-authored errors.
 async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail, signal) {
@@ -4590,7 +4607,7 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (source.onBehalfOfUser) return view('user_managed');
   const token = managementCredential(env);
   if (!token) return view('unknown', 'management_credential_required');
-  if (await recordedLifecycleBlocks(storage, Date.now()) || await teamActionBlocksLifecycle(storage)) {
+  if (await sourceConnectionLifecycleBlocks(storage, sources, sourceId, Date.now())) {
     return view('unknown', 'lifecycle_pending');
   }
   const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
