@@ -2226,7 +2226,7 @@ test('the dashboard can save and reload a Gateway Management draft through its s
       label: 'Gateway Management', url: discovery.endpoint, authMode: 'oauth',
       enabledTools: discovery.tools.map((tool) => tool.name),
     });
-    assert.equal(saved.sources.find((source) => source.id === MANAGEMENT_ID).onBehalfOfUser, true);
+    assert.equal(saved.sources.find((source) => source.id === MANAGEMENT_ID).onBehalfOfUser, false);
     assert.deepEqual(await dashboard.getSources(), saved);
     assert.equal((await dashboard.getStatus()).status, 'ready');
     assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === MANAGEMENT_ID).initialManager, ADMIN);
@@ -4405,7 +4405,7 @@ test('API source management is always advertised and requires live assignment an
   assert.equal(seen.length, 1);
 }));
 
-async function installManagementSource(gateway, enabledTools = null, recover = null) {
+async function installManagementSource(gateway, enabledTools = null, recover = null, shared = false) {
   const discovery = await (await gateway.api('/api/sources/discover', { method: 'POST', body: { url: `${MANAGEMENT_ORIGIN}/api/mcp` } })).json();
   assert.ok(discovery.tools.length > 10);
   const current = await (await gateway.api('/api/sources')).json();
@@ -4417,7 +4417,13 @@ async function installManagementSource(gateway, enabledTools = null, recover = n
   assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
   const saved = await savedResponse.json();
   const source = saved.sources.find((item) => item.id === MANAGEMENT_ID);
-  assert.equal(source.onBehalfOfUser, true);
+  assert.equal(source.onBehalfOfUser, false);
+  if (!shared) {
+    const legacy = gateway.managementStorage.snapshot(SOURCES_KEY);
+    legacy.sources.find(item => item.id === MANAGEMENT_ID).onBehalfOfUser = true;
+    await gateway.managementStorage.put(SOURCES_KEY, legacy);
+    source.onBehalfOfUser = true;
+  }
   assert.equal(Object.hasOwn(source, 'initialManager'), false);
   assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((item) => item.id === MANAGEMENT_ID).initialManager, ADMIN);
   const begun = await gateway.api('/api/source-actions', { method: 'POST', body: {
@@ -6497,4 +6503,121 @@ test('a check that waits out its deadline behind a mutation starts no provider w
   } finally {
     AbortSignal.timeout = timeout;
   }
+}));
+
+test('new Gateway Management uses shared OAuth while Team policies retain the exact assignments', () => fixture(async gateway => {
+  const { server, source, portalApplication } = await installManagementSource(gateway, ['get_gateway_status'], null, true);
+  assert.equal(source.onBehalfOfUser, false);
+  assert.equal(portalMapping(gateway, server.id).on_behalf, false);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status' })).body.result.structuredContent.ok, true);
+  // A source assignment permits the Portal to use the operator connection, not
+  // a personal token at the shared upstream endpoint.
+  let team = await gateway.view();
+  team.members.find(member => member.email === MEMBER).sourceIds.push(MANAGEMENT_ID);
+  team.members.forEach(member => member.sourceIds.sort());
+  const assigned = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members: team.members,
+  } });
+  assert.equal(assigned.status, 200, await assigned.clone().text());
+  assert.ok(gateway.provider.state.policies.get(portalApplication.id)[0].include.some(rule => rule.email?.email === MEMBER));
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status' }, { email: MEMBER })).response.status, 401);
+  team = await gateway.view();
+  team.members.forEach(member => { member.sourceIds = member.sourceIds.filter(id => id !== MANAGEMENT_ID); });
+  assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members: team.members,
+  } })).status, 200);
+  assert.equal(gateway.provider.state.policies.get(portalApplication.id)[0].include.some(rule => rule.email), false);
+  // Revoking a Portal member does not revoke the operator's upstream credential.
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status' })).body.result.structuredContent.ok, true);
+  for (const options of [{ email: MEMBER }, { audience: gateway.env.CF_ACCESS_AUD }]) {
+    assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status' }, options)).response.status, 401);
+  }
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: { expectedRevision: team.revision, members: [] } })).body.error.code, -32602);
+}));
+
+test('shared Gateway Management cannot use the operator identity to grant or revoke dashboard access', () => fixture(async gateway => {
+  installDashboardTarget(gateway);
+  await installManagementSource(gateway, ['get_gateway_team', 'save_gateway_team'], null, true);
+  let team = await gateway.view();
+  const members = [...team.members, { email: NEW_PERSON, sourceIds: [], dashboardAccess: true }];
+  const baseline = gateway.provider.requests.length;
+  const grant = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: {
+    expectedRevision: team.revision, members,
+  } });
+  assert.equal(grant.response.status, 200, JSON.stringify(grant.body));
+  assert.ok(grant.body.result, JSON.stringify(grant.body));
+  assert.equal(grant.body.result.structuredContent.error.code, 'team_access_admin_required');
+  assertNoMutation(gateway.provider, baseline);
+  assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members,
+  } })).status, 200);
+  team = await gateway.view();
+  const revoke = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: {
+    expectedRevision: team.revision, members: team.members.filter(member => member.email !== NEW_PERSON),
+  } });
+  assert.equal(revoke.body.result.structuredContent.error.code, 'team_access_admin_required');
+  const ordinary = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: {
+    expectedRevision: team.revision,
+    members: team.members.map(member => member.email === MEMBER ? { ...member, sourceIds: [MANAGEMENT_ID] } : member),
+  } });
+  assert.equal(ordinary.body.result.structuredContent.ok, true, JSON.stringify(ordinary.body));
+}));
+
+for (const interrupted of [false, true]) {
+  test(`existing Gateway Management migrates its Portal connection without changing Team or tools (interrupted: ${interrupted})`, () => fixture(async gateway => {
+    const { server } = await installManagementSource(gateway, ['get_gateway_status']);
+    const beforeSources = gateway.managementStorage.snapshot(SOURCES_KEY);
+    const beforeTeam = gateway.managementStorage.snapshot(TEAM_KEY);
+    const policies = structuredClone([...gateway.provider.state.policies]);
+    const body = { schemaVersion: 1, revision: beforeSources.revision, enabledTools: ['get_gateway_status'], sharedConnection: true };
+    if (interrupted) {
+      gateway.provider.hook(({ record, state }) => {
+        if (record.method !== 'PUT' || !record.pathname.includes('/mcp/portals/')) return undefined;
+        state.portal = { id: state.portal.id, ...record.body, servers: record.body.servers.map(mapping => ({ ...mapping, server_id: mapping.id })) };
+        throw new Error('synthetic lost Portal response');
+      });
+      await refused(await gateway.api(installedToolsPath(MANAGEMENT_ID), { method: 'PUT', body }), 409, 'source_tools_recovery_required');
+      assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY).sharedConnection, true);
+      gateway.reloadManagement();
+      gateway.provider.hook(undefined);
+    }
+    const writes = gateway.provider.requests.filter(r => r.method === 'PUT' && r.pathname.includes('/mcp/portals/')).length;
+    const migrated = await gateway.api(installedToolsPath(MANAGEMENT_ID), { method: 'PUT', body });
+    assert.equal(migrated.status, 200, await migrated.clone().text());
+    assert.equal(portalMapping(gateway, server.id).on_behalf, false);
+    const stored = gateway.managementStorage.snapshot(SOURCES_KEY);
+    assert.equal(stored.sources.find(s => s.id === MANAGEMENT_ID).onBehalfOfUser, false);
+    assert.deepEqual(stored.sources.find(s => s.id === MANAGEMENT_ID).enabledTools, ['get_gateway_status']);
+    assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY).members, beforeTeam.members);
+    assert.deepEqual([...gateway.provider.state.policies], policies);
+    assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY), null);
+    assert.equal(gateway.provider.requests.filter(r => r.method === 'PUT' && r.pathname.includes('/mcp/portals/')).length, writes + (interrupted ? 0 : 1));
+    assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status' })).body.result.structuredContent.ok, true);
+    assert.equal((await gateway.api(`/api/sources/${MANAGEMENT_ID}/connection`, { method: 'POST' })).status, 200);
+    // Recomputed receipts must still permit cleanup after the migration.
+    const removed = await gateway.api(`/api/sources/${MANAGEMENT_ID}`, { method: 'DELETE', body: { schemaVersion: 1, revision: stored.revision } });
+    assert.equal(removed.status, 200, await removed.clone().text());
+    assert.equal((await managementRpc(gateway, 'tools/list', {})).response.status, 401);
+  }));
+}
+
+test('shared migration preserves permissions and refuses drift but can precede operator reauthentication', () => fixture(async gateway => {
+  const { server } = await installManagementSource(gateway, ['get_gateway_status']);
+  const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const body = { schemaVersion: 1, revision: sources.revision, enabledTools: ['get_gateway_status'], sharedConnection: true };
+  const baseline = gateway.provider.requests.length;
+  await refused(await gateway.api(installedToolsPath(MANAGEMENT_ID), { method: 'PUT', body: { ...body, enabledTools: ['get_gateway_status', 'get_gateway_team'] } }), 400, 'source_tools_invalid');
+  await refused(await gateway.api(installedToolsPath(MANAGEMENT_ID), { method: 'PUT', body: { ...body, revision: sources.revision - 1 } }), 409, 'source_conflict');
+  const mapping = portalMapping(gateway, server.id);
+  mapping.updated_tools = [];
+  await refused(await gateway.api(installedToolsPath(MANAGEMENT_ID), { method: 'PUT', body }), 409, 'source_portal_drift');
+  mapping.updated_tools = [{ name: 'get_gateway_status', enabled: true }];
+  assertNoMutation(gateway.provider, baseline);
+  server.authentication_status = 'required';
+  server.status = 'stale';
+  const switched = await gateway.api(installedToolsPath(MANAGEMENT_ID), { method: 'PUT', body });
+  assert.equal(switched.status, 200, await switched.clone().text());
+  const checked = await gateway.api(`/api/sources/${MANAGEMENT_ID}/connection`, { method: 'POST' });
+  assert.equal((await checked.json()).state, 'authorization_required');
+  assert.equal(server.authentication_status, 'required');
 }));

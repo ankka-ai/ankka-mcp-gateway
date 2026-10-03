@@ -3,6 +3,7 @@ import { DisclosureTrigger } from './Disclosure'
 import { SourceIcon } from './SourceIcon'
 import { InstalledSourceName, InstalledSourceToolsEditor } from './InstalledSourceTools'
 import { SourceRemoval } from './SourceRemoval'
+import { GatewayApiError } from '../api'
 import { ConnectionDetails, ConnectionStatus, useSourceConnections } from './SourceConnection'
 import { MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
@@ -35,6 +36,7 @@ interface SourceListProps {
   onRefresh?(): Promise<void>
   onAuthorize(sourceId: string): void
   onReconnect?(sourceId: string, reconnectUrl?: string): void
+  onShareManagement?(): Promise<void>
   canRemove?(sourceId: string): boolean
   removeDisabled?: boolean
   onRemoveDraft?(sourceId: string): void
@@ -44,7 +46,16 @@ interface SourceListProps {
   sourceToolsDisabled?: boolean
 }
 
-export function SourceList({ sources, connectionRevision, onCheckConnection, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, onReconnect, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, onRenameSource, sourceToolsDisabled = false }: SourceListProps) {
+export function SourceList({ sources, connectionRevision, onCheckConnection, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, onReconnect, onShareManagement, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, onRenameSource, sourceToolsDisabled = false }: SourceListProps) {
+  const [sharing, setSharing] = useState(false)
+  const [shareError, setShareError] = useState<string | null>(null)
+  async function shareManagement() {
+    setSharing(true)
+    setShareError(null)
+    try { await onShareManagement?.() }
+    catch (error) { setShareError(error instanceof GatewayApiError ? error.message : 'The connection could not be changed. Try again to resume.') }
+    finally { setSharing(false) }
+  }
   const [filter, setFilter] = useState<(typeof filters)[number]['value']>('all')
   const [search, setSearch] = useState('')
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -109,7 +120,7 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
             const isExpanded = expanded === source.id || pendingRemovalSourceId === source.id
             const sourceDetailsId = `${detailsId}-${source.id}`
             const connection = source.authMode === 'oauth'
-              ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'Your own sign-in' : 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
+              ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'Individual sign-in (previous setup)' : 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
               : 'Public'
 
             return (
@@ -165,6 +176,11 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
                     <td colSpan={3} className="px-5 py-5 sm:pl-14">
                       <p className="text-xs text-kumo-subtle">{connection}</p>
                       {source.status === 'installed' ? <ConnectionDetails result={connections[source.id]} /> : null}
+                      {source.id === 'source-616e6b6b616d6370' && source.status === 'installed' && source.onBehalfOfUser && onShareManagement ? <div className="mt-3">
+                        <p className="text-sm text-kumo-subtle">Use one operator connection for your team. Team assignments and selected tools stay the same.</p>
+                        <Button variant="secondary" className="mt-2" disabled={isBusy || sourceToolsDisabled || sharing} loading={sharing} onClick={() => void shareManagement()}>Use shared connection</Button>
+                        {shareError ? <p role="alert" className="mt-2 text-sm text-danger">{shareError}</p> : null}
+                      </div> : null}
                       <code className="mt-2 block select-all break-all text-xs text-kumo-default">{source.url}</code>
                       <p className="mt-4 text-xs font-medium text-kumo-subtle">{source.enabledTools.length === 0
                         // Only a sign-in source can be saved without tools: its real list exists once it is connected.

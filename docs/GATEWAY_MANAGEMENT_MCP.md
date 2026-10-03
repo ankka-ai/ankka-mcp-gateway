@@ -32,6 +32,14 @@ It has no arbitrary HTTP, Cloudflare API, shell, account-selection, or credentia
 input tool. Connector-specific provisioning, including BigQuery setup, continues
 to use its existing dashboard workflow.
 
+Shared management calls use the connected operator's identity; action records
+therefore identify that operator, not the individual Portal caller. Browser
+handoffs still authenticate the person completing the operation and enforce the
+recorded actor binding. If that operation needs the connected operator's consent,
+that operator must finish the handoff. Granting or revoking dashboard access is
+always refused through the shared MCP connection, including indirect removal of
+a dashboard administrator. Use the authenticated dashboard for those changes.
+
 Provider sign-in remains a browser step. `authorize_mcp_source` returns a customer
 gateway URL. Opening it and selecting **Continue to provider** starts the existing
 PKCE flow. The code exchange and credential import run in the team's Worker and
@@ -61,9 +69,27 @@ with only its MCP server destination, and a self-hosted application with Managed
 OAuth covering `/api/mcp` and the existing customer operation consent paths.
 Cloudflare rejects path destinations on MCP applications and rejects Portal
 destinations on self-hosted applications. Team assignments synchronize both
-policies through the existing journal; the UI still presents one source. Each person authenticates with their
-own identity; this source is registered in the Portal with `on_behalf: true`.
-Ordinary upstream OAuth sources retain their shared team connection behavior.
+policies through the existing journal; the UI still presents one source.
+
+New installations use one operator OAuth connection, registered in the Portal
+with `on_behalf: false`, like ordinary upstream OAuth sources. Cloudflare's Portal
+source policy enforces Team membership before using that connection. The Worker
+verifies the operator's signed Access assertion for the exact source audience;
+it accepts the original connector operator and dashboard administrators, not
+personal tokens belonging to ordinary Portal members. An operator credential
+continues to authorize upstream calls independently of that operator's Portal
+assignment, just as for an ordinary shared upstream connection. Credentials stay
+in the team's Cloudflare account. Removing the source revokes its endpoint.
+
+Older installations retain `on_behalf: true` until a dashboard administrator
+selects **Use shared connection** under Gateway Management in Sources. This
+one-way migration reuses the recoverable Portal edit journal, preserves every
+Team assignment, policy, tool selection and override, and updates ownership
+receipts atomically. A lost response is recovered by reading back the exact
+Portal mapping. It raises the minimum compatible runtime before changing the
+mapping. If the operator credential needs renewal, use **Reconnect** afterwards.
+New drafts use shared mode; unfinished older installations keep their recorded
+mode until completed and migrated.
 Managed OAuth must allow both the shared Cloudflare callback and the exact
 Cloudflare dashboard callback for this account and server. The dashboard uses
 `https://dash.cloudflare.com/<account-id>/one/access-controls/ai-controls/mcp-server/oauth-callback/<server-id>`
@@ -74,19 +100,19 @@ wildcard dashboard callback is needed.
 The dashboard's administrator policy remains a separate recovery entry point.
 The endpoint's authentication policy retains the installation's original audience
 so administrators can complete browser recovery consent after unassigning
-themselves. Authentication alone does not authorize MCP tools: the Worker also
-requires the current Portal source assignment.
+themselves. For legacy individual connections and interactive browser handoffs, the Worker
+also requires the visitor's current source assignment. Shared MCP calls run as
+the connected operator; Cloudflare enforces the calling person's Team access.
 
 On each MCP request the Worker reconstructs the source from ownership receipts,
 reads both live Access applications and their sole policies, and verifies the signed
 Access assertion against the self-hosted application's audience. Issuer, signature, expiry,
-email, and current source assignment must match. Membership is not cached.
+email, and the appropriate operator or individual access boundary must match. Membership is not cached.
 A [named team](TEAM_ACCESS.md#named-teams) assigns the source through a group
 rule on both policies. The Worker reads that group on each request and accepts it
 only when it is a group this gateway created for one of its teams, with its
 stable name.
-Service identities, an administrator token for a different audience, an unassigned
-identity, a missing assertion, and changed resource shapes are rejected. Calling
+Service identities, an administrator token for a different audience, an identity outside the applicable operator or individual audience, a missing assertion, and changed resource shapes are rejected. Calling
 the Worker directly does not bypass this check. Authenticated `tools/list` returns the available management catalogue, including
 tools that are not selected. Stored tool allowlists constrain `tools/call`,
 including calls made directly to the Worker. Cloudflare's Portal mapping also
@@ -148,7 +174,7 @@ installation/removal, browser consent, diagnostic redaction, and consent handoff
 preparation. The runtime suite exercises production state and crypto in workerd.
 
 Before declaring the integration ready in a deployed gateway, verify the actual
-Portal's per-person OAuth flow and source app assertion forwarding, tool sync
+Portal's shared operator OAuth flow (including refresh), Team grant/revocation enforcement and source app assertion forwarding, tool sync
 while installation is paused, direct-origin rejection, a non-administrator's
 assignment and revocation, provider consent return, and lifecycle consent return.
 These checks need the target team's Cloudflare account and signed release. A

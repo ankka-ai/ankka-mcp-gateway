@@ -718,6 +718,12 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             connectionRevision={sources.revision}
             onCheckConnection={checkSourceConnection}
             onReconnect={(sourceId, url) => setReconnect({ sourceId, url })}
+            onShareManagement={async () => {
+              const source = sources.sources.find(item => item.id === 'source-616e6b6b616d6370')
+              if (!source) return
+              await api.updateInstalledSourceTools(sources.revision, source.id, source.enabledTools, source.toolMetadata, true)
+              await refreshSources()
+            }}
             installationEnabled={installationEnabled}
             removalEnabled={sources.removalEnabled}
             removalCredentialConfigured={sources.removalCredentialConfigured}

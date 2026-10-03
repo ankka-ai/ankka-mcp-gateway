@@ -63,7 +63,7 @@ export const toolMetadataSchema = v.array(v.strictObject({
 }))
 export type ToolMetadata = v.InferOutput<typeof toolMetadataSchema>
 interface InstalledSourceDetailsInput { schemaVersion: number; revision: number; label: string; company?: string }
-interface InstalledToolsInput { schemaVersion: number; revision: number; enabledTools: string[]; toolMetadata?: ToolMetadata }
+interface InstalledToolsInput { schemaVersion: number; revision: number; enabledTools: string[]; toolMetadata?: ToolMetadata; sharedConnection?: true }
 const sourceConnectionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   sourceId: v.string(),
@@ -448,7 +448,7 @@ export interface GatewayAdminApi {
   /** Cloudflare’s synced catalogue for an installed connector, plus the saved allowlist. New tools are not selected. */
   getInstalledSourceTools(sourceId: string): Promise<InstalledSourceTools>
   /** Replaces an installed connector’s allowlist and its Portal tool configuration. Assignments stay as they are. */
-  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<ManagedSources>
+  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata, sharedConnection?: true): Promise<ManagedSources>
   /** Renames an installed connector in the gateway, in Team, and on its Access policy. Assignments stay as they are. */
   renameInstalledSource(revision: number, sourceId: string, label: string, company?: string): Promise<ManagedSources>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
@@ -778,9 +778,10 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, installedSourceToolsSchema)
   }
 
-  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<ManagedSources> {
+  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata, sharedConnection?: true): Promise<ManagedSources> {
     const body: InstalledToolsInput = { schemaVersion: 1, revision, enabledTools: [...new Set(enabledTools)].sort() }
     if (toolMetadata !== undefined) body.toolMetadata = toolMetadata
+    if (sharedConnection) body.sharedConnection = true
     return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, managedSourcesSchema, {
       method: 'PUT',
       body: JSON.stringify(body),

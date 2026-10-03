@@ -453,16 +453,18 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return { schemaVersion: 1, sourceId, revision: this.#sources.revision, state: 'ready', tools, enabledTools: [...source.enabledTools], toolMetadata: source.toolMetadata ?? [], pendingTools: null, pendingToolMetadata: null }
   }
 
-  async updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ManagedSources['sources'][number]['toolMetadata']): Promise<ManagedSources> {
+  async updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ManagedSources['sources'][number]['toolMetadata'], sharedConnection?: true): Promise<ManagedSources> {
     const source = this.#sources.sources.find((candidate) => candidate.id === sourceId)
     if (!source || source.status !== 'installed') throw new GatewayApiError(409, 'source_tools_unavailable')
     if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
+    if (sharedConnection && sourceId !== 'source-616e6b6b616d6370') throw new GatewayApiError(400, 'source_tools_invalid')
     const chosen = [...new Set(enabledTools)].sort()
     if (chosen.length === 0 || chosen.length > 500) throw new GatewayApiError(400, 'source_tools_invalid')
     const known = new Set((await this.getInstalledSourceTools(sourceId)).tools.map((tool) => tool.name))
     if (chosen.some((name) => !known.has(name))) throw new GatewayApiError(409, 'source_tools_mismatch')
     const metadata = (toolMetadata ?? source.toolMetadata ?? []).filter((entry) => chosen.includes(entry.name))
-    if (JSON.stringify(metadata) !== JSON.stringify(source.toolMetadata ?? []) || chosen.join('\u0000') !== [...source.enabledTools].sort().join('\u0000')) {
+    if ((sharedConnection && source.onBehalfOfUser) || JSON.stringify(metadata) !== JSON.stringify(source.toolMetadata ?? []) || chosen.join('\u0000') !== [...source.enabledTools].sort().join('\u0000')) {
+      if (sharedConnection) source.onBehalfOfUser = false
       source.toolMetadata = metadata
       source.enabledTools = chosen
       this.#sources.revision += 1

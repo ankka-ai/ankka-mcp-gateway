@@ -20,6 +20,23 @@ describe('SourceList', () => {
     vi.useRealTimers()
   })
 
+  it('offers a recoverable shared-connection switch only for legacy Gateway Management', async () => {
+    const user = userEvent.setup()
+    const source = { ...sources[0], id: 'source-616e6b6b616d6370', label: 'Gateway Management', onBehalfOfUser: true }
+    const onShareManagement = vi.fn().mockRejectedValueOnce(new Error('synthetic failure')).mockResolvedValue(undefined)
+    const props = { sources: [source], installationEnabled: true, isBusy: false, onAuthorize: vi.fn(), onShareManagement }
+    const { rerender } = render(<SourceList {...props} />)
+    expect(screen.queryByRole('button', { name: 'Use shared connection' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Gateway Management' }))
+    await user.click(screen.getByRole('button', { name: 'Use shared connection' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Try again to resume')
+    await user.click(screen.getByRole('button', { name: 'Use shared connection' }))
+    expect(onShareManagement).toHaveBeenCalledTimes(2)
+    rerender(<SourceList {...props} sources={[{ ...source, onBehalfOfUser: false }]} />)
+    expect(screen.queryByRole('button', { name: 'Use shared connection' })).not.toBeInTheDocument()
+    expect(screen.getByText('Operator-connected OAuth')).toBeInTheDocument()
+  })
+
   it('filters verified connections and connectors needing attention without changing them', async () => {
     const user = userEvent.setup()
     const onAuthorize = vi.fn()
