@@ -125,6 +125,9 @@ not introduce a new credential, role system, hosted relay, or telemetry stream.
 2. Call `diagnose_mcp_source` with that source ID. Diagnostics retain a fixed
    stage, status, HTTP status when available, and observation time. Discovery,
    dynamic client registration, and token exchange failures are distinguishable.
+   Token exchange failures may also include `oauthError`, restricted to standard
+   OAuth error codes such as `invalid_grant` or `invalid_client`. Provider error
+   descriptions and unrecognized codes are discarded.
 3. Start or retry provider sign-in using the browser handoff. Do not replay a
    provider write with an unknown outcome; follow the recorded recovery action.
 4. Read the action and real tool list, choose the intended tools, and resume.

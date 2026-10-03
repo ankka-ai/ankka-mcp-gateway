@@ -5077,10 +5077,20 @@ function oauthEndpoint(value) {
 
 async function oauthJson(url, init = {}, stage = 'discovery') {
   let response;
+  let oauthError;
   try {
     response = await fetch(new Request(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(10_000) }));
     if (!response.ok) {
-      try { await response.body?.cancel(); } catch { /* Fixed failure only. */ }
+      if (stage === 'token_exchange') {
+        // Retain only protocol-defined labels, never descriptions, credentials,
+        // arbitrary provider errors or an unbounded response body.
+        const failure = await readJsonInput(response, 8_192);
+        if (['invalid_request', 'invalid_client', 'invalid_grant', 'unauthorized_client',
+          'unsupported_grant_type', 'invalid_scope', 'invalid_target', 'server_error',
+          'temporarily_unavailable'].includes(failure?.error)) oauthError = failure.error;
+      } else {
+        try { await response.body?.cancel(); } catch { /* Fixed failure only. */ }
+      }
       sourceOauthFailure();
     }
     const value = await readJsonInput(response, 65_536);
@@ -5089,6 +5099,7 @@ async function oauthJson(url, init = {}, stage = 'discovery') {
   } catch {
     const error = new SourceDiscoveryError(409, 'source_oauth_unavailable');
     error.diagnostic = { stage, httpStatus: response?.status ?? null, status: 'failed' };
+    if (oauthError) error.diagnostic.oauthError = oauthError;
     throw error;
   }
 }
