@@ -146,8 +146,8 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
   )
 }
 
-function nameIsValid(value: string): boolean {
-  if (value.length < 2 || value.length > 80 || value.trim() !== value) return false
+function nameIsValid(value: string, minimum = 2): boolean {
+  if (value.length < minimum || value.length > 80 || value.trim() !== value) return false
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index)
     if (code <= 31 || code === 127) return false
@@ -159,22 +159,25 @@ function nameIsValid(value: string): boolean {
 export function InstalledSourceName({ source, disabled, onRename }: {
   source: ManagedSource
   disabled: boolean
-  onRename(sourceId: string, label: string): Promise<void>
+  onRename(sourceId: string, label: string, company?: string): Promise<void>
 }) {
   const inputId = useId()
   const [name, setName] = useState(source.label)
+  const [company, setCompany] = useState(source.company ?? '')
   const [error, setError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
   useEffect(() => { setName(source.label) }, [source.label])
-  const unchanged = name === source.label
+  useEffect(() => { setCompany(source.company ?? '') }, [source.company])
+  const companyValid = nameIsValid(company, 0)
+  const unchanged = name === source.label && company === (source.company ?? '')
   const busy = disabled || saving
 
   async function save() {
-    if (!nameIsValid(name) || unchanged) return
+    if (!nameIsValid(name) || !companyValid || unchanged) return
     setSaving(true)
     setError(null)
     try {
-      await onRename(source.id, name)
+      await onRename(source.id, name, company)
     } catch (cause) {
       setError(cause instanceof GatewayApiError ? cause.message : 'The gateway request failed. Refresh and try again.')
     } finally {
@@ -185,12 +188,17 @@ export function InstalledSourceName({ source, disabled, onRename }: {
   return (
     <div className="mt-4">
       <label className="block text-xs font-medium text-kumo-subtle" htmlFor={inputId}>Name
-        <input id={inputId} className="text-input mt-2 w-full max-w-md" value={name} maxLength={80} disabled={busy}
+        <input id={inputId} className="text-input mt-2 block w-full max-w-md" value={name} maxLength={80} disabled={busy}
           onChange={(event) => { setName(event.target.value); setError(null) }} />
       </label>
-      <p className="mt-2 text-xs leading-5 text-kumo-subtle">This changes the name in your gateway, in Team, and on this connector’s Access policy. Who can use it does not change.</p>
+      <label className="mt-4 block text-xs font-medium text-kumo-subtle" htmlFor={`${inputId}-company`}>Company (optional)
+        <input id={`${inputId}-company`} className="text-input mt-2 block w-full max-w-md" value={company} maxLength={80} disabled={busy}
+          onChange={(event) => { setCompany(event.target.value); setError(null) }} />
+      </label>
+      <p className="mt-2 text-xs leading-5 text-kumo-subtle">Helps your LLM choose the right company’s data. Shown in connector discovery and tool descriptions. Reconnect your client after saving.</p>
+      <p className="mt-2 text-xs leading-5 text-kumo-subtle">Discovery name: <span className="font-medium text-kumo-default">{company ? `${company} · ${name}` : name}</span></p>
       {error ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{error}</p> : null}
-      <Button type="button" variant="secondary" className="pressable mt-3" disabled={busy || unchanged || !nameIsValid(name)} loading={saving} onClick={() => void save()}>Save name</Button>
+      <Button type="button" variant="secondary" className="pressable mt-3" disabled={busy || unchanged || !nameIsValid(name) || !companyValid} loading={saving} onClick={() => void save()}>Save details</Button>
     </div>
   )
 }

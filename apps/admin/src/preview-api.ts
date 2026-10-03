@@ -193,7 +193,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
         { email: 'admin@example.com', sourceIds: scenario === 'empty' ? [] : ['source-1111111111111111'] },
         { email: 'analyst@example.com', sourceIds: [] },
       ],
-      sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })),
+      sources: this.#sources.sources.map(({ id, label, company, enabledTools, status: sourceStatus }) => ({ id, label: company ? `${company} · ${label}` : label, enabledTools, status: sourceStatus })),
       teams: [],
       pendingAction: null,
       proposedMembers: null,
@@ -220,7 +220,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     if (this.#scenario === 'error') throw new Error('Synthetic preview error: team access could not be loaded.')
     // Once the Portal's policies are gone, a gateway with a management credential cannot read its Team.
     if (this.#scenario === 'removal-interrupted') throw new GatewayApiError(503, 'team_unavailable')
-    return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, enabledTools, status: sourceStatus }) => ({ id, label, enabledTools, status: sourceStatus })) })
+    return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, company, enabledTools, status: sourceStatus }) => ({ id, label: company ? `${company} · ${label}` : label, enabledTools, status: sourceStatus })) })
   }
 
   async prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult> {
@@ -455,13 +455,17 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone(this.#sources)
   }
 
-  async renameInstalledSource(revision: number, sourceId: string, label: string): Promise<ManagedSources> {
+  async renameInstalledSource(revision: number, sourceId: string, label: string, company?: string): Promise<ManagedSources> {
     const source = this.#sources.sources.find((candidate) => candidate.id === sourceId)
     if (!source || source.status !== 'installed') throw new GatewayApiError(409, 'source_label_unavailable')
     if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
     if (label.length < 2 || label.length > 80 || label.trim() !== label) throw new GatewayApiError(400, 'source_label_invalid')
-    if (label !== source.label) {
+    if (label !== source.label || (company !== undefined && company !== (source.company ?? ''))) {
       source.label = label
+      if (company !== undefined) {
+        if (company) source.company = company
+        else delete source.company
+      }
       this.#sources.revision += 1
     }
     return structuredClone(this.#sources)

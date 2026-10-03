@@ -10,7 +10,8 @@ import { deployBigQueryBridge, type BigQueryDeploymentContext } from './customer
 import { BigQueryPreflightError } from './customer-bigquery-preflight';
 
 const PREFIX = 'ankka-mcp-gateway/bigquery-source/v1/';
-const sourceSchema = v.object({ id: v.string(), label: v.string(), url: v.string(),
+type BigQuerySourceDraft = { label: string; url: string; authMode: 'oauth'; enabledTools: string[]; company?: string };
+const sourceSchema = v.object({ id: v.string(), label: v.string(), company: v.optional(v.string()), url: v.string(),
   authMode: v.picklist(['none', 'oauth']), onBehalfOfUser: v.boolean(), enabledTools: v.array(v.string()),
   status: v.picklist(['installed', 'draft']) });
 const sourcesSchema = v.object({ revision: v.number(), sources: v.array(sourceSchema) });
@@ -107,8 +108,11 @@ export function createBigQuerySetup(context: BigQuerySetupContext, port: BigQuer
       const names = await bigQuerySourceNames(context.installationId, context.zoneName, input.configuration);
       const retained = await readRecord(names.sourceId);
       if (retained !== null && (retained.application !== null || retained.pending !== null)) return json({ error: 'bigquery_setup_conflict' }, 409);
-      const saved = await runtime('/sources', 'PUT', { schemaVersion: 1, revision: sources.revision,
-        source: { label: input.label, url: names.url, authMode: 'oauth', enabledTools: [...BIGQUERY_SETUP_TOOLS] } });
+      const draft: BigQuerySourceDraft = {
+        label: input.label, url: names.url, authMode: 'oauth', enabledTools: [...BIGQUERY_SETUP_TOOLS],
+      };
+      if (input.company !== undefined) draft.company = input.company;
+      const saved = await runtime('/sources', 'PUT', { schemaVersion: 1, revision: sources.revision, source: draft });
       if (!saved.ok) return saved;
       sources = v.parse(sourcesSchema, await saved.json());
       record = { schemaVersion: 1, sourceId: names.sourceId, actionId: `action_${randomBase64Url(24)}`,
@@ -118,8 +122,8 @@ export function createBigQuerySetup(context: BigQuerySetupContext, port: BigQuer
     }
     const source = sources.sources.find((item) => item.id === record.sourceId);
     if (!source || source.status !== 'draft' || source.url !== `https://${record.hostname}/mcp`) return json({ error: 'bigquery_setup_conflict' }, 409);
-    const sourceHash = `sha256:${await bigQueryHex(canonicalJson({ id: source.id, label: source.label,
-      url: source.url, authMode: source.authMode, onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools }))}`;
+    const { status: _status, ...sourceIdentity } = source;
+    const sourceHash = `sha256:${await bigQueryHex(canonicalJson(sourceIdentity))}`;
     if (resume && sourceHash !== record.sourceHash) return json({ error: 'bigquery_setup_conflict' }, 409);
     const actionId = existingActionId ?? `action_${randomBase64Url(24)}`;
     const actionKey = randomBase64Url(32);

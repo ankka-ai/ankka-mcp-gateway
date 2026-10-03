@@ -16,6 +16,7 @@ export const bigQueryPrepareSchema = v.strictObject({
   schemaVersion: v.literal(1),
   revision: v.pipe(v.number(), v.safeInteger(), v.minValue(1)),
   label: v.pipe(v.string(), v.minLength(2), v.maxLength(80), v.check((text) => [...text].every((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127 && char !== '<' && char !== '>'))),
+  company: v.optional(v.pipe(v.string(), v.maxLength(80), v.check((text) => text.trim() === text && [...text].every((char) => char.charCodeAt(0) >= 32 && char.charCodeAt(0) !== 127)))),
   configuration: bigQueryConfigurationSchema,
   readOnlyConfirmed: v.literal(true),
 });

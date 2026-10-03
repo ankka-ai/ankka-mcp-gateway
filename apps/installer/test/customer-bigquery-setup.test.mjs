@@ -1,5 +1,5 @@
 import { generateKeyPairSync } from 'node:crypto';
-import { AdminState } from '../../../payload/worker/index.js';
+import { AdminState, managedSourceHash } from '../../../payload/worker/index.js';
 import { installReadyGateway, ACCOUNT_ID, ZONE_ID, INSTALLATION_ID } from '../../../test/payload-lifecycle.mjs';
 import { createBigQuerySetup } from '../src/customer-bigquery-setup';
 import { bigQuerySourceNames } from '../src/customer-bigquery-contract';
@@ -36,8 +36,8 @@ async function fixture() {
       keyId: 'test-key', publicKey: 'p'.repeat(43), artifactSha256: 'a'.repeat(64) },
   }, { storage, runtime: (request) => runtime.fetch(request), fetch, runtimeSource: 'export default {}' });
   const sources = await (await runtime.fetch(new Request('https://admin-state.invalid/sources'))).json();
-  const prepare = async () => controller.prepare(new Request('https://manage.example.com/api/bigquery', {
-    method: 'POST', body: JSON.stringify({ ...body, revision: sources.revision }),
+  const prepare = async (extra = {}) => controller.prepare(new Request('https://manage.example.com/api/bigquery', {
+    method: 'POST', body: JSON.stringify({ ...body, revision: sources.revision, ...extra }),
   }), 'admin@example.com', false);
   return { controller, storage, runtime, prepare, fetch };
 }
@@ -297,4 +297,22 @@ describe('BigQuery setup with the production source-action state machine', () =>
     const second = await bigQuerySourceNames(INSTALLATION_ID, 'example.com', { ...body.configuration, allowedDatasets: datasets.reverse() });
     expect(second).toEqual(first);
   });
+});
+
+
+it('binds Company to the BigQuery source action and preserves it on resume', async () => {
+  const test = await fixture();
+  const response = await test.prepare({ company: 'Company B' });
+  expect(response.status).toBe(200);
+  const prepared = await response.json();
+  const sources = await test.storage.get('ankka-mcp-gateway/management-sources/v1');
+  const source = sources.sources.find((entry) => entry.id === prepared.sourceId);
+  expect(source.company).toBe('Company B');
+  const record = await test.storage.get(`ankka-mcp-gateway/bigquery-source/v1/${prepared.sourceId}`);
+  expect(record.sourceHash).toBe(await managedSourceHash(source));
+  const resumed = await test.controller.prepare(new Request('https://manage.example.com/api/bigquery/resume', {
+    method: 'POST', body: JSON.stringify({ schemaVersion: 1, actionId: prepared.actionId }),
+  }), 'admin@example.com', true);
+  expect(resumed.status).toBe(200);
+  expect(test.fetch).not.toHaveBeenCalled();
 });
