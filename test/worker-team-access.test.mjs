@@ -6363,17 +6363,17 @@ test('connection checks overlap only up to the gateway limit', () => fixture(asy
   const first = await installAdditionalSource(gateway);
   const second = await installAdditionalSource(gateway, { label: 'Second source', url: 'https://catalog.example.net/mcp-b' });
   const syncs = holdSyncs(gateway);
-  const checks = [first, second, first, second, first, second].map(({ source }) => startCheck(gateway, source.id));
-  await until(() => arrivedChecks(gateway, first.source.id) === 3 && arrivedChecks(gateway, second.source.id) === 3,
+  const checks = Array.from({ length: 10 }, (_, index) => startCheck(gateway, (index % 2 ? second : first).source.id));
+  await until(() => arrivedChecks(gateway, first.source.id) === 5 && arrivedChecks(gateway, second.source.id) === 5,
     'every check reaches the gateway');
-  await until(() => syncs.started.length === 4, 'four checks start together');
+  await until(() => syncs.started.length === 8, 'eight checks start together');
   await idle();
-  assert.equal(syncs.started.length, 4, 'the other two wait for a free slot');
+  assert.equal(syncs.started.length, 8, 'the other two wait for a free slot');
   syncs.release(first.serverId);
   syncs.release(second.serverId);
   for (const check of checks) assert.equal((await checkResult(check)).state, 'connected');
-  assert.equal(syncs.started.length, 6);
-  assert.equal(syncs.peak, 4);
+  assert.equal(syncs.started.length, 10);
+  assert.equal(syncs.peak, 8);
 }));
 
 test('a source removal waits for a running check and a later check rereads ownership before any sync', () => fixture(async (gateway) => {

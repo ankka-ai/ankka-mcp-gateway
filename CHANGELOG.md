@@ -23,7 +23,7 @@ Notable public product and repository changes are recorded here.
 - Reconnect expired operator connections through the gateway’s provider sign-in
   flow. Keep Open in Cloudflare as a secondary manual fallback. Reconnection
   preserves installed tool selections and Team assignments.
-- Check connections on Sources at the same time, up to four at once, so a slow
+- Check connections on Sources at the same time, up to eight at once, so a slow
   connector no longer delays the others. Queued connectors show Waiting, each
   check has a deadline, and checks still never overlap configuration changes.
 

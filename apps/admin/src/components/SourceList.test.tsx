@@ -218,8 +218,8 @@ describe('SourceList', () => {
 
   it('shows queued connectors as Waiting and each result as soon as it arrives', async () => {
     const user = userEvent.setup()
-    const installed = Array.from({ length: 6 }, (_, index): ManagedSource => ({
-      id: `source-${String(index + 1).repeat(16)}`, label: `Connector ${index + 1}`, url: `https://connector-${index + 1}.example.com/mcp`,
+    const installed = Array.from({ length: 10 }, (_, index): ManagedSource => ({
+      id: `source-${index.toString(16).repeat(16)}`, label: `Connector ${index + 1}`, url: `https://connector-${index + 1}.example.com/mcp`,
       authMode: 'none', onBehalfOfUser: false, enabledTools: ['search'], status: 'installed',
     }))
     const answers = new Map<string, (result: SourceConnection) => void>()
@@ -230,18 +230,18 @@ describe('SourceList', () => {
     }
     const labels = () => screen.getAllByRole('status').map(status => status.textContent)
     render(<SourceList sources={installed} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
-    await waitFor(() => expect(labels()).toEqual(['Checking…', 'Checking…', 'Checking…', 'Checking…', 'Waiting', 'Waiting']))
-    expect(check).toHaveBeenCalledTimes(4)
+    await waitFor(() => expect(labels()).toEqual([...Array(8).fill('Checking…'), 'Waiting', 'Waiting']))
+    expect(check).toHaveBeenCalledTimes(8)
     expect(screen.getByRole('button', { name: 'Checking connections…' })).toBeDisabled()
-    await user.click(screen.getByRole('button', { name: 'Connector 6' }))
+    await user.click(screen.getByRole('button', { name: 'Connector 10' }))
     expect(screen.getByText('Waiting for other connection checks to finish before testing this one.')).toBeVisible()
     answer(2)
-    await waitFor(() => expect(labels()).toEqual(['Checking…', 'Checking…', 'Connected', 'Checking…', 'Checking…', 'Waiting']))
-    for (const index of [0, 1, 3, 4]) answer(index)
-    await waitFor(() => expect(check).toHaveBeenCalledTimes(6))
+    await waitFor(() => expect(labels()).toEqual(['Checking…', 'Checking…', 'Connected', ...Array(6).fill('Checking…'), 'Waiting']))
+    for (const index of [0, 1, 3, 4, 5, 6, 7, 8]) answer(index)
+    await waitFor(() => expect(check).toHaveBeenCalledTimes(10))
     expect(labels()).toContain('Checking…')
-    answer(5)
-    await waitFor(() => expect(labels()).toEqual(Array(6).fill('Connected')))
+    answer(9)
+    await waitFor(() => expect(labels()).toEqual(Array(10).fill('Connected')))
     expect(screen.getByRole('button', { name: 'Check connections' })).toBeEnabled()
   })
 

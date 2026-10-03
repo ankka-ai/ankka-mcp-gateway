@@ -4232,7 +4232,7 @@ const SOURCE_TOOLS_READ_TIMEOUT_MS = 10_000;
 // One deadline from arrival covers both waiting for admission and the provider calls.
 const SOURCE_CONNECTION_CHECK_TIMEOUT_MS = 20_000;
 // The dashboard sends at most this many checks at once; more from other tabs wait.
-const SOURCE_CONNECTION_CHECK_CONCURRENCY = 4;
+const SOURCE_CONNECTION_CHECK_CONCURRENCY = 8;
 const SOURCE_CATALOGUE_REFUSALS = Object.freeze({
   connection_required: 'source_connection_required',
   sync_required: 'source_sync_required',

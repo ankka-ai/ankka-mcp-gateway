@@ -5,7 +5,7 @@ import type { SourceConnection } from '../api'
 export type ConnectionCheck = SourceConnection | { state: 'waiting' | 'checking'; checkedAt: null; reason: null }
 
 // The gateway's own limit, so a connector shows Checking… only once its request is sent.
-const CHECK_CONCURRENCY = 4
+const CHECK_CONCURRENCY = 8
 // Just above the gateway's 20-second deadline for one check.
 export const CONNECTION_CHECK_TIMEOUT_MS = 25_000
 
