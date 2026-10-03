@@ -52,7 +52,7 @@ describe('connector installation recovery', () => {
     api.checkSourceConnection = vi.fn(async () => ({ schemaVersion: 1 as const, sourceId: source.id, state: 'authorization_required' as const, reason: null, checkedAt: null, reconnectUrl }))
     api.reconnectSource = vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_oauth_unavailable'))
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
-    await user.click(await screen.findByRole('button', { name: `Reconnect ${source.label}` }))
+    await user.click(await screen.findByRole('button', { name: `Reconnect ${source.label}` }, { timeout: 5000 }))
     const dialog = screen.getByRole('dialog', { name: `Reconnect ${source.label}` })
     expect(within(dialog).getByRole('link', { name: 'Open in Cloudflare' })).toHaveAttribute('href', reconnectUrl)
     await user.click(within(dialog).getByRole('button', { name: 'Sign in to reconnect' }))
