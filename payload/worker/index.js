@@ -7136,8 +7136,9 @@ export class AdminState {
         }
       }
       if (url.pathname === INTERNAL_TEAM_PATH && request.method === 'GET') {
-        const snapshot = await teamSnapshot(this.state.storage, this.env);
-        return snapshot ? fixedJson(200, snapshot) : fixedJson(503, { schemaVersion: 1, error: 'team_unavailable' });
+        const diagnostic = { reason: 'team_read_failed' };
+        const snapshot = await teamSnapshot(this.state.storage, this.env, diagnostic).catch(() => null);
+        return snapshot ? fixedJson(200, snapshot) : fixedJson(503, { schemaVersion: 1, error: 'team_unavailable', ...diagnostic });
       }
       if (url.pathname === INTERNAL_TEAM_ACTIONS_PATH && request.method === 'POST') {
         const input = await readJsonInput(request, REQUEST_LIMIT_BYTES + 2048);
@@ -8638,18 +8639,20 @@ async function dashboardActorAllowed(storage, env, email) {
   return policy !== null && teamPolicySelectors(policy).emails.includes(email);
 }
 
-async function teamSnapshot(storage, env) {
+async function teamSnapshot(storage, env, diagnostic) {
+  const fail = (reason) => { diagnostic.reason = reason; return null; };
   let state = await readTeamState(storage, env);
   const sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const admins = accessConfiguration(env)?.emails;
-  if (!state || !sources || !admins) return null;
+  if (!state || !sources || !admins) return fail('team_saved_state_invalid');
   const blocked = await otherLifecycleBlocksTeam(storage, Date.now());
   const configured = managementCredential(env) !== null;
   let members = state.members;
   let observedAt = null;
   if (configured) {
     const context = await teamRuntimeContext(storage, env);
-    if (!context) return null;
+    if (!context) return fail('team_ownership_unavailable');
+    context.teamReadDiagnostic = diagnostic;
     context.signal = AbortSignal.timeout(30_000);
     const plan = planGatewayTeamAccess({ schemaVersion: 1, expectedRevision: state.revision,
       members: state.members }, context.planner);
@@ -8666,7 +8669,7 @@ async function teamSnapshot(storage, env) {
     const audienceOf = (policy) => audiences.get(policy.policyId);
     const portal = plan.policies.find((policy) => policy.kind === 'portal');
     const emails = audienceOf(portal).emails;
-    if (admins.some((email) => !emails.includes(email))) return null;
+    if (admins.some((email) => !emails.includes(email))) return fail('team_portal_administrator_missing');
     const sourcePolicies = plan.policies.filter((policy) => policy.kind === 'source');
     const nativeMismatch = plan.policies.filter((policy) => policy.kind === 'management').some((policy) => {
       const source = sourcePolicies.find((entry) => entry.sourceId === policy.sourceId);
@@ -8686,7 +8689,7 @@ async function teamSnapshot(storage, env) {
       for (const [index, team] of teams.entries()) {
         if (!team.accessGroupId) continue;
         const liveEmails = groupEmails[index];
-        if (!liveEmails) { groupMismatch = true; break; }
+        if (!liveEmails) { groupMismatch = true; diagnostic.reason = 'team_group_unavailable'; break; }
         team.memberEmails = liveEmails;
       }
     }
@@ -8696,7 +8699,12 @@ async function teamSnapshot(storage, env) {
       dashboardAudience.some(email => !emails.includes(email)));
     const inconsistent = dashboardMismatch || nativeMismatch || groupMismatch || sourcePolicies.some((policy) =>
       audienceOf(policy).emails.some((email) => !emails.includes(email)));
-    if (inconsistent && (!state.pendingAction || ['failed', 'succeeded'].includes(state.pendingAction.status))) return null;
+    if (inconsistent && (!state.pendingAction || ['failed', 'succeeded'].includes(state.pendingAction.status))) {
+      if (dashboardMismatch) return fail('team_dashboard_audience_changed');
+      if (nativeMismatch) return fail('team_management_audience_changed');
+      if (groupMismatch) return fail(diagnostic.reason === 'team_group_unavailable' ? diagnostic.reason : 'team_group_bindings_changed');
+      return fail('team_source_audience_changed');
+    }
     // A partially applied proposal may temporarily disagree across policies.
     // Keep it resumable, but do not label the saved roster as a live snapshot.
     if (!inconsistent) {
@@ -8830,6 +8838,16 @@ async function prepareTeamAction(storage, env, input) {
 }
 
 async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy = null, readAudience = false) {
+  // Fixed diagnostics only: never copy a provider message, response body or
+  // credential into the authenticated Team response.
+  const fail = (reason, policy) => {
+    if (readAudience && context.teamReadDiagnostic?.reason === 'team_read_failed') {
+      context.teamReadDiagnostic.reason = reason;
+      if (policy) context.teamReadDiagnostic.policyKind = policy.kind;
+      if (policy?.sourceId) context.teamReadDiagnostic.sourceId = policy.sourceId;
+    }
+    return null;
+  };
   const account = context.environment.accountId;
   const readApplications = () => providerList(`/accounts/${account}/access/apps`, token, {}, context.signal);
   const readPortal = () => providerCall(`/accounts/${account}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`, token, { signal: context.signal });
@@ -8843,13 +8861,14 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   const [applications, portal, credentialValid] = await Promise.all([
     readApplications(), readPortal(), readAudience ? managementTokenActive(account, token) : true,
   ]);
-  if (!credentialValid) return null;
-  if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return null;
-  if (!teamProviderOk(context, portal) || !portalExact(portal.result, context.control, context.authority.portalMappings)) return null;
+  if (!credentialValid) return fail('team_management_token_unavailable');
+  if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return fail('team_applications_unavailable');
+  if (!teamProviderOk(context, portal)) return fail('team_portal_unavailable');
+  if (!portalExact(portal.result, context.control, context.authority.portalMappings)) return fail('team_portal_changed');
   const readPolicy = async (policy) => {
     if (policy.kind === 'dashboard') {
       const live = await readDashboardPolicy(context.environment, policy, token, context.signal);
-      if (!live) return null;
+      if (!live) return fail('team_dashboard_policy_unavailable', policy);
       if (readAudience) return teamPolicySelectors(live);
       const armed = journal.find(value => value.policyId === policy.policyId);
       const before = teamPolicyMatches(live, policy.before, policy.policyId);
@@ -8861,10 +8880,10 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
     const kind = policy.kind === 'portal' ? 'portal_access_application' : policy.kind === 'management' ? 'management_access_application' : 'source_access_application';
     const resourceValue = context.authority.resources.find((value) => value.kind === kind && value.provider.id === policy.applicationId);
     const entry = resourceValue && context.authority.entries.get(teardownResourceKey(resourceValue));
-    if (!entry) return null;
+    if (!entry) return fail('team_policy_ownership_missing', policy);
     const candidates = applications.result.filter((value) => accessApplicationCandidate(value, kind, entry.state));
     if (candidates.length !== 1 || candidates[0].id !== policy.applicationId ||
-        (Object.hasOwn(candidates[0], 'account_id') && candidates[0].account_id !== account)) return null;
+        (Object.hasOwn(candidates[0], 'account_id') && candidates[0].account_id !== account)) return fail('team_application_conflict', policy);
     let app;
     let policies;
     if (Array.isArray(candidates[0].policies)) {
@@ -8876,16 +8895,17 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
       const readPolicies = () => providerList(`${path}/policies`, token, {}, context.signal);
       [app, policies] = await Promise.all([readApp(), readPolicies()]);
     }
-    if (!teamProviderOk(context, app) || app.result?.id !== policy.applicationId ||
+    if (!teamProviderOk(context, app)) return fail('team_application_unavailable', policy);
+    if (app.result?.id !== policy.applicationId ||
         (Object.hasOwn(app.result, 'account_id') && app.result.account_id !== account) ||
-        !accessApplicationIdentityMatches(app.result, kind, entry.state)) return null;
-    if (!teamProviderOk(context, policies)) return null;
+        !accessApplicationIdentityMatches(app.result, kind, entry.state)) return fail('team_application_changed', policy);
+    if (!teamProviderOk(context, policies)) return fail('team_policies_unavailable', policy);
     const live = policyWithId(policies.result, policy.policyId);
-    if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return null;
+    if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return fail('team_managed_policy_missing', policy);
     if (readAudience) {
       let selectors;
-      try { selectors = teamPolicySelectors(live); } catch { return null; }
-      if (!teamPolicyMatches(live, teamPolicy(selectors.emails, policy.policyName, selectors.groupIds), policy.policyId)) return null;
+      try { selectors = teamPolicySelectors(live); } catch { return fail('team_managed_policy_changed', policy); }
+      if (!teamPolicyMatches(live, teamPolicy(selectors.emails, policy.policyName, selectors.groupIds), policy.policyId)) return fail('team_managed_policy_changed', policy);
       return selectors;
     }
     const armed = journal.find((value) => value.policyId === policy.policyId);
@@ -8910,7 +8930,7 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
         const result = await readPolicy(policy);
         if (result === null) failed = true;
         else observed.set(policy.policyId, result);
-      } catch { failed = true; }
+      } catch { fail('team_policy_read_failed', policy); failed = true; }
     }
   };
   await Promise.all(Array.from({ length: 2 }, readNext));

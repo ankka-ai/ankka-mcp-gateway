@@ -42,6 +42,12 @@ request, so removing that assignment rejects even an otherwise unexpired token.
 
 A missing credential leaves the saved snapshot available, clearly unverified.
 Provider failures or unexpected managed-policy shapes block verified reads and writes.
+An authenticated failed `GET /api/team` retains `503 team_unavailable` and adds
+a fixed `reason` identifying the failed read or consistency check. Policy
+failures also identify the `policyKind` and, when applicable, the gateway's
+`sourceId`. Diagnostics contain no provider response bodies, member addresses
+or credentials and are not logged or retained. A reason does not authorize
+repairing a policy or relaxing verification.
 Refresh before editing after an external change; stale revisions are rejected.
 An interrupted save retains its exact proposal and write journal for explicit
 resume. Do not replace it with a different proposal or delete its state.

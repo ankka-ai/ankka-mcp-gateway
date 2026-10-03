@@ -1729,7 +1729,15 @@ for (const type of ['mcp_portal', 'mcp']) {
       if (change === 'duplicate') policies.push(structuredClone(owned));
       if (change === 'altered') owned.require = [{ everyone: {} }];
       const baseline = gateway.provider.requests.length;
-      assert.equal((await gateway.api('/api/team')).status, 503);
+      const unavailable = await gateway.api('/api/team');
+      assert.equal(unavailable.status, 503);
+      const expected = {
+        schemaVersion: 1, error: 'team_unavailable',
+        reason: change === 'altered' ? 'team_managed_policy_changed' : 'team_managed_policy_missing',
+        policyKind: type === 'mcp_portal' ? 'portal' : 'source',
+      };
+      if (type === 'mcp') expected.sourceId = before.sources[0].id;
+      assert.deepEqual(await unavailable.json(), expected);
       assert.equal((await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(before) })).status, 409);
       assertNoMutation(gateway.provider, baseline);
     }));
@@ -1870,13 +1878,13 @@ test('a failed Team read waits for every outstanding read and never returns a pa
     peak = Math.max(peak, active);
     try {
       await nextTurn();
-      if (record.pathname.endsWith('/access/apps')) return envelope(null, 403);
+      if (record.pathname.endsWith('/access/apps')) return envelope({ message: 'synthetic-provider-secret-must-not-be-returned' }, 403);
       await nextTurn();
     } finally { active -= 1; }
   });
   const response = await gateway.api('/api/team');
   assert.equal(response.status, 503);
-  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_unavailable' });
+  assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'team_unavailable', reason: 'team_applications_unavailable' });
   assert.equal(peak, 4, 'the Portal, token and group reads were outstanding when the list failed');
   assert.equal(active, 0, 'every outstanding read settles before responding');
   assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY), stored);
