@@ -129,6 +129,8 @@ async function fixture(run, claimInput) {
   // concurrent API regressions exercise the actual runtime serialization.
   const namespace = gateway.env.ADMIN_STATE;
   const instances = new Map();
+  // Arrival order at the management object, for tests that sequence concurrent requests.
+  const adminRequests = [];
   gateway.env.ADMIN_STATE = {
     ...namespace,
     get(name) {
@@ -137,7 +139,10 @@ async function fixture(run, claimInput) {
         assert.ok(entry);
         instances.set(name, new AdminState({ storage: entry.storage }, gateway.env));
       }
-      return { fetch: (request) => instances.get(name).fetch(request) };
+      return { fetch: (request) => {
+        if (name === 'v1:management') adminRequests.push(`${request.method} ${new URL(request.url).pathname}`);
+        return instances.get(name).fetch(request);
+      } };
     },
   };
   const keys = await crypto.subtle.generateKey({
@@ -285,7 +290,7 @@ async function fixture(run, claimInput) {
     return provider.fetch(request);
   };
   return withProviderFetch(network, () => run({ ...gateway, api, serviceApi, view, draft, apply, teardown, currentTeardown,
-    headers, managementStorage,
+    headers, managementStorage, adminRequests,
     onSourceRequest(hook) { sourceRequestHook = hook; },
     reloadManagement() { instances.delete('v1:management'); },
   }));
@@ -6287,4 +6292,144 @@ test('source connection checks expose expired operator OAuth through the strict 
   assert.equal(stale.reconnectUrl,
     `https://dash.cloudflare.com/${ACCOUNT_ID}/one/access-controls/ai-controls/mcp-server/edit/${installed.serverId}`);
   assert.equal(syncs, 1, 'known expired administrative authorization does not start another sync');
+}));
+
+async function until(condition, message) {
+  const deadline = Date.now() + 5_000;
+  while (!condition() && Date.now() < deadline) await nextTurn();
+  assert.ok(condition(), message);
+}
+
+async function idle(turns = 100) {
+  for (let turn = 0; turn < turns; turn += 1) await nextTurn();
+}
+
+// Holds every connection-check sync until the test releases that server.
+function holdSyncs(gateway) {
+  const gates = new Map();
+  const gate = (serverId) => {
+    if (!gates.has(serverId)) gates.set(serverId, Promise.withResolvers());
+    return gates.get(serverId);
+  };
+  const syncs = { started: [], active: 0, peak: 0, release: (serverId) => gate(serverId).resolve() };
+  gateway.provider.hook(async ({ record }) => {
+    if (record.method !== 'POST' || !record.pathname.endsWith('/sync')) return undefined;
+    const serverId = record.pathname.split('/').at(-2);
+    syncs.started.push(serverId);
+    syncs.active += 1;
+    syncs.peak = Math.max(syncs.peak, syncs.active);
+    await gate(serverId).promise;
+    syncs.active -= 1;
+    return envelope({ status: 'ready' });
+  });
+  return syncs;
+}
+
+function startCheck(gateway, sourceId) {
+  const check = { done: false };
+  check.response = gateway.api(connectionPath(sourceId), { method: 'POST' }).then((response) => {
+    check.done = true;
+    return response;
+  });
+  return check;
+}
+
+async function checkResult(check) {
+  const response = await check.response;
+  assert.equal(response.status, 200, await response.clone().text());
+  return response.json();
+}
+
+const arrivedChecks = (gateway, sourceId) => gateway.adminRequests.filter((request) => request === `POST /sources/${sourceId}/connection`).length;
+
+test('independent connection checks overlap and each reports as soon as it finishes', () => fixture(async (gateway) => {
+  const fast = await installAdditionalSource(gateway);
+  const slow = await installAdditionalSource(gateway, { label: 'Second source', url: 'https://catalog.example.net/mcp-b' });
+  const syncs = holdSyncs(gateway);
+  // The slow check is sent first, so a serial queue would hold the fast one behind it.
+  const slowCheck = startCheck(gateway, slow.source.id);
+  await until(() => syncs.started.length === 1, 'the slow check reaches Cloudflare');
+  const fastCheck = startCheck(gateway, fast.source.id);
+  await until(() => syncs.started.length === 2, 'both upstream checks are in flight at once');
+  syncs.release(fast.serverId);
+  assert.equal((await checkResult(fastCheck)).state, 'connected');
+  assert.equal(slowCheck.done, false, 'the slow connector is still pending');
+  syncs.release(slow.serverId);
+  assert.equal((await checkResult(slowCheck)).state, 'connected');
+  assert.equal(syncs.peak, 2);
+}));
+
+test('connection checks overlap only up to the gateway limit', () => fixture(async (gateway) => {
+  const first = await installAdditionalSource(gateway);
+  const second = await installAdditionalSource(gateway, { label: 'Second source', url: 'https://catalog.example.net/mcp-b' });
+  const syncs = holdSyncs(gateway);
+  const checks = Array.from({ length: 10 }, (_, index) => startCheck(gateway, (index % 2 ? second : first).source.id));
+  await until(() => arrivedChecks(gateway, first.source.id) === 5 && arrivedChecks(gateway, second.source.id) === 5,
+    'every check reaches the gateway');
+  await until(() => syncs.started.length === 8, 'eight checks start together');
+  await idle();
+  assert.equal(syncs.started.length, 8, 'the other two wait for a free slot');
+  syncs.release(first.serverId);
+  syncs.release(second.serverId);
+  for (const check of checks) assert.equal((await checkResult(check)).state, 'connected');
+  assert.equal(syncs.started.length, 10);
+  assert.equal(syncs.peak, 8);
+}));
+
+test('a source removal waits for a running check and a later check rereads ownership before any sync', () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const syncs = holdSyncs(gateway);
+  const running = startCheck(gateway, installed.source.id);
+  await until(() => syncs.started.length === 1, 'the first check is syncing');
+  const baseline = gateway.provider.requests.length;
+  const removal = removeSource(gateway, installed.source.id);
+  await until(() => gateway.adminRequests.includes('POST /source-removal'), 'the removal is queued');
+  const later = startCheck(gateway, installed.source.id);
+  await until(() => arrivedChecks(gateway, installed.source.id) === 2, 'the later check is queued behind the removal');
+  await idle();
+  assert.deepEqual(gateway.provider.requests.slice(baseline)
+    .filter(({ method, pathname }) => method !== 'GET' || pathname.includes(installed.serverId)), [],
+  'the removal reads or changes nothing while the check syncs');
+  syncs.release(installed.serverId);
+  assert.equal((await checkResult(running)).state, 'connected');
+  const removed = await removal;
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.equal(gateway.provider.state.servers.has(installed.serverId), false);
+  await refused(await later.response, 404, 'source_not_found');
+  assert.deepEqual(syncs.started, [installed.serverId], 'the removed source is never synced again');
+}));
+
+test('a check that waits out its deadline behind a mutation starts no provider work', () => fixture(async (gateway) => {
+  const removed = await installAdditionalSource(gateway);
+  const other = await installAdditionalSource(gateway, { label: 'Second source', url: 'https://catalog.example.net/mcp-b' });
+  const syncs = holdSyncs(gateway);
+  const timeout = AbortSignal.timeout;
+  const deadlines = [];
+  // The 20-second deadline of each check, made controllable.
+  AbortSignal.timeout = (ms) => {
+    if (ms !== 20_000) return timeout.call(AbortSignal, ms);
+    const deadline = new AbortController();
+    deadlines.push(deadline);
+    return deadline.signal;
+  };
+  try {
+    const running = startCheck(gateway, removed.source.id);
+    await until(() => syncs.started.length === 1, 'the first check is syncing');
+    const removal = removeSource(gateway, removed.source.id);
+    await until(() => gateway.adminRequests.includes('POST /source-removal'), 'the removal is queued');
+    const late = startCheck(gateway, other.source.id);
+    await until(() => deadlines.length === 2, 'the late check is waiting');
+    const baseline = gateway.provider.requests.length;
+    deadlines[1].abort();
+    syncs.release(removed.serverId);
+    assert.equal((await checkResult(running)).state, 'connected');
+    assert.equal((await removal).status, 200);
+    const body = await checkResult(late);
+    assert.equal(body.state, 'unknown');
+    assert.equal(body.reason, 'check_failed');
+    assert.equal(body.checkedAt, null);
+    assert.equal(gateway.provider.requests.slice(baseline).some(({ pathname }) => pathname.includes(other.serverId)), false);
+  } finally {
+    AbortSignal.timeout = timeout;
+  }
 }));

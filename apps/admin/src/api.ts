@@ -425,7 +425,7 @@ export interface GatewayAdminApi {
   resumeBigQuery(actionId: string): Promise<BigQueryPrepared>
   prepareBigQueryRemoval(revision: number, sourceId: string): Promise<BigQueryPrepared>
   getSources(): Promise<ManagedSources>
-  checkSourceConnection(sourceId: string): Promise<SourceConnection>
+  checkSourceConnection(sourceId: string, signal?: AbortSignal): Promise<SourceConnection>
   getTeam(): Promise<Team>
   prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
@@ -669,8 +669,8 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
   getSources(): Promise<ManagedSources> { return this.#request('/api/sources', managedSourcesSchema) }
-  checkSourceConnection(sourceId: string): Promise<SourceConnection> {
-    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/connection`, sourceConnectionSchema, { method: 'POST' })
+  checkSourceConnection(sourceId: string, signal?: AbortSignal): Promise<SourceConnection> {
+    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/connection`, sourceConnectionSchema, { method: 'POST', signal: signal ?? null })
   }
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
 
