@@ -1,6 +1,14 @@
 # Team access
 
-Team reads current Cloudflare membership and displays its observation time.
+Team reads membership from this gateway's managed Cloudflare policies and
+displays its observation time. Routine reads and saves select each policy by
+its receipt-owned ID. Additional policies on the same application are neither
+displayed nor edited, and their audiences do not become Team assignments.
+Missing or duplicated managed policy IDs and unsupported policy shapes still
+block verification.
+Application removal retains its stricter checks so it cannot delete an
+application carrying additional policies.
+
 With the [customer-owned management token](MANAGEMENT_TOKEN.md) configured,
 administrators save source assignments directly in the gateway. The token stays
 in your Cloudflare account. New data sources start denied to everyone until an explicit Team grant.
@@ -33,7 +41,7 @@ dashboard administrators. The backend reads the live source policy on every MCP
 request, so removing that assignment rejects even an otherwise unexpired token.
 
 A missing credential leaves the saved snapshot available, clearly unverified.
-Provider failures or unexpected policy shapes block verified reads and writes.
+Provider failures or unexpected managed-policy shapes block verified reads and writes.
 Refresh before editing after an external change; stale revisions are rejected.
 An interrupted save retains its exact proposal and write journal for explicit
 resume. Do not replace it with a different proposal or delete its state.

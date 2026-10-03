@@ -308,6 +308,13 @@ function teamNeutralPolicyFields(policy) {
     (Number.isSafeInteger(policy.precedence) && policy.precedence >= 0);
 }
 
+// Routine management owns the receipt's policy, not every policy on its application.
+function policyWithId(policies, policyId) {
+  if (!Array.isArray(policies)) return null;
+  const matches = policies.filter((policy) => isRecord(policy) && policy.id === policyId);
+  return matches.length === 1 ? matches[0] : null;
+}
+
 export function teamPolicyMatches(observed, expected, policyId) {
   try {
     if (!teamText(policyId) || !TEAM_PROVIDER_ID.test(policyId) || !teamRecord(observed) ||
@@ -8377,8 +8384,8 @@ async function managementCredentialChoice(storage) {
  * five fields a Team change sends, with the values as read. A refusal of the
  * credential names the missing permission; every other failure is unconfirmed.
  *
- * At most seven provider calls: one token check, read, write and read-back of
- * the Portal, read and write of the policy with its application.
+ * Seven provider calls for a single policy page: one token check; read, write
+ * and read-back of the Portal; application read, policy list and policy write.
  */
 async function verifyManagementAccess(storage, env) {
   const answer = (status, token, portals, accessPolicies) =>
@@ -8438,15 +8445,14 @@ async function verifyManagementAccess(storage, env) {
     const saved = target.before;
     const [application, policies] = await Promise.all([
       providerCall(applicationPath, token, { signal }),
-      providerCall(`${applicationPath}/policies?page=1&per_page=${PROVIDER_PAGE_SIZE}`, token, { signal }),
+      providerList(`${applicationPath}/policies`, token, {}, signal),
     ]);
     if (application.status !== 'ok') return application.status === 'absent' ? 'drift' : word(application);
     if (application.result?.id !== target.applicationId ||
         (Object.hasOwn(application.result, 'account_id') && application.result.account_id !== environment.accountId) ||
         !accessApplicationIdentityMatches(application.result, 'portal_access_application', entry.state)) return 'drift';
-    const live = policies.status === 'ok' && Array.isArray(policies.result) && policies.result.length === 1
-      ? policies.result[0] : null;
     if (policies.status !== 'ok') return word(policies);
+    const live = policyWithId(policies.result, target.policyId);
     if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== environment.accountId) ||
         !teamPolicyMatches(live, saved, target.policyId)) return 'drift';
     const asRead = { name: live.name, decision: live.decision, include: live.include, exclude: live.exclude, require: live.require };
@@ -8873,8 +8879,8 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
     if (!teamProviderOk(context, app) || app.result?.id !== policy.applicationId ||
         (Object.hasOwn(app.result, 'account_id') && app.result.account_id !== account) ||
         !accessApplicationIdentityMatches(app.result, kind, entry.state)) return null;
-    if (!teamProviderOk(context, policies) || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
-    const live = policies.result[0];
+    if (!teamProviderOk(context, policies)) return null;
+    const live = policyWithId(policies.result, policy.policyId);
     if (!isRecord(live) || (Object.hasOwn(live, 'account_id') && live.account_id !== account)) return null;
     if (readAudience) {
       let selectors;
@@ -9763,9 +9769,9 @@ async function managementSourceContext(storage, env, allowDraft = false, sourceI
     ]);
     if (application.status !== 'ok' || application.result?.id !== receipt.provider.id ||
         !accessApplicationIdentityMatches(application.result, receipt.kind, desired) ||
-        policies.status !== 'ok' || !Array.isArray(policies.result) || policies.result.length !== 1) return null;
+        policies.status !== 'ok') return null;
     const policy = action.resources[index + 1];
-    const live = policies.result[0];
+    const live = policyWithId(policies.result, policy.provider.id);
     let selectors;
     try {
       selectors = teamPolicySelectors(live);

@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Allow manually configured Cloudflare policies alongside Ankka-managed Team
+  policies. Team reads, saves, management-token verification, and built-in
+  connector authorization use the saved policy IDs and preserve other policies.
+
 - Add optional Company context to connectors. Discovery and Team show names
   such as Company B · Google Search Console, and tool descriptions retain their
   original or custom text beneath the company context. Reconnect your LLM
