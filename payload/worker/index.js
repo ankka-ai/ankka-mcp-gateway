@@ -8680,17 +8680,21 @@ async function teamSnapshot(storage, env, diagnostic) {
         [...new Set([...context.control.audienceEmails, ...dashboardEmails(state.members, []), ...sourceLive.emails])].sort(compareText)) ||
         canonicalJson(live.groupIds) !== canonicalJson(sourceLive.groupIds);
     });
-    const expectedGroups = (policy) => (state.teams ?? []).filter((team) => team.accessGroupId && team.memberEmails.length > 0 &&
-      (policy.kind === 'portal' || (policy.sourceId && team.sourceIds.includes(policy.sourceId))))
+    const expectedPortalGroups = (state.teams ?? []).filter((team) => team.accessGroupId && team.memberEmails.length > 0)
       .map((team) => team.accessGroupId).sort(compareText);
-    let groupMismatch = plan.policies.some((policy) => canonicalJson([...audienceOf(policy).groupIds].sort(compareText)) !==
-      canonicalJson(expectedGroups(policy)));
+    // Source assignments are live policy data, just like direct email grants.
+    // Import only references to our saved groups admitted by the owned Portal;
+    // foreign groups and inconsistent native audiences still fail closed.
+    let groupMismatch = canonicalJson([...audienceOf(portal).groupIds].sort(compareText)) !== canonicalJson(expectedPortalGroups) ||
+      sourcePolicies.some((policy) => audienceOf(policy).groupIds.some((id) => !expectedPortalGroups.includes(id)));
     if (!groupMismatch && teams) {
       for (const [index, team] of teams.entries()) {
         if (!team.accessGroupId) continue;
         const liveEmails = groupEmails[index];
         if (!liveEmails) { groupMismatch = true; diagnostic.reason = 'team_group_unavailable'; break; }
         team.memberEmails = liveEmails;
+        team.sourceIds = sourcePolicies.filter((policy) => audienceOf(policy).groupIds.includes(team.accessGroupId))
+          .map((policy) => policy.sourceId).sort(compareText);
       }
     }
     const dashboard = plan.policies.find(policy => policy.kind === 'dashboard');

@@ -49,6 +49,12 @@ failures also identify the `policyKind` and, when applicable, the gateway's
 or credentials and are not logged or retained. A reason does not authorize
 repairing a policy or relaxing verification.
 Refresh before editing after an external change; stale revisions are rejected.
+Reads reconcile direct email grants and source assignments for the gateway's
+saved Access groups from its managed policies without rewriting Cloudflare.
+Group references must belong to this gateway, remain admitted by its managed
+Portal policy, and agree across a native source's managed audiences. Missing,
+renamed or unreadable groups still block verification. Additional policies
+never contribute assignments to this snapshot.
 An interrupted save retains its exact proposal and write journal for explicit
 resume. Do not replace it with a different proposal or delete its state.
 
