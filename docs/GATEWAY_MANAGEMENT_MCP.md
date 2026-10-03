@@ -158,12 +158,6 @@ not introduce a new credential, role system, hosted relay, or telemetry stream.
    provider write with an unknown outcome; follow the recorded recovery action.
 4. Read the action and real tool list, choose the intended tools, and resume.
 
-For the public Chatbase endpoint (`https://mcp.chatbase.co/api/mcp`), new
-OAuth clients omit `scope` from registration and authorization so the provider
-consent screen selects the grant. Advertised scopes remain discovery metadata.
-Reconnects preserve an explicitly recorded scope set, and no tools are enabled
-until you choose them.
-
 An interrupted built-in management application creation with no returned ID can
 be retried after the previous authorization expires. Recovery first requires a
 successful account-wide application listing and exact ownership checks. An

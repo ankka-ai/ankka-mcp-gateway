@@ -5175,7 +5175,6 @@ async function discoverSourceOauth(sourceUrl) {
   };
 }
 
-const CHATBASE_MCP_URL = 'https://mcp.chatbase.co/api/mcp';
 const GORGIAS_MCP_URL = 'https://mcp.gorgias.com/mcp';
 // This connection is deliberately limited to ticket reads. Supported scopes
 // are a catalogue, not consent to all of the provider's read/write authority.
@@ -5347,10 +5346,7 @@ async function startSourceOauth(storage, env, input) {
   if (!meta && Object.hasOwn(input, 'metaAppId')) return sourceToolsRefusal(400, 'source_oauth_invalid');
   const discovered = await discoverSourceOauth(context.source.url);
   const { config, requireIssuer } = discovered;
-  // Chatbase selects permissions on its consent screen. Its advertised scope
-  // catalogue is not a default grant for a new client. Preserve an explicitly
-  // recorded scope set when reconnecting an existing installation.
-  const scope = context.scope ?? (context.source.url === CHATBASE_MCP_URL ? '' : discovered.scope);
+  const scope = context.scope ?? discovered.scope;
   if (context.scope !== undefined) {
     config.scopes_supported = scope ? scope.split(' ') : [];
     verifySourceOauthScope(context.source.url, scope, config.scopes_supported);
