@@ -3956,6 +3956,41 @@ test('source OAuth rejects manual clients and unsafe discovery endpoints without
   }
 });
 
+test('source OAuth diagnostics retain only standard token error codes and bound untrusted bodies', async () => {
+  const privateDetail = 'synthetic-private-provider-detail';
+  const cases = [
+    ['invalid_grant', () => Response.json({ error: 'invalid_grant', error_description: privateDetail,
+      access_token: privateDetail, refresh_token: privateDetail }, { status: 400 })],
+    ['invalid_client', () => Response.json({ error: 'invalid_client' }, { status: 401 })],
+    [undefined, () => Response.json({ error: privateDetail }, { status: 400 })],
+    [undefined, () => Response.json({ error: { code: 'invalid_grant', detail: privateDetail } }, { status: 400 })],
+    [undefined, () => new Response('<html>' + privateDetail + '</html>', { status: 502 })],
+    [undefined, () => new Response('{', { status: 400 })],
+  ];
+  let cancelled = false;
+  cases.push([undefined, () => new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+    status: 400, headers: { 'content-length': '8193' },
+  })]);
+  for (const [expected, response] of cases) {
+    await sourceOauthFixture(async (gateway) => {
+      const attempt = await gateway.begin();
+      gateway.oauthHook((request) => request.url === `${OAUTH_ISSUER}/token` ? response() : undefined);
+      assert.equal((await gateway.finish(attempt)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+      const diagnostic = gateway.managementStorage.snapshot(`ankka-mcp-gateway/source-oauth-diagnostic/v1/${gateway.installed.source.id}`);
+      assert.equal(diagnostic.stage, 'token_exchange');
+      assert.equal(diagnostic.status, 'failed');
+      assert.equal(diagnostic.oauthError, expected);
+      assert.ok([400, 401, 502].includes(diagnostic.httpStatus));
+      assert.deepEqual(Object.keys(diagnostic).sort(), ['at', 'httpStatus', ...(expected ? ['oauthError'] : []), 'stage', 'status'].sort());
+      assert.equal(JSON.stringify(diagnostic).includes(privateDetail), false);
+      assert.equal(JSON.stringify(gateway.managementStorage.writes).includes(privateDetail), false);
+      assert.equal(gateway.imports.length, 0);
+      assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
+    });
+  }
+  assert.equal(cancelled, true);
+});
+
 test('source OAuth restart invalidates the previous callback and provider denial is fixed text', async () => {
   await sourceOauthFixture(async (gateway) => {
     const old = await gateway.begin();
