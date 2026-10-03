@@ -41,17 +41,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/reuse-pr-check.mjs
       - id: key
-        if: steps.source.outputs.reused != 'true'
         run: echo "key=node-modules-v1-${{ runner.os }}-${{ hashFiles('.nvmrc', 'package-lock.json') }}" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
-        if: steps.source.outputs.reused != 'true'
         id: modules
         with:
           path: |
             node_modules
             apps/*/node_modules
           key: ${{ steps.key.outputs.key }}
-      - if: steps.source.outputs.reused != 'true' && steps.modules.outputs.cache-hit != 'true'
+      - if: steps.modules.outputs.cache-hit != 'true'
         run: npm ci
 
   lint-typecheck:
@@ -138,8 +136,17 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      # These checks use only Node built-ins. History must be checked again
-      # after merge even when the file tree is identical to the tested PR.
+      # History must be checked again after merge even when the file tree
+      # is identical to the tested PR. Its rules still need the module cache.
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        id: modules
+        with:
+          path: |
+            node_modules
+            apps/*/node_modules
+          key: ${{ needs.install.outputs.modules-key }}
+      - if: steps.modules.outputs.cache-hit != 'true'
+        run: npm ci
       - run: npm run check:toolchain
       - run: npm run check:boundary
       - run: npm run check:history
