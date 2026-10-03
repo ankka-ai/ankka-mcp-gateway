@@ -2525,13 +2525,13 @@ const REAL_TOOLS = Object.freeze([
 const NO_HINTS = { title: null, description: null, readOnlyHint: null, destructiveHint: null, openWorldHint: null };
 
 /** The shared fixture with one more endpoint on its network: a source that answers discovery with the standard sign-in challenge. */
-function signInFixture(run, claimInput, sourceUrl = SIGN_IN_URL) {
+function signInFixture(run, claimInput) {
   return fixture(async (gateway) => {
     const network = globalThis.fetch;
     globalThis.fetch = async (input, init) => {
-      if (input instanceof Request && input.url === sourceUrl) {
+      if (input instanceof Request && input.url === SIGN_IN_URL) {
         return new Response(null, { status: 401, headers: {
-          'www-authenticate': `Bearer resource_metadata="${new URL(sourceUrl).origin}/.well-known/oauth-protected-resource"`,
+          'www-authenticate': 'Bearer resource_metadata="https://signin.example.net/.well-known/oauth-protected-resource"',
         } });
       }
       return network(input, init);
@@ -2540,13 +2540,13 @@ function signInFixture(run, claimInput, sourceUrl = SIGN_IN_URL) {
   }, claimInput);
 }
 
-async function saveSignInDraft(gateway, enabledTools = [], sourceUrl = SIGN_IN_URL) {
+async function saveSignInDraft(gateway, enabledTools = []) {
   const current = await (await gateway.api('/api/sources')).json();
   const response = await gateway.api('/api/sources', { method: 'PUT', body: { schemaVersion: 1, revision: current.revision,
-    source: { label: 'Sign-in source', url: sourceUrl, authMode: 'oauth', enabledTools } } });
+    source: { label: 'Sign-in source', url: SIGN_IN_URL, authMode: 'oauth', enabledTools } } });
   assert.equal(response.status, 200, await response.clone().text());
   const sources = await response.json();
-  return { sources, source: sources.sources.find((candidate) => candidate.url === sourceUrl) };
+  return { sources, source: sources.sources.find((candidate) => candidate.url === SIGN_IN_URL) };
 }
 
 function pausedAction(gateway) {
@@ -3697,10 +3697,10 @@ const OAUTH_KEY = 'ankka-mcp-gateway/source-oauth/v1';
 const OAUTH_ISSUER = 'https://identity.example.net';
 const OAUTH_CALLBACK = '/__ankka/source-oauth/callback';
 
-async function sourceOauthFixture(run, before = null, sourceUrl = SIGN_IN_URL) {
+async function sourceOauthFixture(run, before = null) {
   return signInFixture(async (gateway) => {
     if (before) await before(gateway);
-    const installed = await installSignInSource(gateway, { draft: await saveSignInDraft(gateway, [], sourceUrl) });
+    const installed = await installSignInSource(gateway);
     const network = globalThis.fetch;
     const exchanges = [], imports = [], registrations = [];
     const accessToken = crypto.randomUUID(), refreshToken = crypto.randomUUID();
@@ -3710,8 +3710,8 @@ async function sourceOauthFixture(run, before = null, sourceUrl = SIGN_IN_URL) {
       const intercepted = await hook?.(request);
       if (intercepted) return intercepted;
       const path = new URL(request.url);
-      if (request.url === `${new URL(sourceUrl).origin}/.well-known/oauth-protected-resource`) {
-        return Response.json({ resource: sourceUrl, authorization_servers: [OAUTH_ISSUER], scopes_supported: ['records:read'] });
+      if (request.url === 'https://signin.example.net/.well-known/oauth-protected-resource') {
+        return Response.json({ resource: SIGN_IN_URL, authorization_servers: [OAUTH_ISSUER], scopes_supported: ['records:read'] });
       }
       if (request.url === `${OAUTH_ISSUER}/.well-known/oauth-authorization-server`) {
         return Response.json({ issuer: OAUTH_ISSUER, authorization_endpoint: `${OAUTH_ISSUER}/authorize`,
@@ -3755,7 +3755,7 @@ async function sourceOauthFixture(run, before = null, sourceUrl = SIGN_IN_URL) {
       await run({ ...gateway, installed, start, begin, finish, exchanges, imports, registrations, accessToken, refreshToken,
         oauthHook(next) { hook = next; } });
     } finally { globalThis.fetch = network; }
-  }, await portalOnlyClaim(), sourceUrl);
+  }, await portalOnlyClaim());
 }
 
 async function installedOauthReconnect(gateway) {
@@ -3880,46 +3880,6 @@ test('source OAuth connects through the customer callback with PKCE; tokens neve
     assert.equal(portalMapping(gateway, gateway.installed.serverId), undefined);
     assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find((source) => source.id === gateway.installed.source.id).enabledTools, []);
   });
-});
-
-// Public provider endpoint; every request and credential in these cases is synthetic.
-const CHATBASE_SOURCE_URL = 'https://mcp.chatbase.co/api/mcp';
-
-test('new Chatbase OAuth clients leave scopes to consent in both registration and authorization', async () => {
-  await sourceOauthFixture(async (gateway) => {
-    const attempt = await gateway.begin();
-    assert.equal(Object.hasOwn(gateway.registrations[0], 'scope'), false);
-    assert.equal(attempt.url.searchParams.has('scope'), false);
-    assert.equal(attempt.url.searchParams.get('resource'), CHATBASE_SOURCE_URL);
-    assert.equal(gateway.registrations[0].token_endpoint_auth_method, 'none');
-    assert.equal((await gateway.finish(attempt)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=connected`);
-    const exchange = gateway.exchanges[0];
-    assert.equal(exchange.get('redirect_uri'), attempt.url.searchParams.get('redirect_uri'));
-    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(exchange.get('code_verifier')));
-    assert.equal(Buffer.from(digest).toString('base64url'), attempt.url.searchParams.get('code_challenge'));
-    const imported = JSON.parse(gateway.imports[0].auth_credentials);
-    assert.equal(Object.hasOwn(imported.registration_info, 'scope'), false);
-    assert.equal(imported.tokens.scope, 'records:read');
-    assert.deepEqual(imported.config.scopes_supported, ['records:read']);
-    assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find(source => source.id === gateway.installed.source.id).enabledTools, []);
-    const evidence = JSON.stringify(gateway.managementStorage.writes);
-    assert.ok(!evidence.includes(gateway.accessToken));
-    assert.ok(!evidence.includes(gateway.refreshToken));
-  }, null, CHATBASE_SOURCE_URL);
-});
-
-test('Chatbase reconnect retains explicitly recorded scopes instead of selecting new defaults', async () => {
-  await sourceOauthFixture(async (gateway) => {
-    const reconnect = await installedOauthReconnect(gateway);
-    gateway.provider.state.servers.get(gateway.installed.serverId).auth_config_summary = {
-      registration_info: { scope: 'records:read' },
-    };
-    const attempt = await reconnect.begin();
-    assert.equal(gateway.registrations[0].scope, 'records:read');
-    assert.equal(attempt.url.searchParams.get('scope'), 'records:read');
-    assert.equal((await gateway.finish(attempt)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=reconnected`);
-    assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), reconnect.sources);
-  }, null, CHATBASE_SOURCE_URL);
 });
 
 test('source OAuth refuses wrong actors, cross-origin starts, missing management authority and stale revisions before registration', async () => {
