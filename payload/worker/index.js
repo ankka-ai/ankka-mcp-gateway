@@ -4576,9 +4576,12 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (loaded instanceof Response) return loaded;
   const { sources, control, source } = loaded;
   if (source.status !== 'installed') return sourceToolsRefusal(409, 'source_tools_unavailable');
-  const view = (state, reason = null, checkedAt = null) => fixedJson(200, {
-    schemaVersion: 1, sourceId, state, reason, checkedAt,
-  });
+  let reconnectUrl;
+  const view = (state, reason = null, checkedAt = null) => {
+    const result = { schemaVersion: 1, sourceId, state, reason, checkedAt };
+    if (state === 'authorization_required' && reconnectUrl) result.reconnectUrl = reconnectUrl;
+    return fixedJson(200, result);
+  };
   // An administrator's successful sync cannot prove another user's OAuth session.
   if (source.onBehalfOfUser) return view('user_managed');
   const token = managementCredential(env);
@@ -4610,6 +4613,10 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (portal.status === 'auth') return view('unknown', 'management_credential_required');
   if (portal.status !== 'ok') return view('unknown', 'check_failed');
   if (!mappings || !portalExact(portal.result, control, mappings)) return view('unknown', 'configuration_changed');
+  if (source.authMode === 'oauth') {
+    reconnectUrl = `https://dash.cloudflare.com/${encodeURIComponent(control.accountId)}` +
+      `/one/access-controls/ai-controls/mcp-server/edit/${encodeURIComponent(serverId)}`;
+  }
   if (['required', 'stale'].includes(server.result.authentication_status)) {
     return view('authorization_required', null, new Date().toISOString());
   }

@@ -6115,6 +6115,7 @@ test('source connection checks use a fresh Cloudflare result, redact errors and 
     assert.equal(body.reason, reason);
     assert.equal(body.sourceId, sourceId);
     assert.equal(body.checkedAt === null, expected === 'unknown');
+    assert.equal(body.reconnectUrl, undefined, 'public sources cannot offer an OAuth reconnect');
     assert.equal(JSON.stringify(body).includes('synthetic-private'), false);
     assert.deepEqual(gateway.provider.requests.slice(baseline).filter(r => r.method !== 'GET').map(r => [r.method, r.pathname]),
       [['POST', `${SERVERS_PATH}/${installed.serverId}/sync`]]);
@@ -6183,10 +6184,15 @@ test('source connection checks expose expired operator OAuth through the strict 
     const result = await dashboard.checkSourceConnection(installed.source.id);
     assert.equal(result.state, 'authorization_required');
     assert.ok(result.checkedAt);
+    assert.equal(result.reconnectUrl,
+      `https://dash.cloudflare.com/${ACCOUNT_ID}/one/access-controls/ai-controls/mcp-server/edit/${installed.serverId}`);
     assert.equal((await dashboard.getSources()).sources.find(source => source.id === installed.source.id).status, 'installed');
   });
   assert.equal(syncs, 1);
   gateway.provider.state.servers.get(installed.serverId).authentication_status = 'stale';
-  assert.equal((await (await gateway.api(connectionPath(installed.source.id), { method: 'POST' })).json()).state, 'authorization_required');
+  const stale = await (await gateway.api(connectionPath(installed.source.id), { method: 'POST' })).json();
+  assert.equal(stale.state, 'authorization_required');
+  assert.equal(stale.reconnectUrl,
+    `https://dash.cloudflare.com/${ACCOUNT_ID}/one/access-controls/ai-controls/mcp-server/edit/${installed.serverId}`);
   assert.equal(syncs, 1, 'known expired administrative authorization does not start another sync');
 }));

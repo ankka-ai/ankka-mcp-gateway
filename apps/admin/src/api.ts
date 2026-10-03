@@ -1,6 +1,7 @@
 import * as v from 'valibot'
 
 const sourceAuthModeSchema = v.picklist(['none', 'oauth'])
+const cloudflareSourceUrlSchema = v.pipe(v.string(), v.regex(/^https:\/\/dash\.cloudflare\.com\/[a-f0-9]{32}\/one\/access-controls\/ai-controls\/mcp-server\/edit\/[a-z0-9_-]+$/u))
 const sourceStatusSchema = v.picklist(['installed', 'draft'])
 const runtimeOperationSchema = v.picklist(['update', 'rollback'])
 const actionStatusSchema = v.picklist([
@@ -69,6 +70,7 @@ const sourceConnectionSchema = v.strictObject({
   state: v.picklist(['connected', 'authorization_required', 'forbidden', 'unavailable', 'unknown', 'user_managed']),
   reason: v.nullable(v.picklist(['management_credential_required', 'lifecycle_pending', 'configuration_changed', 'check_failed', 'check_pending'])),
   checkedAt: v.nullable(v.pipe(v.string(), v.isoTimestamp())),
+  reconnectUrl: v.optional(cloudflareSourceUrlSchema),
 })
 export type SourceConnection = v.InferOutput<typeof sourceConnectionSchema>
 
@@ -176,7 +178,7 @@ const sourceActionSummarySchema = v.strictObject({
   state: sourceActionStateSchema,
   canCancel: v.boolean(),
   canRenew: v.optional(v.boolean()),
-  connectionUrl: v.optional(v.pipe(v.string(), v.regex(/^https:\/\/dash\.cloudflare\.com\/[a-f0-9]{32}\/one\/access-controls\/ai-controls\/mcp-server\/edit\/[a-z0-9_-]+$/u))),
+  connectionUrl: v.optional(cloudflareSourceUrlSchema),
 })
 const sourceActionsSchema = v.strictObject({
   schemaVersion: v.literal(1),

@@ -813,3 +813,18 @@ describe('individual connector removal', () => {
     }))
   })
 })
+
+describe('connector reconnect destinations', () => {
+  afterEach(() => vi.unstubAllGlobals())
+  it('accepts only the fixed Cloudflare server page route', async () => {
+    const sourceId = 'source-1111111111111111'
+    const reconnectUrl = 'https://dash.cloudflare.com/' + 'a'.repeat(32) + '/one/access-controls/ai-controls/mcp-server/edit/server-synthetic'
+    const result = { schemaVersion: 1, sourceId, state: 'authorization_required', reason: null, checkedAt: '2026-10-03T10:00:00Z', reconnectUrl }
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(result)))
+    await expect(new HttpGatewayAdminApi().checkSourceConnection(sourceId)).resolves.toEqual(result)
+    for (const unsafe of ['https://foreign.example.com/authorize', reconnectUrl + '?redirect=https://foreign.example.com', reconnectUrl + '#secret', reconnectUrl.replace('https:', 'http:'), reconnectUrl.replace('dash.cloudflare.com', 'dash.cloudflare.com.foreign.example.com')]) {
+      vi.stubGlobal('fetch', vi.fn(async () => Response.json({ ...result, reconnectUrl: unsafe })))
+      await expect(new HttpGatewayAdminApi().checkSourceConnection(sourceId)).rejects.toMatchObject({ code: 'response_invalid' })
+    }
+  })
+})

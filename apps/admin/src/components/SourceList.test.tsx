@@ -171,16 +171,22 @@ describe('SourceList', () => {
 
   it('shows an installed connector as requiring reconnection and replaces earlier success', async () => {
     const user = userEvent.setup()
+    const reconnectUrl = 'https://dash.cloudflare.com/' + 'a'.repeat(32) + '/one/access-controls/ai-controls/mcp-server/edit/server-synthetic'
     const check = vi.fn().mockImplementationOnce(checkConnection).mockResolvedValue({
       schemaVersion: 1, sourceId: sources[0].id, state: 'authorization_required',
-      checkedAt: '2026-10-03T10:01:00.000Z', reason: null,
+      checkedAt: '2026-10-03T10:01:00.000Z', reason: null, reconnectUrl,
     })
     render(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    expect(screen.queryByRole('link', { name: /Reconnect/ })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Check connections' }))
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Reconnect required'))
+    const reconnect = screen.getByRole('link', { name: 'Reconnect Knowledge in Cloudflare (opens a new tab)' })
+    expect(reconnect).toHaveAttribute('href', reconnectUrl)
+    expect(reconnect).toHaveAttribute('target', '_blank')
+    expect(reconnect).toHaveAttribute('rel', 'noopener noreferrer')
     await user.click(screen.getByRole('button', { name: 'Knowledge' }))
-    expect(screen.getByText(/Reconnect it in Cloudflare/)).toBeVisible()
+    expect(screen.getByText(/Complete its authorization there, then return here and select Check connections/)).toBeVisible()
     expect(document.querySelector('time')).toHaveAttribute('datetime', '2026-10-03T10:01:00.000Z')
     await user.click(screen.getByRole('button', { name: 'Connected' }))
     expect(screen.queryByRole('button', { name: 'Knowledge' })).not.toBeInTheDocument()
