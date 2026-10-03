@@ -166,7 +166,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     sourceNotice,
     sources,
   } = useGateway()
-  const checkSourceConnection = useCallback((sourceId: string) => api.checkSourceConnection(sourceId), [api])
+  const checkSourceConnection = useCallback((sourceId: string, signal: AbortSignal) => api.checkSourceConnection(sourceId, signal), [api])
   const addConnector = useRef<HTMLButtonElement>(null)
   const [showForm, setShowForm] = useState(false)
   const [reconnect, setReconnect] = useState<{ sourceId: string; url?: string | undefined } | null>(null)

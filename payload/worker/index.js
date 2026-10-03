@@ -4229,6 +4229,10 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
 }
 
 const SOURCE_TOOLS_READ_TIMEOUT_MS = 10_000;
+// One deadline from arrival covers both waiting for admission and the provider calls.
+const SOURCE_CONNECTION_CHECK_TIMEOUT_MS = 20_000;
+// The dashboard sends at most this many checks at once; more from other tabs wait.
+const SOURCE_CONNECTION_CHECK_CONCURRENCY = 4;
 const SOURCE_CATALOGUE_REFUSALS = Object.freeze({
   connection_required: 'source_connection_required',
   sync_required: 'source_sync_required',
@@ -4571,7 +4575,7 @@ async function readInstalledSourceTools(storage, env, sourceId, actorEmail) {
 
 // A fresh capability sync exercises the operator connection inside Cloudflare.
 // Never export upstream credentials or pass through provider-authored errors.
-async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail) {
+async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail, signal) {
   const loaded = await loadInstalledSource(storage, env, sourceId, actorEmail);
   if (loaded instanceof Response) return loaded;
   const { sources, control, source } = loaded;
@@ -4600,7 +4604,8 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (!safeProviderId(serverId) || !layout) return view('unknown', 'configuration_changed');
   const desired = (await buildDesiredResources(teardownSettings(control, source,
     layout.receiptSourceOwner === source.id ? 'company-context' : source.id), control.installationId))[0];
-  const signal = AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS);
+  // A check that waited out its deadline starts no provider work.
+  if (signal.aborted) return view('unknown', 'check_failed');
   const path = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`;
   const server = await providerCall(path, token, { signal });
   if (server.status === 'auth') return view('unknown', 'management_credential_required');
@@ -6995,6 +7000,11 @@ export class AdminState {
     this.env = env;
     this.managedTeardown = managedTeardown;
     this.queue = Promise.resolve();
+    // Connection checks admitted since the last queued mutation start together
+    // after it; null once another mutation is queued behind them.
+    this.checksAfter = null;
+    this.activeChecks = 0;
+    this.checkSlots = [];
   }
 
   fetch(request) {
@@ -7019,6 +7029,10 @@ export class AdminState {
       INTERNAL_ROLLBACK_OUTLOOK_PATH, INTERNAL_MANAGEMENT_STATUS_PATH, INTERNAL_SOURCE_REMOVAL_PATH].includes(requestUrl.pathname) ||
         requestUrl.pathname.startsWith(`${INTERNAL_ACTIONS_PATH}/`))) {
       return this.readSourceManagementState(request, requestUrl);
+    }
+    const sourceConnection = /^\/sources\/(source-[a-f0-9]{16})\/connection$/u.exec(requestUrl.pathname);
+    if (sourceConnection && request.method === 'POST') {
+      return this.checkSourceConnection(sourceConnection[1], request.headers.get('x-ankka-actor-email'));
     }
     const operation = async () => {
       const url = new URL(request.url);
@@ -7399,10 +7413,6 @@ export class AdminState {
         if (!actorEmail) return sourceToolsRefusal(403, 'access_required');
         return updateInstalledSourceLabel(this.state.storage, this.env, installedLabel[1], await readJsonInput(request, 1_024), actorEmail);
       }
-      const sourceConnection = /^\/sources\/(source-[a-f0-9]{16})\/connection$/u.exec(url.pathname);
-      if (sourceConnection && request.method === 'POST') {
-        return checkInstalledSourceConnection(this.state.storage, this.env, sourceConnection[1], request.headers.get('x-ankka-actor-email'));
-      }
       const installedTools = /^\/sources\/(source-[a-f0-9]{16})\/tools$/u.exec(url.pathname);
       if (installedTools && (request.method === 'GET' || request.method === 'PUT')) {
         const actorEmail = normalizedActor(request.headers.get('x-ankka-actor-email'));
@@ -7416,6 +7426,31 @@ export class AdminState {
     };
     const result = this.queue.then(operation, operation);
     this.queue = result.then(() => undefined, () => undefined);
+    this.checksAfter = null;
+    return result;
+  }
+
+  // A check syncs Cloudflare's capabilities, so it never overlaps a mutation:
+  // it starts after every mutation queued before it, and a later mutation
+  // waits for it. Independent checks overlap each other up to a fixed limit;
+  // each rereads authorization, ownership and the Portal once admitted.
+  checkSourceConnection(sourceId, actorEmail) {
+    const signal = AbortSignal.timeout(SOURCE_CONNECTION_CHECK_TIMEOUT_MS);
+    const check = async () => {
+      if (this.activeChecks < SOURCE_CONNECTION_CHECK_CONCURRENCY) this.activeChecks += 1;
+      else await new Promise((resolve) => this.checkSlots.push(resolve));
+      try {
+        return await checkInstalledSourceConnection(this.state.storage, this.env, sourceId, actorEmail, signal);
+      } finally {
+        // Hand the slot straight to the next waiting check, if any.
+        const next = this.checkSlots.shift();
+        if (next) next(); else this.activeChecks -= 1;
+      }
+    };
+    this.checksAfter ??= this.queue;
+    const result = this.checksAfter.then(check);
+    const settled = result.then(() => undefined, () => undefined);
+    this.queue = Promise.all([this.queue, settled]).then(() => undefined);
     return result;
   }
 

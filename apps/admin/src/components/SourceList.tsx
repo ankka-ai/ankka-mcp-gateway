@@ -17,7 +17,7 @@ const filters = [
 interface SourceListProps {
   sources: ManagedSource[]
   connectionRevision?: number
-  onCheckConnection?(sourceId: string): Promise<SourceConnection>
+  onCheckConnection?(sourceId: string, signal: AbortSignal): Promise<SourceConnection>
   installationEnabled: boolean
   authorizeDisabled?: boolean
   isBusy: boolean
@@ -56,7 +56,7 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
   const query = search.trim().toLocaleLowerCase()
   const visibleSources = sources.filter((source) => (
     (filter === 'all' || (filter === 'connected' ? connections[source.id]?.state === 'connected'
-      : source.status === 'draft' || !['connected', 'checking', 'user_managed'].includes(connections[source.id]?.state ?? 'unknown')))
+      : source.status === 'draft' || !['connected', 'waiting', 'checking', 'user_managed'].includes(connections[source.id]?.state ?? 'unknown')))
     && (!query || `${source.company ?? ''} ${source.label}`.toLocaleLowerCase().includes(query) || source.url.toLocaleLowerCase().includes(query))
   ))
 

@@ -222,6 +222,14 @@ the gateway receives only the sync result. It never calls a source tool or
 changes allowlists, upstream grants, or Team access. Newly discovered tools
 remain disabled by the Portal mapping.
 
+Checks of different connectors run at the same time, up to four at once, and
+each result appears as soon as its check finishes. Connectors not yet sent show
+**Waiting**. A check never overlaps a configuration change: it waits for an
+installation, removal, Team, or tool change queued before it, and a change
+waits for running checks. Each check has a 20-second deadline that includes
+this wait. A check that runs out returns **Not verified** without contacting
+Cloudflare, and the page stops waiting for any check after 25 seconds.
+
 The connection badge reflects that fresh result, not installation state or
 Cloudflare's previously saved `ready` flag. Upstream 401 and 403 responses
 become **Reconnect required** and **Access denied**; connection errors become

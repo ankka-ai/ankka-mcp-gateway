@@ -1,8 +1,9 @@
-import { cleanup, render, screen, within, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ManagedSource, SourceConnection } from '../api'
 import { SourceList } from './SourceList'
+import { CONNECTION_CHECK_TIMEOUT_MS } from './SourceConnection'
 
 const sources: [ManagedSource, ManagedSource] = [
   { id: 'source-1111111111111111', label: 'Knowledge', url: 'https://knowledge.example.com/mcp', authMode: 'oauth', onBehalfOfUser: false, enabledTools: ['search', 'fetch_document'], status: 'installed' },
@@ -14,7 +15,10 @@ const checkConnection = async (sourceId: string): Promise<SourceConnection> => (
 })
 
 describe('SourceList', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    vi.useRealTimers()
+  })
 
   it('filters verified connections and connectors needing attention without changing them', async () => {
     const user = userEvent.setup()
@@ -210,6 +214,54 @@ describe('SourceList', () => {
       state: 'user_managed', checkedAt: null, reason: null })
     rerender(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Individual sign-in'))
+  })
+
+  it('shows queued connectors as Waiting and each result as soon as it arrives', async () => {
+    const user = userEvent.setup()
+    const installed = Array.from({ length: 6 }, (_, index): ManagedSource => ({
+      id: `source-${String(index + 1).repeat(16)}`, label: `Connector ${index + 1}`, url: `https://connector-${index + 1}.example.com/mcp`,
+      authMode: 'none', onBehalfOfUser: false, enabledTools: ['search'], status: 'installed',
+    }))
+    const answers = new Map<string, (result: SourceConnection) => void>()
+    const check = vi.fn((sourceId: string) => new Promise<SourceConnection>((resolve) => { answers.set(sourceId, resolve) }))
+    const answer = (index: number) => {
+      const sourceId = installed[index]?.id ?? ''
+      answers.get(sourceId)?.({ schemaVersion: 1, sourceId, state: 'connected', checkedAt: '2026-10-03T10:00:00.000Z', reason: null })
+    }
+    const labels = () => screen.getAllByRole('status').map(status => status.textContent)
+    render(<SourceList sources={installed} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(labels()).toEqual(['Checking…', 'Checking…', 'Checking…', 'Checking…', 'Waiting', 'Waiting']))
+    expect(check).toHaveBeenCalledTimes(4)
+    expect(screen.getByRole('button', { name: 'Checking connections…' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Connector 6' }))
+    expect(screen.getByText('Waiting for other connection checks to finish before testing this one.')).toBeVisible()
+    answer(2)
+    await waitFor(() => expect(labels()).toEqual(['Checking…', 'Checking…', 'Connected', 'Checking…', 'Checking…', 'Waiting']))
+    for (const index of [0, 1, 3, 4]) answer(index)
+    await waitFor(() => expect(check).toHaveBeenCalledTimes(6))
+    expect(labels()).toContain('Checking…')
+    answer(5)
+    await waitFor(() => expect(labels()).toEqual(Array(6).fill('Connected')))
+    expect(screen.getByRole('button', { name: 'Check connections' })).toBeEnabled()
+  })
+
+  it('times out a check that never answers without keeping its earlier result', async () => {
+    vi.useFakeTimers()
+    const signals: AbortSignal[] = []
+    const check = vi.fn().mockImplementationOnce(checkConnection).mockImplementation((_sourceId: string, signal: AbortSignal) => {
+      signals.push(signal)
+      return new Promise<SourceConnection>(() => {})
+    })
+    render(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await act(async () => {})
+    expect(screen.getByRole('status')).toHaveTextContent('Connected')
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check connections' })) })
+    expect(screen.getByRole('status')).toHaveTextContent('Checking…')
+    expect(screen.getByRole('button', { name: 'Checking connections…' })).toBeDisabled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_TIMEOUT_MS) })
+    expect(signals.map(signal => signal.aborted)).toEqual([true])
+    expect(screen.getByRole('status')).toHaveTextContent('Not verified')
+    expect(screen.getByRole('button', { name: 'Check connections' })).toBeEnabled()
   })
 
 })

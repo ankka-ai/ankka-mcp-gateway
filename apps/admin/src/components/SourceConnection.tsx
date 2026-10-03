@@ -2,40 +2,64 @@ import { useEffect, useState } from 'react'
 import { Button } from './Button'
 import type { SourceConnection } from '../api'
 
-export type ConnectionCheck = SourceConnection | { state: 'checking'; checkedAt: null; reason: null }
+export type ConnectionCheck = SourceConnection | { state: 'waiting' | 'checking'; checkedAt: null; reason: null }
 
-export function useSourceConnections(sourceIds: string, check?: (sourceId: string) => Promise<SourceConnection>, revision = 0) {
+// The gateway's own limit, so a connector shows Checking… only once its request is sent.
+const CHECK_CONCURRENCY = 4
+// Just above the gateway's 20-second deadline for one check.
+export const CONNECTION_CHECK_TIMEOUT_MS = 25_000
+
+const pending = (state: 'waiting' | 'checking'): ConnectionCheck => ({ state, checkedAt: null, reason: null })
+
+export function useSourceConnections(sourceIds: string, check?: (sourceId: string, signal: AbortSignal) => Promise<SourceConnection>, revision = 0) {
   const [refresh, setRefresh] = useState(0)
   const [results, setResults] = useState<Record<string, ConnectionCheck>>({})
   useEffect(() => {
-    let cancelled = false
-    const ids = sourceIds ? sourceIds.split(',') : []
-    setResults(Object.fromEntries(ids.map(id => [id, { state: 'checking', checkedAt: null, reason: null }])))
     if (!check) { setResults({}); return }
     const checkConnection = check
-    // Bound browser concurrency; each result appears as it arrives.
-    async function run() {
-      while (!cancelled) {
-        const sourceId = ids.shift()
-        if (!sourceId) return
-        let result: SourceConnection
-        try {
-          result = await checkConnection(sourceId)
-          if (result.sourceId !== sourceId) throw new Error('connection_check_mismatch')
-        } catch {
-          result = { schemaVersion: 1, sourceId, state: 'unknown', reason: 'check_failed', checkedAt: null }
-        }
-        if (!cancelled) setResults(current => ({ ...current, [sourceId]: result }))
+    const ids = sourceIds ? sourceIds.split(',') : []
+    const stopped = new AbortController()
+    setResults(Object.fromEntries(ids.map(id => [id, pending('waiting')])))
+    const show = (sourceId: string, result: ConnectionCheck) => {
+      if (!stopped.signal.aborted) setResults(current => ({ ...current, [sourceId]: result }))
+    }
+    // Each check has its own deadline, even if the request ignores its signal.
+    async function checkOne(sourceId: string): Promise<SourceConnection> {
+      const controller = new AbortController()
+      const abort = () => controller.abort()
+      const timer = setTimeout(abort, CONNECTION_CHECK_TIMEOUT_MS)
+      stopped.signal.addEventListener('abort', abort)
+      try {
+        const result = await Promise.race([checkConnection(sourceId, controller.signal), new Promise<never>((_resolve, reject) => {
+          controller.signal.addEventListener('abort', () => reject(new Error('connection_check_timeout')))
+        })])
+        if (result.sourceId !== sourceId) throw new Error('connection_check_mismatch')
+        return result
+      } catch {
+        // A failed or timed-out check never keeps an earlier result.
+        return { schemaVersion: 1, sourceId, state: 'unknown', reason: 'check_failed', checkedAt: null }
+      } finally {
+        clearTimeout(timer)
+        stopped.signal.removeEventListener('abort', abort)
       }
     }
-    void Promise.all([run(), run(), run()])
-    return () => { cancelled = true }
+    // Each result appears as it arrives; a slow connector holds up only its own.
+    async function run() {
+      for (let sourceId = ids.shift(); sourceId && !stopped.signal.aborted; sourceId = ids.shift()) {
+        show(sourceId, pending('checking'))
+        show(sourceId, await checkOne(sourceId))
+      }
+    }
+    void Promise.all(Array.from({ length: CHECK_CONCURRENCY }, run))
+    return () => stopped.abort()
   }, [sourceIds, check, revision, refresh])
-  return { results, recheck: () => setRefresh(value => value + 1), checking: Object.values(results).some(result => result.state === 'checking') }
+  const checking = Object.values(results).some(result => result.state === 'waiting' || result.state === 'checking')
+  return { results, recheck: () => setRefresh(value => value + 1), checking }
 }
 
 export function connectionLabel(result?: ConnectionCheck) {
   switch (result?.state) {
+    case 'waiting': return 'Waiting'
     case 'checking': return 'Checking…'
     case 'connected': return 'Connected'
     case 'authorization_required': return 'Reconnect required'
@@ -70,11 +94,12 @@ export function ConnectionDetails({ result }: { result: ConnectionCheck | undefi
         : result?.state === 'unavailable' ? 'Cloudflare could not connect to this server. Check the provider and try again.'
           : result?.state === 'user_managed' ? 'Each user connects with their own login in the MCP client. This page cannot verify their individual sessions.'
             : result?.state === 'checking' ? 'Testing the connection through Cloudflare…'
-              : result?.reason === 'management_credential_required' ? 'Configure or renew your gateway’s management token in Settings to check connections.'
-                : result?.reason === 'configuration_changed' ? 'The Cloudflare configuration differs from this gateway’s saved configuration. The connection was not tested.'
-                  : result?.reason === 'lifecycle_pending' ? 'Finish the current gateway change, then check the connection again.'
-                    : result?.reason === 'check_pending' ? 'Cloudflare has not finished checking this connection. Check again shortly.'
-                      : 'The connection could not be verified. Check again to get its current status.'
+              : result?.state === 'waiting' ? 'Waiting for other connection checks to finish before testing this one.'
+                : result?.reason === 'management_credential_required' ? 'Configure or renew your gateway’s management token in Settings to check connections.'
+                  : result?.reason === 'configuration_changed' ? 'The Cloudflare configuration differs from this gateway’s saved configuration. The connection was not tested.'
+                    : result?.reason === 'lifecycle_pending' ? 'Finish the current gateway change, then check the connection again.'
+                      : result?.reason === 'check_pending' ? 'Cloudflare has not finished checking this connection. Check again shortly.'
+                        : 'The connection could not be verified. Check again to get its current status.'
   return <div className="mt-3 text-xs leading-5 text-kumo-subtle">
     <p>{message}</p>
     {result?.checkedAt ? <p>Checked <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString()}</time></p> : null}
