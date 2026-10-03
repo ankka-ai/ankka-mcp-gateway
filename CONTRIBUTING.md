@@ -23,9 +23,18 @@ intentionally changing dependencies, and commit the manifest and lockfile
 changes together.
 
 While iterating, `npm run check:fast` runs the lint, typecheck, public
-boundary, and unit-test subset in well under a minute. Run focused tests for
+boundary, unit-test, and local runtime checks. Run focused tests for
 the behavior you change. The full `npm run check` release gate runs in
 continuous integration.
+
+Every pull request runs the full gate. A successful run retains a small
+`checked-source` artifact for seven days with its repository, run, attempt,
+tested commit, and Git tree. After merge, CI can reuse the latest successful
+run for that exact merged PR when the tested tree matches the new `main`
+checkout. This avoids repeating the same builds and tests before signing a
+release. The public-history and boundary checks still run on the merged commit.
+Missing evidence, a changed tree, or a newer failed/pending PR run causes a full
+run instead. The required `check` status and signed-release verification remain.
 
 For local interface work, run:
 
