@@ -130,7 +130,7 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
                   </td>
                   <td className="px-3 py-3">
                     {pendingRemovalSourceId === source.id ? <span className="text-warning-strong">Removal started</span> : source.status === 'installed' ? (
-                      <ConnectionStatus result={connections[source.id]} />
+                      <ConnectionStatus result={connections[source.id]} label={source.label} />
                     ) : (
                       <div className="flex flex-wrap items-center gap-2">
                         <span className="inline-flex items-center rounded-full bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning-strong">{draftLabel?.(source.id) ?? 'Incomplete'}</span>

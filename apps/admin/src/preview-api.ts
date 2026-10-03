@@ -32,7 +32,7 @@ import type {
 const PREVIEW_SCENARIOS = [
   'empty', 'ready', 'update', 'update-running', 'update-failed', 'loading', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential', 'team-editable',
   'source-pending', 'source-applying', 'source-expired', 'source-recovery', 'source-completed', 'source-late-success', 'source-lifecycle',
-  'source-sign-in',
+  'source-sign-in', 'connection-reconnect',
   'management-token',
   'removal-interrupted',
 ] as const
@@ -220,6 +220,10 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   async checkSourceConnection(sourceId: string): Promise<SourceConnection> {
     const source = this.#sources.sources.find(candidate => candidate.id === sourceId)
     if (!source || source.status !== 'installed') throw new GatewayApiError(404, 'source_not_found')
+    if (this.#scenario === 'connection-reconnect') return {
+      schemaVersion: 1, sourceId, state: 'authorization_required', checkedAt: new Date().toISOString(), reason: null,
+      reconnectUrl: 'https://dash.cloudflare.com/' + 'a'.repeat(32) + '/one/access-controls/ai-controls/mcp-server/edit/server-synthetic',
+    }
     return { schemaVersion: 1, sourceId, state: source.onBehalfOfUser ? 'user_managed' : 'connected',
       checkedAt: source.onBehalfOfUser ? null : new Date().toISOString(), reason: null }
   }
