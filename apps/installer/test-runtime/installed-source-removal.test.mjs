@@ -36,6 +36,8 @@ for (const state of ['installed', 'connection-paused']) test(`${state} source re
   gateway.env.ANKKA_MANAGEMENT_TOKEN = 'synthetic-removal-token-never-store';
   const management = Object.fromEntries(await gateway.objects.get('v1:management').storage.list());
   const root = Object.fromEntries(await gateway.objects.get(`v1:${gateway.env.ANKKA_INSTALL_ID}`).storage.list());
+  // An unrelated collection change must not invalidate paused cleanup receipts.
+  if (state === 'connection-paused') management[sourcesKey].revision += 1;
   const { revision, sources: [source] } = management[sourcesKey];
   assert.equal(source.status, state === 'connection-paused' ? 'draft' : 'installed');
   const bundle = await build({ entryPoints: [fileURLToPath(new URL('./installed-source-removal-worker.mjs', import.meta.url))],
