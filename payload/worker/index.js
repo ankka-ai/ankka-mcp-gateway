@@ -6926,8 +6926,10 @@ async function removeManagedSource(storage, env, input) {
   if (!actions) return sourceRemovalRefusal('source_removal_unavailable');
   // A connection pause already owns resources, although the source remains a
   // draft. Use its complete receipts without pretending installation finished.
+  // Other source changes can advance the collection revision. Cleanup still
+  // validates this source's hash and every resource receipt below.
   const paused = source.status === 'draft' ? actions.actions.find((action) => action.sourceId === source.id &&
-    action.sourceRevision === sources.revision && action.bigquerySetupStarted !== true &&
+    action.bigquerySetupStarted !== true &&
     sourceActionConnectionPaused(action) && sourceActionCanRenew(action, input.actorEmail, Date.now())) : null;
   if (source.status === 'draft' && !paused) {
     return removeSourceDraft(storage, { schemaVersion: 1, revision: input.revision, sourceId: source.id }, input.actorEmail, Date.now());

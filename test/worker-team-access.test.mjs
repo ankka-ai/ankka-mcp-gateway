@@ -4110,6 +4110,24 @@ for (const chosen of [false, true]) test(`a paused source can be removed ${chose
   assert.equal((await resumeInstallation(gateway, installed)).status, 409, 'the old installation cannot restart');
 }));
 
+for (const missing of [false, true]) test(`paused-source cleanup survives a collection revision change with its server ${missing ? 'already absent' : 'present'}`, () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
+  await gateway.managementStorage.put(SOURCES_KEY, { ...sources, revision: sources.revision + 1 });
+  if (missing) gateway.provider.state.servers.delete(installed.serverId);
+  const beforePortal = structuredClone(gateway.provider.state.portal);
+  const baseline = gateway.provider.requests.length;
+  const response = await removeSource(gateway, installed.source.id);
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual((await response.json()).sources, sources.sources.filter((source) => source.id !== installed.source.id));
+  assert.deepEqual(gateway.provider.state.portal, beforePortal);
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.some((action) => action.sourceId === installed.source.id), false);
+  const writes = gateway.provider.requests.slice(baseline).filter((request) => request.method !== 'GET');
+  assert.deepEqual(writes.map((request) => request.method), Array(missing ? 2 : 3).fill('DELETE'));
+  assert.equal(writes.some((request) => request.pathname.endsWith(`/mcp/servers/${installed.serverId}`)), !missing);
+  assert.equal((await resumeInstallation(gateway, installed)).status, 409);
+}));
+
 test('paused-source removal resumes without replaying a delete and blocks installation resumption', () => signInFixture(async (gateway) => {
   const installed = await installSignInSource(gateway);
   let intercepted = false;
@@ -4145,6 +4163,7 @@ for (const fault of ['pending-write', 'receipt-drift', 'source-drift', 'portal-d
     if (fault === 'source-drift') {
       const sources = gateway.managementStorage.snapshot(SOURCES_KEY);
       sources.sources.find((source) => source.id === installed.source.id).label = 'Changed elsewhere';
+      sources.revision += 1;
       await gateway.managementStorage.put(SOURCES_KEY, sources);
     }
     if (fault === 'portal-drift') gateway.provider.state.portal.servers.push({ id: installed.serverId, server_id: installed.serverId });
