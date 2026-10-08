@@ -99,6 +99,12 @@ they are explicitly documented as non-secret.
   Once relevant checks pass, do not broaden or repeat them without a new
   change, failure, or unresolved concern. The runtime checks required above
   still apply to bootstrap state, SQLite, and crypto runtime changes.
+- Before pushing behavior changes to a shared component or API, search its
+  callers and related tests for changed props, callback arguments, and copy.
+  Run the affected test files together, including page-level caller tests;
+  do not limit validation to the edited component's own test file.
+- Application test commands must stop on the first failing suite. Run quick
+  suites before the slower installer suite so failures are actionable promptly.
 - The full `npm run check` release gate runs in continuous integration on
   every pull request and must pass before merge; do not duplicate that gate
   locally for low-impact changes.
@@ -143,6 +149,9 @@ they are explicitly documented as non-secret.
 - Use the existing release automation and exact-source CI check reuse. Do not
   recreate signing, publishing, or deployment steps by hand. Measure slow phases
   before optimizing them; parallelize independent tests before adding tooling.
+- Reuse the release entry point and private runbook already identified in this
+  session. Keep machine-specific paths and signing details outside this public
+  repository. Do not repeat tooling discovery during the same release task.
 - Match live verification to the failure being fixed. For deployed update or
   handover changes, use an isolated gateway and the relevant path documented in
   `docs/LIVE_LIFECYCLE.md`; the in-process lifecycle runner cannot prove a deployed
