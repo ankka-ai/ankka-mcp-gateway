@@ -3,7 +3,7 @@ import { bigQueryHex, bigQuerySourceNames, BIGQUERY_SETUP_TOOLS } from '../src/c
 import { canonicalJson } from '../src/canonical-json';
 
 const context = { accountId: 'a'.repeat(32), zoneId: 'b'.repeat(32), installationId: `acg-${'c'.repeat(24)}`,
-  zoneName: 'example.com', accessIssuer: 'https://example.cloudflareaccess.com' };
+  zoneName: 'example.com', managementOrigin: 'https://manage.example.com', accessIssuer: 'https://example.cloudflareaccess.com' };
 const GRANT = 'synthetic-uninstall-grant-never-store';
 export const grant = { accessToken: GRANT, expiresAt: 20_000, requestId: 'x'.repeat(22) };
 export const JOURNAL = 'ankka-mcp-gateway/bigquery-teardown/v1';

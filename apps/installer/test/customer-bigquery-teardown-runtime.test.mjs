@@ -14,7 +14,7 @@ async function fixture(run, { stopAfter, knownPending = false, portalPending = f
   const gateway = await installReadyGateway({ claimInput: await portalOnlyClaim() });
   const storage = gateway.objects.get('v1:management').storage;
   const context = { accountId: ACCOUNT_ID, zoneId: ZONE_ID, installationId: gateway.readyReceipt.installationId,
-    accessIssuer: gateway.env.CF_ACCESS_ISSUER, zoneName: 'example.com' };
+    managementOrigin: 'https://manage.example.com', accessIssuer: gateway.env.CF_ACCESS_ISSUER, zoneName: 'example.com' };
   const bridges = [];
   for (let index = 0; index < count; index++) bridges.push(await bridgeFixture({ fixtureContext: context, lostDelete, journalStorage: storage, index }));
   const bridge = bridges[0];

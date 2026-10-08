@@ -114,6 +114,11 @@ function RemovalProbe() {
   </div>
 }
 
+function RuntimeNoticeProbe() {
+  const { updateNotice } = useGateway()
+  return <span>{updateNotice?.message}</span>
+}
+
 describe('GatewayProvider', () => {
   afterEach(() => { cleanup(); vi.useRealTimers(); window.history.replaceState(null, '', '/') })
   it.each(['applied', 'failed'])('reports a bridge removal return separately from installation (%s)', async (result) => {
@@ -125,6 +130,48 @@ describe('GatewayProvider', () => {
     expect(window.location.search).toBe('')
     expect(service.cancelSourceAction).not.toHaveBeenCalled()
     expect(service.prepareSourceAction).not.toHaveBeenCalled()
+  })
+
+  it('keeps checking an unconfirmed handover and refreshes the dashboard when it completes', async () => {
+    vi.useFakeTimers()
+    const action = { schemaVersion: 1 as const, actionId: pendingAction.actionId, operation: 'update' as const,
+      status: 'applying' as const, stage: 'assets_uploaded', failureCode: null,
+      from: { release: 'gateway-v1.0.0', artifactSha256: 'a'.repeat(64) },
+      to: { release: 'gateway-v1.0.1', artifactSha256: 'b'.repeat(64) },
+      expiresAt: new Date(Date.now() + 60_000).toISOString() }
+    window.history.replaceState(null, '', `/settings?runtimeAction=${action.actionId}`)
+    const getRuntimeAction = vi.fn<GatewayAdminApi['getRuntimeAction']>()
+      .mockResolvedValueOnce(action)
+      .mockResolvedValueOnce({ ...action, status: 'recovery_required', failureCode: 'runtime_update_unconfirmed' })
+      .mockResolvedValue({ ...action, status: 'succeeded', stage: 'health_verified' })
+    const service = api({ getRuntimeAction })
+    render(<GatewayProvider api={service}><RuntimeNoticeProbe /></GatewayProvider>)
+    await act(async () => {})
+    expect(screen.getByText('Assets uploaded. Waiting for the new runtime to activate and confirm the update…')).toBeVisible()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+    expect(screen.getByText('Cloudflare is taking longer to activate the new runtime. Still checking…')).toBeVisible()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+    expect(screen.getByText('Update activated and health-checked. Durable Object data was preserved.')).toBeVisible()
+    expect(service.getStatus).toHaveBeenCalledTimes(2)
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    expect(getRuntimeAction).toHaveBeenCalledTimes(3)
+  })
+
+  it('stops waiting for an unconfirmed handover when the authorization expires', async () => {
+    vi.useFakeTimers()
+    window.history.replaceState(null, '', `/settings?runtimeAction=${pendingAction.actionId}`)
+    const getRuntimeAction = vi.fn<GatewayAdminApi['getRuntimeAction']>().mockResolvedValue({
+      schemaVersion: 1, actionId: pendingAction.actionId, operation: 'update',
+      status: 'recovery_required', stage: 'assets_uploaded', failureCode: 'runtime_update_unconfirmed',
+      from: { release: 'gateway-v1.0.0', artifactSha256: 'a'.repeat(64) },
+      to: { release: 'gateway-v1.0.1', artifactSha256: 'b'.repeat(64) },
+      expiresAt: new Date(Date.now() + 1500).toISOString(),
+    })
+    render(<GatewayProvider api={api({ getRuntimeAction })}><RuntimeNoticeProbe /></GatewayProvider>)
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+    expect(screen.getByText('The one-time authorization expired. Start a fresh runtime action.')).toBeVisible()
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000) })
+    expect(getRuntimeAction).toHaveBeenCalledTimes(2)
   })
 
   it('hydrates the production status, connector, and update contracts', async () => {

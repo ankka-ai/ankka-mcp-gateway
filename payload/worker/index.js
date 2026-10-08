@@ -5765,14 +5765,14 @@ async function runtimeUpdates(storage, environment) {
 // flight, the journal follows the release the object actually runs, keeps the
 // recorded one as the rollback reference, and the public status follows too.
 async function followRunningRelease(storage, state, environment) {
-  // A delayed rollout can outlive the handover alarm's confirmation window.
+  // A new runtime can answer polls before its handover alarm finishes.
   // The exact release and digest in this object's own bindings prove that the
   // authorized target arrived. Repair only the latest unconfirmed handover;
   // never deploy again, accept a client-reported version, or revive a grant.
   const latest = state.actions.at(-1);
   const unconfirmed = latest && latest.stage !== null && (
     (latest.status === 'recovery_required' && latest.failureCode === 'runtime_update_unconfirmed') ||
-    (latest.status === 'applying' && latest.expiresAt <= Date.now())
+    (latest.status === 'applying' && !['authorized', 'current_verified'].includes(latest.stage))
   );
   const sameRelease = (version) => version.release === environment.release &&
     version.artifactSha256 === environment.releaseSha256;
@@ -5948,9 +5948,11 @@ async function processRuntimeActionControl(request, env, storage, nowMs = Date.n
     }));
   } else if (value.command === 'finalize' && exactKeys(value, [
     'actionId', 'actionKey', 'command', 'expiresAt', 'fromVersionId', 'issuedAt', 'operation', 'schemaVersion',
-  ]) && value.schemaVersion === 1 && action.status === 'applying' &&
+  ]) && value.schemaVersion === 1 && ['applying', 'succeeded'].includes(action.status) &&
       (value.fromVersionId === null || VERSION_ID.test(value.fromVersionId)) &&
       environment.release === action.to.release && environment.releaseSha256 === action.to.artifactSha256) {
+    // A status read may already have reconciled this exact running target.
+    if (action.status === 'succeeded') return fixedJson(200, publicRuntimeAction(action));
     // The gateway finished its own update: this object now runs the target
     // release, which is the proof; the new version id is not knowable here.
     updated = await updateRuntimeAction(storage, environment, action.actionId, (current) => ({

@@ -3,7 +3,7 @@ import { boundaryValueSchema } from './boundary';
 import { canonicalJson } from './canonical-json';
 import { BIGQUERY_SETUP_TOOLS, bigQueryHex, bigQueryRecordSchema, bigQuerySourceNames,
   readBigQueryText, type BigQueryRecord } from './customer-bigquery-contract';
-import { bigQueryCloudflareUrl, type BigQueryDeploymentContext } from './customer-bigquery-deployment';
+import { bigQueryCloudflareUrl, bigQueryOauthCallbacksMatch, type BigQueryDeploymentContext } from './customer-bigquery-deployment';
 
 const PREFIX = 'ankka-mcp-gateway/bigquery-source/v1/';
 const JOURNAL = 'ankka-mcp-gateway/bigquery-teardown/v1';
@@ -176,7 +176,7 @@ export function createBigQueryTeardown(context: BigQueryDeploymentContext & { re
           app.name !== `acg:v1:${context.installationId}:bigquery-${record.sourceId}` ||
           !(app.destinations.length === 0 || same(app.destinations, [{ type: 'public', uri: record.hostname }])) ||
           !(app.self_hosted_domains.length === 0 || same(app.self_hosted_domains, [record.hostname])) ||
-          !same(app.oauth_configuration.dynamic_client_registration.allowed_uris, [callback]) || app.policies.length !== 1 ||
+          !bigQueryOauthCallbacksMatch(app.oauth_configuration.dynamic_client_registration.allowed_uris, callback, context.managementOrigin) || app.policies.length !== 1 ||
           !same(app.policies[0]?.include, [{ email: { email: record.operatorEmail } }]) ||
           app.policies[0]?.exclude.length !== 0 || app.policies[0]?.require.length !== 0) fail();
       return true;

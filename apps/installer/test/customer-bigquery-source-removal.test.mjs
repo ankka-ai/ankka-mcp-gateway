@@ -8,7 +8,7 @@ import { fixture as bridgeFixture, grant, JOURNAL } from './bigquery-teardown-fi
 const SOURCES = 'ankka-mcp-gateway/management-sources/v1';
 const ACTIONS = 'ankka-mcp-gateway/source-actions/v1';
 const context = { accountId: ACCOUNT_ID, zoneId: ZONE_ID, installationId: INSTALLATION_ID,
-  zoneName: 'example.com', accessIssuer: 'https://example.cloudflareaccess.com' };
+  zoneName: 'example.com', managementOrigin: 'https://manage.example.com', accessIssuer: 'https://example.cloudflareaccess.com' };
 async function fixture(options = {}) {
   const { env, objects } = await installReadyGateway();
   const storage = objects.get('v1:management').storage;

@@ -62,7 +62,8 @@ assertion) and the exact child Worker's secret upload in the selected account.
 
 Bridge code is embedded in the signed gateway release. The deployment disables
 Worker logs, workers.dev, and previews before attaching its protected custom
-domain. Managed OAuth allows only the recorded Cloudflare MCP server callback;
+domain. Managed OAuth allows the recorded Cloudflare MCP server callback and
+the gateway’s browser and management MCP OAuth callbacks;
 the bridge login policy admits the operator who prepared the action.
 
 ## Interrupted setup

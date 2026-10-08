@@ -1467,8 +1467,11 @@ async function exerciseSignedRuntimeUpdate(bindExpectedTarget) {
     const finalizedAction = await finalized.json();
     assert.equal(finalizedAction.status, 'succeeded');
     assert.equal(finalizedAction.stage, 'health_verified');
+    const beforeReplay = structuredClone(env.ADMIN_STATE.objects.get('v1:management').storage.writes);
     const replay = await rolledBackObject.fetch(rollbackControl({ command: 'finalize', fromVersionId: newVersionId }));
-    assert.equal(replay.status, 409, 'a finished action cannot be finalized twice');
+    assert.equal(replay.status, 200, 'a confirmed handover can acknowledge a retried finalization');
+    assert.deepEqual(env.ADMIN_STATE.objects.get('v1:management').storage.writes, beforeReplay,
+      'acknowledging a retry does not rewrite the journal or rollback reference');
     const rolledBack = await worker.fetch(new Request(
       `https://manage.example.com/api/update-actions/${rollbackClaim.actionId}`, { headers: accessHeaders },
     ), env);
@@ -1557,7 +1560,10 @@ test('a running target recovers an unconfirmed handover without replaying deploy
     [{}, env, false],
     [{}, { ...environment, ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'5'.repeat(64)}` }, false],
     [{ status: 'authorization_required', stage: null, failureCode: null }, environment, false],
-    [{ status: 'applying', failureCode: null }, environment, false],
+    [{ status: 'applying', failureCode: null }, environment, true],
+    [{ status: 'applying', stage: 'authorized', failureCode: null }, environment, false],
+    [{ status: 'applying', stage: 'current_verified', failureCode: null }, environment, false],
+    [{ status: 'applying', failureCode: null }, env, false],
     [{ failureCode: 'different_failure' }, environment, false],
   ]) {
     const pending = { ...action, ...change };

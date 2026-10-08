@@ -27,7 +27,10 @@ client-side capability flag alone is not sufficient.
    Keep Require user auth off. Source credentials stay in your Cloudflare
    account; do not paste them into Ankka or the gateway dashboard.
    For upstreams with a redirect allowlist, configure the exact callback shown
-   by Cloudflare in the upstream's OAuth settings. Once the server is Ready,
+   in **OAuth callback setup** in the upstream’s OAuth settings. The gateway callback
+   is `https://<management-hostname>/__ankka/source-oauth/callback`; manual setup
+   through Cloudflare uses a different callback shown there. Keep both if you use
+   both flows. Once the server is Ready,
    return to Sources. For a source installed without tools, the paused
    installation now lists the tools Cloudflare synced from it; choose the ones
    to allow (catalog recommendations that exist are preselected, nothing is

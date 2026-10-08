@@ -50,6 +50,7 @@ export const catalog: PreviewEntry[] = [
   worker('remove-final-running', 'Final removal in progress', 'gateway-teardown-router', 'The final removal with the same shared progress treatment.'),
   worker('remove-final', 'Final removal', 'gateway-teardown-router', 'The hosted final-removal review and authorization.'),
   dashboard('sources', 'Sources', '/sources?preview=ready', 'Installed connectors, drafts, endpoint copy, filters, and connector setup. Use Add connector to enter a custom MCP URL or browse the Connector library.', 'pages/SourcesPage'),
+  dashboard('connection-reconnect', 'Connectors · reconnect required', '/sources?preview=connection-reconnect', 'Company knowledge needs reconnection, with its reconnect control visible.', 'pages/SourcesPage'),
   dashboard('empty', 'Connectors · empty', '/sources?preview=empty', 'The gateway before a connector is added.', 'pages/SourcesPage'),
   ...sourceScenarios.map(([id, label]) => dashboard(id, label, `/sources?preview=${id}`, 'A recorded connector action using the current connector management UI.', 'pages/SourcesPage')),
   dashboard('team', 'Team', '/team?preview=team-populated', 'One team, two administrators, and eleven shared connectors with long names.', 'pages/TeamPage'),
