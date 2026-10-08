@@ -90,8 +90,10 @@ Portal mapping. It raises the minimum compatible runtime before changing the
 mapping. If the operator credential needs renewal, use **Reconnect** afterwards.
 New drafts use shared mode; unfinished older installations keep their recorded
 mode until completed and migrated.
-Managed OAuth must allow both the shared Cloudflare callback and the exact
-Cloudflare dashboard callback for this account and server. The dashboard uses
+Managed OAuth must allow the gateway’s `/__ankka/source-oauth/callback` and
+`/api/mcp/oauth/callback` URLs, the shared Cloudflare callback, and the exact
+Cloudflare dashboard callback for this account and server. New apps include these
+callbacks automatically. The dashboard uses
 `https://dash.cloudflare.com/<account-id>/one/access-controls/ai-controls/mcp-server/oauth-callback/<server-id>`
 for the initial administrator sign-in, even when the shared callback is enabled.
 A missing entry returns `invalid_request` with “Redirect URI not allowed by
@@ -150,6 +152,9 @@ not introduce a new credential, role system, hosted relay, or telemetry stream.
 
 ## Debugging source authorization
 
+For agent authentication, CLI commands and edge failures, start with
+[Diagnostic access for agents](#diagnostic-access-for-agents) below.
+
 1. Read `list_mcp_sources` and `list_mcp_source_actions` to identify the saved
    source, its revision, and the unfinished action.
 2. Call `diagnose_mcp_source` with that source ID. Diagnostics retain a fixed
@@ -172,6 +177,159 @@ Diagnostics never include authorization codes, access or refresh tokens, client
 secrets, raw provider bodies, or arbitrary error messages. Missing older evidence
 is reported as unknown. These diagnostics help locate the failure; they do not
 by themselves establish its cause or fix an incompatible provider.
+
+## Diagnostic access for agents
+
+There are two separate APIs. Use each for the evidence it owns:
+
+| Interface | Evidence | Authentication |
+| --- | --- | --- |
+| Cloudflare account API through `cf` | Access app configuration, MCP connection and sync status, Portal mappings, Access login events | The CLI's existing Cloudflare credentials and their permissions |
+| Gateway Management MCP at `https://<management-hostname>/api/mcp` | Saved sources, actions and the sanitized OAuth diagnostic in the gateway's Durable Object | Access identity for the Management source, current assignment/operator checks and enabled tools |
+
+Account API access does not authenticate gateway requests or expose its Durable
+Object records. Do not send a Cloudflare API token or `ANKKA_MANAGEMENT_TOKEN`
+as a gateway client credential. Prefer an already connected Management MCP client;
+otherwise use the authenticated HTTP recipe below.
+
+### Read provider state with the CLI
+
+If `cf` is absent from PATH, locate the installed executable and existing
+authentication setup, including the local npm cache, before falling back to UI.
+Keep that machine-specific path outside this repository. Discover commands with
+anonymous queries such as `cf cli search 'get MCP server details'`, then inspect
+the selected command's `--help` and `cf schema` before unfamiliar operations.
+
+Existing commands include:
+
+```sh
+cf mcp servers list --per-page 100
+cf mcp servers read '<server-id>'
+cf zero-trust access applications get '<application-id>'
+```
+
+Select the server by its exact source URL, not just its display name. Read
+`authentication_status`, `status`, `error_details`, `modified_at`, `last_synced`
+and `last_successful_sync`; absent fields are unknown. Do not substitute guessed
+field names such as `updated_at` or `last_sync`. Select only relevant fields for
+output; do not dump credentials, identities, IP addresses or complete provider
+responses into logs or public artifacts. Read saved tool approvals and Portal
+mappings when checking whether sync or permission drift explains the failure.
+
+An Access login event with `allowed: true` proves only that Access admitted the
+login. It does not prove provider consent, callback processing, token exchange,
+credential import or successful MCP sync. Record event times with their timezone.
+
+### Read the gateway diagnostic without exposing a session token
+
+The deployed Management source must be installed and permit `list_mcp_sources`
+and `diagnose_mcp_source` for your identity. A dashboard session for a different
+Access audience is insufficient. Use the source ID returned by
+`list_mcp_sources`; the Cloudflare server ID is a different identifier.
+
+Use an existing `cloudflared` session for the exact Management endpoint. If one
+is unavailable, this standard login opens the browser and keeps the JWT out of
+terminal output:
+
+```sh
+cloudflared access login --quiet --auto-close --app 'https://manage.example.com/api/mcp'
+```
+
+The following read-only example captures the cached token in memory. Substitute
+your trusted gateway origin and saved source ID. Never run the token command
+by itself, enable shell tracing, print request headers, or follow redirects
+with credentials attached.
+To look up the source ID first, use the same authenticated request with tool
+name `list_mcp_sources` and empty `arguments`, then select the source by URL.
+
+```sh
+GATEWAY_ORIGIN='https://manage.example.com' SOURCE_ID='source-0123456789abcdef' python3 - <<'PY'
+import json, os, subprocess, urllib.error, urllib.request
+
+origin = os.environ['GATEWAY_ORIGIN'].rstrip('/')
+endpoint = origin + '/api/mcp'
+session = subprocess.run(
+    ['cloudflared', 'access', 'token', '--app', endpoint],
+    capture_output=True, text=True, timeout=30,
+)
+if session.returncode or session.stdout.strip().count('.') != 2:
+    raise SystemExit('Access login required; no diagnostic request sent')
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+request = urllib.request.Request(endpoint, data=json.dumps({
+    'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
+    'params': {'name': 'diagnose_mcp_source',
+               'arguments': {'sourceId': os.environ['SOURCE_ID']}},
+}).encode(), headers={
+    'Content-Type': 'application/json', 'Accept': 'application/json',
+    'Origin': origin, 'Cookie': 'CF_Authorization=' + session.stdout.strip(),
+})
+try:
+    response = urllib.request.build_opener(NoRedirect()).open(request, timeout=20)
+except urllib.error.HTTPError as failure:
+    response = failure
+print('HTTP status:', response.status)
+if 'application/json' not in response.headers.get('content-type', ''):
+    raise SystemExit('Non-JSON response; inspect authentication before retrying')
+body = json.load(response)
+if response.status != 200 or 'error' in body:
+    # Fixed codes only; do not print arbitrary edge or provider response bodies.
+    print(json.dumps({key: body.get(key) for key in ('error_code', 'error_name')}))
+    error = body.get('error')
+    print('Gateway/MCP error:', error.get('code') if isinstance(error, dict) else error)
+    raise SystemExit(1)
+rpc_result = body.get('result', {})
+if rpc_result.get('isError') or 'structuredContent' not in rpc_result:
+    raise SystemExit('MCP tool failed or returned no structured diagnostic')
+result = rpc_result['structuredContent']
+diagnostic = result.get('result', result)
+print(json.dumps({'authorization': diagnostic.get('authorization'),
+                  'status': diagnostic.get('status')}, indent=2))
+PY
+```
+
+This is a cached **human Access session**, not unattended service-token access.
+The existing `ANKKA_SERVICE_CLIENT_ID` support permits only its fixed management
+REST routes; it does not currently include diagnostics, and Management MCP
+rejects service identities. Creating a service token alone will not enable this
+recipe. See [agent lifecycle credentials](AGENT_LIFECYCLE.md#credentials) for
+the existing service-identity boundary.
+
+### Identify the rejecting layer before retrying
+
+| Observation | Meaning and next step |
+| --- | --- |
+| HTTP 403, Cloudflare error 1010 / `browser_signature_banned` | Browser Integrity Check rejected the client before the Worker. Changing Access credentials will not fix that layer. |
+| Access login redirect or authentication challenge | Establish the correct endpoint's Access session; do not follow redirects with credentials. |
+| Gateway refusal or MCP tool error | Check source installation, audience, assignment and tool selection; account API permissions do not replace them. |
+| Provider consent reports an invalid nonce | Failure is on the provider consent endpoint. Do not replay the consent URL; a fresh attempt in the same browser can distinguish an old session from a recurring issue. |
+| Gateway reports authorization failure; diagnostic says `authorization_callback` | Use the fixed `reason` when present, such as `attempt_expired`, `attempt_mismatch`, `issuer_mismatch` or `source_changed`. Older releases record only this broad stage, which cannot establish the cause. |
+| Diagnostic says `token_response` | The exchange returned HTTP 200, but a credential field failed validation. The fixed `reason` names the field without retaining its value. |
+| Diagnostic says `credential_import` with `provider_rejected` | Cloudflare rejected or did not confirm credential import; inspect the recorded HTTP status before retrying. |
+| Diagnostic says `token_exchange` | Use its HTTP status and standard `oauthError`, when recorded, to investigate the exchange. Never retain raw token responses. |
+| Provider still reports `stale` / `Preemptively needs reauth` | Cloudflare still requires authorization; this is not merely stale dashboard text. Compare the latest diagnostic and sync times before retrying. |
+
+For an operator-authorized API compatibility change, Cloudflare supports a
+configuration rule in the zone's `http_config_settings` phase with action
+`set_config` and `action_parameters: {"bic": false}`. Limit its expression to
+the management hostname, exact `/api/mcp` path and `POST` method. Inspect existing
+rules first and preserve unrelated settings. Keep Access authentication, tool
+authorization and other protections enabled; do not disable BIC zone-wide or
+spoof a browser identity as the operational fix.
+
+After applying a rule through `cf`, read it back, verify an authenticated
+diagnostic succeeds and verify an unauthenticated request is still rejected.
+This rule is an account configuration choice, not automatically installed by
+the gateway. If propagation is uncertain, use bounded backoff; repeated identical
+1010 responses are not evidence of a gateway callback failure.
+
+References: [Cloudflare error 1010](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/),
+[Browser Integrity Check](https://developers.cloudflare.com/waf/tools/browser-integrity-check/),
+[configuration rules API](https://developers.cloudflare.com/rules/configuration-rules/create-api/),
+and [agent authentication](https://developers.cloudflare.com/cloudflare-one/access-controls/authenticate-agents/).
 
 ## Release qualification
 

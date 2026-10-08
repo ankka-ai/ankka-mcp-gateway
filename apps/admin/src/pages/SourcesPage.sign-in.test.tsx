@@ -105,6 +105,20 @@ describe('choosing the tools of a connected sign-in connector', () => {
     expect(api.chooseSourceActionTools).not.toHaveBeenCalled()
   })
 
+  it('opens exact callback setup instructions when the upstream allowlist blocks sign-in', async () => {
+    const user = userEvent.setup()
+    const api = pausedApi(pause(), signInDraft, offered('connection_required'))
+    api.authorizeSource.mockRejectedValue(new GatewayApiError(409, 'source_oauth_redirect_not_allowed'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    const button = await screen.findByRole('button', { name: 'Authorize connector' })
+    await waitFor(() => expect(button).toBeEnabled())
+    await user.click(button)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Managed OAuth redirect allowlist')
+    expect(screen.getByText(`${window.location.origin}/__ankka/source-oauth/callback`)).toBeVisible()
+    expect(screen.getByText('OAuth callback setup').closest('details')).toHaveAttribute('open')
+    expect(button).toBeEnabled()
+  })
+
   it('requires a Meta App ID, shows the gateway callback, and passes it only to the authorization request', async () => {
     const user = userEvent.setup()
     const source = { ...signInDraft, label: 'Meta Ads', url: 'https://mcp.facebook.com/ads' }
