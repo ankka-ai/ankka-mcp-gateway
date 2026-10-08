@@ -9,9 +9,9 @@ const GOOGLE_KEY = JSON.stringify({ type: 'service_account', project_id: 'query-
   client_email: 'synthetic-reader@query-project.iam.gserviceaccount.com', token_uri: 'https://oauth2.googleapis.com/token' });
 const CF_TOKEN = 'synthetic-operation-grant';
 const context = { accountId: 'a'.repeat(32), zoneId: 'b'.repeat(32), installationId: `acg-${'c'.repeat(24)}`,
-  accessIssuer: 'https://example.cloudflareaccess.com' };
+  managementOrigin: 'https://manage.example.com', accessIssuer: 'https://example.cloudflareaccess.com' };
 const configuration = { queryProjectId: 'query-project', allowedDatasets: [{ projectId: 'data-project', datasetId: 'reporting' }] };
-async function fixture(options: { collision?: boolean; lostUpload?: boolean; googleFailure?: boolean; changedVersion?: boolean; applicationStatus?: number } = {}) {
+async function fixture(options: { collision?: boolean; lostUpload?: boolean; googleFailure?: boolean; changedVersion?: boolean; applicationStatus?: number; missingGatewayCallbacks?: boolean } = {}) {
   const names = await bigQuerySourceNames(context.installationId, 'example.com', configuration);
   let record: BigQueryRecord = { schemaVersion: 1, sourceId: names.sourceId, actionId: `action_${'d'.repeat(32)}`,
     configuration, workerName: names.workerName, hostname: names.hostname, operatorEmail: 'admin@example.com',
@@ -52,7 +52,18 @@ async function fixture(options: { collision?: boolean; lostUpload?: boolean; goo
     else if (path === '/access/apps' && method === 'POST') {
       if (options.applicationStatus) return Response.json({ errors: [{ message: 'private-provider-detail' }] }, { status: options.applicationStatus });
       const body = v.parse(boundaryObjectSchema, JSON.parse(v.parse(v.string(), init?.body)));
+      expect(body).toMatchObject({ oauth_configuration: { dynamic_client_registration: { allowed_uris: [
+        expect.stringContaining('https://dash.cloudflare.com/'),
+        'https://manage.example.com/__ankka/source-oauth/callback', 'https://manage.example.com/api/mcp/oauth/callback',
+      ] } } });
       application = { ...body, id: 'app-id', aud: 'f'.repeat(64) };
+      if (options.missingGatewayCallbacks) {
+        const oauth = v.parse(v.object({ dynamic_client_registration: v.object({ allowed_uris: v.array(v.string()) }) }), body.oauth_configuration);
+        application = { ...application, oauth_configuration: { enabled: true,
+          dynamic_client_registration: { enabled: true, allow_any_on_localhost: false, allow_any_on_loopback: false,
+            allowed_uris: oauth.dynamic_client_registration.allowed_uris.slice(0, 1) },
+          grant: { access_token_lifetime: '15m', session_duration: '336h' } } };
+      }
       result = application;
     } else if (path === '/access/apps/app-id') result = application;
     else if (path === `/workers/scripts/${names.workerName}/settings`) {
@@ -100,6 +111,11 @@ describe('gateway-owned BigQuery deployment', () => {
     await test.run();
     expect(test.uploads()).toBe(1);
     expect(test.requests.filter((request) => request.url === 'https://bigquery.googleapis.com/mcp')).toHaveLength(1);
+  });
+  it('rejects a new app if the provider did not retain its gateway callbacks', async () => {
+    const test = await fixture({ missingGatewayCallbacks: true });
+    await expect(test.run()).rejects.toThrow('bigquery_deployment_failed');
+    expect(test.uploads()).toBe(0);
   });
   it('refuses an unsuccessful Google preflight before any Cloudflare resource write', async () => {
     const test = await fixture({ googleFailure: true });

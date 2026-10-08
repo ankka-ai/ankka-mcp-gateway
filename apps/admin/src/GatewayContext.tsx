@@ -359,6 +359,11 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
             setUpdateNotice({ tone: 'error', message: 'The one-time authorization expired. Start a fresh runtime action.' })
             return
           }
+          if (action.status === 'recovery_required' && action.failureCode === 'runtime_update_unconfirmed') {
+            setUpdateNotice({ tone: 'neutral', message: 'Cloudflare is taking longer to activate the new runtime. Still checking…' })
+            await delay()
+            continue
+          }
           if (action.status === 'failed' || action.status === 'recovery_required') {
             const cause = action.failureCode ?? returnReason
             setUpdateNotice({
@@ -370,7 +375,9 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
           setUpdateNotice({
             tone: 'neutral',
             message: action.status === 'applying'
-              ? `Runtime action in progress: ${(action.stage ?? 'authorized').replaceAll('_', ' ')}…`
+              ? action.stage === 'assets_uploaded'
+                ? 'Assets uploaded. Waiting for the new runtime to activate and confirm the update…'
+                : `Runtime action in progress: ${(action.stage ?? 'authorized').replaceAll('_', ' ')}…`
               : 'Waiting for Cloudflare authorization…',
           })
         } catch {

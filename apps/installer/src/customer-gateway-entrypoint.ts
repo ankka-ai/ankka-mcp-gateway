@@ -266,6 +266,57 @@ function exactRecoveryJournal(journal: CustomerStage2Journal, config: ParsedFina
   return finalRuntime !== null && ['send_armed', 'submitted', 'verified'].includes(finalRuntime.phase);
 }
 
+/** Finish the journal on the running target, retaining transient failures for the next alarm. */
+export async function finishCustomerRuntimeHandover(
+  storage: Pick<DurableObjectStorage, 'get' | 'delete' | 'setAlarm'>,
+  config: Pick<ParsedFinalEnv, 'ANKKA_GATEWAY_RELEASE' | 'ANKKA_GATEWAY_RELEASE_SHA256' | 'ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY'>,
+  control: (identity: { actionId: string; actionKey: string; operation: 'update' | 'rollback'; actionExpiresAt: number },
+    command: CustomerRuntimeControlCommand | { command: 'finalize'; fromVersionId: string }) => Promise<boolean>,
+  now = Date.now(),
+): Promise<void> {
+  const stored = await storage.get(RUNTIME_HANDOVER_KEY);
+  if (stored === undefined || stored === null) return;
+  const parsed = v.safeParse(runtimeHandoverSchema, stored);
+  if (!parsed.success) {
+    await storage.delete(RUNTIME_HANDOVER_KEY);
+    return;
+  }
+  const handover = parsed.output;
+  if (now >= handover.actionExpiresAt) {
+    await storage.delete(RUNTIME_HANDOVER_KEY);
+    return;
+  }
+  // Arm the next pass before finalization: a thrown or refused journal write
+  // must not discard the only retry. Never retain the key beyond its grant.
+  await storage.setAlarm(Math.min(now + RUNTIME_HANDOVER_ALARM_DELAY_MS, handover.actionExpiresAt));
+  const running = config.ANKKA_GATEWAY_RELEASE === handover.target.release &&
+    config.ANKKA_GATEWAY_RELEASE_SHA256 === handover.target.artifactSha256;
+  if (!running && now < handover.deadline) {
+    return;
+  }
+  let actionKey: string;
+  try {
+    actionKey = await openOperationSecret(config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY, handover.sealedActionKey);
+  } catch {
+    await storage.delete(RUNTIME_HANDOVER_KEY);
+    return;
+  }
+  const identity = {
+    actionId: handover.actionId,
+    actionKey,
+    operation: handover.operation,
+    actionExpiresAt: handover.actionExpiresAt,
+  };
+  try {
+    const accepted = await control(identity, running
+      ? { command: 'finalize', fromVersionId: handover.fromVersionId }
+      : { command: 'fail', failureCode: 'runtime_update_unconfirmed', recoveryRequired: true });
+    if (accepted) await storage.delete(RUNTIME_HANDOVER_KEY);
+  } catch {
+    // The alarm above retries within the original authorization window.
+  }
+}
+
 export class AdminState extends RuntimeAdminState {
   private readonly recoveryReady: Promise<void>;
   /** Grant and pass count of a running recovery attempt, in memory only. */
@@ -284,6 +335,7 @@ export class AdminState extends RuntimeAdminState {
       accountId: config.CLOUDFLARE_ACCOUNT_ID, zoneId: config.CLOUDFLARE_ZONE_ID,
       zoneName: config.CLOUDFLARE_ZONE_NAME, installationId: config.ANKKA_INSTALL_ID,
       accessIssuer: new URL(config.CF_ACCESS_ISSUER).origin,
+      managementOrigin: `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`,
     }, { storage: finalState.storage, fetch: (target, init) => fetch(target, init) }));
     this.recoveryReady = finalState.blockConcurrencyWhile(async () => {
       const config = parsedEnv(finalEnv);
@@ -550,49 +602,6 @@ export class AdminState extends RuntimeAdminState {
     }
   }
 
-  /**
-   * Runs in whichever version owns the object when the alarm fires: the new
-   * one proves the update by its own release bindings and completes the
-   * journal; the old one keeps waiting until the deadline, then fails it.
-   */
-  private async finishRuntimeHandover(config: ParsedFinalEnv): Promise<void> {
-    const stored = await this.finalState.storage.get(RUNTIME_HANDOVER_KEY);
-    if (stored === undefined || stored === null) return;
-    const parsed = v.safeParse(runtimeHandoverSchema, stored);
-    if (!parsed.success) {
-      await this.finalState.storage.delete(RUNTIME_HANDOVER_KEY);
-      return;
-    }
-    const handover = parsed.output;
-    const now = Date.now();
-    const running = config.ANKKA_GATEWAY_RELEASE === handover.target.release &&
-      config.ANKKA_GATEWAY_RELEASE_SHA256 === handover.target.artifactSha256;
-    if (!running && now < handover.deadline) {
-      await this.finalState.storage.setAlarm(now + RUNTIME_HANDOVER_ALARM_DELAY_MS);
-      return;
-    }
-    let actionKey: string;
-    try {
-      actionKey = await openOperationSecret(config.ANKKA_GATEWAY_OWNERSHIP_WRAP_KEY, handover.sealedActionKey);
-    } catch {
-      await this.finalState.storage.delete(RUNTIME_HANDOVER_KEY);
-      return;
-    }
-    const identity = {
-      actionId: handover.actionId,
-      actionKey,
-      operation: handover.operation,
-      actionExpiresAt: handover.actionExpiresAt,
-    };
-    try {
-      await this.signedRuntimeControl(identity, running
-        ? { command: 'finalize', fromVersionId: handover.fromVersionId }
-        : { command: 'fail', failureCode: 'runtime_update_unconfirmed', recoveryRequired: true });
-    } finally {
-      await this.finalState.storage.delete(RUNTIME_HANDOVER_KEY);
-    }
-  }
-
   /** The signed handoff to the hosted root finalizer, once the dependencies are gone. */
   private async signTeardownHandoff(config: ParsedFinalEnv, completion: CustomerTeardownCompletion, priorGrantRevocationUnconfirmed: boolean): Promise<string> {
     const ownership = await this.assertOperational(config);
@@ -759,9 +768,10 @@ export class AdminState extends RuntimeAdminState {
     await this.recoveryReady;
     // An update this object started, or the update that put this version here.
     try {
-      await this.finishRuntimeHandover(parsedEnv(this.finalEnv));
+      await finishCustomerRuntimeHandover(this.finalState.storage, parsedEnv(this.finalEnv),
+        (identity, command) => this.signedRuntimeControl(identity, command));
     } catch {
-      // A refused journal write leaves the action for the dashboard to show; the record is gone.
+      // A storage failure leaves the handover record available for recovery.
     }
     try {
       await finalizeCustomerBootstrapHandover(

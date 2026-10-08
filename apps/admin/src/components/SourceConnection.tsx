@@ -77,18 +77,13 @@ export function ConnectionStatus({ result, label, onReconnect, disabled }: { res
   return <div className="flex flex-wrap items-center gap-2">
     <span role="status" className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${color}`}>{connectionLabel(result)}</span>
     {result?.state === 'authorization_required' && onReconnect ? <Button variant="primary" disabled={disabled} onClick={onReconnect} aria-label={`Reconnect ${label}`}>Reconnect</Button> : null}
-    {result?.state === 'authorization_required' && result.reconnectUrl ? <a
-      className="text-xs text-kumo-subtle underline underline-offset-4"
-      href={result.reconnectUrl} target="_blank" rel="noopener noreferrer"
-      aria-label={`Open ${label} in Cloudflare (opens a new tab)`}
-    >Open in Cloudflare</a> : null}
   </div>
 }
 
 export function ConnectionDetails({ result }: { result: ConnectionCheck | undefined }) {
   const message = result?.state === 'connected' ? 'Cloudflare successfully connected to this server. Individual tool calls can still require additional permissions.'
     : result?.state === 'authorization_required' ? result.reconnectUrl
-      ? 'Choose Reconnect to sign in again. If authorization does not work here, use Open in Cloudflare for manual setup, then return and check the connection. Keep Require user auth off for this shared connection.'
+      ? 'Choose Reconnect to sign in again. The reconnect dialog also has an Open in Cloudflare link for manual setup. Keep Require user auth off for this shared connection.'
       : 'The connector needs authorization. Reconnect it in Cloudflare → MCP Portals → MCP servers, then check again.'
       : result?.state === 'forbidden' ? 'The server denied access. Review the connected account’s permissions in Cloudflare and the provider.'
         : result?.state === 'unavailable' ? 'Cloudflare could not connect to this server. Check the provider and try again.'

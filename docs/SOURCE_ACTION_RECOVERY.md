@@ -223,6 +223,19 @@ tests cover this restriction and restart/replay; live Gorgias enforcement and
 Cloudflare refresh still require an isolated provider canary.
 
 The callback is `https://<management-hostname>/__ankka/source-oauth/callback`.
+Providers with redirect allowlists must permit that exact URL (management MCP
+initiated authorization uses `/api/mcp/oauth/callback`). The Sources page exposes
+the browser callback under **OAuth callback setup**, including for reconnects.
+For a Cloudflare Access issuer belonging to the gateway's account, authorization
+first reads the account's Access apps. A uniquely matched literal source route
+with Managed OAuth and a literal redirect allowlist missing the callback returns
+`source_oauth_redirect_not_allowed` before client registration. The dashboard
+opens the callback instructions. This read-only check never changes upstream
+policies or OAuth settings. Unreadable, foreign-account, ambiguous or wildcard
+configurations continue through OAuth; they are not claimed as verified.
+Gateway-created BigQuery and Gateway Management apps include the gateway callbacks
+at creation. Existing apps require an operator to update their allowlist.
+
 One five-minute attempt binds a state hash and a Secure, HttpOnly, SameSite=Lax
 browser-cookie hash to the initiating administrator, action hash and source
 revision. The Durable Object retains the PKCE verifier and public OAuth

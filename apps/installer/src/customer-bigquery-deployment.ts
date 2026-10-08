@@ -34,6 +34,17 @@ export interface BigQueryDeploymentContext {
   readonly zoneId: string;
   readonly installationId: string;
   readonly accessIssuer: string;
+  readonly managementOrigin: string;
+}
+
+export function bigQueryOauthCallbacks(dashboardCallback: string, managementOrigin: string): string[] {
+  return [dashboardCallback, `${managementOrigin}/__ankka/source-oauth/callback`, `${managementOrigin}/api/mcp/oauth/callback`];
+}
+
+/** Older receipts used only the dashboard callback. Keep resumability and removal ownership intact. */
+export function bigQueryOauthCallbacksMatch(actual: readonly string[], dashboardCallback: string, managementOrigin: string): boolean {
+  return canonicalJson(actual) === canonicalJson([dashboardCallback]) ||
+    canonicalJson([...actual].sort()) === canonicalJson(bigQueryOauthCallbacks(dashboardCallback, managementOrigin).sort());
 }
 export interface BigQueryDeploymentPort {
   readonly fetch: typeof globalThis.fetch;
@@ -111,7 +122,7 @@ export async function deployBigQueryBridge(
   const desiredApplication = { name: applicationName, type: 'self_hosted', domain: record.hostname,
     session_duration: '24h', app_launcher_visible: false,
     oauth_configuration: { enabled: true, dynamic_client_registration: { enabled: true,
-      allow_any_on_localhost: false, allow_any_on_loopback: false, allowed_uris: [callback] },
+      allow_any_on_localhost: false, allow_any_on_loopback: false, allowed_uris: bigQueryOauthCallbacks(callback, context.managementOrigin) },
       grant: { access_token_lifetime: '15m', session_duration: '336h' } },
     policies: [{ name: 'Gateway operator', decision: 'allow', include: [{ email: { email: record.operatorEmail } }], exclude: [], require: [] }],
   };
@@ -135,7 +146,8 @@ export async function deployBigQueryBridge(
   const observedApp = v.parse(applicationSchema, await api(`/access/apps/${application.id}`));
   if (observedApp.id !== application.id || observedApp.aud !== application.audience ||
       observedApp.name !== applicationName || observedApp.domain !== record.hostname ||
-      canonicalJson(observedApp.oauth_configuration.dynamic_client_registration.allowed_uris) !== canonicalJson([callback]) ||
+      !bigQueryOauthCallbacksMatch(observedApp.oauth_configuration.dynamic_client_registration.allowed_uris, callback, context.managementOrigin) ||
+      (initial.application === null && observedApp.oauth_configuration.dynamic_client_registration.allowed_uris.length !== 3) ||
       observedApp.policies.length !== 1 || observedApp.policies[0]?.decision !== 'allow' ||
       canonicalJson(observedApp.policies[0].include) !== canonicalJson(desiredApplication.policies[0]?.include) ||
       observedApp.policies[0].exclude.length !== 0 || observedApp.policies[0].require.length !== 0) failure();

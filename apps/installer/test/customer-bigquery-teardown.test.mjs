@@ -2,6 +2,13 @@ import { fixture, grant, JOURNAL } from './bigquery-teardown-fixture.mjs';
 const GRANT = grant.accessToken;
 
 describe('receipt-bound BigQuery bridge removal', () => {
+  it('removes a bridge with the gateway browser and management MCP callbacks', async () => {
+    const test = await fixture();
+    test.provider.app.oauth_configuration.dynamic_client_registration.allowed_uris.push(
+      'https://manage.example.com/__ankka/source-oauth/callback', 'https://manage.example.com/api/mcp/oauth/callback');
+    await (await test.describe()).remove(grant, [test.serverId]);
+    expect(test.deletions).toEqual(['domain', 'settings', 'app']);
+  });
   it('fits both maximum catalogue scans and resource rechecks in each pass', async () => {
     const test = await fixture(); test.provider.cataloguePages = 10;
     await (await test.describe()).remove(grant, [test.serverId]);
