@@ -52,7 +52,7 @@ async function assertSourceOauthRestart(endpoint) {
       if (meta) assert.equal(new URLSearchParams(await request.text()).get('client_id'), '123456789012345');
       exchanges++;
       const tokens = { access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 60 };
-      if (scope && !meta) tokens.scope = scope;
+      if (!meta) tokens.scope = scope ?? '';
       return Response.json(tokens);
     }
     if (meta && url.href === 'https://graph.facebook.com/v26.0/me/permissions') {
@@ -68,6 +68,7 @@ async function assertSourceOauthRestart(endpoint) {
           assert.equal(imported.registration_info.scope, scope);
           assert.deepEqual(imported.config.scopes_supported, scope.split(' '));
         }
+        if (!scope) assert.equal(imported.tokens.scope, undefined);
         imports++;
         return Response.json({ success: true, result: {} });
       }

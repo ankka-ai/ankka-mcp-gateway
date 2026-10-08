@@ -134,8 +134,20 @@ they are explicitly documented as non-secret.
   approval round, or blanket release gate to solve a narrow operational issue.
   Preserve the security invariants and required CI checks above.
 - Prefer the Cloudflare `cf` CLI and existing authenticated diagnostic APIs
-  over browser inspection. Use the browser for consent or behavior that needs
-  UI verification. Never broaden access or expose credentials to avoid a login.
+  over browser inspection. The `cf` CLI is available in the local development
+  environment. If it is not on the current shell's PATH, locate the installed
+  CLI and its existing authentication setup before falling back to the browser;
+  a failed `command -v cf` does not mean it is unavailable. Keep machine-specific
+  paths and credentials out of this repository. Use the browser for consent or
+  behavior that needs UI verification. Never broaden access or expose credentials
+  to avoid a login.
+- For connector authentication failures, follow the diagnostic runbook in
+  [Gateway Management](docs/GATEWAY_MANAGEMENT_MCP.md#diagnostic-access-for-agents).
+  Distinguish `cf` account API reads from authenticated requests to the gateway's
+  own API. Read the saved OAuth diagnostic before requesting another sign-in;
+  a provider consent page or successful Access login does not prove reconnect.
+  Report the rejecting layer and fixed error code, and do not repeatedly retry
+  unchanged authentication or browser-signature failures.
 - Collect only evidence relevant to the failure. For update issues, distinguish
   the provider deployment, running Worker and Durable Object, and stored release
   versions; include the update stage, timestamps and endpoint failure reason.

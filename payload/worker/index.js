@@ -2346,6 +2346,7 @@ async function createResource(state, kind, token) {
       for (const route of nativeSourcePaths(state.source)) body.destinations.push({ type: 'public', uri: new URL(state.source.url).host + route });
       body.oauth_configuration = { enabled: true, dynamic_client_registration: { enabled: true,
         allowed_uris: [...DEFAULT_OAUTH_CALLBACKS, `${new URL(state.source.url).origin}${SOURCE_OAUTH_CALLBACK}`,
+          `${new URL(state.source.url).origin}${MANAGEMENT_MCP_PATH}/oauth/callback`,
           // Cloudflare's initial administrator sign-in has a distinct callback
           // from per-person Portal OAuth, even when the shared callback is on.
           `https://dash.cloudflare.com/${account}/one/access-controls/ai-controls/mcp-server/oauth-callback/${encodeURIComponent(server.id)}`,
@@ -5227,6 +5228,13 @@ function sourceOauthFailure(code = 'source_oauth_unavailable') {
   throw new SourceDiscoveryError(409, code);
 }
 
+// Callers supply fixed reason labels, never provider bodies or credential values.
+function sourceOauthDiagnosticFailure(stage, reason, httpStatus = null, code = 'source_oauth_invalid') {
+  const error = new SourceDiscoveryError(409, code);
+  error.diagnostic = { stage, reason, status: 'failed', httpStatus };
+  throw error;
+}
+
 function oauthText(value, limit = 2048) {
   return isText(value) && value.length > 0 && value.length <= limit && !hasControlCharacter(value);
 }
@@ -5392,6 +5400,7 @@ async function metaAdsGrantedScope(accessToken) {
 }
 
 function verifyReconnectScope(sourceUrl, scope, requested) {
+  if (scope === '' && requested.length === 0 && sourceUrl !== META_ADS_MCP_URL && sourceUrl !== GORGIAS_MCP_URL) return;
   const allowed = sourceUrl === META_ADS_MCP_URL ? [...requested, 'public_profile'] : requested;
   if (!oauthText(scope, 4096) || scope.split(' ').some(value => !allowed.includes(value))) {
     sourceOauthFailure('source_oauth_scope_unsupported');
@@ -5472,6 +5481,49 @@ function sourceOauthCookie(value, maxAge) {
   return `${SOURCE_OAUTH_COOKIE}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
 }
 
+// Diagnose only configurations we can read in this gateway's Cloudflare account.
+// External providers, unreadable apps and ambiguous wildcard configurations still
+// use normal OAuth. This is a preflight hint, never an authorization boundary or
+// permission to rewrite an upstream application's access settings.
+async function checkSourceOauthCallback(context, env, config, redirectUri) {
+  if (!/^https:\/\/[a-z0-9-]+\.cloudflareaccess\.com$/u.test(config.issuer) ||
+      config.issuer !== accessConfiguration(env)?.issuer) return;
+  const listed = await providerList(`/accounts/${encodeURIComponent(context.control.accountId)}/access/apps`,
+    managementCredential(env), {}, AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS));
+  if (listed.status !== 'ok' || !Array.isArray(listed.result)) return;
+  const source = new URL(context.source.url);
+  let match = null, specificity = -1, ambiguous = false;
+  for (const app of listed.result) {
+    if (!isRecord(app) || app.type !== 'self_hosted') continue;
+    const routes = [app.domain, ...(Array.isArray(app.self_hosted_domains) ? app.self_hosted_domains : []),
+      ...(Array.isArray(app.destinations) ? app.destinations.filter(item => item?.type === 'public').map(item => item.uri) : [])];
+    for (const route of new Set(routes.filter(isText))) {
+      const slash = route.indexOf('/');
+      const host = slash < 0 ? route : route.slice(0, slash);
+      const path = slash < 0 ? '/' : route.slice(slash);
+      // Skip potentially applicable wildcards without letting an unrelated app
+      // suppress this check. Do not guess Cloudflare's wildcard precedence.
+      if (host.includes('*')) {
+        if (source.host.startsWith(host.slice(0, host.indexOf('*'))) && source.host.endsWith(host.slice(host.lastIndexOf('*') + 1))) return;
+        continue;
+      }
+      if (host !== source.host) continue;
+      if (path.includes('*')) return;
+      if (!(source.pathname === path || source.pathname.startsWith(path.endsWith('/') ? path : `${path}/`))) continue;
+      if (path.length > specificity) { match = app; specificity = path.length; ambiguous = false; }
+      else if (path.length === specificity && match !== app) ambiguous = true;
+    }
+  }
+  if (!match || ambiguous || match.oauth_configuration?.enabled !== true) return;
+  const registration = match.oauth_configuration.dynamic_client_registration;
+  if (registration?.enabled !== true || !Array.isArray(registration.allowed_uris) ||
+      !registration.allowed_uris.every(isText)) return;
+  if (registration.allowed_uris.includes(redirectUri)) return;
+  // A provider-owned wildcard may permit the callback; do not falsely reject it.
+  if (registration.allowed_uris.some(uri => uri.includes('*'))) return;
+  sourceOauthFailure('source_oauth_redirect_not_allowed');
+}
+
 async function startSourceOauth(storage, env, input) {
   if (!exactKeys(input, ['schemaVersion', 'actionId', 'sourceId', 'revision', 'actorEmail',
       ...(Object.hasOwn(input ?? {}, 'metaAppId') ? ['metaAppId'] : []),
@@ -5498,6 +5550,7 @@ async function startSourceOauth(storage, env, input) {
   }
   const origin = `https://${parseManagementEnvironment(env).managementHostname}`;
   const redirectUri = `${origin}${input.remote ? `${MANAGEMENT_MCP_PATH}/oauth/callback` : SOURCE_OAUTH_CALLBACK}`;
+  await checkSourceOauthCallback(context, env, config, redirectUri);
   const registration = {
     client_name: 'Ankka MCP Gateway', redirect_uris: [redirectUri], token_endpoint_auth_method: 'none',
     grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'],
@@ -5538,28 +5591,31 @@ async function finishSourceOauth(storage, env, input) {
   const attempt = await storage.get(SOURCE_OAUTH_KEY);
   if (!attempt || !NONCE.test(input.state) || !NONCE.test(input.browser) ||
       attempt.actorEmail !== input.actorEmail || attempt.stateHash !== await sha256(input.state) ||
-      attempt.browserHash !== await sha256(input.browser)) sourceOauthFailure('source_oauth_invalid');
+      attempt.browserHash !== await sha256(input.browser)) sourceOauthDiagnosticFailure('authorization_callback', 'attempt_mismatch');
   // All callbacks use the mutation queue. Consume before any network call so a
   // replay, restart or lost response can never exchange or import twice.
   await storage.delete(SOURCE_OAUTH_KEY);
-  if (Date.now() >= attempt.expiresAt ||
-      (input.issuer !== null && input.issuer !== attempt.config.issuer) || (attempt.requireIssuer && input.issuer === null)) {
-    sourceOauthFailure('source_oauth_invalid');
+  if (Date.now() >= attempt.expiresAt) sourceOauthDiagnosticFailure('authorization_callback', 'attempt_expired');
+  if ((input.issuer !== null && input.issuer !== attempt.config.issuer) || (attempt.requireIssuer && input.issuer === null)) {
+    sourceOauthDiagnosticFailure('authorization_callback', 'issuer_mismatch');
   }
   if (input.denied) return fixedJson(200, { result: 'cancelled' });
-  if (!oauthText(input.code, 4096)) sourceOauthFailure('source_oauth_invalid');
+  if (!oauthText(input.code, 4096)) sourceOauthDiagnosticFailure('authorization_callback', 'authorization_code_invalid');
   const context = await ownedSourceOauthContext(storage, env, attempt);
   if (context instanceof Response) return context;
-  if (await sha256(context.binding) !== attempt.actionHash) sourceOauthFailure('source_oauth_invalid');
+  if (await sha256(context.binding) !== attempt.actionHash) sourceOauthDiagnosticFailure('authorization_callback', 'source_changed');
   const response = await oauthJson(attempt.config.token_endpoint, {
     method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ grant_type: 'authorization_code', code: input.code, code_verifier: attempt.verifier,
       client_id: attempt.registrationInfo.client_id, redirect_uri: attempt.redirectUri, resource: context.source.url }).toString(),
   }, 'token_exchange');
-  if (!oauthText(response.access_token, 16384) || !isText(response.token_type) || response.token_type.toLowerCase() !== 'bearer' ||
-      (response.refresh_token !== undefined && !oauthText(response.refresh_token, 16384)) ||
-      (response.expires_in !== undefined && (!Number.isSafeInteger(response.expires_in) || response.expires_in <= 0)) ||
-      (response.scope !== undefined && !oauthText(response.scope, 4096))) sourceOauthFailure();
+  const invalidTokenField = !oauthText(response.access_token, 16384) ? 'invalid_access_token'
+    : !isText(response.token_type) || response.token_type.toLowerCase() !== 'bearer' ? 'invalid_token_type'
+    : response.refresh_token !== undefined && !oauthText(response.refresh_token, 16384) ? 'invalid_refresh_token'
+    : response.expires_in !== undefined && (!Number.isSafeInteger(response.expires_in) || response.expires_in <= 0) ? 'invalid_expires_in'
+    : response.scope !== undefined && !(response.scope === '' && attempt.config.scopes_supported.length === 0) &&
+      !oauthText(response.scope, 4096) ? 'invalid_scope' : null;
+  if (invalidTokenField) sourceOauthDiagnosticFailure('token_response', invalidTokenField, 200, 'source_oauth_unavailable');
   let confirmedScope = response.scope;
   if (context.source.url === META_ADS_MCP_URL) {
     if (confirmedScope !== undefined) verifySourceOauthScope(context.source.url, confirmedScope, attempt.config.scopes_supported);
@@ -5569,19 +5625,21 @@ async function finishSourceOauth(storage, env, input) {
   if (attempt.actionId === null && confirmedScope !== undefined) verifyReconnectScope(context.source.url, confirmedScope, attempt.config.scopes_supported);
   const tokens = { access_token: response.access_token, token_type: 'Bearer' };
   for (const key of ['refresh_token', 'expires_in']) if (response[key] !== undefined) tokens[key] = response[key];
-  if (confirmedScope !== undefined) tokens.scope = confirmedScope;
+  // Providers without named scopes may return an explicit empty set. Preserve
+  // the unscoped registration without inventing a scope or expanding a grant.
+  if (confirmedScope !== undefined && confirmedScope !== '') tokens.scope = confirmedScope;
   // Consent and the token endpoint are external work. Recheck the provider
   // record immediately before writing so drift during exchange is refused too.
   const current = await ownedSourceOauthContext(storage, env, attempt);
   if (current instanceof Response) return current;
-  if (await sha256(current.binding) !== attempt.actionHash || current.path !== context.path) sourceOauthFailure('source_oauth_invalid');
+  if (await sha256(current.binding) !== attempt.actionHash || current.path !== context.path) sourceOauthDiagnosticFailure('authorization_callback', 'source_changed');
   // Observed Cloudflare dashboard import contract, exercised by the disposable
   // OAuth proof. Keep this undocumented format confined to this one write.
   const imported = await providerCall(context.path, managementCredential(env), {
     method: 'PUT', signal: AbortSignal.timeout(10_000),
     body: canonicalJson({ auth_credentials: JSON.stringify({ tokens, config: attempt.config, registration_info: attempt.registrationInfo }) }),
   });
-  if (imported.status !== 'ok') sourceOauthFailure();
+  if (imported.status !== 'ok') sourceOauthDiagnosticFailure('credential_import', 'provider_rejected', imported.httpStatus, 'source_oauth_unavailable');
   const synced = await providerCall(`${context.path}/sync`, managementCredential(env), {
     method: 'POST', signal: AbortSignal.timeout(10_000),
   });
@@ -7297,7 +7355,7 @@ export class AdminState {
           return result;
         } catch (error) {
           const diagnostic = error instanceof SourceDiscoveryError && error.diagnostic;
-          await record(diagnostic && ['discovery', 'client_registration', 'token_exchange', 'permission_check'].includes(diagnostic.stage)
+          await record(diagnostic && ['discovery', 'client_registration', 'token_exchange', 'token_response', 'permission_check', 'authorization_callback', 'credential_import'].includes(diagnostic.stage)
             ? diagnostic : { stage: url.pathname.endsWith('/start') ? 'authorization_start' : 'authorization_callback',
               status: 'failed', httpStatus: null });
           return sourceToolsRefusal(error instanceof SourceDiscoveryError ? error.status : 502,

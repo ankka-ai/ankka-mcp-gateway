@@ -10,12 +10,14 @@ export function SourceAuthorization({ actionId, sourceId, sourceUrl, revision, d
   const { api } = useGateway()
   const [pending, setPending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [callbackBlocked, setCallbackBlocked] = useState(false)
   const [metaAppId, setMetaAppId] = useState('')
   const meta = sourceUrl === 'https://mcp.facebook.com/ads'
   const validMetaAppId = /^[1-9][0-9]{0,31}$/u.test(metaAppId.trim())
   async function authorize() {
     setPending(true)
     setError(null)
+    setCallbackBlocked(false)
     try {
       const result = actionId === null
         ? await api.reconnectSource(revision, sourceId, ...(meta ? [metaAppId.trim()] : []))
@@ -24,6 +26,7 @@ export function SourceAuthorization({ actionId, sourceId, sourceUrl, revision, d
           : await api.authorizeSource(actionId, revision, sourceId)
       window.location.assign(result.authorizationUrl)
     } catch (failure) {
+      setCallbackBlocked(failure instanceof GatewayApiError && failure.code === 'source_oauth_redirect_not_allowed')
       setError(meta && failure instanceof GatewayApiError && failure.code === 'source_oauth_unavailable'
         ? 'Your gateway could not start Meta authorization. Try again.'
         : failure instanceof GatewayApiError ? failure.message : 'Authorization could not start. Try again.')
@@ -43,6 +46,12 @@ export function SourceAuthorization({ actionId, sourceId, sourceUrl, revision, d
     </Button>
     {sourceId === 'source-616e6b6b616d6370' ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">Sign in with your gateway identity to connect Gateway Management. Each person assigned this connector uses their own sign-in.</p> : null}
     {error ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{error}</p> : null}
+    {!meta ? <details className="mt-3 text-sm text-kumo-subtle" open={callbackBlocked || undefined}>
+      <summary className="cursor-pointer">OAuth callback setup</summary>
+      <p className="mt-2 leading-6">If your provider restricts redirect URLs, allow this exact callback in the upstream application’s OAuth settings:</p>
+      <code className="mt-2 block break-all text-xs">{window.location.origin}/__ankka/source-oauth/callback</code>
+      <p className="mt-2 leading-6">For Cloudflare Access, open the application protecting the connector’s hostname and update its Managed OAuth settings. Keep its existing callback URLs. Then start authorization again.</p>
+    </details> : null}
   </div>
 }
 

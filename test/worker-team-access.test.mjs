@@ -3788,10 +3788,11 @@ const OAUTH_KEY = 'ankka-mcp-gateway/source-oauth/v1';
 const OAUTH_ISSUER = 'https://identity.example.net';
 const OAUTH_CALLBACK = '/__ankka/source-oauth/callback';
 
-async function sourceOauthFixture(run, before = null) {
+async function sourceOauthFixture(run, before = null, cloudflare = false) {
   return signInFixture(async (gateway) => {
     if (before) await before(gateway);
     const installed = await installSignInSource(gateway);
+    const issuer = cloudflare ? new URL(gateway.env.CF_ACCESS_ISSUER).origin : OAUTH_ISSUER;
     const network = globalThis.fetch;
     const exchanges = [], imports = [], registrations = [];
     const accessToken = crypto.randomUUID(), refreshToken = crypto.randomUUID();
@@ -3802,20 +3803,20 @@ async function sourceOauthFixture(run, before = null) {
       if (intercepted) return intercepted;
       const path = new URL(request.url);
       if (request.url === 'https://signin.example.net/.well-known/oauth-protected-resource') {
-        return Response.json({ resource: SIGN_IN_URL, authorization_servers: [OAUTH_ISSUER], scopes_supported: ['records:read'] });
+        return Response.json({ resource: SIGN_IN_URL, authorization_servers: [issuer], scopes_supported: ['records:read'] });
       }
-      if (request.url === `${OAUTH_ISSUER}/.well-known/oauth-authorization-server`) {
-        return Response.json({ issuer: OAUTH_ISSUER, authorization_endpoint: `${OAUTH_ISSUER}/authorize`,
-          token_endpoint: `${OAUTH_ISSUER}/token`, registration_endpoint: `${OAUTH_ISSUER}/register`,
+      if (request.url === `${issuer}/.well-known/oauth-authorization-server`) {
+        return Response.json({ issuer, authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`, registration_endpoint: `${issuer}/register`,
           code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none'],
           authorization_response_iss_parameter_supported: true });
       }
-      if (request.url === `${OAUTH_ISSUER}/register`) {
+      if (request.url === `${issuer}/register`) {
         const registration = await request.json();
         registrations.push(registration);
         return Response.json({ ...registration, client_id: 'synthetic-public-client' });
       }
-      if (request.url === `${OAUTH_ISSUER}/token`) {
+      if (request.url === `${issuer}/token`) {
         exchanges.push(new URLSearchParams(await request.text()));
         return Response.json({ access_token: accessToken, refresh_token: refreshToken, token_type: 'Bearer', expires_in: 300, scope: 'records:read' });
       }
@@ -3839,7 +3840,7 @@ async function sourceOauthFixture(run, before = null) {
       return { body, url: new URL(body.authorizationUrl), cookie };
     }
     function finish(attempt, query = {}, options = {}) {
-      const params = new URLSearchParams({ state: attempt.url.searchParams.get('state'), code: 'synthetic-authorization-code', iss: OAUTH_ISSUER, ...query });
+      const params = new URLSearchParams({ state: attempt.url.searchParams.get('state'), code: 'synthetic-authorization-code', iss: issuer, ...query });
       return gateway.api(`${OAUTH_CALLBACK}?${params}`, { extraHeaders: { cookie: attempt.cookie }, ...options });
     }
     try {
@@ -3866,6 +3867,56 @@ async function installedOauthReconnect(gateway) {
   };
   return { start, begin, sources };
 }
+
+for (const reconnect of [false, true]) {
+  test(`Cloudflare callback preflight protects ${reconnect ? 'reconnect' : 'initial sign-in'} before DCR and retries after repair`, async () => {
+    await sourceOauthFixture(async (gateway) => {
+      const start = reconnect ? (await installedOauthReconnect(gateway)).start : gateway.start;
+      const callback = `${MANAGEMENT_ORIGIN}${OAUTH_CALLBACK}`;
+      const app = { type: 'self_hosted', domain: new URL(SIGN_IN_URL).host,
+        oauth_configuration: { enabled: true, dynamic_client_registration: { enabled: true,
+          allowed_uris: ['https://dashboard.example.net/callback'] } } };
+      let reads = 0;
+      gateway.oauthHook(request => {
+        if (new URL(request.url).pathname === `/client/v4/accounts/${ACCOUNT_ID}/access/apps`) {
+          assert.equal(request.method, 'GET'); reads++;
+          return envelope([app, { type: 'self_hosted', domain: '*.unrelated.example.org' }]);
+        }
+      });
+      const blocked = await start();
+      assert.equal(blocked.status, 409);
+      assert.equal((await blocked.json()).error, 'source_oauth_redirect_not_allowed');
+      assert.equal(gateway.registrations.length, 0);
+      assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
+      app.oauth_configuration.dynamic_client_registration.allowed_uris.push(callback);
+      assert.equal((await start()).status, 200);
+      assert.equal(reads, 2);
+      assert.deepEqual(gateway.registrations[0].redirect_uris, [callback]);
+    }, null, true);
+  });
+}
+
+test('callback preflight does not block unknown configurations and uses the most specific literal source route', async () => {
+  await sourceOauthFixture(async (gateway) => {
+    const host = new URL(SIGN_IN_URL).host;
+    const app = { type: 'self_hosted', domain: host, oauth_configuration: { enabled: true,
+      dynamic_client_registration: { enabled: true, allowed_uris: [] } } };
+    const allowed = { ...app, domain: host + '/mcp', oauth_configuration: { enabled: true,
+      dynamic_client_registration: { enabled: true, allowed_uris: [`${MANAGEMENT_ORIGIN}${OAUTH_CALLBACK}`] } } };
+    for (const response of [
+      () => envelope(null, 403), () => envelope([]),
+      () => envelope([{ ...app, domain: 'other.example.net' }]),
+      () => envelope([app, structuredClone(app)]),
+      () => envelope([{ ...app, domain: '*.example.net' }]),
+      () => envelope([{ ...app, oauth_configuration: { enabled: true,
+        dynamic_client_registration: { enabled: true, allowed_uris: ['https://*.example.com/*'] } } }]),
+      () => envelope([app, allowed]),
+    ]) {
+      gateway.oauthHook(request => new URL(request.url).pathname.endsWith('/access/apps') ? response() : undefined);
+      assert.equal((await gateway.start()).status, 200);
+    }
+  }, null, true);
+});
 
 test('installed source OAuth reconnect preserves ownership, allowed tools and team access with single-use PKCE', async () => {
   await sourceOauthFixture(async (gateway) => {
@@ -3940,6 +3991,31 @@ test('installed reconnect rechecks portal permissions after exchange before impo
     assert.equal(gateway.imports.length, 0);
   });
 });
+
+for (const reconnect of [false, true]) {
+  test(`source OAuth accepts an empty scope only for an unscoped ${reconnect ? 'reconnect' : 'initial connection'}`, async () => {
+    await sourceOauthFixture(async (gateway) => {
+      const begin = reconnect ? (await installedOauthReconnect(gateway)).begin : gateway.begin;
+      gateway.oauthHook(request => {
+        if (request.url === 'https://signin.example.net/.well-known/oauth-protected-resource') {
+          return Response.json({ resource: SIGN_IN_URL, authorization_servers: [OAUTH_ISSUER] });
+        }
+        if (request.url === `${OAUTH_ISSUER}/token`) return Response.json({
+          access_token: gateway.accessToken, refresh_token: gateway.refreshToken,
+          token_type: 'Bearer', expires_in: 300, scope: '',
+        });
+      });
+      const attempt = await begin();
+      assert.equal(attempt.url.searchParams.has('scope'), false);
+      const finished = await gateway.finish(attempt);
+      assert.equal(finished.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=${reconnect ? 'reconnected' : 'connected'}`);
+      const imported = JSON.parse(gateway.imports[0].auth_credentials);
+      assert.deepEqual(imported.config.scopes_supported, []);
+      assert.equal(imported.tokens.scope, undefined);
+      assert.equal(JSON.stringify(gateway.managementStorage.writes).includes(gateway.accessToken), false);
+    });
+  });
+}
 
 test('source OAuth connects through the customer callback with PKCE; tokens never enter storage or browser responses', async () => {
   await sourceOauthFixture(async (gateway) => {
@@ -4022,6 +4098,10 @@ test('source OAuth expires, binds the issuer and rejects action or ownership dri
       assert.equal(gateway.exchanges.length, 0, change);
       assert.equal(gateway.imports.length, 0, change);
       assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined, change);
+      if (change === 'expiry' || change === 'issuer') {
+        const diagnostic = gateway.managementStorage.snapshot(`ankka-mcp-gateway/source-oauth-diagnostic/v1/${gateway.installed.source.id}`);
+        assert.equal(diagnostic.reason, change === 'expiry' ? 'attempt_expired' : 'issuer_mismatch');
+      }
     });
   }
 });
@@ -4043,6 +4123,27 @@ test('source OAuth rejects manual clients and unsafe discovery endpoints without
       assert.equal((await response.json()).error, 'source_oauth_unavailable');
       assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
       assert.equal(gateway.imports.length, 0);
+    });
+  }
+});
+
+test('source OAuth records fixed token-response failure reasons without retaining provider values', async () => {
+  for (const [field, value, reason] of [
+    ['scope', '', 'invalid_scope'], ['scope', null, 'invalid_scope'],
+    ['token_type', 'synthetic-private-provider-detail', 'invalid_token_type'],
+    ['expires_in', -1, 'invalid_expires_in'], ['refresh_token', '', 'invalid_refresh_token'],
+  ]) {
+    await sourceOauthFixture(async (gateway) => {
+      const attempt = await gateway.begin();
+      gateway.oauthHook(request => request.url === `${OAUTH_ISSUER}/token` ? Response.json({
+        access_token: gateway.accessToken, token_type: 'Bearer', expires_in: 300, scope: 'records:read', [field]: value,
+      }) : undefined);
+      assert.equal((await gateway.finish(attempt)).headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=failed`);
+      const diagnostic = gateway.managementStorage.snapshot(`ankka-mcp-gateway/source-oauth-diagnostic/v1/${gateway.installed.source.id}`);
+      assert.deepEqual(diagnostic, { stage: 'token_response', reason, status: 'failed', httpStatus: 200, at: diagnostic.at });
+      assert.equal(gateway.imports.length, 0);
+      assert.equal(JSON.stringify(gateway.managementStorage.writes).includes(gateway.accessToken), false);
+      assert.equal(JSON.stringify(diagnostic).includes('synthetic-private-provider-detail'), false);
     });
   }
 });
@@ -4113,6 +4214,10 @@ test('source OAuth never imports after ownership changes during exchange and giv
       assert.equal(response.headers.get('location'), `${MANAGEMENT_ORIGIN}/sources?source_oauth=${failure === 'sync' ? 'sync_pending' : 'failed'}`);
       assert.equal(gateway.exchanges.length, 1);
       assert.equal(gateway.imports.length, failure === 'sync' ? 1 : 0);
+      if (failure === 'import') {
+        const diagnostic = gateway.managementStorage.snapshot(`ankka-mcp-gateway/source-oauth-diagnostic/v1/${gateway.installed.source.id}`);
+        assert.deepEqual(diagnostic, { stage: 'credential_import', reason: 'provider_rejected', status: 'failed', httpStatus: 503, at: diagnostic.at });
+      }
       assert.equal(gateway.managementStorage.snapshot(OAUTH_KEY), undefined);
       assert.ok(!JSON.stringify([...response.headers]).includes(gateway.accessToken));
       await gateway.finish(attempt);
@@ -4593,6 +4698,7 @@ async function installManagementSource(gateway, enabledTools = null, recover = n
     'https://chatgpt.com/connector/oauth/*', 'https://www.cursor.com/agents/mcp/oauth/callback',
     'https://playground.ai.cloudflare.com/agents/playground/*',
     `${MANAGEMENT_ORIGIN}/__ankka/source-oauth/callback`,
+    `${MANAGEMENT_ORIGIN}/api/mcp/oauth/callback`,
     `https://dash.cloudflare.com/${ACCOUNT_ID}/one/access-controls/ai-controls/mcp-server/oauth-callback/${server.id}`,
     'https://oauth-callbacks.cloudflareaccess.com/cdn-cgi/access/outbound-oauth-callback',
   ]);

@@ -484,6 +484,7 @@ const ERROR_MESSAGES = new Map([
   ['source_removal_unverified', 'The gateway could not verify removal of the BigQuery bridge. Its cleanup records are saved. Continue removal with a fresh Cloudflare approval.'],
   ['source_oauth_invalid', 'This authorization attempt is no longer valid. Start again from your connector.'],
   ['source_oauth_unavailable', 'This connector could not be authorized here. Try again, or open it in Cloudflare for manual OAuth setup.'],
+  ['source_oauth_redirect_not_allowed', 'This connector’s Cloudflare Access application does not allow your gateway callback. Add the URL below to its Managed OAuth redirect allowlist, then try again.'],
   ['source_oauth_meta_app_required', 'Enter your Meta App ID and register the callback URL shown on this connector. Meta does not allow automatic registration for this client.'],
   ['source_oauth_scope_unsupported', 'The provider did not confirm the required read-only permissions, or granted additional permissions. Authorization stopped before importing credentials.'],
   ['bigquery_setup_invalid', 'Review the query project and dataset names before continuing.'],
