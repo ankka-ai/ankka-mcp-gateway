@@ -8,7 +8,7 @@ interface InstalledSourceToolsProps {
   source: ManagedSource
   disabled: boolean
   onLoad(sourceId: string): Promise<InstalledSourceTools>
-  onSave(sourceId: string, revision: number, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<void>
+  onSave(sourceId: string, revision: number, enabledTools: string[], toolMetadata?: ToolMetadata, allTools?: boolean): Promise<void>
 }
 
 const WAITING = {
@@ -23,13 +23,14 @@ function selectedFrom(catalogue: InstalledSourceTools): string[] {
 }
 
 /**
- * Review an installed connector’s available tools and save an explicit allowlist.
- * Opening the editor fetches that list. Tools that were not already allowed start unselected.
+ * Review an installed connector’s available tools and save its permission mode.
+ * New tools start unselected unless the operator opted into all current and future tools.
  */
 export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }: InstalledSourceToolsProps) {
   const [open, setOpen] = useState(false)
   const [catalogue, setCatalogue] = useState<InstalledSourceTools | null>(null)
   const [selected, setSelected] = useState<string[]>([])
+  const [allTools, setAllTools] = useState(false)
   const [metadata, setMetadata] = useState<ToolMetadata>([])
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -42,6 +43,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
       const next = await onLoad(source.id)
       setCatalogue(next)
       setSelected(selectedFrom(next))
+      setAllTools(next.pendingAllTools ?? next.allTools ?? false)
       setMetadata(next.pendingToolMetadata ?? next.toolMetadata ?? [])
       setOpen(true)
     } catch (cause) {
@@ -54,7 +56,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
 
   async function save() {
     if (!catalogue) return
-    const choice = catalogue.pendingTools ?? [...selected].sort()
+    const choice = catalogue.pendingTools ?? (allTools ? catalogue.tools.map((tool) => tool.name) : [...selected]).sort()
     if (metadata.some((entry) => choice.includes(entry.name) && entry.alias &&
       (!/^[a-zA-Z0-9]+([_-][a-zA-Z0-9]+)*$/.test(entry.alias) || entry.alias.length > 40 ||
        catalogue.tools.some((tool) => tool.name !== entry.name && tool.name === entry.alias) ||
@@ -71,7 +73,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
         if (entry.description?.trim()) result.description = entry.description.trim()
         return result
       }).filter((entry) => entry.alias || entry.description)
-      await onSave(source.id, catalogue.revision, choice, overrides)
+      await onSave(source.id, catalogue.revision, choice, overrides, allTools)
       setOpen(false)
       setCatalogue(null)
     } catch (cause) {
@@ -88,7 +90,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
   ))
   const builtin = catalogue?.catalogueSource === 'gateway'
   const ready = catalogue?.state === 'ready'
-  const canSave = ready === true && selected.length > 0 && (pending === null || missing.length === 0)
+  const canSave = ready === true && (allTools ? catalogue?.tools.length > 0 : selected.length > 0) && (pending === null || missing.length === 0)
 
   return (
     <div className="mt-4">
@@ -103,7 +105,7 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
             <>
               {catalogue.state === 'ready' ? (
                 <p className="text-sm leading-6 text-kumo-subtle">
-                  {catalogue.tools.length} tools {builtin ? 'in your installed gateway release' : 'in Cloudflare’s synced list'}. The tools already allowed are selected. New tools stay off until you select them.
+                  {catalogue.tools.length} tools {builtin ? 'in your installed gateway release' : 'in Cloudflare’s synced list'}. Choose individual tools or allow all current and future tools.
                 </p>
               ) : <p className="text-sm leading-6 text-kumo-subtle">{WAITING[catalogue.state]}</p>}
               {ready && catalogue.tools.length > 0 ? <p className="mt-2 text-xs leading-5 text-kumo-subtle">{builtin ? 'This list comes from your gateway. Saving your selection automatically syncs Gateway Management with Cloudflare when needed.' : syncedHintSummary(catalogue.tools)}</p> : null}
@@ -121,10 +123,12 @@ export function InstalledSourceToolsEditor({ source, disabled, onLoad, onSave }:
                     tools={catalogue.tools}
                     selected={pending ?? selected}
                     onChange={setSelected}
+                    allTools={allTools}
+                    onAllToolsChange={setAllTools}
                     listLabel={`${source.label} ${builtin ? 'available' : 'synced'} tools`}
                     missingDescription={builtin ? 'This tool has no description in the installed gateway release.' : 'This tool has no description in Cloudflare’s synced list.'}
                     disabled={busy || pending !== null}
-                    renderDetails={(tool) => selected.includes(tool.name) ? (
+                    renderDetails={(tool) => (allTools || selected.includes(tool.name)) ? (
                       <ToolPresentation name={tool.name} upstreamDescription={tool.description ?? ''}
                         value={metadata.find((entry) => entry.name === tool.name)} disabled={busy || pending !== null}
                         onChange={(entry) => setMetadata((current) => [

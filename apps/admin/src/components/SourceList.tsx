@@ -41,7 +41,7 @@ interface SourceListProps {
   removeDisabled?: boolean
   onRemoveDraft?(sourceId: string): void
   onLoadSourceTools?(sourceId: string): Promise<InstalledSourceTools>
-  onSaveSourceTools?(sourceId: string, revision: number, enabledTools: string[], toolMetadata?: ToolMetadata): Promise<void>
+  onSaveSourceTools?(sourceId: string, revision: number, enabledTools: string[], toolMetadata?: ToolMetadata, allTools?: boolean): Promise<void>
   onRenameSource?(sourceId: string, label: string, company?: string): Promise<void>
   sourceToolsDisabled?: boolean
 }
@@ -101,8 +101,7 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
         </label>
       </div>
 
-      {onCheckConnection ? <div className="mb-3 flex items-center justify-between gap-3">
-        <p className="text-xs text-kumo-subtle">Connections are checked when you open this page. Expand a connector for details.</p>
+      {onCheckConnection ? <div className="mb-3 flex items-center justify-end gap-3">
         <Button variant="secondary" disabled={checking || isBusy} onClick={recheck}>{checking ? 'Checking connections…' : 'Check connections'}</Button>
       </div> : null}
 
@@ -182,12 +181,12 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
                         {shareError ? <p role="alert" className="mt-2 text-sm text-danger">{shareError}</p> : null}
                       </div> : null}
                       <code className="mt-2 block select-all break-all text-xs text-kumo-default">{source.url}</code>
-                      <p className="mt-4 text-xs font-medium text-kumo-subtle">{source.enabledTools.length === 0
+                      <p className="mt-4 text-xs font-medium text-kumo-subtle">{source.allTools ? 'All tools, including future additions' : source.enabledTools.length === 0
                         // Only a sign-in source can be saved without tools: its real list exists once it is connected.
                         ? 'No tools chosen yet. Nothing is enabled; you choose from the connector’s real list after connecting it.'
                         : `${source.enabledTools.length} tool${source.enabledTools.length === 1 ? '' : 's'}`}</p>
                       <div className="mt-2 flex max-h-52 flex-wrap gap-2 overflow-y-auto pr-1" role="region" aria-label={`${source.label} allowed tools`} tabIndex={0}>
-                        {source.enabledTools.map((tool) => <code key={tool} className="tool-chip break-all">{tool}</code>)}
+                        {!source.allTools && source.enabledTools.map((tool) => <code key={tool} className="tool-chip break-all">{tool}</code>)}
                       </div>
                       {source.status === 'draft' && canRemove?.(source.id) && onRemoveDraft ? (
                         <Button variant="secondary-destructive" className="pressable mt-4" disabled={isBusy || removeDisabled}

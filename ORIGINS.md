@@ -105,3 +105,29 @@ metadata; none were present. Assets are served locally without provider requests
 Material not listed above was written for this public repository. Published npm
 dependencies are not vendored; their licenses are described in
 `THIRD_PARTY_NOTICES.md` and the lockfile.
+
+## MCP connection page client icons
+
+The inline client SVGs in `apps/connect-page/src/page.html` were obtained and
+reviewed on 2026-10-08:
+
+- ChatGPT (`svg/openai-light.svg`) and Google Gemini (`svg/google-gemini.svg`):
+  [Dashboard Icons](https://github.com/homarr-labs/dashboard-icons/tree/cf87d9bbd47792b20893f090ff48763fe874b05d/svg),
+  revision `cf87d9bbd47792b20893f090ff48763fe874b05d`, Homarr Labs and
+  contributors, Apache-2.0. The existing license is retained at
+  `third_party/licenses/dashboard-icons-Apache-2.0.txt`.
+- Claude (`icons/claude.svg`) and Cursor (`icons/cursor.svg`):
+  [Simple Icons](https://github.com/simple-icons/simple-icons/tree/b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76/icons),
+  revision `b86d5c9a0bdd4f3f5c30898a63654dd32f39fd76`, Simple Icons contributors,
+  CC0 1.0 Universal. The existing license is retained at
+  `third_party/licenses/simple-icons-CC0-1.0.md`.
+
+The licenses permit redistribution. SVG letterforms and paths are unchanged;
+decorative accessibility attributes and sizing classes were added, redundant
+titles and fixed sizes removed, monochrome fills adjusted for the dark page,
+and Gemini's inline mask style converted to a presentation attribute for CSP
+compatibility. ChatGPT's invalid child fill was normalized to `currentColor`.
+The SVGs contain no scripts, external references, or private metadata and are
+bundled into the page without provider requests. The generic plug icon is
+original repository artwork. Brand and trademark rights remain with the
+respective providers; these icons identify compatibility only.

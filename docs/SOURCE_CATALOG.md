@@ -369,7 +369,8 @@ The existing source apply action remains the provisioning boundary:
 3. obtain a fresh operation-scoped Cloudflare authorization;
 4. create the MCP server and its source Access resources; and
 5. attach it to the Portal with `default_disabled: true` and the exact
-   `updated_tools` selection.
+   `updated_tools` selection, or `default_disabled: false` after explicit
+   `allTools: true` consent.
 
 Registry metadata does not contain the authoritative tool catalogue.
 `recommendedTools` may preselect a reviewed subset in the UI, but the operator
@@ -382,9 +383,12 @@ longer exists is shown as absent and can never be enabled.
 
 Cloudflare can synchronize capabilities from some OAuth servers, and its
 default behavior can expose newly discovered capabilities. The gateway must
-continue writing a deny-by-default Portal mapping so new tools remain disabled.
+write a deny-by-default Portal mapping unless the operator explicitly chooses
+All tools, including future additions. This saved `allTools: true` mode sets
+`default_disabled: false`; Cloudflare then exposes current and future tools and
+MCP prompts when synced. The default remains a manual selection.
 A catalog refresh, Cloudflare capability sync, or changed recommendation must
-never expand installed `enabledTools`. Direct out-of-band Portal edits are
+never change the saved permission mode or expand manual `enabledTools`. Direct out-of-band Portal edits are
 drift, not a second policy authority.
 
 Phase-one entries must match the authentication flow the dashboard actually

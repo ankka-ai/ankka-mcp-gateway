@@ -63,7 +63,7 @@ export const toolMetadataSchema = v.array(v.strictObject({
 }))
 export type ToolMetadata = v.InferOutput<typeof toolMetadataSchema>
 interface InstalledSourceDetailsInput { schemaVersion: number; revision: number; label: string; company?: string }
-interface InstalledToolsInput { schemaVersion: number; revision: number; enabledTools: string[]; toolMetadata?: ToolMetadata; sharedConnection?: true }
+interface InstalledToolsInput { schemaVersion: number; revision: number; enabledTools: string[]; toolMetadata?: ToolMetadata; sharedConnection?: true; allTools?: boolean }
 const sourceConnectionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   sourceId: v.string(),
@@ -82,6 +82,7 @@ const managedSourceSchema = v.strictObject({
   authMode: sourceAuthModeSchema,
   onBehalfOfUser: v.boolean(),
   enabledTools: v.array(v.string()),
+  allTools: v.optional(v.boolean()),
   status: sourceStatusSchema,
   toolMetadata: v.optional(toolMetadataSchema),
 })
@@ -207,6 +208,8 @@ const installedSourceToolsSchema = v.strictObject({
   state: sourceActionToolsSchema.entries.state,
   tools: sourceActionToolsSchema.entries.tools,
   enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.maxLength(500)),
+  allTools: v.optional(v.boolean()),
+  pendingAllTools: v.optional(v.nullable(v.boolean())),
   catalogueSource: v.optional(v.literal('gateway')),
   toolMetadata: v.optional(toolMetadataSchema),
   pendingToolMetadata: v.optional(v.nullable(toolMetadataSchema)),
@@ -225,6 +228,7 @@ const sourceAuthorizationSchema = v.strictObject({
 export type SourceAuthorization = v.InferOutput<typeof sourceAuthorizationSchema>
 /** A saved tool choice: the draft revision the paused installation is now bound to, and its exact allowlist. */
 const sourceToolChoiceSchema = v.strictObject({
+  allTools: v.optional(v.boolean()),
   schemaVersion: v.literal(1),
   actionId: sourceActionPointerSchema.entries.actionId,
   sourceId: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u)),
@@ -312,6 +316,7 @@ const teamEmailSchema = v.pipe(v.string(), v.minLength(1), v.maxLength(254))
 const teamSourceIdSchema = v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u))
 const teamMemberSchema = v.strictObject({
   email: teamEmailSchema,
+  allSources: v.optional(v.boolean()),
   dashboardAccess: v.optional(v.boolean()),
   sourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
 })
@@ -321,6 +326,7 @@ const teamGrantSchema = v.strictObject({
   name: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
   memberEmails: v.pipe(v.array(teamEmailSchema), v.maxLength(500)),
   sourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
+  allSources: v.optional(v.boolean()),
 })
 const teamGrantsSchema = v.pipe(v.array(teamGrantSchema), v.maxLength(16))
 const managementCredentialStatusSchema = v.strictObject({
@@ -387,6 +393,7 @@ export type DiscoveredTool = v.InferOutput<typeof discoveredToolSchema>
 export type SourceDiscovery = v.InferOutput<typeof sourceDiscoverySchema>
 
 export interface SourceDraftInput {
+  allTools?: boolean
   company?: string
   label: string
   url: string
@@ -444,11 +451,11 @@ export interface GatewayAdminApi {
   authorizeSource(actionId: string, revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization>
   reconnectSource(revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization>
   /** Saves the tool choice as its own revision-bound step; the recorded installation is resumed separately. */
-  chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice>
-  /** Cloudflare’s synced catalogue for an installed connector, plus the saved allowlist. New tools are not selected. */
+  chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[], allTools?: boolean): Promise<SourceToolChoice>
+  /** Cloudflare’s synced catalogue for an installed connector, plus the saved selection and allTools mode. */
   getInstalledSourceTools(sourceId: string): Promise<InstalledSourceTools>
   /** Replaces an installed connector’s allowlist and its Portal tool configuration. Assignments stay as they are. */
-  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata, sharedConnection?: true): Promise<ManagedSources>
+  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata, sharedConnection?: true, allTools?: boolean): Promise<ManagedSources>
   /** Renames an installed connector in the gateway, in Team, and on its Access policy. Assignments stay as they are. */
   renameInstalledSource(revision: number, sourceId: string, label: string, company?: string): Promise<ManagedSources>
   prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }>
@@ -766,11 +773,12 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     })
   }
 
-  chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {
+  chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[], allTools?: boolean): Promise<SourceToolChoice> {
+    // The gateway accepts only a sorted list without repeats, the form it hashes.
+    const body: InstalledToolsInput & { sourceId: string } = { schemaVersion: 1, revision, sourceId, enabledTools: [...new Set(enabledTools)].sort() }
+    if (allTools !== undefined) body.allTools = allTools
     return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/tools`, sourceToolChoiceSchema, {
-      method: 'POST',
-      // The gateway accepts only a sorted list without repeats, the form it hashes.
-      body: JSON.stringify({ schemaVersion: 1, revision, sourceId, enabledTools: [...new Set(enabledTools)].sort() }),
+      method: 'POST', body: JSON.stringify(body),
     })
   }
 
@@ -778,9 +786,10 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, installedSourceToolsSchema)
   }
 
-  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata, sharedConnection?: true): Promise<ManagedSources> {
+  updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ToolMetadata, sharedConnection?: true, allTools?: boolean): Promise<ManagedSources> {
     const body: InstalledToolsInput = { schemaVersion: 1, revision, enabledTools: [...new Set(enabledTools)].sort() }
     if (toolMetadata !== undefined) body.toolMetadata = toolMetadata
+    if (allTools !== undefined) body.allTools = allTools
     if (sharedConnection) body.sharedConnection = true
     return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/tools`, managedSourcesSchema, {
       method: 'PUT',

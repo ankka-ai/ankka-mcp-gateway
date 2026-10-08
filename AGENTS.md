@@ -41,8 +41,9 @@ they are explicitly documented as non-secret.
   account or user identifiers, IP or raw user-agent storage, provider-resource,
   credential, or free-form dimensions.
 - Connected MCP sources may expose read and write tools through explicit tool
-  allowlists. New tools stay disabled until selected; upgrades must not expand
-  existing allowlists or upstream grants. Dedicated read-only connectors retain
+  allowlists by default. New tools stay disabled until selected, unless the
+  operator explicitly enables All tools for that source, including future tools.
+  Upgrades must preserve the saved mode and must not expand upstream grants. Dedicated read-only connectors retain
   their narrower boundaries.
 - Prompts and tool names are not authorization boundaries; upstreams must also
   enforce the allowed operations.
@@ -86,9 +87,21 @@ they are explicitly documented as non-secret.
 - Keep the dependency graph small.
 - Record the origin and license of any transferred or vendored material in
   `ORIGINS.md` and `THIRD_PARTY_NOTICES.md`.
-- Run `npm run check:fast` while developing. The full `npm run check` release
-  gate runs in continuous integration on every pull request and must pass
-  before merge.
+- Match local validation to the change; do not run checks by habit.
+  For UI copy, comments, documentation, and simple styling or spacing changes
+  that do not alter behavior, inspect the diff only. Do not add or run tests,
+  typechecks, builds, or `check:fast` for these changes unless explicitly
+  requested or a concrete concern requires a specific check. Use a visual
+  check only when needed to judge layout.
+- For behavior changes, run the smallest relevant tests or checks. Use
+  `npm run check:fast` for changes spanning multiple components or when
+  narrower checks cannot cover the affected behavior, not after every edit.
+  Once relevant checks pass, do not broaden or repeat them without a new
+  change, failure, or unresolved concern. The runtime checks required above
+  still apply to bootstrap state, SQLite, and crypto runtime changes.
+- The full `npm run check` release gate runs in continuous integration on
+  every pull request and must pass before merge; do not duplicate that gate
+  locally for low-impact changes.
 - The toolchain is pinned by `.nvmrc`, `packageManager`, and `devEngines`.
   Local drift warns; `check:toolchain` enforces the exact versions in
   continuous integration and at the head of the full gate.
@@ -107,3 +120,39 @@ they are explicitly documented as non-secret.
   Terraform state, private keys, or generated deployment output.
 - Production deployment credentials, signing keys, and CI authority remain
   outside this repository even when the implementation they invoke is public.
+
+## Debugging and release operations
+
+- Optimize for the shortest reliable path from diagnosis to verified fix.
+  Reuse existing commands and automation; do not introduce another framework,
+  approval round, or blanket release gate to solve a narrow operational issue.
+  Preserve the security invariants and required CI checks above.
+- Prefer the Cloudflare `cf` CLI and existing authenticated diagnostic APIs
+  over browser inspection. Use the browser for consent or behavior that needs
+  UI verification. Never broaden access or expose credentials to avoid a login.
+- Collect only evidence relevant to the failure. For update issues, distinguish
+  the provider deployment, running Worker and Durable Object, and stored release
+  versions; include the update stage, timestamps and endpoint failure reason.
+  Mark unavailable evidence as unknown; one version field does not prove all
+  layers updated.
+  For source or Team failures, compare saved tool approvals with the current
+  Portal mappings and catalogue. Keep customer details out of public artifacts.
+- Gather independent reads together and overlap independent checks when useful.
+  Reuse evidence for unchanged code; do not repeatedly inspect the same state
+  or rerun passing checks without a specific unresolved question.
+- Use the existing release automation and exact-source CI check reuse. Do not
+  recreate signing, publishing, or deployment steps by hand. Measure slow phases
+  before optimizing them; parallelize independent tests before adding tooling.
+- Match live verification to the failure being fixed. For deployed update or
+  handover changes, use an isolated gateway and the relevant path documented in
+  `docs/LIVE_LIFECYCLE.md`; the in-process lifecycle runner cannot prove a deployed
+  Durable Object handover. Do not require a full live lifecycle for every change.
+  If deployed evidence is unavailable, state the gap rather than claim coverage.
+- An upload is not a verified update. Confirm the running target release, the
+  completed update record, and the affected operation; for a Team fix, check
+  that Team loads and editing is enabled. Use bounded waits with backoff during
+  propagation, and diagnose an uncertain outcome before retrying a mutation.
+- Keep progress reports brief: current phase, elapsed wait when relevant, and
+  the next useful check. Turn recurring manual diagnosis into a small reusable
+  command, extending existing tooling where possible; distinguish proposed
+  automation from commands that actually exist.

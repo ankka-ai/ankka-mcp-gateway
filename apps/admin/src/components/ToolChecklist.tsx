@@ -12,6 +12,8 @@ interface ToolChecklistProps {
   /** Shown for a tool whose origin supplied no description. */
   missingDescription: string
   renderDetails?(tool: DiscoveredTool): ReactNode
+  allTools?: boolean
+  onAllToolsChange?(value: boolean): void
   disabled?: boolean
 }
 
@@ -29,10 +31,10 @@ function annotation(tool: DiscoveredTool): string {
  * source fills it from Cloudflare's synced list after the operator has connected it. Names, descriptions and hints are
  * source-authored either way: review aids, never an authorization boundary.
  */
-export function ToolChecklist({ tools, selected, onChange, listLabel, missingDescription, renderDetails, disabled = false }: ToolChecklistProps) {
+export function ToolChecklist({ tools, selected, onChange, listLabel, missingDescription, renderDetails, allTools = false, onAllToolsChange, disabled = false }: ToolChecklistProps) {
   const [filter, setFilter] = useState('')
   const filterId = useId()
-  const selectedNames = useMemo(() => new Set(selected), [selected])
+  const selectedNames = useMemo(() => new Set(allTools ? tools.map((tool) => tool.name) : selected), [allTools, selected, tools])
   const visibleTools = useMemo(() => {
     const query = filter.trim().toLocaleLowerCase()
     if (!query) return tools
@@ -45,6 +47,12 @@ export function ToolChecklist({ tools, selected, onChange, listLabel, missingDes
 
   return (
     <div>
+      {onAllToolsChange ? <label className="mb-4 flex items-start gap-3 text-sm text-kumo-default">
+        <Checkbox checked={allTools} disabled={disabled} onChange={(event) => onAllToolsChange(event.target.checked)} />
+        <span>All tools, including future additions
+          <span className="mt-1 block text-xs leading-5 text-kumo-subtle">Automatically allow tools added by this MCP. Also includes its MCP prompts.</span>
+        </span>
+      </label> : null}
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
         <label className="block" htmlFor={filterId}>
           <span className="mb-1.5 block text-sm font-medium text-kumo-default">Filter tools</span>
@@ -62,14 +70,14 @@ export function ToolChecklist({ tools, selected, onChange, listLabel, missingDes
             type="button"
             variant="secondary"
             className="pressable"
-            disabled={disabled || visibleTools.length === 0}
+            disabled={disabled || allTools || visibleTools.length === 0}
             onClick={() => onChange([...new Set([...selected, ...visibleTools.map((tool) => tool.name)])])}
           >Select shown</Button>
           <Button
             type="button"
             variant="secondary"
             className="pressable"
-            disabled={disabled || visibleTools.every((tool) => !selectedNames.has(tool.name))}
+            disabled={disabled || allTools || visibleTools.every((tool) => !selectedNames.has(tool.name))}
             onClick={() => {
               const visibleNames = new Set(visibleTools.map((tool) => tool.name))
               onChange(selected.filter((name) => !visibleNames.has(name)))
@@ -78,7 +86,7 @@ export function ToolChecklist({ tools, selected, onChange, listLabel, missingDes
         </div>
       </div>
       <p className="mt-2 text-xs text-kumo-subtle">
-        Showing {visibleTools.length} of {tools.length} tools; {selected.length} selected.
+        Showing {visibleTools.length} of {tools.length} tools; {allTools ? 'all current and future tools allowed' : `${selected.length} selected`}.
       </p>
       <p className="mt-2 max-w-[80ch] text-xs leading-5 text-kumo-subtle">
         You can allow read and edit tools. Everyone assigned to this connector can use the selected tools within the connected account’s permissions. Check what each tool can change before selecting it; provider permissions must enforce the access you intend.
@@ -89,7 +97,7 @@ export function ToolChecklist({ tools, selected, onChange, listLabel, missingDes
           <label className="tool-option-card">
             <Checkbox
               checked={selectedNames.has(tool.name)}
-              disabled={disabled}
+              disabled={disabled || allTools}
               onChange={(event) => onChange(event.target.checked
                 ? [...new Set([...selected, tool.name])]
                 : selected.filter((name) => name !== tool.name))}

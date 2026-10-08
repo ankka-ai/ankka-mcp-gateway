@@ -88,3 +88,11 @@ digest. The release publisher attaches the same files to its GitHub Release.
 
 Cloudflare products and names referenced in the documentation are owned by
 Cloudflare, Inc. No Cloudflare source code is included in this repository.
+
+The inline ChatGPT and Gemini icons in `apps/connect-page/src/page.html` are
+from Dashboard Icons by Homarr Labs and contributors, under Apache-2.0. The
+Claude and Cursor icons are from Simple Icons contributors, under CC0 1.0.
+Their licenses are retained in `third_party/licenses/`; exact revisions and
+modifications are recorded in `ORIGINS.md`. All corresponding trademarks
+belong to their owners. Inclusion identifies compatibility and does not imply
+endorsement or affiliation.

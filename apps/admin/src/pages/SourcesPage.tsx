@@ -218,6 +218,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   const [url, setUrl] = useState('')
   const [discovery, setDiscovery] = useState<SourceDiscovery | null>(null)
   const [selected, setSelected] = useState<string[]>([])
+  const [allTools, setAllTools] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   // What Cloudflare says about a paused sign-in source right now, by action. The journal records a reason only when
   // the executor runs, so the live list can be ahead of it.
@@ -233,7 +234,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   // OAuth sources can publish their catalogue before sign-in. Choose their
   // tools from Cloudflare's connected list; never enable the public preview.
   const signIn = discovery?.authentication === 'oauth' && !discovery.connectionBlock
-  const enabledTools = useMemo(() => signIn ? [] : [...selected].sort(), [selected, signIn])
+  const enabledTools = useMemo(() => signIn ? [] : (allTools ? (discovery?.tools ?? []).map((tool) => tool.name) : [...selected]).sort(), [allTools, discovery, selected, signIn])
   const missingRecommendedTools = useMemo(() => {
     if (!catalogSource || !discovery || discovery.tools.length === 0) return []
     const discoveredNames = new Set(discovery.tools.map((tool) => tool.name))
@@ -311,6 +312,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     setUrl('')
     setDiscovery(null)
     setSelected([])
+    setAllTools(false)
     setFormError(null)
   }
 
@@ -345,6 +347,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     setFormError(null)
     setDiscovery(null)
     setSelected([])
+    setAllTools(false)
     try {
       const next = await discoverSource(url.trim())
       if (catalogSource && next.endpoint !== catalogSource.implementation.deployment.url) {
@@ -380,6 +383,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     setFormError(null)
     try {
       const draft: SourceDraftInput = { label: label.trim(), url: discovery.endpoint, authMode: discovery.authentication, enabledTools }
+      if (!signIn && allTools) draft.allTools = true
       if (company.trim()) draft.company = company.trim()
       await saveSourceDraft(draft)
       clearDraftForm()
@@ -675,6 +679,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                       tools={discovery.tools}
                       selected={selected}
                       onChange={setSelected}
+                      allTools={allTools}
+                      onAllToolsChange={setAllTools}
                       listLabel="Discovered tools"
                       missingDescription="No description supplied by this MCP server."
                     />
@@ -683,7 +689,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
                 <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
                   <Button type="submit" variant="primary" className="pressable" loading={isBusy} aria-describedby={signIn && rollbackNote ? 'save-draft-rollback-note' : undefined} disabled={(!signIn && enabledTools.length === 0) || Boolean(discovery.connectionBlock)}>Save draft</Button>
-                  <span className="text-xs text-kumo-subtle">{signIn ? 'This draft is saved with no tools. You choose them after connecting the connector.' : `${enabledTools.length} exact tool${enabledTools.length === 1 ? '' : 's'} selected`}</span>
+                  <span className="text-xs text-kumo-subtle">{signIn ? 'This draft is saved with no tools. You choose them after connecting the connector.' : allTools ? 'All current and future tools allowed' : `${enabledTools.length} exact tool${enabledTools.length === 1 ? '' : 's'} selected`}</span>
                   {/* Older releases cannot read a source saved without tools, so for this one draft the save is what ends a rollback. */}
                   {signIn && rollbackNote ? (
                     <p id="save-draft-rollback-note" className="basis-full text-xs leading-5 text-kumo-subtle">{rollbackNote} Older releases cannot read a connector saved without tools.</p>
@@ -740,8 +746,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             installNote={blocker ? null : rollbackNote}
             onAuthorize={(sourceId) => void authorize(sourceId)}
             onLoadSourceTools={(sourceId) => api.getInstalledSourceTools(sourceId)}
-            onSaveSourceTools={async (sourceId, revision, enabledTools, toolMetadata) => {
-              await api.updateInstalledSourceTools(revision, sourceId, enabledTools, toolMetadata)
+            onSaveSourceTools={async (sourceId, revision, enabledTools, toolMetadata, allTools) => {
+              await api.updateInstalledSourceTools(revision, sourceId, enabledTools, toolMetadata, undefined, allTools)
               await refreshSources()
             }}
             onRenameSource={async (sourceId, label, company) => {

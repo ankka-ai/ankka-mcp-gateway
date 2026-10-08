@@ -48,6 +48,7 @@ export function SourceToolChoice({ action, source, revision, recommendedTools, d
   const { api, refreshSourceActions, refreshSources } = useGateway()
   const [offered, setOffered] = useState<SourceActionTools | null>(null)
   const [selected, setSelected] = useState<string[]>([])
+  const [allTools, setAllTools] = useState(source.allTools === true)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -103,11 +104,12 @@ export function SourceToolChoice({ action, source, revision, recommendedTools, d
   useEffect(() => { if (offeredState !== undefined) onState?.(action.actionId, offeredState) }, [action.actionId, offeredState, onState])
 
   const finish = async () => {
-    if (saving || selected.length === 0) return
+    const choice = allTools ? (offered?.tools ?? []).map((tool) => tool.name) : selected
+    if (saving || choice.length === 0) return
     setSaving(true)
     setError(null)
     try {
-      const chosen = await api.chooseSourceActionTools(action.actionId, revision, source.id, selected)
+      const chosen = await api.chooseSourceActionTools(action.actionId, revision, source.id, choice, allTools)
       const resumed = await api.prepareSourceAction(chosen.revision, source.id, action.actionId)
       if (resumed.status === 'authorization_required') {
         const destination = validHandoffUrl(resumed.handoffUrl, window.location.origin)
@@ -140,7 +142,7 @@ export function SourceToolChoice({ action, source, revision, recommendedTools, d
       ) : (
         <>
           <p className="mt-2 max-w-[80ch] text-xs leading-5 text-kumo-subtle">
-            {tools.length} tool{tools.length === 1 ? '' : 's'} in Cloudflare’s synced list of this connector.{preselected ? ' Catalog recommendations that exist are preselected for review.' : ''} Only the tools you select are attached; everything else stays disabled.
+            {tools.length} tool{tools.length === 1 ? '' : 's'} in Cloudflare’s synced list of this connector.{preselected ? ' Catalog recommendations that exist are preselected for review.' : ''} Choose individual tools or allow all current and future tools.
           </p>
           <p className="mt-1 max-w-[80ch] text-xs leading-5 text-kumo-subtle">{syncedHintSummary(tools)}</p>
           {missingRecommended.length > 0 ? (
@@ -157,19 +159,21 @@ export function SourceToolChoice({ action, source, revision, recommendedTools, d
               tools={tools}
               selected={selected}
               onChange={setSelected}
+              allTools={allTools}
+              onAllToolsChange={setAllTools}
               listLabel="Synced tools"
               missingDescription="No description in Cloudflare’s synced list."
               disabled={saving}
             />
           </div>
           <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-4">
-            <Button type="button" variant="primary" className="pressable" loading={saving} disabled={disabled || saving || selected.length === 0} onClick={() => void finish()}>
-              {selected.length === 0 ? 'Allow tools and finish installation' : `Allow ${selected.length} tool${selected.length === 1 ? '' : 's'} and finish installation`}
+            <Button type="button" variant="primary" className="pressable" loading={saving} disabled={disabled || saving || (allTools ? tools.length === 0 : selected.length === 0)} onClick={() => void finish()}>
+              {allTools ? 'Allow all tools and finish installation' : selected.length === 0 ? 'Allow tools and finish installation' : `Allow ${selected.length} tool${selected.length === 1 ? '' : 's'} and finish installation`}
             </Button>
             <span className="max-w-[60ch] text-xs leading-5 text-kumo-subtle">
-              {selected.length === 0
+              {allTools ? 'Current and future tools will be allowed automatically.' : selected.length === 0
                 ? 'Select at least one tool. Until then the connector stays installed with nothing enabled.'
-                : 'The gateway saves this selection, then attaches the connector with exactly these tools. Nobody is assigned access.'}
+                : 'The gateway saves this selection, then attaches the connector with these tools.'}
             </span>
           </div>
         </>

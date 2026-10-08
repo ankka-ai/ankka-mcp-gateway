@@ -25,13 +25,13 @@ export function TeamGrantDialog({ team, sources, disabled, onSave }: TeamGrantDi
   const [emails, setEmails] = useState<string[]>(team?.memberEmails ?? [])
   const [email, setEmail] = useState('')
   const [sourceIds, setSourceIds] = useState<string[]>(team?.sourceIds ?? [])
+  const [allSources, setAllSources] = useState(team?.allSources === true)
   const [error, setError] = useState<string | null>(null)
   const nameInput = useRef<HTMLInputElement>(null)
   const nameId = useId()
   const emailId = useId()
   const errorId = useId()
   const installed = sources.filter((source) => source.status === 'installed')
-  const allSelected = installed.length > 0 && installed.every((source) => sourceIds.includes(source.id))
 
   const reset = (nextOpen: boolean) => {
     setOpen(nextOpen)
@@ -39,6 +39,7 @@ export function TeamGrantDialog({ team, sources, disabled, onSave }: TeamGrantDi
     setEmails(team?.memberEmails ?? [])
     setEmail('')
     setSourceIds(team?.sourceIds ?? [])
+    setAllSources(team?.allSources === true)
     setError(null)
   }
 
@@ -65,12 +66,14 @@ export function TeamGrantDialog({ team, sources, disabled, onSave }: TeamGrantDi
       setError('Enter a team name of 1 to 80 characters.')
       return
     }
-    onSave({
+    const next: TeamGrant = {
       id: team?.id ?? newTeamId(),
       name: trimmed,
       memberEmails: [...emails].sort(),
-      sourceIds: [...new Set(sourceIds)].sort(),
-    })
+      sourceIds: allSources ? installed.map(source => source.id).sort() : [...new Set(sourceIds)].sort(),
+    }
+    if (allSources) next.allSources = true
+    onSave(next)
     setOpen(false)
   }
 
@@ -104,15 +107,16 @@ export function TeamGrantDialog({ team, sources, disabled, onSave }: TeamGrantDi
             </div>
             <fieldset className="mt-5">
               <legend className="text-sm font-medium">Connectors</legend>
-              <p className="mt-2 text-xs leading-5 text-kumo-subtle">All installed connectors selects every connector installed now. A connector you add later stays closed until you add it to this team.</p>
-              {installed.length > 0 ? <label className="mt-3 flex min-h-11 cursor-pointer items-center gap-3 text-sm font-medium text-kumo-strong">
-                <Checkbox checked={allSelected} disabled={disabled} onChange={(event) => {
-                  setSourceIds(event.target.checked ? installed.map((source) => source.id) : [])
+              <p className="mt-2 text-xs leading-5 text-kumo-subtle">All MCPs includes every installed MCP and automatically allows new MCPs added to this gateway.</p>
+              <label className="mt-3 flex min-h-11 cursor-pointer items-center gap-3 text-sm font-medium text-kumo-strong">
+                <Checkbox checked={allSources} disabled={disabled} onChange={(event) => {
+                  setAllSources(event.target.checked)
+                  if (event.target.checked) setSourceIds(installed.map(source => source.id))
                 }} />
-                All installed connectors
-              </label> : <p className="mt-3 text-sm text-kumo-subtle">No installed connectors to assign.</p>}
+                All MCPs
+              </label>
               {installed.map((source) => <label key={source.id} className="flex min-h-11 cursor-pointer items-center gap-3 text-sm text-kumo-strong">
-                <Checkbox disabled={disabled} checked={sourceIds.includes(source.id)} onChange={(event) => {
+                <Checkbox disabled={disabled || allSources} checked={allSources || sourceIds.includes(source.id)} onChange={(event) => {
                   setSourceIds((current) => event.target.checked ? [...new Set([...current, source.id])] : current.filter((id) => id !== source.id))
                 }} />
                 <span className="break-words">{source.label}</span>

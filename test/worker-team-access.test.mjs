@@ -617,6 +617,97 @@ test('pristine historical two-source additions retain exact primary-runtime tear
 
 // New source provisioning has a distinct empty initial audience. It must not
 // inherit the original receipt audience or change existing saved assignments.
+for (const mode of ['member', 'team']) {
+  test(`all MCPs ${mode} consent automatically grants a newly installed source and survives a live read`, async () => fixture(async (gateway) => {
+    const before = await gateway.view();
+    const request = { schemaVersion: 1, expectedRevision: before.revision,
+      members: before.members.map(member => mode === 'member' && member.email === ADMIN ? { ...member, allSources: true } : member),
+      teams: mode === 'team' ? [{ id: 'team-1111111111111111', name: 'All connectors', memberEmails: [NEW_PERSON], sourceIds: [], allSources: true }] : [],
+    };
+    const saved = await gateway.api('/api/team-actions', { method: 'POST', body: request });
+    assert.equal(saved.status, 200, await saved.clone().text());
+    const prepared = await prepareNewSource(gateway);
+    const applied = await gateway.apply(prepared, {}, null);
+    assert.equal(applied.status, 200, await applied.clone().text());
+    const after = await gateway.view();
+    const consent = mode === 'member' ? after.members.find(member => member.email === ADMIN) : after.teams[0];
+    assert.equal(consent.allSources, true);
+    assert.ok(consent.sourceIds.includes(prepared.source.id));
+    const sourcePolicy = sourceAccessPolicy(gateway, prepared.source.id);
+    assert.equal(sourcePolicy.decision, 'allow');
+    if (mode === 'member') assert.ok(sourcePolicy.include.some(rule => rule.email?.email === ADMIN));
+    else assert.ok(ruleGroups(sourcePolicy).includes([...gateway.provider.groups.values()][0].id));
+    assert.deepEqual(after.sources.find(source => source.id === prepared.source.id).enabledTools, ['company_lookup']);
+    const selected = { ...consent };
+    delete selected.allSources;
+    const disabled = await gateway.api('/api/team-actions', { method: 'POST', body: { schemaVersion: 1, expectedRevision: after.revision,
+      members: mode === 'member' ? after.members.map(member => member.email === ADMIN ? selected : member) : after.members,
+      teams: mode === 'team' ? [selected] : after.teams,
+    } });
+    assert.equal(disabled.status, 200, await disabled.clone().text());
+    const final = await gateway.view();
+    assert.equal((mode === 'member' ? final.members.find(member => member.email === ADMIN) : final.teams[0]).allSources, undefined);
+    const later = await prepareNewSource(gateway, { url: 'https://catalog.example.net/mcp-b' });
+    const laterApplied = await gateway.apply(later, {}, null);
+    assert.equal(laterApplied.status, 200, await laterApplied.clone().text());
+    assert.equal(sourceAccessPolicy(gateway, later.source.id).decision, 'deny');
+  }));
+}
+
+test('all MCPs consent covers a new native connector but does not grant dashboard administration', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: { schemaVersion: 1, expectedRevision: before.revision,
+    members: before.members, teams: [{ id: 'team-1111111111111111', name: 'All connectors', memberEmails: [MEMBER], sourceIds: [], allSources: true }],
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const { source } = await installManagementSource(gateway);
+  const after = await gateway.view();
+  assert.ok(after.teams[0].sourceIds.includes(source.id));
+  assert.equal(after.teams[0].allSources, true);
+  const call = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status', arguments: {} }, { email: MEMBER });
+  assert.equal(call.response.status, 200);
+  assert.notEqual(after.members.find(member => member.email === MEMBER)?.dashboardAccess, true);
+}));
+
+test('all MCPs mode pins the runtime even when current policy selections do not change', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: { schemaVersion: 1, expectedRevision: before.revision,
+    members: before.members.map(member => member.email === ADMIN ? { ...member, allSources: true } : member),
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
+}));
+
+test('all MCPs source policy update resumes after a committed write loses its response', async () => fixture(async (gateway) => {
+  const before = await gateway.view();
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: { schemaVersion: 1, expectedRevision: before.revision,
+    members: before.members.map(member => ({ ...member, allSources: member.email === ADMIN })),
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const prepared = await prepareNewSource(gateway);
+  let dropped = false;
+  gateway.provider.hook(async ({ record, state }) => {
+    if (!dropped && record.method === 'PUT' && record.pathname.includes('/policies/')) {
+      dropped = true;
+      const [appId, , policyId] = record.pathname.split('/access/apps/')[1].split('/');
+      const policies = state.policies.get(appId);
+      const index = policies.findIndex(policy => policy.id === policyId);
+      policies[index] = { ...record.body, id: policyId };
+      return new Response('Synthetic lost response', { status: 503 });
+    }
+  });
+  const first = await gateway.apply(prepared, {}, null);
+  assert.equal(first.status, 409, await first.clone().text());
+  gateway.provider.hook(null);
+  await expireSourceAction(gateway, prepared.claim.actionId);
+  const resumed = await gateway.api(`/api/source-actions/${prepared.claim.actionId}/renew`, { method: 'POST', body: {
+    schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id,
+  } });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  const after = await gateway.view();
+  assert.ok(after.members.find(member => member.email === ADMIN).sourceIds.includes(prepared.source.id));
+}));
+
 for (const initialState of ['before first Team view', 'after Team view']) {
   test(`new source starts denied ${initialState} without changing existing grants or receipts`, async () => fixture(async (gateway) => {
     assert.equal(gateway.managementStorage.snapshot(TEAM_KEY), undefined);
@@ -1175,7 +1266,7 @@ for (const committedBeforeInterruption of [false, true]) {
     let interrupted = false;
     gateway.managementStorage.put = async (key, value) => {
       if (Object.hasOwn(key, SOURCES_KEY)) {
-        assert.deepEqual(Object.keys(key).sort(), [controlKey, SOURCES_KEY, SOURCE_ACTIONS_KEY].sort());
+        assert.deepEqual(Object.keys(key).sort(), [controlKey, SOURCES_KEY, SOURCE_ACTIONS_KEY, TEAM_KEY].sort());
         const completed = key[SOURCE_ACTIONS_KEY].actions.find((action) => action.actionId === prepared.claim.actionId);
         assert.equal(completed.status, 'succeeded');
         assert.equal(key[SOURCES_KEY].sources.find((source) => source.id === prepared.source.id).status, 'installed');
@@ -5004,6 +5095,18 @@ test('built-in API sources install, isolate data access, update Team policies an
   assert.equal((await rpc('tools/call', { name: 'listStock', arguments: {} })).body.error.code, -32602);
   assert.deepEqual((await rpc('tools/list')).body.result.tools, catalogue.body.result.tools);
 
+  const setMode = async (allTools) => gateway.api(installedToolsPath(source.id), { method: 'PUT', body: {
+    schemaVersion: 1, revision: gateway.managementStorage.snapshot(SOURCES_KEY).revision, enabledTools: ['getStock'], allTools,
+  } });
+  const all = await setMode(true);
+  assert.equal(all.status, 200, await all.clone().text());
+  activeTools.push({ ...tool, name: 'futureStock' });
+  assert.equal((await rpc('tools/call', { name: 'futureStock', arguments: {} })).body.result.isError, false);
+  assert.equal((await rpc('tools/call', { name: 'futureStock' }, NEW_PERSON)).status, 401);
+  const manualAgain = await setMode(false);
+  assert.equal(manualAgain.status, 200, await manualAgain.clone().text());
+  assert.equal((await rpc('tools/call', { name: 'futureStock', arguments: {} })).body.error.code, -32602);
+
   assert.equal((await rpc('tools/call', { name: 'save_api_source_draft' })).body.error.code, -32602);
   assert.equal((await rpc('tools/call', { name: 'getStock' }, MEMBER, MANAGEMENT_AUDIENCE)).status, 401);
   assert.equal((await managementRpc(gateway, 'tools/list', {}, { email: MEMBER, audience: native.aud })).response.status, 401);
@@ -6800,4 +6903,96 @@ test('shared migration preserves permissions and refuses drift but can precede o
   const checked = await gateway.api(`/api/sources/${MANAGEMENT_ID}/connection`, { method: 'POST' });
   assert.equal((await checked.json()).state, 'authorization_required');
   assert.equal(server.authentication_status, 'required');
+}));
+
+test('All tools persists explicit consent, allows future catalogue tools, and can return to manual selection', () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const edit = async (allTools, enabledTools = ['company_lookup']) => {
+    const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+    return gateway.api(installedToolsPath(installed.source.id), { method: 'PUT', body: {
+      schemaVersion: 1, revision, enabledTools, allTools,
+    } });
+  };
+  assert.equal(portalMapping(gateway, installed.serverId).default_disabled, true);
+  const saved = await edit(true);
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal((await saved.json()).sources.find(source => source.id === installed.source.id).allTools, true);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  gateway.provider.state.servers.get(installed.serverId).tools.push({ name: 'company_future', inputSchema: { type: 'object' } });
+  await dashboardClient(gateway, async dashboard => {
+    const view = await dashboard.getInstalledSourceTools(installed.source.id);
+    assert.equal(view.allTools, true);
+    assert.ok(view.tools.some(tool => tool.name === 'company_future'));
+    assert.equal((await dashboard.getSources()).sources.find(source => source.id === installed.source.id).allTools, true);
+  });
+  // Provider default applies to names with no individual override, without another gateway save.
+  const mapping = portalMapping(gateway, installed.serverId);
+  assert.equal(mapping.updated_tools.some(tool => tool.name === 'company_future'), false);
+  assert.equal(mapping.default_disabled, false);
+  assert.equal(gateway.managementStorage.snapshot(SOURCES_KEY).revision, revision);
+  const team = await gateway.view();
+  assert.equal(team.editingEnabled, true);
+  const manual = await edit(false);
+  assert.equal(manual.status, 200, await manual.clone().text());
+  assert.equal((await manual.json()).sources.find(source => source.id === installed.source.id).allTools, undefined);
+  assert.equal(portalMapping(gateway, installed.serverId).default_disabled, true);
+  assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, [{ name: 'company_lookup', enabled: true }]);
+}));
+
+test('All tools consent survives a lost Portal response and cannot be changed during recovery', () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const body = { schemaVersion: 1, revision, enabledTools: ['company_lookup'], allTools: true };
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method !== 'PUT' || !record.pathname.includes('/mcp/portals/')) return undefined;
+    state.portal = { id: state.portal.id, ...record.body, servers: record.body.servers.map(mapping => ({ ...mapping, server_id: mapping.id })) };
+    throw new Error('lost portal response');
+  });
+  await refused(await gateway.api(installedToolsPath(installed.source.id), { method: 'PUT', body }), 409, 'source_tools_recovery_required');
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY).allTools, true);
+  assert.equal((await (await gateway.api(installedToolsPath(installed.source.id))).json()).pendingAllTools, true);
+  await refused(await gateway.api(installedToolsPath(installed.source.id), { method: 'PUT', body: { ...body, allTools: false } }), 409, 'source_tools_pending');
+  gateway.provider.hook(undefined);
+  const saved = await gateway.api(installedToolsPath(installed.source.id), { method: 'PUT', body });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(gateway.managementStorage.snapshot(SOURCE_TOOL_EDIT_KEY), null);
+  assert.equal(portalMapping(gateway, installed.serverId).default_disabled, false);
+}));
+
+test('All tools on native management permits tools outside the saved snapshot but preserves assignment checks', () => fixture(async (gateway) => {
+  const { server } = await installManagementSource(gateway, ['get_gateway_status']);
+  const call = () => managementRpc(gateway, 'tools/call', { name: 'get_installed_source_tools', arguments: { sourceId: MANAGEMENT_ID } });
+  assert.equal((await call()).body.error.code, -32602);
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const saved = await gateway.api(installedToolsPath(MANAGEMENT_ID), { method: 'PUT', body: {
+    schemaVersion: 1, revision, enabledTools: ['get_gateway_status'], allTools: true,
+  } });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal(portalMapping(gateway, server.id).default_disabled, false);
+  assert.equal((await call()).body.result.structuredContent.ok, true);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'unknown_future_tool' })).body.error.code, -32602);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'get_gateway_status' }, { email: NEW_PERSON })).response.status, 401);
+}));
+
+test('a new sign-in MCP can choose All tools before installation completes', () => signInFixture(async (gateway) => {
+  const installed = await installSignInSource(gateway);
+  connectSignInSource(gateway, installed.serverId);
+  await dashboardClient(gateway, async dashboard => {
+    const chosen = await dashboard.chooseSourceActionTools(installed.action.actionId, installed.sources.revision,
+      installed.source.id, ['records_search'], true);
+    assert.equal(chosen.allTools, true);
+    const applied = await dashboard.prepareSourceAction(chosen.revision, installed.source.id, installed.action.actionId);
+    assert.equal(applied.status, 'succeeded');
+    assert.equal((await dashboard.getSources()).sources.find(source => source.id === installed.source.id).allTools, true);
+  });
+  assert.equal(portalMapping(gateway, installed.serverId).default_disabled, false);
+}));
+
+
+test('a new public MCP stores All tools in its approved draft and Portal mapping', () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway, { allTools: true });
+  assert.equal(installed.source.allTools, true);
+  assert.equal(portalMapping(gateway, installed.serverId).default_disabled, false);
+  const saved = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find(source => source.id === installed.source.id);
+  assert.equal(saved.allTools, true);
 }));

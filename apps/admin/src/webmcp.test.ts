@@ -401,7 +401,7 @@ describe('connector pause and current state', () => {
 
   it('discloses connector grants and lifecycle restrictions before agent actions', () => {
     const { tool, api } = fixture()
-    expect(tool('apply_mcp_source').description).toContain('denied to everyone')
+    expect(tool('apply_mcp_source').description).toContain('applies saved all-MCP consent before completion')
     expect(tool('apply_mcp_source').description).toContain('explicit Team grant')
     expect(tool('apply_mcp_source').description).toContain('preparation alone does not')
     expect(tool('apply_mcp_source').description).toContain('Finish or recover this action before gateway removal')
