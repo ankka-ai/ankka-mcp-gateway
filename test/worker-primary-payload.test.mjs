@@ -1533,6 +1533,50 @@ test('the runtime journal follows a release the Worker received outside an actio
   assert.equal(held.revision, followed.revision + 1, 'only the prepared action advanced the journal');
 });
 
+test('a running target recovers an unconfirmed handover without replaying deployment or trusting a requested version', async () => {
+  const { env } = await installReadyGateway();
+  const storage = env.ADMIN_STATE.objects.get('v1:management').storage;
+  const key = 'ankka-mcp-gateway/runtime-updates/v1';
+  const readJournal = async (environment) => {
+    const response = await new AdminState({ storage }, environment).fetch(new Request('https://admin-state.invalid/runtime-updates'));
+    assert.equal(response.status, 200, await response.clone().text());
+    return storage.get(key);
+  };
+  const initial = await readJournal(env);
+  const now = Date.now();
+  const target = { release: 'gateway-v0.1.4', artifactSha256: `sha256:${'4'.repeat(64)}`, versionId: null };
+  const environment = { ...env, ANKKA_GATEWAY_RELEASE: target.release, ANKKA_GATEWAY_RELEASE_SHA256: target.artifactSha256 };
+  const action = { schemaVersion: 1, actionId: `action_${'a'.repeat(32)}`, actionKeyHash: `sha256:${'b'.repeat(64)}`,
+    actorEmail: 'admin@example.com', issuedAt: now - 30_000, expiresAt: now + 30_000,
+    operation: 'update', from: initial.current, to: target, fromVersionId: null, toVersionId: null,
+    status: 'recovery_required', stage: 'assets_uploaded', failureCode: 'runtime_update_unconfirmed' };
+  for (const [change, running, succeeds] of [
+    [{}, environment, true],
+    [{ issuedAt: now - 120_000, expiresAt: now - 60_000 }, environment, true],
+    [{ status: 'applying', failureCode: null, issuedAt: now - 120_000, expiresAt: now - 60_000 }, environment, true],
+    [{}, env, false],
+    [{}, { ...environment, ANKKA_GATEWAY_RELEASE_SHA256: `sha256:${'5'.repeat(64)}` }, false],
+    [{ status: 'authorization_required', stage: null, failureCode: null }, environment, false],
+    [{ status: 'applying', failureCode: null }, environment, false],
+    [{ failureCode: 'different_failure' }, environment, false],
+  ]) {
+    const pending = { ...action, ...change };
+    await storage.put(key, { ...initial, actions: [pending] });
+    const result = await readJournal(running);
+    assert.equal(result.actions[0].status === 'succeeded', succeeds, JSON.stringify(change));
+    if (!succeeds) {
+      assert.deepEqual(result.actions[0], pending);
+      continue;
+    }
+    assert.equal(result.actions[0].stage, 'health_verified');
+    assert.equal(result.actions[0].failureCode, null);
+    assert.deepEqual(result.current, target);
+    assert.deepEqual(result.previous, initial.current);
+    assert.equal((await storage.get('ankka-mcp-gateway/public-status/v1')).release, target.release);
+    assert.deepEqual(await readJournal(running), result, 'completion is idempotent');
+  }
+});
+
 test('signed runtime updates require explicit authorization, journal progress in customer storage, and retain rollback', () => (
   exerciseSignedRuntimeUpdate(false)
 ));

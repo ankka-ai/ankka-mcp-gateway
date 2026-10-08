@@ -5597,6 +5597,32 @@ async function runtimeUpdates(storage, environment) {
 // flight, the journal follows the release the object actually runs, keeps the
 // recorded one as the rollback reference, and the public status follows too.
 async function followRunningRelease(storage, state, environment) {
+  // A delayed rollout can outlive the handover alarm's confirmation window.
+  // The exact release and digest in this object's own bindings prove that the
+  // authorized target arrived. Repair only the latest unconfirmed handover;
+  // never deploy again, accept a client-reported version, or revive a grant.
+  const latest = state.actions.at(-1);
+  const unconfirmed = latest && latest.stage !== null && (
+    (latest.status === 'recovery_required' && latest.failureCode === 'runtime_update_unconfirmed') ||
+    (latest.status === 'applying' && latest.expiresAt <= Date.now())
+  );
+  const sameRelease = (version) => version.release === environment.release &&
+    version.artifactSha256 === environment.releaseSha256;
+  if (unconfirmed && sameRelease(latest.to) &&
+      (sameRelease(state.current) || (state.current.release === latest.from.release &&
+        state.current.artifactSha256 === latest.from.artifactSha256))) {
+    const completed = { ...latest, status: 'succeeded', stage: 'health_verified', failureCode: null, toVersionId: null };
+    const recovered = await saveRuntimeUpdates(storage, {
+      ...state, revision: state.revision + 1,
+      current: { ...latest.to, versionId: null },
+      previous: { ...latest.from, versionId: latest.fromVersionId },
+      actions: [...state.actions.slice(0, -1), completed],
+    });
+    if (!recovered) return state;
+    const status = safePublicStatus(await storage.get(STATUS_KEY));
+    if (status) await storage.put(STATUS_KEY, { ...status, release: environment.release, updatedAt: new Date().toISOString() });
+    return recovered;
+  }
   if (state.current.release === environment.release &&
       state.current.artifactSha256 === environment.releaseSha256) return state;
   const now = Date.now();
