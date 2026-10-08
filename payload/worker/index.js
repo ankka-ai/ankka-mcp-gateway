@@ -2998,14 +2998,17 @@ function safeCompanyDescriptions(value, enabledTools = null) {
   return Object.freeze(value.map((entry) => Object.freeze({ ...entry })).sort((a, b) => compareText(a.name, b.name)));
 }
 
-function captureCompanyDescriptions(source, server) {
-  if (sourceConnectionFailure(server, source) ||
+function captureCompanyDescriptions(source, server, installed = false) {
+  const failure = sourceConnectionFailure(server, source);
+  if ((failure && !(installed && failure === 'source_tools_mismatch')) ||
       (server.updated_tools != null && (!Array.isArray(server.updated_tools) || server.updated_tools.some((entry) => !isRecord(entry)))) ||
       new Set(server.tools.map((entry) => entry.name)).size !== server.tools.length) return null;
+  // An installed source keeps approval for removed tools, but there is no
+  // current upstream description to capture for those names.
   return safeCompanyDescriptions(source.enabledTools.map((name) => {
     const tool = server.tools.find((entry) => entry.name === name);
     const override = server.updated_tools?.find((entry) => entry.name === name);
-    return { name, description: override?.description ?? tool.description ?? '' };
+    return { name, description: override?.description ?? tool?.description ?? '' };
   }), source.enabledTools);
 }
 
@@ -3960,13 +3963,45 @@ function syncedSourceCatalogue(server) {
   return state('ready', tools.sort((left, right) => compareText(left.name, right.name)));
 }
 
-function portalExact(value, control, mappings) {
+// The saved allowlist is approval, not a promise that an upstream still offers
+// every tool. Only a complete, ready catalogue can narrow a Portal write. An
+// absent, failed or stale catalogue must never be interpreted as an empty one.
+function availablePortalMappings(value, mappings, requiredServerId = null) {
+  return mappings.map((mapping) => {
+    // An explicit tool selection must be applied in full, including tools a
+    // native source is about to sync. Do not mistake their absence for success.
+    if (mapping.server_id === requiredServerId) return mapping;
+    const server = value?.servers?.find((entry) => (entry.server_id ?? entry.id) === mapping.server_id);
+    const catalogue = syncedSourceCatalogue(server);
+    if (catalogue.state !== 'ready' || server.error || server.error_details) return mapping;
+    const available = new Set(catalogue.tools.map((tool) => tool.name));
+    return { ...mapping, updated_tools: mapping.updated_tools.filter((tool) => available.has(tool.name)) };
+  });
+}
+
+function portalExact(value, control, mappings, requiredServerId = null) {
   const observed = normalizedPortalMappings(value);
-  const expected = [...mappings].map((mapping) => ({
+  if (!portalStaticMatches(value, control) || !observed) return false;
+  const expected = availablePortalMappings(value, mappings, requiredServerId).map((mapping) => ({
     ...mapping,
     updated_tools: [...mapping.updated_tools].sort((left, right) => compareText(left.name, right.name)),
   })).sort((left, right) => compareText(left.server_id, right.server_id));
-  return portalStaticMatches(value, control) && observed !== null && canonicalJson(observed) === canonicalJson(expected);
+  return canonicalJson(observed) === canonicalJson(expected);
+}
+
+// Team and connection operations do not write tool mappings. A missing tool
+// reduces exposure and must not prevent these operations, even during an
+// upstream outage. Still reject extra tools, changed metadata, routing or
+// ownership. Writes use the stricter catalogue comparison above.
+function portalWithinToolApproval(value, control, mappings) {
+  const observed = normalizedPortalMappings(value);
+  if (!portalStaticMatches(value, control) || !observed || observed.length !== mappings.length) return false;
+  return observed.every((mapping) => {
+    const expected = mappings.find((entry) => entry.server_id === mapping.server_id);
+    if (!expected || mapping.default_disabled !== expected.default_disabled || mapping.on_behalf !== expected.on_behalf) return false;
+    const approved = new Map(expected.updated_tools.map((tool) => [tool.name, tool]));
+    return mapping.updated_tools.every((tool) => approved.has(tool.name) && canonicalJson(tool) === canonicalJson(approved.get(tool.name)));
+  });
 }
 
 async function finalizeSourceAction(storage, action) {
@@ -4197,7 +4232,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
       // The guide uses `id` while the API schema requires `server_id`.
       // Send both with one identity; keep retained desired hashes unchanged.
       method: 'PUT', body: canonicalJson({ ...portalBody,
-        servers: mappings.map((mapping) => ({ ...mapping, id: mapping.server_id })),
+        servers: availablePortalMappings(live.result, mappings).map((mapping) => ({ ...mapping, id: mapping.server_id })),
       }),
     });
     if (updated.status !== 'ok') {
@@ -4632,12 +4667,12 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (server.status !== 'ok') return view('unknown', 'check_failed');
   if (!desired || !mcpMatches(server.result, desired) || desired.key !== serverId) return view('unknown', 'configuration_changed');
   // Sync can discover new tools. Only proceed with the receipt-owned Portal's
-  // exact default-disabled mappings, so discovery cannot enable any of them.
+  // approved, default-disabled mappings, so discovery cannot enable any of them.
   const mappings = installedPortalMappings(control, sources);
   const portal = await providerCall(`/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`, token, { signal });
   if (portal.status === 'auth') return view('unknown', 'management_credential_required');
   if (portal.status !== 'ok') return view('unknown', 'check_failed');
-  if (!mappings || !portalExact(portal.result, control, mappings)) return view('unknown', 'configuration_changed');
+  if (!mappings || !portalWithinToolApproval(portal.result, control, mappings)) return view('unknown', 'configuration_changed');
   if (source.authMode === 'oauth') {
     reconnectUrl = `https://dash.cloudflare.com/${encodeURIComponent(control.accountId)}` +
       `/one/access-controls/ai-controls/mcp-server/edit/${encodeURIComponent(serverId)}`;
@@ -4782,7 +4817,7 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   const signal = AbortSignal.timeout(30_000);
   const portal = await providerCall(portalPath, token, { signal });
   const matchesBefore = portal.status === 'ok' && portalExact(portal.result, control, before);
-  const matchesAfter = portal.status === 'ok' && portalExact(portal.result, control, after);
+  const matchesAfter = portal.status === 'ok' && portalExact(portal.result, control, after, serverId);
   if (!edit && portal.status !== 'ok') return sourceToolsRefusal(502, 'source_catalogue_unavailable');
   if (!edit && !matchesBefore && !matchesAfter) return sourceToolsRefusal(409, 'source_portal_drift');
   if (edit && (portal.status !== 'ok' || (!matchesBefore && !matchesAfter))) {
@@ -4822,11 +4857,11 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
     const written = await providerCall(portalPath, token, { method: 'PUT', signal, body: canonicalJson({
       name: control.portal.name, hostname: control.portal.hostname, description: control.portal.marker,
       code_mode: 'default_on', secure_web_gateway: false,
-      servers: after.map((mapping) => ({ ...mapping, id: mapping.server_id })),
+      servers: availablePortalMappings(portal.result, after, serverId).map((mapping) => ({ ...mapping, id: mapping.server_id })),
     }) });
     if (written.status !== 'ok') return sourceToolsRefusal(409, 'source_tools_recovery_required');
     const verified = await providerCall(portalPath, token, { signal });
-    if (verified.status !== 'ok' || !portalExact(verified.result, control, after)) {
+    if (verified.status !== 'ok' || !portalExact(verified.result, control, after, serverId)) {
       return sourceToolsRefusal(409, 'source_tools_recovery_required');
     }
   } else if ((changingConnection || introducingBaseline || metadataChanged || toolMetadata.length > 0) && !await armSourceCompatibility(storage, env)) {
@@ -4933,7 +4968,7 @@ async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEm
   const server = await providerCall(serverPath, token, { signal });
   if (server.status === 'auth') return sourceToolsRefusal(409, 'management_credential_required');
   if (server.status !== 'ok' || !mcpMatches(server.result, serverDesired)) return sourceToolsRefusal(409, edit ? 'source_label_recovery_required' : 'source_label_drift');
-  const companyDescriptions = company ? edit?.companyDescriptions ?? source.companyDescriptions ?? captureCompanyDescriptions(source, server.result) : [];
+  const companyDescriptions = company ? edit?.companyDescriptions ?? source.companyDescriptions ?? captureCompanyDescriptions(source, server.result, true) : [];
   if (!companyDescriptions) return sourceToolsRefusal(409, 'source_context_too_large');
   const nextSource = withCompany({ ...source, label }, company, companyDescriptions);
   const nextSources = safeManagementSources({
@@ -4996,7 +5031,7 @@ async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEm
       const written = await providerCall(portalPath, token, { method: 'PUT', signal, body: canonicalJson({
         name: control.portal.name, hostname: control.portal.hostname, description: control.portal.marker,
         code_mode: 'default_on', secure_web_gateway: false,
-        servers: after.map((mapping) => ({ ...mapping, id: mapping.server_id })),
+        servers: availablePortalMappings(portal.result, after).map((mapping) => ({ ...mapping, id: mapping.server_id })),
       }) });
       if (written.status !== 'ok') return sourceToolsRefusal(409, 'source_label_recovery_required');
       const verified = await providerCall(portalPath, token, { signal });
@@ -5283,11 +5318,11 @@ async function installedSourceOauthContext(storage, env, input) {
   if (server.status !== 'ok') sourceOauthFailure();
   if (!desired || !mcpMatches(server.result, desired) || desired.key !== serverId) sourceOauthFailure();
   // Sync can discover new tools. Only proceed with the receipt-owned Portal's
-  // exact default-disabled mappings, so discovery cannot enable any of them.
+  // approved, default-disabled mappings, so discovery cannot enable any of them.
   const mappings = installedPortalMappings(control, sources);
   const portal = await providerCall(`/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`, token, { signal });
   if (portal.status !== 'ok') sourceOauthFailure();
-  if (!mappings || !portalExact(portal.result, control, mappings)) sourceOauthFailure();
+  if (!mappings || !portalWithinToolApproval(portal.result, control, mappings)) sourceOauthFailure();
   // Cloudflare's summary is non-secret. Keep a previously selected scope set
   // when available, instead of requesting every newly advertised permission.
   const scope = server.result.auth_config_summary?.registration_info?.scope;
@@ -7001,7 +7036,7 @@ async function removeManagedSource(storage, env, input) {
         const written = await providerCall(portalPath, token, { method: 'PUT', signal, body: canonicalJson({
           name: control.portal.name, hostname: control.portal.hostname, description: control.portal.marker,
           code_mode: 'default_on', secure_web_gateway: false,
-          servers: after.map((mapping) => ({ ...mapping, id: mapping.server_id })),
+          servers: availablePortalMappings(current.result, after).map((mapping) => ({ ...mapping, id: mapping.server_id })),
         }) });
         if (written.status !== 'ok') return sourceRemovalRefusal('source_removal_recovery_required');
         const verified = await readPortal();
@@ -8688,7 +8723,7 @@ async function verifyManagementAccess(storage, env) {
     };
     // As when a source is attached: the guide names `id`, the schema `server_id`. A Portal without sources keeps the
     // body it was created with, which carries no server list.
-    if (mappings.length > 0) body.servers = mappings.map((mapping) => ({ ...mapping, id: mapping.server_id }));
+    if (mappings.length > 0) body.servers = availablePortalMappings(portal.result, mappings).map((mapping) => ({ ...mapping, id: mapping.server_id }));
     const written = await providerCall(portalPath, token, { method: 'PUT', body: canonicalJson(body), signal });
     if (written.status !== 'ok') return word(written);
     const after = await providerCall(portalPath, token, { signal });
@@ -9129,7 +9164,7 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   if (!credentialValid) return fail('team_management_token_unavailable');
   if (!teamProviderOk(context, applications) || !Array.isArray(applications.result)) return fail('team_applications_unavailable');
   if (!teamProviderOk(context, portal)) return fail('team_portal_unavailable');
-  if (!portalExact(portal.result, context.control, context.authority.portalMappings)) return fail('team_portal_changed');
+  if (!portalWithinToolApproval(portal.result, context.control, context.authority.portalMappings)) return fail('team_portal_changed');
   const readPolicy = async (policy) => {
     if (policy.kind === 'dashboard') {
       const live = await readDashboardPolicy(context.environment, policy, token, context.signal);

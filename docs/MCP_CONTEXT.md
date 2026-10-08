@@ -98,6 +98,50 @@ Repeat in both modes and supported clients after refreshing cached definitions.
 Measure routing accuracy separately from answer accuracy, latency and tokens.
 Descriptions guide selection; upstream permissions and allowlists enforce access.
 
+## When an upstream changes its tools
+
+The saved tool list records what your team approved. Cloudflare's synced
+catalogue records what a source currently offers. Removing or renaming an
+upstream tool must not invalidate Team access: existing approved tools keep
+working, and newly discovered names remain disabled until selected.
+
+Team reads, Team changes, connection checks and reconnects tolerate missing
+tool mappings, including during an upstream outage. They still verify the
+owned Portal and servers, default-disabled behavior, connection routing and
+every exposed tool's approval and metadata. They do not rewrite tool mappings.
+
+Subsequent Portal writes omit removed tools only when a valid, ready catalogue
+confirms their absence. They retain saved approvals and custom metadata. An
+unavailable, stale or malformed catalogue does not count as an empty catalogue.
+A tool still offered upstream but disabled outside Ankka is not silently
+re-enabled. Explicit tool selections must be applied in full; newly selected
+tools cannot be silently dropped as unavailable.
+
+There are two separate refresh steps:
+
+1. **Source to Cloudflare:** Cloudflare documents background synchronization
+   approximately every two hours for DCR servers. **Check connections** requests
+   an immediate sync for eligible shared connections. New tools stay disabled;
+   no upstream credential passes through Ankka. See
+   [Cloudflare's synchronization behavior](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/#synchronize-the-mcp-server).
+2. **Cloudflare to the connected client:** ordinary MCP sessions terminate at
+   Cloudflare's Portal. Its advertised `tools.listChanged` capability permits
+   tool-list notifications, which supporting clients use to fetch updated
+   definitions. Advertising the capability alone does not prove delivery for
+   every catalogue change or that a client refreshes its model context.
+   [MCP's notification contract](https://modelcontextprotocol.io/docs/2026-07-28/learn/architecture)
+   depends on the negotiated protocol and is best effort. Refresh or reconnect
+   clients that retain old definitions. Ankka does not add a second MCP proxy.
+
+To verify propagation, use a disposable source with two connected clients.
+Remove one approved tool, add an unapproved tool, then sync the source. Confirm
+Team still loads, remaining tools execute, the removed tool disappears from
+`tools/list`, and the new tool stays hidden. Record notification receipt and
+the next `tools/list` response for both clients, in normal and Code Mode.
+Test a client that ignores notifications separately. Local regression tests
+prove the management behavior; they do not prove end-to-end notification
+delivery. Do not replay a failed write tool automatically after a refresh.
+
 Keep company-specific definitions, examples, recipes and results in your
 Cloudflare account or your team's chosen client storage. This public repository
 contains only generic guidance and synthetic fixtures.

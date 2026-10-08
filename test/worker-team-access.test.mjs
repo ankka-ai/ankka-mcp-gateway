@@ -4719,13 +4719,14 @@ test('management catalogue uses the installed release and automatically syncs a 
   assert.deepEqual(catalogue.enabledTools, ['get_gateway_status']);
   assertNoMutation(gateway.provider, baseline);
   let syncs = 0;
-  gateway.provider.hook(({ record }) => {
+  gateway.provider.hook(({ record, state }) => {
     if (record.pathname === `${SERVERS_PATH}/${server.id}/sync` && record.method === 'POST') {
       syncs += 1;
       server.tools = available;
       // A lost response must not prevent confirming the successful sync by readback.
       return envelope(null, 503);
     }
+    return syncedPortalResponse(record, state);
   });
   const selected = ['get_gateway_status', 'get_gateway_team'];
   const saved = await putInstalledTools(gateway, MANAGEMENT_ID, catalogue.revision, selected);
@@ -6246,6 +6247,131 @@ test('Company on the original receipt-owned source preserves teardown and tool s
 }));
 
 const connectionPath = (sourceId) => `/api/sources/${sourceId}/connection`;
+
+// Cloudflare embeds its current server catalogue in Portal reads. Its stored
+// overrides can shrink when an upstream stops offering an approved tool.
+function syncedPortalResponse(record, state) {
+  if (record.method === 'GET' && record.pathname.endsWith(`/mcp/portals/${state.portal.id}`)) {
+    return envelope({ ...state.portal, servers: state.portal.servers.map((mapping) => ({
+      ...state.servers.get(mapping.server_id), ...mapping,
+    })) });
+  }
+}
+
+function serveSyncedPortalCatalogue(gateway) {
+  gateway.provider.hook(({ record, state }) => {
+    if (record.method === 'POST' && record.pathname.endsWith('/sync')) return envelope({ status: 'ready' });
+    return syncedPortalResponse(record, state);
+  });
+}
+
+test('catalogue removals and outages do not block Team or connection checks or change approvals', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  server.tools = [{ name: 'company_lookup_v2' }];
+  portalMapping(gateway, installed.serverId).updated_tools = [];
+  serveSyncedPortalCatalogue(gateway);
+  const approved = gateway.managementStorage.snapshot(SOURCES_KEY);
+  const ownership = gateway.managementStorage.snapshot(CONTROL_KEY);
+  const portal = structuredClone(gateway.provider.state.portal);
+  for (const status of ['ready', 'stale', 'error']) {
+    server.status = status;
+    const baseline = gateway.provider.requests.length;
+    await gateway.view();
+    assertNoMutation(gateway.provider, baseline);
+    assert.ok(gateway.provider.requests.slice(baseline).every(r => !r.pathname.includes('/mcp/servers')));
+  }
+  const result = await (await gateway.api(connectionPath(installed.source.id), { method: 'POST' })).json();
+  assert.equal(result.state, 'connected', JSON.stringify(result));
+  const saved = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(await gateway.view()) });
+  assert.equal(saved.status, 200, await saved.clone().text());
+  assert.equal((await saved.json()).action.status, 'succeeded');
+  gateway.reloadManagement();
+  assert.ok((await gateway.view()).members.some(member => member.email === NEW_PERSON));
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY), approved);
+  assert.deepEqual(gateway.managementStorage.snapshot(CONTROL_KEY), ownership);
+  assert.deepEqual(gateway.provider.state.portal, portal);
+}));
+
+for (const removeAll of [false, true]) test(`catalogue removals are omitted from later Portal writes without enabling replacements or forgetting approval (all: ${removeAll})`, async () => fixture(async (gateway) => {
+  await gateway.view();
+  const original = gateway.managementStorage.snapshot(SOURCES_KEY).sources[0];
+  const owner = gateway.managementStorage.snapshot(CONTROL_KEY).sourceOwnership.find(entry => entry.sourceId === original.id);
+  const serverId = owner.resources[0].provider.id;
+  const server = gateway.provider.state.servers.get(serverId);
+  const removed = removeAll ? original.enabledTools : [original.enabledTools[0]];
+  server.tools = [...server.tools.filter(tool => !removed.includes(tool.name)), { name: 'replacement_tool' }];
+  portalMapping(gateway, serverId).updated_tools = portalMapping(gateway, serverId).updated_tools.filter(tool => !removed.includes(tool.name));
+  serveSyncedPortalCatalogue(gateway);
+  assert.equal((await verifyToken(gateway)).status, 'verified');
+  const installed = await installAdditionalSource(gateway);
+  const anotherServer = gateway.provider.state.servers.get(installed.serverId);
+  anotherServer.tools.push({ name: 'company_update' });
+  const revision = gateway.managementStorage.snapshot(SOURCES_KEY).revision;
+  const saved = await putInstalledTools(gateway, installed.source.id, revision, ['company_lookup', 'company_update']);
+  assert.equal(saved.status, 200, await saved.clone().text());
+  const labelled = await putCompany(gateway, installed.source, 'Company B');
+  assert.equal(labelled.status, 200, await labelled.clone().text());
+  assert.equal((await removeSource(gateway, installed.source.id)).status, 200);
+  for (const company of ['Company A', '']) {
+    const renamed = await putCompany(gateway, original, company);
+    assert.equal(renamed.status, 200, await renamed.clone().text());
+  }
+  assert.deepEqual(gateway.managementStorage.snapshot(SOURCES_KEY).sources.find(source => source.id === original.id), original);
+  for (const tool of portalMapping(gateway, serverId).updated_tools) {
+    assert.equal(removed.includes(tool.name), false);
+    assert.notEqual(tool.name, 'replacement_tool');
+  }
+  assert.equal((await gateway.currentTeardown(5)).prepared.status, 200);
+}));
+
+test('catalogue omissions cannot hide extra tools, altered metadata, routing or source ownership from Team', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const original = structuredClone(gateway.provider.state.portal);
+  const mutations = [
+    mapping => { mapping.updated_tools = [{ name: 'new_unapproved_tool', enabled: true }]; },
+    mapping => { mapping.updated_tools[0].alias = 'unexpected_alias'; },
+    mapping => { mapping.updated_tools[0].description = 'Unexpected description.'; },
+    mapping => { mapping.default_disabled = false; },
+    mapping => { mapping.on_behalf = !mapping.on_behalf; },
+    mapping => { mapping.server_id = 'unexpected-server'; },
+    mapping => { mapping.updated_prompts = [{ name: 'unexpected_prompt', enabled: true }]; },
+  ];
+  for (const mutate of mutations) {
+    gateway.provider.state.portal = structuredClone(original);
+    mutate(portalMapping(gateway, installed.serverId));
+    const baseline = gateway.provider.requests.length;
+    const response = await gateway.api('/api/team');
+    assert.equal(response.status, 503, await response.clone().text());
+    assert.equal((await response.json()).reason, 'team_portal_changed');
+    assertNoMutation(gateway.provider, baseline);
+  }
+}));
+
+test('Portal writes require a ready complete catalogue to explain missing approvals and do not undo manual disables', async () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const server = gateway.provider.state.servers.get(installed.serverId);
+  portalMapping(gateway, installed.serverId).updated_tools = [];
+  const originalTools = structuredClone(server.tools);
+  serveSyncedPortalCatalogue(gateway);
+  for (const change of [
+    { status: 'ready', tools: originalTools }, // Still offered: manually disabled, not removed upstream.
+    { status: 'stale', tools: [] },
+    { status: 'error', tools: [] },
+    { status: 'ready', tools: null },
+    { status: 'ready', tools: [{ name: 'duplicate' }, { name: 'duplicate' }] },
+    { status: 'ready', tools: [], error_details: { status_code: 503 } },
+    { status: 'ready', tools: [], authentication_status: 'stale' },
+  ]) {
+    delete server.error_details;
+    delete server.authentication_status;
+    Object.assign(server, change);
+    const baseline = gateway.provider.requests.length;
+    assert.equal((await verifyToken(gateway)).portals, 'drift', JSON.stringify(change));
+    assert.ok(gateway.provider.requests.slice(baseline).every(r => r.method !== 'PUT' || !r.pathname.includes('/mcp/portals/')));
+    assert.deepEqual(portalMapping(gateway, installed.serverId).updated_tools, []);
+  }
+}));
 
 test('installed connections remain checkable with a draft or another installation paused for sign-in or tools', () => signInFixture(async (gateway) => {
   const installed = await installAdditionalSource(gateway);
