@@ -23,7 +23,7 @@ test('browser navigation receives the setup page without contacting the portal',
   assert.ok(!body.includes('{{'));
   const nonce = body.match(/<script nonce="([^"]+)"/u)[1];
   assert.ok(response.headers.get('content-security-policy').includes(`script-src 'nonce-${nonce}'`));
-  assert.ok(!/<(?:style|script)>/u.test(body));
+  assert.ok(!/<(?:style|script)\s*>/iu.test(body));
   const second = await handler(new Request(endpoint, { headers: browserHeaders }), env);
   assert.notEqual(second.headers.get('content-security-policy'), response.headers.get('content-security-policy'));
 });
