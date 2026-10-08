@@ -171,7 +171,7 @@ describe('choosing the tools of a connected sign-in connector', () => {
     await screen.findByRole('article', { name: `Installation of ${signInDraft.label}` })
     expect(screen.getByText('Choose tools')).toBeVisible()
     const region = await choice()
-    expect(await within(region).findByText(/3 tools in Cloudflare’s synced list of this connector\. Only the tools you select are attached; everything else stays disabled\./u)).toBeVisible()
+    expect(await within(region).findByText(/3 tools in Cloudflare’s synced list of this connector\. Choose individual tools or allow all current and future tools\./u)).toBeVisible()
     expect(within(region).getByText('Hints and descriptions are the connector’s own claims, as Cloudflare synced them; 1 of 3 tools carry no hint. They help you review. They do not make a tool read-only.')).toBeVisible()
     expect(within(region).getByText('No description in Cloudflare’s synced list.')).toBeVisible()
     expect(within(region).getByText('read-only hint')).toBeVisible()
@@ -185,7 +185,7 @@ describe('choosing the tools of a connected sign-in connector', () => {
     const reads = { sources: api.getSources.mock.calls.length, actions: api.getSourceActions.mock.calls.length }
     await user.click(within(region).getByRole('button', { name: 'Allow 2 tools and finish installation' }))
     await waitFor(() => expect(api.prepareSourceAction).toHaveBeenCalledExactlyOnceWith(5, signInDraft.id, ACTION_ID))
-    expect(api.chooseSourceActionTools).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, signInDraft.id, ['records_search', 'records_export'])
+    expect(api.chooseSourceActionTools).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, signInDraft.id, ['records_search', 'records_export'], false)
     expect(api.chooseSourceActionTools.mock.invocationCallOrder[0]).toBeLessThan(api.prepareSourceAction.mock.invocationCallOrder[0] ?? 0)
     await waitFor(() => expect(api.getSources.mock.calls.length).toBeGreaterThan(reads.sources))
     await waitFor(() => expect(api.getSourceActions.mock.calls.length).toBeGreaterThan(reads.actions))
@@ -207,7 +207,7 @@ describe('choosing the tools of a connected sign-in connector', () => {
     expect(within(region).getByText(/Everyone assigned to this connector can use the selected tools/u)).toBeVisible()
     await user.click(edit)
     await user.click(within(region).getByRole('button', { name: 'Allow 1 tool and finish installation' }))
-    await waitFor(() => expect(api.chooseSourceActionTools).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, signInDraft.id, ['records_update']))
+    await waitFor(() => expect(api.chooseSourceActionTools).toHaveBeenCalledExactlyOnceWith(ACTION_ID, 4, signInDraft.id, ['records_update'], false))
     expect(within(region).getByRole('checkbox', { name: /records_delete/u })).not.toBeChecked()
   })
 
