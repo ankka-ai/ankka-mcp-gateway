@@ -12,11 +12,13 @@ interface MemberAccessDialogProps {
   disabled: boolean
   dashboardAccessAvailable?: boolean
   deploymentAdministrator?: boolean
+  connectorAccessFromTeam?: boolean
+  onAllSourcesChange?(allowed: boolean): void
   onDashboardAccessChange?(allowed: boolean): void
   onChange(sourceIds: string[]): void
 }
 
-export function MemberAccessDialog({ member, sources, disabled, onChange, dashboardAccessAvailable, deploymentAdministrator, onDashboardAccessChange }: MemberAccessDialogProps) {
+export function MemberAccessDialog({ member, sources, disabled, onChange, dashboardAccessAvailable, deploymentAdministrator, connectorAccessFromTeam = false, onDashboardAccessChange, onAllSourcesChange }: MemberAccessDialogProps) {
   const [open, setOpen] = useState(false)
   const heading = useRef<HTMLHeadingElement>(null)
   return <Dialog.Root open={open} onOpenChange={setOpen}>
@@ -32,7 +34,7 @@ export function MemberAccessDialog({ member, sources, disabled, onChange, dashbo
             </div>
             <Dialog.Close render={<Button variant="ghost" aria-label="Close member access" />}><X size={20} aria-hidden="true" /></Dialog.Close>
           </div>
-          <Dialog.Description className="mt-4 text-sm leading-6 text-kumo-subtle">Select connectors to grant access to their tools. Tools are shared per connector.</Dialog.Description>
+          <Dialog.Description className="mt-4 text-sm leading-6 text-kumo-subtle">{connectorAccessFromTeam ? 'Connector access is managed by their teams. Edit a team to change its connectors.' : 'Select connectors to grant access to their tools. Tools are shared per connector.'}</Dialog.Description>
         </header>
         <div className="overflow-y-auto overscroll-contain px-5 sm:px-6">
           {dashboardAccessAvailable ? <div className="border-b border-kumo-line py-4">
@@ -45,9 +47,16 @@ export function MemberAccessDialog({ member, sources, disabled, onChange, dashbo
               ? 'Deployment administrators keep dashboard access for recovery.'
               : 'Full access to manage connectors, team access, gateway settings, updates and removal. This includes giving others dashboard access.'}</p>
           </div> : null}
-          {sources.map(source => <div key={source.id} className="border-b border-kumo-line py-4 last:border-0">
+          {!connectorAccessFromTeam && onAllSourcesChange ? <div className="border-b border-kumo-line py-4">
             <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm font-medium text-kumo-strong">
-              <Checkbox disabled={disabled} checked={member.sourceIds.includes(source.id)} onChange={event => {
+              <Checkbox checked={member.allSources === true} disabled={disabled} onChange={event => onAllSourcesChange(event.target.checked)} />
+              <span>All MCPs</span>
+            </label>
+            <p className="ml-8 mt-1 text-xs leading-5 text-kumo-subtle">Includes every installed MCP and automatically allows new MCPs added to this gateway.</p>
+          </div> : null}
+          {!connectorAccessFromTeam ? sources.map(source => <div key={source.id} className="border-b border-kumo-line py-4 last:border-0">
+            <label className="flex min-h-11 cursor-pointer items-center gap-3 text-sm font-medium text-kumo-strong">
+              <Checkbox disabled={disabled || member.allSources === true} checked={member.allSources === true || member.sourceIds.includes(source.id)} onChange={event => {
                 if (!disabled) onChange(event.target.checked ? [...new Set([...member.sourceIds, source.id])] : member.sourceIds.filter(id => id !== source.id))
               }} />
               <span className="break-words">{source.label}</span>
@@ -57,8 +66,8 @@ export function MemberAccessDialog({ member, sources, disabled, onChange, dashbo
                 {source.enabledTools.map(tool => <li key={tool} className="tool-chip break-all"><code>{tool}</code></li>)}
               </ul>
             </Disclosure>
-          </div>)}
-          {sources.length === 0 ? <p className="py-6 text-sm text-kumo-subtle">No installed connectors to assign.</p> : null}
+          </div>) : null}
+          {!connectorAccessFromTeam && sources.length === 0 ? <p className="py-6 text-sm text-kumo-subtle">No installed connectors to assign.</p> : null}
         </div>
         <footer className="flex shrink-0 items-center justify-between gap-4 border-t border-kumo-line p-5 sm:px-6">
           <p className="text-xs leading-5 text-kumo-subtle">{disabled ? 'Access is currently read-only.' : 'Save on the Team page to apply your changes.'}</p>

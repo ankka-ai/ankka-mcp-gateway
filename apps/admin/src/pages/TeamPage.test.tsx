@@ -51,14 +51,14 @@ function renderTeam(client = api()) {
 
 function accessCheckbox(member: HTMLElement, name?: RegExp) {
   fireEvent.click(within(member).getByRole('button', { name: /^Access for/ }))
-  const checkbox = screen.getByRole('checkbox', { name: name ?? /^(?!Dashboard administrator$)/ })
+  const checkbox = screen.getByRole('checkbox', { name: name ?? /^(?!Dashboard administrator$|All MCPs$)/ })
   fireEvent.click(screen.getByRole('button', { name: 'Done' }))
   return checkbox
 }
 
 async function toggleAccess(user: ReturnType<typeof userEvent.setup>, member: HTMLElement, name?: RegExp) {
   await user.click(within(member).getByRole('button', { name: /^Access for/ }))
-  await user.click(screen.getByRole('checkbox', { name: name ?? /^(?!Dashboard administrator$)/ }))
+  await user.click(screen.getByRole('checkbox', { name: name ?? /^(?!Dashboard administrator$|All MCPs$)/ }))
   await user.click(screen.getByRole('button', { name: 'Done' }))
 }
 
@@ -78,7 +78,7 @@ describe('TeamPage', () => {
     await user.click(within(dialog).getByText('2 tools'))
     expect(within(dialog).getByText('fetch_document')).toBeVisible()
     expect(within(dialog).getByText('search')).toBeVisible()
-    expect(within(dialog).getAllByRole('checkbox')).toHaveLength(1)
+    expect(within(dialog).getAllByRole('checkbox')).toHaveLength(2)
     await user.click(within(dialog).getByRole('checkbox', { name: 'Company knowledge' }))
     expect(client.prepareTeamAction).not.toHaveBeenCalled()
     await user.keyboard('{Escape}')
@@ -94,7 +94,7 @@ describe('TeamPage', () => {
     const user = userEvent.setup()
     const client = renderTeam()
     await screen.findByRole('group', { name: 'admin@example.com' })
-    expect(screen.getByRole('heading', { name: 'Team members (2)' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Default (2)' })).toBeInTheDocument()
     expect(screen.queryByText(/including administrators/)).not.toBeInTheDocument()
     expect(screen.queryByText('Edit connector access')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
@@ -190,7 +190,7 @@ describe('TeamPage', () => {
     const user = userEvent.setup()
     const members = [{ email: 'admin@example.com', sourceIds: [] }, ...Array.from({ length: 50 }, (_, index) => ({ email: `person${index}@example.com`, sourceIds: [] }))]
     const client = renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, members })) }))
-    expect(await screen.findByRole('heading', { name: 'Team members (51)' })).toBeInTheDocument()
+    expect(await screen.findByRole('heading', { name: 'Default (51)' })).toBeInTheDocument()
     expect(screen.queryByLabelText('Email')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add user' })).toBeEnabled()
     const administrator = screen.getByRole('group', { name: 'admin@example.com' })
@@ -199,11 +199,11 @@ describe('TeamPage', () => {
     await user.type(screen.getByLabelText('Email'), 'another@example.com')
     await user.click(screen.getByRole('button', { name: 'Add user' }))
     expect(screen.getByRole('group', { name: 'another@example.com' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Team members (52)' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Default (52)' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Add user' })).toBeEnabled()
     expect(client.prepareTeamAction).not.toHaveBeenCalled()
     await user.click(screen.getByRole('button', { name: 'Remove person0@example.com' }))
-    expect(screen.getByRole('heading', { name: 'Team members (51)' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Default (51)' })).toBeInTheDocument()
   })
 
   it('rejects an overlong local email part without preparing any change', async () => {
@@ -671,13 +671,14 @@ describe('TeamPage', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
   })
 
-  it('keeps direct grants until you move the ones a team already covers', async () => {
+  it('replaces individual connector selection with team access when someone joins a team', async () => {
     const user = userEvent.setup()
     const prepareTeamAction = vi.fn<(revision: number, members: TeamMember[], teams?: TeamGrant[]) => Promise<never>>(() => new Promise(() => {}))
     renderTeam(api({ prepareTeamAction }))
     await screen.findByRole('group', { name: 'analyst@example.com' })
+    await toggleAccess(user, screen.getByRole('group', { name: 'analyst@example.com' }), /Company knowledge/)
     await user.click(screen.getByRole('button', { name: 'Create team' }))
-    expect(screen.getByText(/A connector you add later stays closed until you add it to this team/)).toBeVisible()
+    expect(screen.getByText(/All MCPs includes every installed MCP/)).toBeVisible()
     await user.type(screen.getByLabelText('Name'), 'Finance')
     await user.type(screen.getByLabelText('Members'), 'analyst@example.com')
     await user.click(screen.getByRole('button', { name: 'Add' }))
@@ -685,12 +686,11 @@ describe('TeamPage', () => {
     await user.click(screen.getByRole('button', { name: 'Save team' }))
     const teamRow = screen.getByRole('group', { name: 'Finance' })
     expect(teamRow).toHaveTextContent('analyst@example.com')
-    expect(screen.getByRole('group', { name: 'analyst@example.com' })).toHaveTextContent('Effective access: Company knowledge (Finance)')
-    await toggleAccess(user, screen.getByRole('group', { name: 'analyst@example.com' }), /Company knowledge/)
-    expect(screen.getByRole('group', { name: 'analyst@example.com' })).toHaveTextContent('Effective access: Company knowledge (Direct, Finance)')
-    await user.click(screen.getByRole('button', { name: 'Move covered direct grants into this team' }))
-    expect(screen.getByRole('group', { name: 'analyst@example.com' })).toHaveTextContent('No connectors selected.')
-    expect(screen.getByRole('group', { name: 'analyst@example.com' })).toHaveTextContent('Effective access: Company knowledge (Finance)')
+    expect(screen.queryByRole('button', { name: 'Move covered direct grants into this team' })).not.toBeInTheDocument()
+    await user.click(within(teamRow).getByRole('button', { name: 'Access for analyst@example.com' }))
+    expect(screen.getByText(/Connector access is managed by their teams/)).toBeVisible()
+    expect(screen.queryByRole('checkbox', { name: 'Company knowledge' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Done' }))
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(prepareTeamAction).toHaveBeenCalledOnce()
     const savedCall = prepareTeamAction.mock.calls[0]
@@ -707,6 +707,83 @@ describe('TeamPage', () => {
       memberEmails: ['analyst@example.com'],
       sourceIds: [sourceId],
     }])
+  })
+
+  it.each(['team', 'member'])('saves persistent all-MCP consent for a %s and can return to selected connectors', async mode => {
+    vi.stubEnv('VITE_GATEWAY_UI_PREVIEW', '1')
+    window.history.replaceState(null, '', '/team?preview=team-editable')
+    const previewApi = createPreviewGatewayAdminApi()
+    if (!previewApi) throw new Error('Expected preview API')
+    const user = userEvent.setup()
+    renderTeam(previewApi)
+    await screen.findByRole('group', { name: 'analyst@example.com' })
+    if (mode === 'team') {
+      await user.click(screen.getByRole('button', { name: 'Create team' }))
+      await user.type(screen.getByLabelText('Name'), 'Everyone')
+      await user.type(screen.getByLabelText('Members'), 'analyst@example.com')
+      await user.click(screen.getByRole('button', { name: 'Add' }))
+    } else await user.click(screen.getByRole('button', { name: 'Access for analyst@example.com' }))
+    await user.click(screen.getByRole('checkbox', { name: 'All MCPs' }))
+    expect(screen.getByRole('checkbox', { name: 'Company knowledge' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Company knowledge' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: mode === 'team' ? 'Save team' : 'Done' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByText('Team access saved and verified in Cloudflare.')
+    const saved = await previewApi.getTeam()
+    const selection = mode === 'team' ? saved.teams[0] : saved.members.find(member => member.email === 'analyst@example.com')
+    expect(selection).toMatchObject({ allSources: true, sourceIds: ['source-1111111111111111'] })
+    if (mode === 'team') await user.click(within(screen.getByRole('group', { name: 'Everyone' })).getByRole('button', { name: 'Edit' }))
+    else await user.click(screen.getByRole('button', { name: 'Access for analyst@example.com' }))
+    expect(screen.getByRole('checkbox', { name: 'All MCPs' })).toBeChecked()
+    await user.click(screen.getByRole('checkbox', { name: 'All MCPs' }))
+    expect(screen.getByRole('checkbox', { name: 'Company knowledge' })).toBeEnabled()
+    expect(screen.getByRole('checkbox', { name: 'Company knowledge' })).toBeChecked()
+    await user.click(screen.getByRole('button', { name: mode === 'team' ? 'Save team' : 'Done' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    await screen.findByText('Team access saved and verified in Cloudflare.')
+    const updated = await previewApi.getTeam()
+    expect((mode === 'team' ? updated.teams[0] : updated.members.find(member => member.email === 'analyst@example.com'))?.allSources).not.toBe(true)
+  })
+
+  it('groups unassigned members first and supports shared and team-only members without changing grants on load', async () => {
+    const user = userEvent.setup()
+    const grants: TeamGrant[] = [
+      { id: 'team-1111111111111111', name: 'Engineering', memberEmails: ['analyst@example.com', 'guest@example.com'], sourceIds: [sourceId] },
+      { id: 'team-2222222222222222', name: 'Support', memberEmails: ['analyst@example.com'], sourceIds: [] },
+    ]
+    const client = renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, teams: grants, dashboardAccessAvailable: true })) }))
+    const engineering = await screen.findByRole('group', { name: 'Engineering' })
+    const defaults = screen.getByRole('region', { name: 'Default (1)' })
+    expect(within(defaults).getByRole('group', { name: 'admin@example.com' })).toBeVisible()
+    expect(within(defaults).queryByRole('group', { name: 'analyst@example.com' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('group', { name: 'analyst@example.com' })).toHaveLength(2)
+    expect(within(engineering).getByRole('group', { name: 'guest@example.com' })).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    expect(client.prepareTeamAction).not.toHaveBeenCalled()
+    await toggleAccess(user, within(engineering).getByRole('group', { name: 'guest@example.com' }), /Dashboard administrator/)
+    expect(within(engineering).getByRole('group', { name: 'guest@example.com' })).toHaveTextContent('Dashboard administrator')
+    await user.click(within(engineering).getByRole('button', { name: 'Remove analyst@example.com from Engineering' }))
+    expect(within(engineering).queryByRole('group', { name: 'analyst@example.com' })).not.toBeInTheDocument()
+    expect(within(screen.getByRole('group', { name: 'Support' })).getByRole('group', { name: 'analyst@example.com' })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Remove analyst@example.com from Support' }))
+    expect(within(screen.getByRole('region', { name: 'Default (2)' })).getByRole('group', { name: 'analyst@example.com' })).toBeVisible()
+    await user.click(within(engineering).getByRole('button', { name: 'Remove guest@example.com from Engineering' }))
+    const guest = within(screen.getByRole('region', { name: 'Default (3)' })).getByRole('group', { name: 'guest@example.com' })
+    expect(guest).toHaveTextContent('No connectors selected.')
+    expect(accessCheckbox(guest, /Company knowledge/)).not.toBeChecked()
+  })
+
+  it('groups the exact recorded proposal without allowing membership edits', async () => {
+    const pendingAction: TeamAction = { schemaVersion: 1, actionId, status: 'recovery_required', expiresAt, failureCode: null, canCancel: false }
+    renderTeam(api({ getTeam: vi.fn(async () => ({ ...team, dashboardAccessAvailable: true, pendingAction, proposedMembers: team.members,
+      teams: [{ id: 'team-1111111111111111', name: 'Saved team', memberEmails: ['admin@example.com'], sourceIds: [] }],
+      proposedTeams: [{ id: 'team-2222222222222222', name: 'Proposed team', memberEmails: ['analyst@example.com'], sourceIds: [sourceId] }],
+    })) }))
+    const proposed = await screen.findByRole('group', { name: 'Proposed team' })
+    expect(within(proposed).getByRole('group', { name: 'analyst@example.com' })).toBeVisible()
+    expect(screen.queryByRole('group', { name: 'Saved team' })).not.toBeInTheDocument()
+    expect(within(proposed).queryByRole('button', { name: /Remove/ })).not.toBeInTheDocument()
+    expect(accessCheckbox(within(proposed).getByRole('group', { name: 'analyst@example.com' }), /Dashboard administrator/)).toBeDisabled()
   })
 
   it('grants dashboard access explicitly and keeps deployment administrators enabled', async () => {

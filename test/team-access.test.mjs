@@ -12,6 +12,19 @@ import {
 const ADMIN = 'owner@example.com';
 const PERSON = 'person@example.com';
 
+test('allSources is explicit persistent consent and resolves only installed sources', () => {
+  const current = context();
+  const input = request([{ email: ADMIN, sourceIds: [], allSources: true }]);
+  input.teams = [{ id: 'team-1111111111111111', name: 'Everyone', memberEmails: [PERSON], sourceIds: [], allSources: true }];
+  const plan = planTeamAccessChange(input, current);
+  assert.deepEqual(plan.nextState.members, [{ email: ADMIN, sourceIds: ['erp', 'wiki'], allSources: true }]);
+  assert.deepEqual(plan.nextState.teams[0].sourceIds, ['erp', 'wiki']);
+  assert.equal(plan.nextState.teams[0].allSources, true);
+  assert.ok(plan.policies.filter(policy => policy.kind === 'source').every(policy => policy.after.include.some(rule => rule.email?.email === ADMIN)));
+  assert.throws(() => normalizeTeamAccessRequest(request([{ email: ADMIN, sourceIds: [], allSources: 'true' }]), current));
+  assert.equal(Object.hasOwn(planTeamAccessChange(request(), current).nextState.members[0], 'allSources'), false);
+});
+
 function context() {
   return {
     revision: 3,
@@ -443,4 +456,3 @@ test('an expected group rule matches that group and rejects a different one', ()
   assert.equal(teamPolicyMatches(observed(teamPolicy([ADMIN], 'ERP people', [LEGAL_GROUP])), expected, 'erp-policy'), false);
   assert.equal(teamPolicyMatches(observed(teamPolicy([ADMIN], 'ERP people')), expected, 'erp-policy'), false);
 });
-

@@ -135,6 +135,8 @@ function teamMembers(values, context) {
   for (const value of values) {
     const keys = ['email', 'sourceIds'];
     if (teamRecord(value) && Object.hasOwn(value, 'dashboardAccess')) keys.push('dashboardAccess');
+    if (teamRecord(value) && Object.hasOwn(value, 'allSources')) keys.push('allSources');
+    if (Object.hasOwn(value ?? {}, 'allSources') && !isBoolean(value.allSources)) teamFail();
     if (!teamKeys(value, keys) || (Object.hasOwn(value, 'dashboardAccess') && !isBoolean(value.dashboardAccess)) || !Array.isArray(value.sourceIds) ||
         value.sourceIds.length > TEAM_MAX_SOURCES) teamFail();
     const email = teamEmail(value.email);
@@ -148,6 +150,7 @@ function teamMembers(values, context) {
     if (new Set(sourceIds).size !== sourceIds.length) teamFail();
     if (context.adminEmails.includes(email) && value.dashboardAccess === false) teamFail('team_access_admin_required');
     const member = { email, sourceIds: sourceIds.sort(teamCompare) };
+    if (value.allSources === true) member.allSources = true;
     if (Object.hasOwn(value, 'dashboardAccess') && !context.adminEmails.includes(email)) member.dashboardAccess = value.dashboardAccess;
     members.push(member);
   }
@@ -182,16 +185,19 @@ function teamDefinitions(values, context) {
   const ids = new Set();
   const teams = [];
   for (const value of values) {
-    if (!teamKeys(value, ['id', 'name', 'memberEmails', 'sourceIds']) ||
+    if (!teamKeys(value, ['id', 'name', 'memberEmails', 'sourceIds', ...(Object.hasOwn(value ?? {}, 'allSources') ? ['allSources'] : [])]) ||
+        (Object.hasOwn(value ?? {}, 'allSources') && !isBoolean(value.allSources)) ||
         !teamText(value.id) || !TEAM_ID.test(value.id) || ids.has(value.id) ||
         !teamName(value.name, 80)) teamFail();
     ids.add(value.id);
-    teams.push({
+    const team = {
       id: value.id,
       name: value.name,
       memberEmails: teamEmails(value.memberEmails),
       sourceIds: teamSourceIds(value.sourceIds, context),
-    });
+    };
+    if (value.allSources === true) team.allSources = true;
+    teams.push(team);
   }
   return teams.sort((left, right) => teamCompare(left.id, right.id));
 }
@@ -202,20 +208,23 @@ function storedTeamRecords(values, context) {
   const teams = [];
   try {
     for (const value of values) {
-      if (!teamKeys(value, ['id', 'name', 'memberEmails', 'sourceIds', 'accessGroupId']) ||
+      if (!teamKeys(value, ['id', 'name', 'memberEmails', 'sourceIds', 'accessGroupId', ...(Object.hasOwn(value ?? {}, 'allSources') ? ['allSources'] : [])]) ||
+          (Object.hasOwn(value ?? {}, 'allSources') && !isBoolean(value.allSources)) ||
           !teamText(value.id) || !TEAM_ID.test(value.id) || ids.has(value.id) ||
           !teamName(value.name, 80) ||
           !(value.accessGroupId === null || (teamText(value.accessGroupId) && TEAM_PROVIDER_ID.test(value.accessGroupId)))) {
         teamFail('team_access_invalid_state');
       }
       ids.add(value.id);
-      teams.push({
+      const team = {
         id: value.id,
         name: value.name,
         memberEmails: teamEmails(value.memberEmails),
         sourceIds: teamSourceIds(value.sourceIds, context),
         accessGroupId: value.accessGroupId,
-      });
+      };
+      if (value.allSources === true) team.allSources = true;
+      teams.push(team);
     }
   } catch (error) {
     if (error instanceof TeamAccessError && error.code === 'team_access_invalid_state') throw error;
@@ -225,9 +234,9 @@ function storedTeamRecords(values, context) {
 }
 
 function publicTeam(team) {
-  return {
-    id: team.id, name: team.name, memberEmails: team.memberEmails, sourceIds: team.sourceIds,
-  };
+  const result = { id: team.id, name: team.name, memberEmails: team.memberEmails, sourceIds: team.sourceIds };
+  if (team.allSources === true) result.allSources = true;
+  return result;
 }
 
 export function normalizeTeamAccessRequest(value, context) {
@@ -373,7 +382,9 @@ export function planTeamAccessChange(value, context) {
   const targets = [portalTarget, ...sourceTargets];
   if (new Set(targets.map((target) => target.applicationId)).size !== targets.length ||
       new Set(targets.map((target) => target.policyId)).size !== targets.length) teamFail('team_access_invalid_target');
-  const nextTeams = Object.hasOwn(input, 'teams') ? input.teams : priorTeams.map(publicTeam);
+  const nextMembers = input.members.map(member => member.allSources ? { ...member, sourceIds: installedIds } : member);
+  const nextTeams = (Object.hasOwn(input, 'teams') ? input.teams : priorTeams.map(publicTeam))
+    .map(team => team.allSources ? { ...team, sourceIds: installedIds } : team);
   const groupId = new Map(priorTeams.map((team) => [team.id, team.accessGroupId]));
   const priorById = new Map(priorTeams.map((team) => [team.id, team]));
   const groupChanges = [];
@@ -418,7 +429,7 @@ export function planTeamAccessChange(value, context) {
       kind: target.sourceId === undefined ? 'portal' : 'source',
       ...target,
       before: teamPolicy(audience(previous), target.policyName, beforeGroups.resolved),
-      after: teamPolicy(audience(input.members), target.policyName, afterGroups.resolved),
+      after: teamPolicy(audience(nextMembers), target.policyName, afterGroups.resolved),
     };
     if (afterGroups.unresolved.length > 0) entry.unresolvedTeamIds = afterGroups.unresolved;
     policies.push(entry);
@@ -427,7 +438,7 @@ export function planTeamAccessChange(value, context) {
     policy.unresolvedTeamIds);
   const oldEmails = new Set(previous.map((member) => member.email));
   const newEmails = new Set(input.members.map((member) => member.email));
-  const nextState = { schemaVersion: 1, revision: current.revision + 1, members: input.members };
+  const nextState = { schemaVersion: 1, revision: current.revision + 1, members: nextMembers };
   if (nextTeams.length > 0 || (Object.hasOwn(input, 'teams') && priorTeams.length > 0)) nextState.teams = nextTeams;
   const plan = {
     nextState,
@@ -3040,6 +3051,7 @@ function safeManagedSource(value) {
   const legacyAuth = exactKeys(value, ['id', 'label', 'url', 'authMode', 'enabledTools', 'status']);
   const current = exactKeys(value, [
     'id', 'label', 'url', 'authMode', 'onBehalfOfUser', 'enabledTools', 'status',
+    ...(Object.hasOwn(value ?? {}, 'allTools') ? ['allTools'] : []),
     ...(Object.hasOwn(value ?? {}, 'toolMetadata') ? ['toolMetadata'] : []),
     ...(Object.hasOwn(value ?? {}, 'company') ? ['company'] : []),
     ...(Object.hasOwn(value ?? {}, 'companyDescriptions') ? ['companyDescriptions'] : []),
@@ -3047,6 +3059,7 @@ function safeManagedSource(value) {
     ...(Object.hasOwn(value ?? {}, 'initialDashboardEmails') ? ['initialDashboardEmails'] : []),
   ]);
   if ((!legacyPublic && !legacyAuth && !current) ||
+      (Object.hasOwn(value ?? {}, 'allTools') && !isBoolean(value.allTools)) ||
       !isText(value.id) || !SOURCE_ID.test(value.id) ||
       !validSourceLabel(value.label) || !publicMcpUrl(value.url) ||
       (value.status !== 'installed' && value.status !== 'draft')) return null;
@@ -3074,6 +3087,7 @@ function safeManagedSource(value) {
     enabledTools,
     status: value.status,
   };
+  if (value.allTools === true) parsedSource.allTools = true;
   if (Object.hasOwn(value, 'company')) {
     if (!validSourceCompany(value.company) || !value.company) return null;
     parsedSource.company = value.company;
@@ -3157,11 +3171,11 @@ async function initialManagementSources(status) {
 
 export function parseSourceSave(value) {
   const validSource = isRecord(value?.source) && exactKeys(
-    value.source, ['label', 'url', 'authMode', 'enabledTools', ...(Object.hasOwn(value.source, 'company') ? ['company'] : [])],
+    value.source, ['label', 'url', 'authMode', 'enabledTools', ...(Object.hasOwn(value.source, 'allTools') ? ['allTools'] : []), ...(Object.hasOwn(value.source, 'company') ? ['company'] : [])],
   );
   if (!exactKeys(value, ['schemaVersion', 'revision', 'source']) || value.schemaVersion !== 1 ||
       !Number.isSafeInteger(value.revision) || value.revision < 1 ||
-      !validSource ||
+      !validSource || (Object.hasOwn(value.source, 'allTools') && !isBoolean(value.source.allTools)) ||
       !validSourceLabel(value.source.label) ||
       (Object.hasOwn(value.source, 'company') && !validSourceCompany(value.source.company))) return null;
   const url = publicMcpUrl(value.source.url);
@@ -3176,6 +3190,7 @@ export function parseSourceSave(value) {
   );
   if (!url || !enabledTools || (authMode !== 'none' && authMode !== 'oauth')) return null;
   const source = { label: value.source.label, url, authMode, enabledTools };
+  if (value.source.allTools === true) source.allTools = true;
   if (Object.hasOwn(value.source, 'company')) source.company = value.source.company;
   return Object.freeze({ revision: value.revision, source: Object.freeze(source) });
 }
@@ -3199,6 +3214,7 @@ export async function saveDraftSource(current, input, management = null, apiSour
     enabledTools: [...input.source.enabledTools],
     status: 'draft',
   };
+  if (input.source.allTools === true) source.allTools = true;
   const company = input.source.company ?? existing?.company;
   if (company) source.company = company;
   if (management) source.initialManager = existing?.initialManager ?? management.actorEmail;
@@ -3270,6 +3286,7 @@ function safeSourceAction(value) {
     ...(Object.hasOwn(value ?? {}, 'initialPolicyVersion') ? ['initialPolicyVersion'] : []),
     ...(Object.hasOwn(value ?? {}, 'renewedAt') ? ['renewedAt'] : []),
     ...(Object.hasOwn(value ?? {}, 'bigquerySetupStarted') ? ['bigquerySetupStarted'] : []),
+    ...(Object.hasOwn(value ?? {}, 'accessUpdate') ? ['accessUpdate'] : []),
   ]) || value.schemaVersion !== 1 || !ACTION_ID.test(value.actionId) || !SOURCE_ID.test(value.sourceId) ||
       (Object.hasOwn(value, 'bigquerySetupStarted') && value.bigquerySetupStarted !== true) ||
       (Object.hasOwn(value, 'initialPolicyVersion') && value.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION) ||
@@ -3287,6 +3304,8 @@ function safeSourceAction(value) {
   const resources = value.resources.map(safeSourceActionResource);
   const pending = safeSourceActionPending(value.pending);
   const portalUpdate = safePortalUpdate(value.portalUpdate);
+  if (Object.hasOwn(value, 'accessUpdate') && (!safePortalUpdate(value.accessUpdate) ||
+      resources.length !== sourceResourceOrder(value.sourceId).length)) return null;
   if (resources.some((resourceValue) => resourceValue === null) || pending === false || portalUpdate === false ||
       resources.some((resourceValue, index) => resourceValue.kind !== sourceResourceOrder(value.sourceId)[index]) ||
       (pending && pending.kind !== sourceResourceOrder(value.sourceId)[resources.length]) ||
@@ -3542,6 +3561,7 @@ export async function managedSourceHash(source) {
     onBehalfOfUser: source.onBehalfOfUser,
     enabledTools: source.enabledTools,
   };
+  if (source.allTools === true) identity.allTools = true;
   if (source.company) identity.company = source.company;
   if (source.id === MANAGEMENT_SOURCE_ID) identity.initialManager = source.initialManager;
   if (source.initialDashboardEmails) identity.initialDashboardEmails = source.initialDashboardEmails;
@@ -3867,7 +3887,7 @@ function portalServerMappings(control, sources, action) {
     if (!source || !safeProviderId(serverId)) return null;
     mappings.push(Object.freeze({
       server_id: serverId,
-      default_disabled: true,
+      default_disabled: source.allTools !== true,
       on_behalf: source.onBehalfOfUser,
       updated_tools: portalTools(source),
     }));
@@ -3884,7 +3904,7 @@ function normalizedPortalMappings(value) {
   for (const mapping of servers) {
     if (!isRecord(mapping)) return null;
     const serverId = safeProviderId(mapping.server_id ?? mapping.id);
-    if (!serverId || mapping.default_disabled !== true || !isBoolean(mapping.on_behalf) ||
+    if (!serverId || !isBoolean(mapping.default_disabled) || !isBoolean(mapping.on_behalf) ||
         !Array.isArray(mapping.updated_tools) ||
         (Object.hasOwn(mapping, 'updated_prompts') &&
           (!Array.isArray(mapping.updated_prompts) || mapping.updated_prompts.length !== 0))) return null;
@@ -3908,7 +3928,7 @@ function normalizedPortalMappings(value) {
     if (new Set(tools.map((tool) => tool.name)).size !== tools.length) return null;
     mappings.push(Object.freeze({
       server_id: serverId,
-      default_disabled: true,
+      default_disabled: mapping.default_disabled,
       on_behalf: mapping.on_behalf,
       updated_tools: Object.freeze(tools),
     }));
@@ -4004,7 +4024,46 @@ function portalWithinToolApproval(value, control, mappings) {
   });
 }
 
-async function finalizeSourceAction(storage, action) {
+// Explicit allSources consent is applied to each new, owned source policy.
+// Source installation holds the lifecycle lock, so its retained hash binds
+// retries to one exact audience. Tool selections are never changed here.
+async function automaticSourceAccess(storage, env, state, action, token) {
+  const team = await readTeamState(storage, env);
+  if (!team) return null;
+  const emails = team.members.filter(member => member.allSources === true).map(member => member.email);
+  const groups = (team.teams ?? []).filter(group => group.allSources === true && group.memberEmails.length > 0);
+  const context = { control: { installationId: state.installationId }, environment: parseManagementEnvironment(env) };
+  for (const group of groups) {
+    const live = await readOwnedTeamGroup(context, token, group);
+    if (!live || canonicalJson(live) !== canonicalJson(group.memberEmails)) return null;
+  }
+  const policies = [];
+  if (emails.length || groups.length) {
+    for (const record of action.resources.filter(entry => sourcePolicyKind(entry.kind))) {
+      const desired = resource(state, record.kind);
+      if (!desired || !record.provider.parentId) return null;
+      const name = `${state.source.label} users [${record.marker}]`;
+      const beforeEmails = record.kind === 'management_access_policy' ? desired.desired.allow.emails
+        : desired.desired.allow.identitiesRef === 'team.sourceMembers' ? []
+          : [...state.settings.access.adminEmails, ...state.settings.access.memberEmails];
+      const before = teamPolicy(beforeEmails, name);
+      const after = teamPolicy([...new Set([...beforeEmails, ...emails])].sort(compareText), name,
+        groups.map(group => group.accessGroupId));
+      policies.push({ kind: record.kind, provider: record.provider, before, after });
+    }
+  }
+  return { policies, desiredHash: await sha256(policies) };
+}
+
+async function readAutomaticSourcePolicy(state, policy, token) {
+  const response = await providerCall(`/accounts/${state.target.accountId}/access/apps/${encodeURIComponent(policy.provider.parentId)}/policies/${encodeURIComponent(policy.provider.id)}`, token);
+  if (response.status !== 'ok' || (Object.hasOwn(response.result ?? {}, 'account_id') && response.result.account_id !== state.target.accountId)) return null;
+  return response.result;
+}
+
+async function finalizeSourceAction(storage, action, env) {
+  const team = await readTeamState(storage, env);
+  if (!team) return null;
   const ownership = Object.freeze({
     sourceId: action.sourceId,
     resources: action.resources,
@@ -4053,7 +4112,14 @@ async function finalizeSourceAction(storage, action) {
   if (!updatedActions) return null;
   // One atomic multi-key write: a restart cannot leave installed ownership and
   // source status committed without the corresponding completed action journal.
-  await storage.put({ [CONTROL_KEY]: control, [SOURCES_KEY]: sources, [ACTIONS_KEY]: updatedActions });
+  const includeNewSource = entry => entry.allSources === true
+    ? { ...entry, sourceIds: [...new Set([...entry.sourceIds, source.id])].sort(compareText) } : entry;
+  const members = team.members.map(includeNewSource);
+  const teams = team.teams?.map(includeNewSource);
+  const accessChanged = canonicalJson(members) !== canonicalJson(team.members) || canonicalJson(teams ?? []) !== canonicalJson(team.teams ?? []);
+  const nextTeam = accessChanged ? { ...team, members, revision: team.revision + 1, pendingAction: null } : team;
+  if (accessChanged && teams) nextTeam.teams = teams;
+  await storage.put({ [CONTROL_KEY]: control, [SOURCES_KEY]: sources, [ACTIONS_KEY]: updatedActions, [TEAM_KEY]: nextTeam });
   return completed;
 }
 
@@ -4080,6 +4146,10 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   try { await verifyGatewaySource(desiredState.source, env); } catch {
     return failSourceAction(storage, action, 'source_discovery_failed');
   }
+  const retainedAccess = action.accessUpdate ? await automaticSourceAccess(storage, env, desiredState, action, parsed.claim.cloudflareAccessToken) : null;
+  if (action.accessUpdate && (!retainedAccess || retainedAccess.desiredHash !== action.accessUpdate.desiredHash)) {
+    return failSourceAction(storage, action, 'source_action_drift');
+  }
   for (let index = 0; index < sourceResourceOrder(action.sourceId).length; index += 1) {
     const kind = sourceResourceOrder(action.sourceId)[index];
     const state = { ...desiredState, resources: action.resources };
@@ -4090,6 +4160,8 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
         state, kind, parsed.claim.cloudflareAccessToken, action.resources[index].provider,
       );
       if (observed.status !== 'present' || !sameProvider(observed.provider, action.resources[index].provider)) {
+        const policy = retainedAccess?.policies.find(entry => entry.kind === kind);
+        if (policy && teamPolicyMatches(await readAutomaticSourcePolicy(state, policy, parsed.claim.cloudflareAccessToken), policy.after, policy.provider.id)) continue;
         return failSourceAction(storage, action, 'source_resource_drift', false, providerDetail(kind, 'retained', observed));
       }
       continue;
@@ -4257,7 +4329,33 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   // This gateway never maps a server with nothing enabled. A Portal that
   // already does was changed elsewhere; that is drift, not completion.
   if (desiredState.source.enabledTools.length === 0) return failSourceAction(storage, action, 'portal_drift');
-  const completed = await finalizeSourceAction(storage, action);
+  const automaticAccess = await automaticSourceAccess(storage, env, desiredState, action, parsed.claim.cloudflareAccessToken);
+  if (!automaticAccess || (action.accessUpdate && action.accessUpdate.desiredHash !== automaticAccess.desiredHash)) {
+    return failSourceAction(storage, action, 'source_action_drift');
+  }
+  if (automaticAccess.policies.length) {
+    // Arm before the first policy write; after a lost response both the exact
+    // initial policy and the exact approved audience are resumable.
+    for (const policy of automaticAccess.policies) {
+      const observed = await readAutomaticSourcePolicy(desiredState, policy, parsed.claim.cloudflareAccessToken);
+      const after = teamPolicyMatches(observed, policy.after, policy.provider.id);
+      if (!(teamPolicyMatches(observed, policy.before, policy.provider.id) || (action.accessUpdate && after))) {
+        return failSourceAction(storage, action, 'source_resource_drift');
+      }
+      if (after) continue;
+      if (Date.now() >= action.expiresAt) return failSourceAction(storage, action, 'source_action_recovery_required');
+      if (!action.accessUpdate) {
+        action = await persistSourceAction(storage, { ...action, accessUpdate: { phase: 'send_armed', desiredHash: automaticAccess.desiredHash } });
+        if (!action) return actionRecovery('source_action_state_unavailable');
+      }
+      const path = `/accounts/${desiredState.target.accountId}/access/apps/${encodeURIComponent(policy.provider.parentId)}/policies/${encodeURIComponent(policy.provider.id)}`;
+      const written = await providerCall(path, parsed.claim.cloudflareAccessToken, { method: 'PUT', body: canonicalJson(policy.after) });
+      if (written.status !== 'ok' || !teamPolicyMatches(await readAutomaticSourcePolicy(desiredState, policy, parsed.claim.cloudflareAccessToken), policy.after, policy.provider.id)) {
+        return failSourceAction(storage, action, 'source_action_recovery_required');
+      }
+    }
+  }
+  const completed = await finalizeSourceAction(storage, action, env);
   return completed
     ? fixedJson(200, publicSourceAction(completed))
     : actionRecovery('source_action_state_unavailable');
@@ -4352,13 +4450,14 @@ async function readSourceActionTools(storage, env, actionId, actorEmail) {
  */
 async function chooseSourceActionTools(storage, env, input) {
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
-  const enabledTools = exactKeys(input, ['schemaVersion', 'actionId', 'sourceId', 'revision', 'enabledTools', 'actorEmail']) &&
+  const enabledTools = exactKeys(input, ['schemaVersion', 'actionId', 'sourceId', 'revision', 'enabledTools', 'actorEmail',
+    ...(Object.hasOwn(input ?? {}, 'allTools') ? ['allTools'] : [])]) &&
       input.schemaVersion === 1 && isText(input.actionId) && ACTION_ID.test(input.actionId) &&
       isText(input.sourceId) && SOURCE_ID.test(input.sourceId) &&
       Number.isSafeInteger(input.revision) && input.revision >= 1 && normalizedActor(input.actorEmail)
     ? exactSortedUniqueStrings(input.enabledTools, toolName, MAX_ENABLED_TOOLS_PER_SOURCE, 1)
     : null;
-  if (!enabledTools) return sourceToolsRefusal(400, 'source_tools_invalid');
+  if (!enabledTools || (Object.hasOwn(input, 'allTools') && !isBoolean(input.allTools))) return sourceToolsRefusal(400, 'source_tools_invalid');
   const recorded = await recordedSourceToolAction(storage, input.actionId);
   if (recorded instanceof Response) return recorded;
   if (await otherLifecycleBlocksSource(storage, Date.now(), input.actionId) ||
@@ -4374,17 +4473,20 @@ async function chooseSourceActionTools(storage, env, input) {
   if (catalogue.state !== 'ready') return sourceToolsRefusal(409, SOURCE_CATALOGUE_REFUSALS[catalogue.state]);
   const available = new Set(catalogue.tools.map((tool) => tool.name));
   if (!enabledTools.every((name) => available.has(name))) return sourceToolsRefusal(409, 'source_tools_mismatch');
-  const chosen = (revision) => fixedJson(200, {
-    schemaVersion: 1, actionId: action.actionId, sourceId: action.sourceId, revision, enabledTools,
-  });
+  const allTools = input.allTools ?? source.allTools ?? false;
+  const chosen = (revision) => {
+    const result = { schemaVersion: 1, actionId: action.actionId, sourceId: action.sourceId, revision, enabledTools };
+    if (allTools) result.allTools = true;
+    return fixedJson(200, result);
+  };
   // The same choice on an action already bound to this revision changes nothing.
-  if (canonicalJson(enabledTools) === canonicalJson(source.enabledTools) &&
+  if (allTools === (source.allTools === true) && canonicalJson(enabledTools) === canonicalJson(source.enabledTools) &&
       action.sourceRevision === sources.revision) return chosen(sources.revision);
   const nextSources = safeManagementSources({
     ...sources,
     revision: sources.revision + 1,
     sources: sources.sources.map((candidate) => candidate.id === source.id
-      ? withCompany({ ...candidate, enabledTools: [...enabledTools] }, candidate.company)
+      ? withCompany({ ...candidate, enabledTools: [...enabledTools], allTools }, candidate.company)
       : candidate),
   });
   if (!nextSources || !managementSourcesInstallProjectionFits(nextSources)) {
@@ -4435,10 +4537,11 @@ function safeReceiptSourceToolBaseline(value) {
 function safeSourceToolEdit(value) {
   if (value === undefined || value === null) return null;
   if (!exactKeys(value, ['schemaVersion', 'sourceId', 'fromRevision', 'enabledTools', 'phase', 'receiptBaseline',
+    ...(Object.hasOwn(value ?? {}, 'allTools') ? ['allTools'] : []),
     ...(Object.hasOwn(value ?? {}, 'toolMetadata') ? ['toolMetadata'] : []),
     ...(Object.hasOwn(value ?? {}, 'sharedConnection') ? ['sharedConnection'] : []),
     ...(Object.hasOwn(value ?? {}, 'companyDescriptions') ? ['companyDescriptions'] : [])]) ||
-      value.schemaVersion !== 1 || !SOURCE_ID.test(value.sourceId) ||
+      value.schemaVersion !== 1 || (Object.hasOwn(value, 'allTools') && !isBoolean(value.allTools)) || !SOURCE_ID.test(value.sourceId) ||
       (Object.hasOwn(value, 'sharedConnection') && (value.sharedConnection !== true || value.sourceId !== MANAGEMENT_SOURCE_ID)) ||
       !Number.isSafeInteger(value.fromRevision) || value.fromRevision < 1 ||
       !['portal_armed', 'portal_submitted'].includes(value.phase)) return false;
@@ -4451,6 +4554,7 @@ function safeSourceToolEdit(value) {
     schemaVersion: 1, sourceId: value.sourceId, fromRevision: value.fromRevision, enabledTools,
     phase: value.phase, receiptBaseline,
   };
+  if (Object.hasOwn(value, 'allTools')) result.allTools = value.allTools;
   if (value.sharedConnection) result.sharedConnection = true;
   if (Object.hasOwn(value, 'toolMetadata')) result.toolMetadata = toolMetadata;
   if (Object.hasOwn(value, 'companyDescriptions')) {
@@ -4579,6 +4683,8 @@ function installedSourceToolsView(source, sources, catalogue, edit) {
     toolMetadata: source.toolMetadata ?? [],
     pendingToolMetadata: edit?.sourceId === source.id ? edit.toolMetadata ?? [] : null,
   };
+  if (source.allTools === true) view.allTools = true;
+  if (edit?.sourceId === source.id && Object.hasOwn(edit, 'allTools')) view.pendingAllTools = edit.allTools;
   if (catalogue.catalogueSource === 'gateway') view.catalogueSource = 'gateway';
   return fixedJson(200, view);
 }
@@ -4713,20 +4819,23 @@ async function handleSourceConnection(request, env) {
 
 async function updateInstalledSourceTools(storage, env, sourceId, input, actorEmail) {
   const enabledTools = exactKeys(input, ['schemaVersion', 'revision', 'enabledTools',
+    ...(Object.hasOwn(input ?? {}, 'allTools') ? ['allTools'] : []),
     ...(Object.hasOwn(input ?? {}, 'toolMetadata') ? ['toolMetadata'] : []),
     ...(Object.hasOwn(input ?? {}, 'sharedConnection') ? ['sharedConnection'] : [])]) && input.schemaVersion === 1 &&
       Number.isSafeInteger(input.revision) && input.revision >= 1
     ? exactSortedUniqueStrings(input.enabledTools, toolName, MAX_ENABLED_TOOLS_PER_SOURCE, 1) : null;
-  if (!enabledTools || (Object.hasOwn(input, 'sharedConnection') &&
+  if (!enabledTools || (Object.hasOwn(input, 'allTools') && !isBoolean(input.allTools)) || (Object.hasOwn(input, 'sharedConnection') &&
       (input.sharedConnection !== true || sourceId !== MANAGEMENT_SOURCE_ID))) return sourceToolsRefusal(400, 'source_tools_invalid');
   const loaded = await loadInstalledSource(storage, env, sourceId, actorEmail);
   if (loaded instanceof Response) return loaded;
   const { sources, control, source } = loaded;
   let edit = loaded.edit;
+  const allTools = input.allTools ?? edit?.allTools ?? source.allTools ?? false;
+  const modeChanged = allTools !== (source.allTools === true);
   const sharedConnection = input.sharedConnection === true;
   const changingConnection = sharedConnection && source.onBehalfOfUser;
   if (changingConnection && !await dashboardActorAllowed(storage, env, actorEmail)) return sourceToolsRefusal(403, 'access_required');
-  if (edit && Boolean(edit.sharedConnection) !== sharedConnection) return sourceToolsRefusal(409, 'source_tools_pending');
+  if (edit && (Boolean(edit.sharedConnection) !== sharedConnection || allTools !== (edit.allTools ?? source.allTools ?? false))) return sourceToolsRefusal(409, 'source_tools_pending');
   // Older clients preserve overrides for tools that remain selected. [] explicitly resets them.
   const toolMetadata = safeToolMetadata(Object.hasOwn(input, 'toolMetadata') ? input.toolMetadata :
     (edit?.toolMetadata ?? source.toolMetadata ?? []).filter((entry) => enabledTools.includes(entry.name)), enabledTools);
@@ -4744,10 +4853,10 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
     return sourceToolsRefusal(409, 'source_tools_pending');
   }
   const metadataChanged = canonicalJson(source.toolMetadata ?? []) !== canonicalJson(toolMetadata);
-  if (sharedConnection && (metadataChanged || canonicalJson(source.enabledTools) !== canonicalJson(enabledTools))) {
+  if (sharedConnection && (modeChanged || metadataChanged || canonicalJson(source.enabledTools) !== canonicalJson(enabledTools))) {
     return sourceToolsRefusal(400, 'source_tools_invalid');
   }
-  if (!edit && !changingConnection && !metadataChanged && canonicalJson(source.enabledTools) === canonicalJson(enabledTools)) return fixedJson(200, sources);
+  if (!edit && !modeChanged && !changingConnection && !metadataChanged && canonicalJson(source.enabledTools) === canonicalJson(enabledTools)) return fixedJson(200, sources);
   const serverId = ownership.resources[0]?.provider?.id;
   if (!safeProviderId(serverId)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
   const environment = parseManagementEnvironment(env);
@@ -4781,7 +4890,7 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
     companyDescriptions = captureCompanyDescriptions({ ...source, enabledTools }, raw.result);
     if (!companyDescriptions) return sourceToolsRefusal(409, 'source_context_too_large');
   }
-  const nextSource = withCompany({ ...source, enabledTools, toolMetadata }, source.company, companyDescriptions);
+  const nextSource = withCompany({ ...source, enabledTools, toolMetadata, allTools }, source.company, companyDescriptions);
   if (sharedConnection) nextSource.onBehalfOfUser = false;
   const nextBaseline = edit?.receiptBaseline ?? (aliasesReceipt && !control.receiptSourceToolBaseline
     ? { sourceId: source.id, enabledTools: [...source.enabledTools], label: source.label } : control.receiptSourceToolBaseline ?? null);
@@ -4805,7 +4914,7 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   }
   const before = installedPortalMappings(control, sources);
   const after = before?.map((mapping) => mapping.server_id === serverId ? Object.freeze({
-    ...mapping, updated_tools: portalTools(nextSource), on_behalf: nextSource.onBehalfOfUser,
+    ...mapping, default_disabled: !allTools, updated_tools: portalTools(nextSource), on_behalf: nextSource.onBehalfOfUser,
   }) : mapping);
   if (!before || !after || before.filter((mapping) => mapping.server_id === serverId).length !== 1) {
     return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
@@ -4837,18 +4946,19 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
   }
   if (!matchesAfter) {
     if (!edit) {
-      if ((changingConnection || introducingBaseline || metadataChanged || toolMetadata.length > 0) && !await armSourceCompatibility(storage, env)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
+      if ((modeChanged || changingConnection || introducingBaseline || metadataChanged || toolMetadata.length > 0) && !await armSourceCompatibility(storage, env)) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
       const pending = {
         schemaVersion: 1, sourceId: source.id, fromRevision: sources.revision, enabledTools,
         phase: 'portal_submitted', receiptBaseline: introducingBaseline ? nextBaseline : null,
       };
+      if (modeChanged || allTools) pending.allTools = allTools;
       if (sharedConnection) pending.sharedConnection = true;
       if (metadataChanged || toolMetadata.length > 0) pending.toolMetadata = toolMetadata;
       if (companyDescriptions) pending.companyDescriptions = companyDescriptions;
       edit = safeSourceToolEdit(pending);
       if (!edit) return sourceToolsRefusal(409, 'source_tool_edit_unavailable');
       await storage.put(SOURCE_TOOL_EDIT_KEY, edit);
-    } else if ((changingConnection || introducingBaseline || metadataChanged || toolMetadata.length > 0) && !await armSourceCompatibility(storage, env)) {
+    } else if ((modeChanged || changingConnection || introducingBaseline || metadataChanged || toolMetadata.length > 0) && !await armSourceCompatibility(storage, env)) {
       return sourceToolsRefusal(409, 'source_tools_recovery_required');
     } else if (edit.phase !== 'portal_submitted') {
       edit = { ...edit, phase: 'portal_submitted' };
@@ -4864,7 +4974,7 @@ async function updateInstalledSourceTools(storage, env, sourceId, input, actorEm
     if (verified.status !== 'ok' || !portalExact(verified.result, control, after, serverId)) {
       return sourceToolsRefusal(409, 'source_tools_recovery_required');
     }
-  } else if ((changingConnection || introducingBaseline || metadataChanged || toolMetadata.length > 0) && !await armSourceCompatibility(storage, env)) {
+  } else if ((modeChanged || changingConnection || introducingBaseline || metadataChanged || toolMetadata.length > 0) && !await armSourceCompatibility(storage, env)) {
     return sourceToolsRefusal(409, edit ? 'source_tools_recovery_required' : 'source_tool_edit_unavailable');
   }
   await storage.put({ [SOURCES_KEY]: nextSources, [CONTROL_KEY]: nextControl, [SOURCE_TOOL_EDIT_KEY]: null });
@@ -7513,7 +7623,7 @@ export class AdminState {
         });
         // Older runtimes cannot read an empty tool selection or the built-in
         // source identity. Company also needs the current parser. Arm compatibility before saving.
-        if ((builtin || apiSource || input.source.company || input.source.enabledTools.length === 0) &&
+        if ((builtin || apiSource || input.source.allTools || input.source.company || input.source.enabledTools.length === 0) &&
             !await armSourceCompatibility(this.state.storage, this.env)) {
           return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
         }
@@ -8300,6 +8410,7 @@ async function publicSources(sources, stub, env) {
       id: source.id, label: source.label, url: source.url, authMode: source.authMode,
       onBehalfOfUser: source.onBehalfOfUser, enabledTools: source.enabledTools, status: source.status,
     };
+    if (source.allTools === true) entry.allTools = true;
     if (source.toolMetadata) entry.toolMetadata = source.toolMetadata;
     if (source.company) entry.company = source.company;
     return entry;
@@ -9015,6 +9126,7 @@ async function teamSnapshot(storage, env, diagnostic) {
         team.memberEmails = liveEmails;
         team.sourceIds = sourcePolicies.filter((policy) => audienceOf(policy).groupIds.includes(team.accessGroupId))
           .map((policy) => policy.sourceId).sort(compareText);
+        if (team.allSources && sourcePolicies.some(policy => !team.sourceIds.includes(policy.sourceId))) delete team.allSources;
       }
     }
     const dashboard = plan.policies.find(policy => policy.kind === 'dashboard');
@@ -9035,6 +9147,8 @@ async function teamSnapshot(storage, env, diagnostic) {
       members = emails.map((email) => {
         const member = { email, sourceIds: sourcePolicies
           .filter((policy) => audienceOf(policy).emails.includes(email)).map((policy) => policy.sourceId).sort(compareText) };
+        if (state.members.find(person => person.email === email)?.allSources &&
+            sourcePolicies.every(policy => member.sourceIds.includes(policy.sourceId))) member.allSources = true;
         if (!admins.includes(email) && (dashboardAudience.includes(email) ||
             state.members.find(person => person.email === email)?.dashboardAccess !== undefined)) {
           member.dashboardAccess = dashboardAudience.includes(email);
@@ -9159,7 +9273,18 @@ async function prepareTeamAction(storage, env, input) {
     sourceRevision: context.sources.revision, planHash, journal: unfinished ? previous.journal : [],
   }, context.planner);
   if (!action) return null;
-  await storage.put(TEAM_KEY, { ...context.team, pendingAction: action });
+  const storesFutureConsent = plan.nextState.members.some(member => member.allSources) ||
+    plan.nextState.teams?.some(team => team.allSources);
+  // Older runtimes cannot interpret persistent future-source consent, even
+  // when enabling it leaves today's concrete policy audiences unchanged.
+  const nextTeam = { ...context.team, pendingAction: action };
+  if (storesFutureConsent) {
+    nextTeam.teardownDisabled = true;
+    if (!nextTeam.minimumRuntimeRelease || compareUpdateRelease(nextTeam.minimumRuntimeRelease, context.environment.release) === -1) {
+      nextTeam.minimumRuntimeRelease = context.environment.release;
+    }
+  }
+  await storage.put(TEAM_KEY, nextTeam);
   return action;
 }
 
@@ -9661,7 +9786,7 @@ async function handleSourceActions(request, env, authorizedAccess = null) {
     // The tool choice of a connected sign-in source. The management object
     // checks everything else inside its queue, with its one provider read.
     const choice = await readJsonInput(request, SOURCE_SAVE_REQUEST_LIMIT_BYTES);
-    if (!exactKeys(choice, ['schemaVersion', 'revision', 'sourceId', 'enabledTools'])) {
+    if (!exactKeys(choice, ['schemaVersion', 'revision', 'sourceId', 'enabledTools', ...(Object.hasOwn(choice ?? {}, 'allTools') ? ['allTools'] : [])])) {
       return sourceToolsRefusal(400, 'source_tools_invalid');
     }
     try {
@@ -10148,7 +10273,7 @@ async function managementSourceContext(storage, env, allowDraft = false, sourceI
     sharedEmails: source.id === MANAGEMENT_SOURCE_ID && !source.onBehalfOfUser
       ? [...new Set([source.initialManager, ...(accessConfiguration(env)?.emails ?? []), ...dashboardAdmins])].sort(compareText) : null,
     emails: [...new Set([...portal.emails, ...members])].sort(compareText),
-    enabledTools: source.enabledTools, installed: source.status === 'installed' };
+    enabledTools: source.enabledTools, allTools: source.allTools === true, installed: source.status === 'installed' };
 }
 
 async function managementOperationActorAllowed(storage, env, actorEmail) {
@@ -10177,7 +10302,7 @@ async function managementSourceAccess(request, env, allowDraft = false, nowMs = 
       emails: allowAdministratorConsent ? [...new Set([...emails, ...configuration.emails])] : emails, serviceClientId: null }, nowMs);
     if (!actor && allowAdministratorConsent) actor = await verifyDashboardActor(request, env, { ...configuration, aud: context.aud }, nowMs);
     return actor?.kind === 'human' ? { actor, actorEmail: actor.email,
-      enabledTools: context.enabledTools, installed: context.installed, sharedConnection } : null;
+      enabledTools: context.enabledTools, allTools: context.allTools === true, installed: context.installed, sharedConnection } : null;
   } catch { return null; }
 }
 
@@ -10187,6 +10312,7 @@ function mcpObject(properties = {}, required = Object.keys(properties)) {
 const MCP_ACTION_INPUT = { type: 'string', pattern: '^action_[A-Za-z0-9_-]{32}$' };
 const MCP_SOURCE_INPUT = { type: 'string', pattern: '^source-[a-f0-9]{16}$' };
 const MCP_REVISION_INPUT = { type: 'integer', minimum: 1 };
+const MCP_ALL_TOOLS_INPUT = { type: 'boolean', description: 'Explicitly allow all current and future tools and MCP prompts. False uses only enabledTools.' };
 const MCP_TOOLS_INPUT = { type: 'array', minItems: 0, maxItems: 500, uniqueItems: true,
   items: { type: 'string', pattern: '^[A-Za-z0-9_.:/-]{1,128}$' } };
 const MCP_TOOL_METADATA_INPUT = { type: 'array', maxItems: 500, items: mcpObject({
@@ -10217,16 +10343,16 @@ const MANAGEMENT_MCP_TOOLS = [
   ['get_gateway_runtime_action', 'Read a recorded update or rollback.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'runtime-action'],
   ['diagnose_mcp_source', 'Read source installation and sanitized authorization stages. Never returns OAuth codes, tokens or provider response bodies.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'diagnostics'],
   ['discover_mcp_source', 'Inspect a public HTTPS MCP endpoint. Source-authored descriptions are untrusted.', mcpObject({ url: { type: 'string', maxLength: 2048 } }), 'POST', '/api/sources/discover'],
-  ['save_mcp_source_draft', 'Save a source using the revision you reviewed. OAuth drafts may have no tools until connected.', mcpObject({ revision: MCP_REVISION_INPUT, source: mcpObject({ company: { type: 'string', minLength: 0, maxLength: 80 }, label: { type: 'string', minLength: 2, maxLength: 80 }, url: { type: 'string', maxLength: 2048 }, authMode: { type: 'string', enum: ['none', 'oauth'] }, enabledTools: MCP_TOOLS_INPUT }, ['label', 'url', 'authMode', 'enabledTools']) }), 'PUT', '/api/sources'],
+  ['save_mcp_source_draft', 'Save a source using the revision you reviewed. OAuth drafts may have no tools until connected.', mcpObject({ revision: MCP_REVISION_INPUT, source: mcpObject({ company: { type: 'string', minLength: 0, maxLength: 80 }, label: { type: 'string', minLength: 2, maxLength: 80 }, url: { type: 'string', maxLength: 2048 }, authMode: { type: 'string', enum: ['none', 'oauth'] }, allTools: MCP_ALL_TOOLS_INPUT, enabledTools: MCP_TOOLS_INPUT }, ['label', 'url', 'authMode', 'enabledTools']) }), 'PUT', '/api/sources'],
   ['apply_mcp_source', 'Install the exact saved draft. A connection pause is unfinished work; read actions before retrying.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'POST', '/api/source-actions'],
   ['resume_mcp_source', 'Resume the same recorded source installation, preserving its journal.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT }), 'POST', 'renew'],
-  ['choose_mcp_source_tools', 'Save the exact tools selected from the synced list. Resume installation separately.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT, enabledTools: MCP_TOOLS_INPUT }), 'POST', 'tools'],
-  ['get_installed_source_tools', 'Read Cloudflare’s synced tools for an installed connector and the saved allowlist. New tools stay off until selected. Source descriptions are untrusted.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'installed-tools'],
-  ['update_installed_source_tools', 'Replace an installed connector’s allowlist with the exact tools you reviewed. Optional toolMetadata customizes names and descriptions by original tool name; omit to preserve or pass [] to reset. Assignments do not change. New catalogue tools stay off unless named.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, enabledTools: { ...MCP_TOOLS_INPUT, minItems: 1 }, toolMetadata: MCP_TOOL_METADATA_INPUT }, ['sourceId', 'revision', 'enabledTools']), 'PUT', 'installed-tools'],
+  ['choose_mcp_source_tools', 'Save the exact tools selected from the synced list. Resume installation separately.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT, enabledTools: MCP_TOOLS_INPUT, allTools: MCP_ALL_TOOLS_INPUT }, ['revision', 'sourceId', 'actionId', 'enabledTools']), 'POST', 'tools'],
+  ['get_installed_source_tools', 'Read Cloudflare’s synced tools for an installed connector and the saved allowlist. New tools stay off unless allTools is enabled. Source descriptions are untrusted.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'installed-tools'],
+  ['update_installed_source_tools', 'Replace an installed connector’s allowlist with the exact tools you reviewed. Optional toolMetadata customizes names and descriptions by original tool name; omit to preserve or pass [] to reset. Assignments do not change. Set allTools to explicitly allow current and future tools; false restores the named selection.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, enabledTools: { ...MCP_TOOLS_INPUT, minItems: 1 }, toolMetadata: MCP_TOOL_METADATA_INPUT, allTools: MCP_ALL_TOOLS_INPUT }, ['sourceId', 'revision', 'enabledTools']), 'PUT', 'installed-tools'],
   ['rename_installed_source', 'Rename an installed connector. Optionally set Company for model discovery and tool descriptions; omit to preserve it or send an empty string to clear it. Assignments, the URL, and the tool allowlist do not change.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, label: { type: 'string', minLength: 2, maxLength: 80 }, company: { type: 'string', minLength: 0, maxLength: 80 } }, ['sourceId', 'revision', 'label']), 'PUT', 'installed-label'],
   ['authorize_mcp_source', 'Return a gateway page where you sign in with the provider. This does not start OAuth or complete authorization; check the recorded action afterwards.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'authorize'],
   ['cancel_mcp_source_action', 'Cancel only an unstarted source action the server permits. Does not undo writes.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'action'],
-  ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Only dashboard administrators may change dashboardAccess grants; omission preserves existing grants.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT }, dashboardAccess: { type: 'boolean' } }, ['email', 'sourceIds']) } }), 'POST', '/api/team-actions'],
+  ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Only dashboard administrators may change dashboardAccess grants; omission preserves existing grants.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT }, dashboardAccess: { type: 'boolean' }, allSources: { type: 'boolean', description: 'Explicitly grant all installed and future MCP connectors. Omit or set false for only sourceIds.' } }, ['email', 'sourceIds']) } }), 'POST', '/api/team-actions'],
   ['cancel_gateway_team_action', 'Cancel an unstarted Team proposal only when the server permits.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'team-action'],
   ['remove_mcp_source_draft', 'Remove an unprovisioned source draft. Started installations retain their journal.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', '/api/sources'],
   ['remove_mcp_source', 'Remove a source and its owned resources after explicit instruction. Its tools and assignments stop being available.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', 'source'],
@@ -10360,7 +10486,7 @@ async function handleApiSourceMcp(request, env) {
     }
     if (message.method !== 'tools/call') return error(-32601, 'Method not found');
     const params = message.params;
-    if (!isRecord(params) || !isText(params.name) || !access.enabledTools.includes(params.name) ||
+    if (!isRecord(params) || !isText(params.name) || (!access.allTools && !access.enabledTools.includes(params.name)) ||
         Object.keys(params).some((key) => !['name', 'arguments', '_meta'].includes(key))) return error(-32602, 'Unknown tool or invalid arguments');
     const response = await invoke({ operation: 'call', tool: params.name, argumentsJson: JSON.stringify(params.arguments ?? {}) });
     const outcome = response.ok ? await response.json() : null;
@@ -10405,7 +10531,7 @@ async function handleManagementMcp(request, env) {
   if (message.method !== 'tools/call') return error(-32601, 'Method not found');
   const params = message.params;
   if (!isRecord(params) || !isText(params.name) || Object.keys(params).some((key) => !['name', 'arguments', '_meta'].includes(key))) return error(-32602, 'Invalid params');
-  const tool = MANAGEMENT_MCP_TOOLS.find((entry) => entry.name === params.name && access.enabledTools.includes(entry.name));
+  const tool = MANAGEMENT_MCP_TOOLS.find((entry) => entry.name === params.name && (access.allTools || access.enabledTools.includes(entry.name)));
   if (!tool || !mcpInputMatches(params.arguments ?? {}, tool.inputSchema)) return error(-32602, 'Unknown tool or invalid arguments');
   let result;
   try {
@@ -10436,7 +10562,7 @@ async function managementMcpBrowser(request, env) {
       '<p>Return to your agent to check the source and continue setup.</p>');
   }
   const match = /^\/api\/mcp\/authorize\/(action_[A-Za-z0-9_-]{32})$/u.exec(url.pathname);
-  if (!match || url.search || !['GET', 'POST'].includes(request.method) || !access.enabledTools.includes('authorize_mcp_source')) return sourceToolsRefusal(404, 'not_found');
+  if (!match || url.search || !['GET', 'POST'].includes(request.method) || (!access.allTools && !access.enabledTools.includes('authorize_mcp_source'))) return sourceToolsRefusal(404, 'not_found');
   const stub = adminStateStub(env, 'v1:management');
   const read = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_ACTIONS_PATH}/${match[1]}`));
   if (!read.ok) return read;

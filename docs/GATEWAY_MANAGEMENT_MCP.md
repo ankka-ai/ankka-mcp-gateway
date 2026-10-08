@@ -121,7 +121,11 @@ keeps unselected tools disabled. Discovery does not grant execution permission.
 After a gateway upgrade adds tools, open **Edit tools** in Ankka. Gateway
 Management's catalogue comes directly from the installed release, so it does not
 require a separate Cloudflare capability sync. Select **Check again** if the
-editor was already open. New tools appear unchecked. Saving your exact selection
+editor was already open. New tools appear unchecked in manual mode.
+The explicit All tools option (`allTools: true`) also allows future tools and
+MCP prompts; `allTools: false` returns to the named selection. Native management
+and API source execution honor the saved mode, while preserving actor and
+upstream permission checks. Saving your exact selection
 syncs the receipt-owned Cloudflare server when its catalogue is stale, verifies
 the refreshed list, then updates the allowlist and Portal mapping. Team
 assignments do not change. If Cloudflare is still syncing, permissions remain

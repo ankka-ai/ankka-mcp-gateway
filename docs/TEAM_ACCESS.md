@@ -198,17 +198,32 @@ already-connected client.
 
 ## Named teams
 
-A team is a name, the people on it, and the connectors it grants. Saving a team
-does not replace anyone's direct connector grants. Effective access is the
-combination of those direct grants and every team that includes both that
-person and the connector. Removing someone from one team leaves their direct
-grants and their other teams in place. Existing installations are not
-converted: direct grants stay until you choose **Move covered direct grants
-into this team**, which drops only the direct grants that team already covers.
-The page shows the draft before you save, and effective access does not change.
+The dashboard groups people under their named teams, with **Default** first for
+people without a team. Default members can have individual connector selections.
+Joining a team clears individual selections in the dashboard proposal; team
+members get connector access through their teams. Dashboard administrator access
+is a separate, explicit permission. A person can belong to more than one team.
 
-**All installed connectors** selects every connector installed now. A connector
-you add later stays closed until you add it to the team. There is no wildcard.
+**All MCPs** is explicit, persistent consent to every installed connector and to
+connectors installed later. It is available for teams and Default members. The
+API stores this as optional `allSources: true` alongside `sourceIds`, the exact
+applied connector list. Omitted or false means selected connectors only; an
+upgrade or an existing list containing all current connectors never opts in.
+Turning the option off keeps the current selections and stops future additions.
+
+A new connector is created with its initial restricted policy. Before installation
+completes, the Worker applies the recorded all-MCP audiences to that connector's
+owned Cloudflare Access policies. The source action retains the exact audience
+hash before writing, verifies the result, and resumes an interrupted write only
+against that same audience. Installation completion and the updated Team snapshot
+are stored atomically. Other people and teams receive no new access. Native MCP
+connectors are included, but dashboard administration is not granted by this mode.
+Tool permissions are separate: new tools remain disabled until selected unless
+the operator explicitly enables All tools for that connector.
+
+Live Team reads preserve the saved mode while the installed policy assignments
+match it. An external policy edit that removes a connector clears the all-MCP
+mode for that person or team rather than automatically restoring broader access.
 
 A team with no members has no Cloudflare Access group and appears on no policy.
 The first member creates one group. Its provider name is

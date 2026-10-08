@@ -1,0 +1,16 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "ankka-connect-page",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-29",
+  "workers_dev": false,
+  "preview_urls": false,
+  "logpush": false,
+  "observability": {
+    "enabled": false,
+    "logs": { "enabled": false, "invocation_logs": false, "persist": false },
+    "traces": { "enabled": false, "persist": false }
+  },
+  "rules": [{ "type": "Text", "globs": ["**/*.html", "**/*.svg"], "fallthrough": true }],
+  "vars": { "MCP_HOSTNAME": "connect.example.com" }
+}

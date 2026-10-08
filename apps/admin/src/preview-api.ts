@@ -30,7 +30,7 @@ import type {
 } from './api'
 
 const PREVIEW_SCENARIOS = [
-  'empty', 'ready', 'update', 'update-running', 'update-failed', 'loading', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential', 'team-editable',
+  'empty', 'ready', 'update', 'update-running', 'update-failed', 'loading', 'error', 'team-recovery', 'team-readonly', 'team-lifecycle', 'team-legacy', 'team-no-credential', 'team-editable', 'team-populated',
   'source-pending', 'source-applying', 'source-expired', 'source-recovery', 'source-completed', 'source-late-success', 'source-lifecycle',
   'source-sign-in', 'connection-reconnect',
   'management-token',
@@ -156,6 +156,19 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   constructor(scenario: PreviewScenario) {
     this.#scenario = scenario
     this.#sources = structuredClone(scenario === 'empty' ? { ...installedSources, revision: 1, sources: [] } : installedSources)
+    if (scenario === 'team-populated') {
+      // Synthetic density fixture: long connector names shared through a team.
+      this.#sources.sources = [
+        'Customer support', 'Application database', 'Operations API (full access)',
+        'Product search', 'Operations reporting database', 'Gateway management',
+        'Search performance', 'Monitoring dashboards', 'Daily analytics warehouse export',
+        'Service health monitor', 'Company knowledge base',
+      ].map((label, index) => ({
+        id: `source-${(index + 1).toString(16).padStart(16, '0')}`,
+        company: 'Northstar', label, url: `https://connector-${index + 1}.example.com/mcp`,
+        authMode: 'oauth', onBehalfOfUser: false, enabledTools: ['search', 'fetch'], status: 'installed',
+      }))
+    }
     if (scenario === 'source-sign-in') {
       this.#sources.sources.push({ id: SIGN_IN_SOURCE_ID, label: 'Customer records', url: 'https://records.example.com/mcp',
         authMode: 'oauth', onBehalfOfUser: false, enabledTools: [], status: 'draft' })
@@ -182,12 +195,13 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       const completedSource = this.#sources.sources.find((source) => source.id === 'source-2222222222222222')
       if (state === 'succeeded' && completedSource) completedSource.status = 'installed'
     }
+    const editableTeam = scenario === 'team-editable' || scenario === 'team-populated'
     this.#team = {
       schemaVersion: 1,
       revision: 2,
-      editingEnabled: scenario === 'team-editable',
-      editingDisabledReason: scenario === 'team-editable' ? null : scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : 'managed_in_cloudflare',
-      managementCredentialConfigured: scenario === 'team-editable' || scenario === 'management-token',
+      editingEnabled: editableTeam,
+      editingDisabledReason: editableTeam ? null : scenario === 'team-lifecycle' ? 'lifecycle_action_pending' : 'managed_in_cloudflare',
+      managementCredentialConfigured: editableTeam || scenario === 'management-token',
       adminEmails: ['admin@example.com'],
       dashboardAccessAvailable: true,
       members: [
@@ -199,6 +213,18 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       pendingAction: null,
       proposedMembers: null,
       proposedTeams: null,
+    }
+    if (scenario === 'team-populated') {
+      this.#team.adminEmails = ['jordan.rivera+gateway@example.com']
+      this.#team.members = [
+        { email: 'alex.morgan@example.com', sourceIds: [], dashboardAccess: true },
+        { email: 'jordan.rivera+gateway@example.com', sourceIds: [] },
+      ]
+      this.#team.teams = [{
+        id: 'team-0123456789abcdef', name: 'Northstar Development',
+        memberEmails: this.#team.members.map(({ email }) => email),
+        sourceIds: this.#sources.sources.map(({ id }) => id),
+      }]
     }
     if (scenario === 'team-recovery' || scenario === 'team-legacy') {
       this.#team.pendingAction = { schemaVersion: 1, actionId: ACTION_ID, status: scenario === 'team-recovery' ? 'recovery_required' : 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: scenario === 'team-recovery' ? 'team_action_recovery_required' : null, canCancel: scenario === 'team-legacy' }
@@ -231,6 +257,9 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     if (this.#scenario === 'error') throw new Error('Synthetic preview error: team access could not be loaded.')
     // Once the Portal's policies are gone, a gateway with a management credential cannot read its Team.
     if (this.#scenario === 'removal-interrupted') throw new GatewayApiError(503, 'team_unavailable')
+    const installedIds = this.#sources.sources.filter(source => source.status === 'installed').map(source => source.id).sort()
+    this.#team.members = this.#team.members.map(member => member.allSources ? { ...member, sourceIds: installedIds } : member)
+    this.#team.teams = this.#team.teams.map(team => team.allSources ? { ...team, sourceIds: installedIds } : team)
     return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, company, enabledTools, status: sourceStatus }) => ({ id, label: company ? `${company} · ${label}` : label, enabledTools, status: sourceStatus })) })
   }
 
@@ -448,12 +477,12 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       name, title: null, description: null, readOnlyHint: null, destructiveHint: null, openWorldHint: null,
     }))
     if (!source.enabledTools.includes('preview_export')) {
-      tools.push({ name: 'preview_export', title: null, description: 'A tool in Cloudflare’s synced list that is not allowed yet.', readOnlyHint: true, destructiveHint: false, openWorldHint: false })
+      tools.push({ name: 'preview_export', title: null, description: 'An additional tool in Cloudflare’s synced list.', readOnlyHint: true, destructiveHint: false, openWorldHint: false })
     }
-    return { schemaVersion: 1, sourceId, revision: this.#sources.revision, state: 'ready', tools, enabledTools: [...source.enabledTools], toolMetadata: source.toolMetadata ?? [], pendingTools: null, pendingToolMetadata: null }
+    return { schemaVersion: 1, sourceId, revision: this.#sources.revision, state: 'ready', tools, allTools: source.allTools === true, enabledTools: [...source.enabledTools], toolMetadata: source.toolMetadata ?? [], pendingTools: null, pendingToolMetadata: null }
   }
 
-  async updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ManagedSources['sources'][number]['toolMetadata'], sharedConnection?: true): Promise<ManagedSources> {
+  async updateInstalledSourceTools(revision: number, sourceId: string, enabledTools: string[], toolMetadata?: ManagedSources['sources'][number]['toolMetadata'], sharedConnection?: true, allTools?: boolean): Promise<ManagedSources> {
     const source = this.#sources.sources.find((candidate) => candidate.id === sourceId)
     if (!source || source.status !== 'installed') throw new GatewayApiError(409, 'source_tools_unavailable')
     if (revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_conflict')
@@ -463,10 +492,11 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const known = new Set((await this.getInstalledSourceTools(sourceId)).tools.map((tool) => tool.name))
     if (chosen.some((name) => !known.has(name))) throw new GatewayApiError(409, 'source_tools_mismatch')
     const metadata = (toolMetadata ?? source.toolMetadata ?? []).filter((entry) => chosen.includes(entry.name))
-    if ((sharedConnection && source.onBehalfOfUser) || JSON.stringify(metadata) !== JSON.stringify(source.toolMetadata ?? []) || chosen.join('\u0000') !== [...source.enabledTools].sort().join('\u0000')) {
+    if ((allTools !== undefined && allTools !== (source.allTools === true)) || (sharedConnection && source.onBehalfOfUser) || JSON.stringify(metadata) !== JSON.stringify(source.toolMetadata ?? []) || chosen.join('\u0000') !== [...source.enabledTools].sort().join('\u0000')) {
       if (sharedConnection) source.onBehalfOfUser = false
       source.toolMetadata = metadata
       source.enabledTools = chosen
+      if (allTools !== undefined) source.allTools = allTools
       this.#sources.revision += 1
     }
     return structuredClone(this.#sources)
@@ -488,7 +518,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     return structuredClone(this.#sources)
   }
 
-  async chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[]): Promise<SourceToolChoice> {
+  async chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[], allTools?: boolean): Promise<SourceToolChoice> {
     const action = this.#signInAction(actionId)
     const source = this.#sources.sources.find((candidate) => candidate.id === sourceId && candidate.id === action.sourceId)
     if (!source || revision !== this.#sources.revision) throw new GatewayApiError(409, 'source_action_conflict', { reason: 'draft_changed' })
@@ -496,9 +526,12 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     if (chosen.length === 0) throw new GatewayApiError(400, 'source_tools_invalid')
     if (chosen.some((name) => !SIGN_IN_TOOLS.some((tool) => tool.name === name))) throw new GatewayApiError(409, 'source_tools_mismatch')
     source.enabledTools = chosen
+    if (allTools !== undefined) source.allTools = allTools
     this.#sources.revision += 1
     action.failureCode = 'source_tools_chosen'
-    return { schemaVersion: 1, actionId, sourceId, revision: this.#sources.revision, enabledTools: [...chosen] }
+    const result: SourceToolChoice = { schemaVersion: 1, actionId, sourceId, revision: this.#sources.revision, enabledTools: [...chosen] }
+    if (source.allTools) result.allTools = true
+    return result
   }
 
   async prepareRuntimeAction(operation: RuntimeOperation, expectedTarget?: RuntimeVersion): Promise<PreparedAction & { operation: RuntimeOperation }> {
