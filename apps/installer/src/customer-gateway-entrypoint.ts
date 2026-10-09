@@ -13,7 +13,7 @@ import gatewayRuntime, { AdminState as RuntimeAdminState, verifyBootstrapReceipt
 import { CustomerBootstrapConvergenceDriver } from './customer-bootstrap-convergence-driver';
 import { finalizeCustomerBootstrapHandover } from './customer-bootstrap-handover';
 import { customerInstallProgressPage } from './customer-install-progress-page';
-import { CUSTOMER_MANAGEMENT_BINDING } from './customer-management-credential';
+import { CUSTOMER_MANAGEMENT_BINDING, parseCustomerManagementCredential } from './customer-management-credential';
 import {
   customerManagementCredentialControlRequest,
   type CustomerManagementCredentialControl,
@@ -56,6 +56,7 @@ import { CustomerRuntimeUpdateDriver, DurableCustomerUpdateOutcomePort, withCust
 import { DurableCustomerTeardownOutcomePort, type CustomerTeardownCompletion } from './customer-teardown-progress';
 import { createCustomerTeardownRouter, customerTeardownCookiePresent, CUSTOMER_TEARDOWN_PATH } from './customer-teardown-router';
 import {
+  CUSTOMER_UNATTENDED_UPDATE_PATH,
   createCustomerOperationRouter,
   customerOperationAttemptSchema,
   customerOperationCookiePresent,
@@ -749,6 +750,11 @@ export class AdminState extends RuntimeAdminState {
       },
       startRuntimeUpdate: async (input) => (await this.runtimeUpdateDriver(config)).start(input),
       updateView: async (attemptId) => (await this.runtimeUpdateDriver(config)).view(attemptId),
+      // Read from the binding for one call and handed to the driver in memory; never returned or stored.
+      managementCredential: () => {
+        const value = this.finalEnv[CUSTOMER_MANAGEMENT_BINDING];
+        return v.is(v.string(), value) ? parseCustomerManagementCredential(value) : null;
+      },
       issueRelayTicket: (operation) => this.issueOperationRelayTicket(config, operation),
       beginRelay: (input) => beginCustomerBootstrapRelay({
         ...input,
@@ -825,6 +831,11 @@ export class AdminState extends RuntimeAdminState {
       now: Date.now,
     });
     if (installation !== null) return installation;
+    // The gateway's management tools run a prepared update or rollback here with the management token, in process.
+    if (url.origin === 'https://admin-state.invalid' && url.pathname === CUSTOMER_UNATTENDED_UPDATE_PATH && request.method === 'POST') {
+      try { return await (await this.operationRouter(config, managementOrigin)).startUnattended(request); }
+      catch { return unavailable(); }
+    }
     const teardownRoute = url.pathname === CUSTOMER_TEARDOWN_PATH || url.pathname.startsWith(`${CUSTOMER_TEARDOWN_PATH}/`) ||
       (url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH && customerTeardownCookiePresent(request));
     if (url.origin === managementOrigin && teardownRoute) {

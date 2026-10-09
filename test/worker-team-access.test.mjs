@@ -5038,6 +5038,45 @@ test('management rollback binds consent preparation to the reviewed release and 
   const handoff = prepared.body.result.structuredContent.result;
   assert.equal(handoff.status, 'user_authorization_required');
   assert.equal(new URL(handoff.handoffUrl).origin, MANAGEMENT_ORIGIN);
+  // The runtime alone cannot run the operation with the token; the shell answers that route. The handoff stays.
+  assert.deepEqual(handoff.unattended, { status: 'unavailable', reason: 'not_found' });
+  assert.equal(review.body.result.structuredContent.result.applies, 'management_token');
+  assertNoMutation(gateway.provider, before);
+}));
+
+test('management rollback runs in the gateway with the management token when the shell accepts the prepared handoff', () => fixture(async (gateway) => {
+  await installManagementSource(gateway);
+  await runtimeAction(gateway, { release: gateway.env.ANKKA_GATEWAY_RELEASE });
+  const target = (await managementRpc(gateway, 'tools/call', { name: 'review_gateway_update', arguments: {} })).body.result.structuredContent.result.rollback;
+  const namespace = gateway.env.ADMIN_STATE;
+  const handoffs = [];
+  gateway.env.ADMIN_STATE = { ...namespace, get(name) {
+    const stub = namespace.get(name);
+    return { fetch: async (request) => {
+      if (new URL(request.url).pathname !== '/runtime-updates/unattended') return stub.fetch(request);
+      assert.equal(request.method, 'POST');
+      handoffs.push(await request.json());
+      return Response.json({ schemaVersion: 1, status: 'running', attemptId: `attempt_${'u'.repeat(24)}`, actionId: handoffs.length, operation: 'rollback' });
+    } };
+  } };
+  const before = gateway.provider.requests.length;
+  const started = await managementRpc(gateway, 'tools/call', { name: 'rollback_gateway_update', arguments: {
+    approvedRelease: target.release, approvedArtifactSha256: target.artifactSha256,
+  } });
+  assert.equal(started.body.result.structuredContent.ok, true, JSON.stringify(started.body));
+  const result = started.body.result.structuredContent.result;
+  assert.equal(result.status, 'running');
+  assert.equal(result.attemptId, `attempt_${'u'.repeat(24)}`);
+  assert.equal(result.operation, 'rollback');
+  assert.equal(Object.hasOwn(result, 'handoffUrl'), false);
+  assert.match(result.actionId, /^action_/u);
+  // The shell received exactly the prepared handoff: the claim names the action, never a token.
+  assert.equal(handoffs.length, 1);
+  const claim = JSON.parse(Buffer.from(handoffs[0].handoff, 'base64url').toString());
+  assert.equal(claim.actionType, 'runtime_update');
+  assert.equal(claim.actionId, result.actionId);
+  assert.equal(claim.operation, 'rollback');
+  assert.equal(JSON.stringify(handoffs[0]).includes(gateway.env.ANKKA_MANAGEMENT_TOKEN), false);
   assertNoMutation(gateway.provider, before);
 }));
 

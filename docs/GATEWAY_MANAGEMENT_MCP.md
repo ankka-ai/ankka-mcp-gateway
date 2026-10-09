@@ -51,9 +51,12 @@ For Meta Ads, the browser handoff links to Connectors so you can enter your
 public Meta App ID and configure the displayed callback before consent.
 
 Update and rollback require the exact reviewed release and artifact digest.
-Preparation persists a bounded action and returns the existing customer-hosted
-consent handoff. It does not execute a deployment.
-Cloudflare authorization and the existing operation driver perform that work.
+Preparation persists a bounded action. With a management token that has
+Workers Scripts Edit, the gateway then runs the operation itself and answers
+`running` with the attempt; otherwise it returns the existing customer-hosted
+consent handoff and does not execute a deployment. Either way the existing
+operation driver performs the upload; see
+[Updates without a browser](UPDATES.md#updates-without-a-browser).
 
 Full gateway removal continues through the dashboard. Removing the management
 source's Access application during teardown would cut off an assigned person's

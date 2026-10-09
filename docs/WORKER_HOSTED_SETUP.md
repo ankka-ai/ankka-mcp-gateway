@@ -53,7 +53,7 @@ approval: after adding and activating a domain, start a new deployment to
 discover it with a fresh grant. No grant is retained to refresh that list.
 
 The review page also holds the management token step: the link that opens
-Cloudflare's account-token page with both permissions and a name containing
+Cloudflare's account-token page with its three permissions and a name containing
 the management hostname filled in, and one paste field. The second approval
 is offered only while the gateway holds the required token.
 `POST /__ankka/install/management-token` takes the pasted value once by same-origin JSON POST under the setup

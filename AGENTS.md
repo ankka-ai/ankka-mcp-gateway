@@ -29,9 +29,11 @@ they are explicitly documented as non-secret.
   reused for another action.
 - The distinct optional `ANKKA_MANAGEMENT_TOKEN` is an account-owned secret
   configured directly on the customer Worker. Only fixed routine source and
-  Team operations may use it. Never send it through Ankka-hosted infrastructure,
-  return it to a browser, or persist it in Durable Object state. Its account-wide
-  provider authority must be disclosed; ownership checks constrain our code.
+  Team operations, and the gateway's own signed update and rollback, may use
+  it. Never send it through Ankka-hosted infrastructure, return it to a browser,
+  or persist it in Durable Object state. Its account-wide provider authority,
+  including Workers scripts, must be disclosed; ownership checks constrain our
+  code, and an update still verifies the signed release before any upload.
 - Secrets must not appear in configuration files, logs, exceptions, telemetry,
   tests, snapshots, or deployment output.
 - Self-hosted gateways send no telemetry to Ankka. The Ankka-hosted

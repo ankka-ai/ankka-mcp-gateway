@@ -4,6 +4,14 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let agents apply signed updates and rollbacks without a browser consent.
+  With a management token that has Workers Scripts Edit, `apply_gateway_update`
+  and `rollback_gateway_update` run the prepared operation in the gateway and
+  answer `running`; `review_gateway_update` reports which path applies. The
+  token template link now pre-fills that third permission, and a token created
+  earlier can be edited in Cloudflare to add it. Without it, the browser
+  handoff continues to work.
+
 - Add a built-in feedback source. Any assigned session can report a wrong
   description, missing capability, stale data or routing problem about a
   connected source with `submit_gateway_feedback`, and read reports with

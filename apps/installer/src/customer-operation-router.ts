@@ -43,10 +43,15 @@ import {
   CUSTOMER_UPDATE_STAGES,
   customerServingRelease,
   customerUpdateProgressSchema,
+  managementCredentialUpdateCredential,
+  type CustomerUpdateCredential,
   type CustomerUpdateProgress,
   type CustomerUpdateStage,
   type CustomerUpdateView,
 } from './customer-update-driver';
+
+/** The management object's internal route that runs an update or rollback with the gateway's own management token. */
+export const CUSTOMER_UNATTENDED_UPDATE_PATH = '/runtime-updates/unattended';
 
 /**
  * Gateway-local authorization for a later operation.
@@ -313,12 +318,14 @@ export interface CustomerOperationRouterDependencies {
     readonly body: string;
     readonly signature: string;
   }) => Promise<Response>;
-  /** Takes an update's grant and action key into the management object's memory and arms the pass that uploads. */
+  /** Takes an update's credential and action key into the management object's memory and arms the pass that uploads. */
   readonly startRuntimeUpdate: (input: {
     readonly attempt: CustomerOperationAttempt;
-    readonly grant: EphemeralCustomerCloudflareGrant;
+    readonly grant: CustomerUpdateCredential;
     readonly actionKey: string;
   }) => Promise<'started' | 'failed'>;
+  /** The gateway's own management token when one is configured, read from the Worker's binding; never stored. */
+  readonly managementCredential?: () => string | null;
   /** The update attempt as the management object knows it; null for an unknown attempt. */
   readonly updateView: (attemptId: string) => Promise<CustomerUpdateView | null>;
   readonly now?: () => number;
@@ -641,7 +648,7 @@ poll()})();</script>${customerPageEnd}`, { status: 200, headers: pageHeaders });
 export function createCustomerOperationRouter(
   rawConfig: CustomerOperationRouterConfig,
   dependencies: CustomerOperationRouterDependencies,
-): Readonly<{ fetch(request: Request): Promise<Response> }> {
+): Readonly<{ fetch(request: Request): Promise<Response>; startUnattended(request: Request): Promise<Response> }> {
   const parsed = v.safeParse(configSchema, rawConfig);
   if (!parsed.success) throw new Error('operation_config_invalid');
   const config = Object.freeze(parsed.output);
@@ -973,7 +980,73 @@ export function createCustomerOperationRouter(
     return json(v.parse(customerUpdateProgressSchema, progress));
   };
 
+  /**
+   * The same prepared update or rollback the browser handoff carries, run
+   * with the gateway's own management token instead of a consent. Internal to
+   * the management object: the gateway's management tools call it after
+   * preparing the action. The token is checked against the account and the
+   * Worker first, exactly as a consent grant is, then the ordinary driver
+   * uploads behind its alarm. Nothing is revoked afterwards: the token stays
+   * the operator's.
+   */
+  const startUnattended = async (request: Request): Promise<Response> => {
+    try {
+      await dependencies.assertOperational();
+    } catch {
+      return json({ schemaVersion: 1, error: 'operation_unavailable' }, 503);
+    }
+    const body = await startBody(request);
+    const decoded = body === null ? null : decodeClaim(body.handoff);
+    const startedAt = now();
+    if (decoded === null || decoded.kind !== 'runtime' || !claimMatches(decoded, config, startedAt)) {
+      return json({ schemaVersion: 1, error: 'operation_invalid' }, 400);
+    }
+    const token = dependencies.managementCredential?.() ?? null;
+    if (token === null) return json({ schemaVersion: 1, error: 'management_credential_required' }, 409);
+    const { claim } = decoded;
+    const action = await dependencies.readRuntimeAction(claim.actionId);
+    if (action === null || action.status !== 'authorization_required' || action.expiresAt !== claim.expiresAt) {
+      return json({ schemaVersion: 1, error: 'operation_conflict' }, 409);
+    }
+    const existing = await dependencies.attempts.read();
+    if (existing !== null && existing.expiresAt > startedAt) return json({ schemaVersion: 1, error: 'operation_pending' }, 409);
+    const operation = claim.operation === 'rollback' ? 'rollback' : 'upgrade';
+    const attempt: CustomerOperationAttempt = {
+      schemaVersion: 1,
+      attemptId: `attempt_${randomBase64Url(18)}`,
+      kind: 'runtime',
+      operation,
+      actionId: claim.actionId,
+      actorEmail: claim.actorEmail,
+      actionExpiresAt: claim.expiresAt,
+      controlPlaneOrigin: new URL(claim.controlPlaneOrigin).origin,
+      target: { release: claim.to.release, artifactSha256: claim.to.artifactSha256 },
+      stateHash: await sha256(randomBase64Url(32)),
+      phase: 'exchanging',
+      expiresAt: Math.min(claim.expiresAt, startedAt + CUSTOMER_OPERATION_ATTEMPT_TTL_MS),
+    };
+    // Holds the one attempt slot while the token is checked, so no consent can start a second update meanwhile.
+    await dependencies.attempts.write(attempt);
+    const credential = managementCredentialUpdateCredential(token);
+    try {
+      await credential.withAccessToken((accessToken) => verifyCustomerCloudflareGrantAccountAccess({
+        accessToken, expectedAccountId: config.accountId, operation, workerName: config.workerName, transport: dependencies.transport,
+      }));
+    } catch (error) {
+      credential.discard();
+      await dependencies.attempts.clear();
+      return json({ schemaVersion: 1, error: 'management_credential_rejected', reason: failureReason(error) }, 409);
+    }
+    // The upload replaces this Worker version, so the attempt is cleared before the driver takes the credential.
+    await dependencies.attempts.clear();
+    const started = await dependencies.startRuntimeUpdate({ attempt, grant: credential, actionKey: claim.actionKey });
+    return started === 'started'
+      ? json({ schemaVersion: 1, status: 'running', attemptId: attempt.attemptId, actionId: claim.actionId, operation: claim.operation })
+      : json({ schemaVersion: 1, error: 'update_start_failed' }, 409);
+  };
+
   return Object.freeze({
+    startUnattended,
     async fetch(request: Request): Promise<Response> {
       let url: URL;
       try {
