@@ -711,7 +711,6 @@ const PUBLIC_HEADERS = Object.freeze({
   'x-frame-options': 'DENY',
 });
 const OBJECT_TAG = Object.prototype.toString;
-const FUNCTION_SOURCE = Function.prototype.toString;
 
 function hasPrimitiveTag(value, tag) {
   return Object(value) !== value && OBJECT_TAG.call(value) === tag;
@@ -742,12 +741,8 @@ function isReference(value) {
 }
 
 function isCallable(value) {
-  try {
-    FUNCTION_SOURCE.call(value);
-    return true;
-  } catch {
-    return false;
-  }
+  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- typeof reports exactly IsCallable; a throwing Function.prototype.toString probe made every record check the worker's hottest path.
+  return typeof value === 'function';
 }
 
 function isObjectReference(value) {
