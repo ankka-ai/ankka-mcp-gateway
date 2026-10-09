@@ -64,7 +64,7 @@ export const toolMetadataSchema = v.array(v.strictObject({
 export type ToolMetadata = v.InferOutput<typeof toolMetadataSchema>
 interface InstalledSourceDetailsInput { schemaVersion: number; revision: number; label: string; company?: string }
 interface InstalledToolsInput { schemaVersion: number; revision: number; enabledTools: string[]; toolMetadata?: ToolMetadata; sharedConnection?: true; allTools?: boolean }
-const sourceConnectionSchema = v.strictObject({
+export const sourceConnectionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   sourceId: v.string(),
   state: v.picklist(['connected', 'authorization_required', 'forbidden', 'unavailable', 'unknown', 'user_managed']),

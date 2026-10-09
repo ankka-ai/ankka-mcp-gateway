@@ -102,7 +102,7 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
       </div>
 
       {onCheckConnection ? <div className="mb-3 flex items-center justify-end gap-3">
-        <Button variant="secondary" disabled={checking || isBusy} onClick={recheck}>{checking ? 'Checking connections…' : 'Check connections'}</Button>
+        <Button variant="secondary" disabled={checking || isBusy} onClick={recheck}>Check connections</Button>
       </div> : null}
 
       <table className="w-full table-fixed border-collapse text-left text-sm" aria-label="Connector list">

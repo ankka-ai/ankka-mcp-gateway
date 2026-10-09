@@ -5,6 +5,7 @@ import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type GatewayAdminApi, 
 import { SYNTHETIC_SOURCE_CATALOG } from '../catalog/fixtures'
 import { GatewayProvider } from '../GatewayContext'
 import { SourcesPage } from './SourcesPage'
+import { CONNECTION_CACHE_KEY } from '../components/SourceConnection'
 
 const status: GatewayStatus = {
   schemaVersion: 1, status: 'ready', controlPlaneOrigin: 'https://deploy.ankka.ai', release: 'gateway-v1.0.0',
@@ -41,7 +42,10 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
 }
 
 describe('connector installation recovery', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    sessionStorage.removeItem(CONNECTION_CACHE_KEY)
+  })
 
   it('reconnects an installed connector through the site, retaining a Cloudflare fallback', async () => {
     const user = userEvent.setup()
@@ -327,7 +331,10 @@ describe('connector installation recovery', () => {
 })
 
 describe('SourcesPage', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    sessionStorage.removeItem(CONNECTION_CACHE_KEY)
+  })
 
   it.each([false, true])('disables connector addition and draft application while retaining existing connectors (empty=%s)', async (empty) => {
     const user = userEvent.setup()
@@ -864,7 +871,10 @@ describe('Add BigQuery setup', () => {
     expect(addConnector).toHaveFocus()
   })
 
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    sessionStorage.removeItem(CONNECTION_CACHE_KEY)
+  })
   it('shows the retained Google error after a fresh page load and resumes through BigQuery, even with a management token', async () => {
     const user = userEvent.setup()
     const action = pendingAction({ state: 'failed', status: 'failed', canCancel: false,
@@ -951,7 +961,10 @@ describe('Add BigQuery setup', () => {
 // The gateway reports `installEndsRollbackTo` only while installing a source really ends a rollback: the gateway was
 // updated, the earlier release can still be restored, and the first installation here would change that.
 describe('the rollback sentence beside the install control', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    sessionStorage.removeItem(CONNECTION_CACHE_KEY)
+  })
   const idle: SourceActions = { schemaVersion: 1, actions: [], blockingAction: null }
   const sentence = 'After this you can no longer roll back to gateway-v0.9.9.'
 
@@ -1025,7 +1038,10 @@ describe('the rollback sentence beside the install control', () => {
 })
 
 describe('individual connector removal', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    sessionStorage.removeItem(CONNECTION_CACHE_KEY)
+  })
 
   it.each(['source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'source_tools_required', 'source_tools_chosen'])(
     'offers confirmed cleanup for an unfinished source waiting on %s', async (failureCode) => {

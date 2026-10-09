@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { ManagedSource, SourceConnection } from '../api'
 import { SourceList } from './SourceList'
-import { CONNECTION_CHECK_TIMEOUT_MS } from './SourceConnection'
+import { CONNECTION_CACHE_KEY, CONNECTION_CHECK_TIMEOUT_MS } from './SourceConnection'
 
 const sources: [ManagedSource, ManagedSource] = [
   { id: 'source-1111111111111111', label: 'Knowledge', url: 'https://knowledge.example.com/mcp', authMode: 'oauth', onBehalfOfUser: false, enabledTools: ['search', 'fetch_document'], status: 'installed' },
@@ -17,6 +17,8 @@ const checkConnection = async (sourceId: string): Promise<SourceConnection> => (
 describe('SourceList', () => {
   afterEach(() => {
     cleanup()
+    sessionStorage.removeItem(CONNECTION_CACHE_KEY)
+    vi.restoreAllMocks()
     vi.useRealTimers()
   })
 
@@ -222,6 +224,72 @@ describe('SourceList', () => {
     expect(screen.getByText(/Connection checking is paused while a gateway change is unfinished/)).toBeVisible()
   })
 
+  it('restores the last result on remount and refreshes it without showing checking states', async () => {
+    const user = userEvent.setup()
+    const first = render(<SourceList sources={sources} onCheckConnection={checkConnection} connectionRevision={4} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    first.unmount()
+
+    let finish!: (result: SourceConnection) => void
+    const check = vi.fn(() => new Promise<SourceConnection>(resolve => { finish = resolve }))
+    render(<SourceList sources={sources} onCheckConnection={check} connectionRevision={4} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Connected')
+    expect(check).toHaveBeenCalledExactlyOnceWith(sources[0].id, expect.any(AbortSignal))
+    expect(screen.queryByText(/Checking/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Check connections' })).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Connected' }))
+    expect(screen.getByRole('button', { name: 'Knowledge' })).toBeVisible()
+
+    await act(async () => finish({ schemaVersion: 1, sourceId: sources[0].id, state: 'authorization_required', reason: null, checkedAt: '2026-10-09T10:00:00.000Z' }))
+    expect(screen.queryByRole('button', { name: 'Knowledge' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Needs attention' }))
+    expect(screen.getByRole('status')).toHaveTextContent('Reconnect required')
+    expect(screen.getByRole('button', { name: 'Check connections' })).toBeEnabled()
+  })
+
+  it('invalidates cached results after configuration changes and prunes removed connectors', async () => {
+    const check = vi.fn().mockImplementationOnce(checkConnection).mockImplementation(() => new Promise<SourceConnection>(() => {}))
+    const props = { onCheckConnection: check, installationEnabled: true, isBusy: false, onAuthorize: vi.fn() }
+    const { rerender } = render(<SourceList {...props} sources={sources} connectionRevision={4} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    rerender(<SourceList {...props} sources={sources} connectionRevision={5} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Checking…')
+    rerender(<SourceList {...props} sources={[sources[1]]} connectionRevision={5} />)
+    expect(JSON.parse(sessionStorage.getItem(CONNECTION_CACHE_KEY) ?? '{}').results).toEqual({})
+    expect(screen.getByRole('button', { name: 'Check connections' })).toBeEnabled()
+  })
+
+  it('ignores a late result from an aborted check after navigation', async () => {
+    let finish!: (result: SourceConnection) => void
+    const slow = vi.fn(() => new Promise<SourceConnection>(resolve => { finish = resolve }))
+    const first = render(<SourceList sources={sources} onCheckConnection={slow} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    first.unmount()
+    const second = render(<SourceList sources={sources} onCheckConnection={checkConnection} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    await act(async () => finish({ schemaVersion: 1, sourceId: sources[0].id, state: 'unavailable', reason: null, checkedAt: null }))
+    second.unmount()
+    render(<SourceList sources={sources} onCheckConnection={slow} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Connected')
+  })
+
+  it.each(['invalid JSON', JSON.stringify({ revision: 0, results: { [sources[0].id]: { state: 'connected' } } })])('ignores malformed cached data: %s', async stored => {
+    sessionStorage.setItem(CONNECTION_CACHE_KEY, stored)
+    const check = vi.fn().mockRejectedValue(new Error('unavailable'))
+    render(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Not verified'))
+  })
+
+  it('still checks connections and retains results during refresh when storage is unavailable', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => { throw new Error('storage blocked') })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('storage blocked') })
+    const check = vi.fn().mockImplementationOnce(checkConnection).mockImplementation(() => new Promise<SourceConnection>(() => {}))
+    render(<SourceList sources={sources} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connected'))
+    fireEvent.click(screen.getByRole('button', { name: 'Check connections' }))
+    expect(check).toHaveBeenCalledTimes(2)
+    expect(screen.getByRole('status')).toHaveTextContent('Connected')
+  })
+
   it('does not retain a green badge when rechecking fails', async () => {
     const user = userEvent.setup()
     const check = vi.fn().mockImplementationOnce(checkConnection).mockRejectedValue(new Error('unavailable'))
@@ -256,7 +324,7 @@ describe('SourceList', () => {
     render(<SourceList sources={installed} onCheckConnection={check} installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
     await waitFor(() => expect(labels()).toEqual([...Array(8).fill('Checking…'), 'Waiting', 'Waiting']))
     expect(check).toHaveBeenCalledTimes(8)
-    expect(screen.getByRole('button', { name: 'Checking connections…' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Check connections' })).toBeDisabled()
     await user.click(screen.getByRole('button', { name: 'Connector 10' }))
     expect(screen.getByText('Waiting for other connection checks to finish before testing this one.')).toBeVisible()
     answer(2)
@@ -280,8 +348,8 @@ describe('SourceList', () => {
     await act(async () => {})
     expect(screen.getByRole('status')).toHaveTextContent('Connected')
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Check connections' })) })
-    expect(screen.getByRole('status')).toHaveTextContent('Checking…')
-    expect(screen.getByRole('button', { name: 'Checking connections…' })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent('Connected')
+    expect(screen.getByRole('button', { name: 'Check connections' })).toBeDisabled()
     await act(async () => { await vi.advanceTimersByTimeAsync(CONNECTION_CHECK_TIMEOUT_MS) })
     expect(signals.map(signal => signal.aborted)).toEqual([true])
     expect(screen.getByRole('status')).toHaveTextContent('Not verified')

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import * as v from 'valibot'
 import { Button } from './Button'
-import type { SourceConnection } from '../api'
+import { sourceConnectionSchema, type SourceConnection } from '../api'
 
 export type ConnectionCheck = SourceConnection | { state: 'waiting' | 'checking'; checkedAt: null; reason: null }
 
@@ -11,17 +12,58 @@ export const CONNECTION_CHECK_TIMEOUT_MS = 25_000
 
 const pending = (state: 'waiting' | 'checking'): ConnectionCheck => ({ state, checkedAt: null, reason: null })
 
+export const CONNECTION_CACHE_KEY = 'ankka-gateway-connections-v1'
+const cacheSchema = v.strictObject({
+  revision: v.number(),
+  results: v.record(v.string(), sourceConnectionSchema),
+})
+type ConnectionCache = v.InferOutput<typeof cacheSchema>
+
+function readCache(): ConnectionCache {
+  try {
+    const cached = v.safeParse(cacheSchema, JSON.parse(sessionStorage.getItem(CONNECTION_CACHE_KEY) ?? 'null'))
+    if (cached.success) return cached.output
+  } catch { /* Storage may be unavailable or contain an older format. */ }
+  return { revision: -1, results: {} }
+}
+
+function writeCache(cache: ConnectionCache) {
+  try { sessionStorage.setItem(CONNECTION_CACHE_KEY, JSON.stringify(cache)) }
+  catch { /* Connection checks still work when browser storage is unavailable. */ }
+}
+
+function retainedResults(cache: ConnectionCache, sourceIds: string, revision: number): Record<string, SourceConnection> {
+  if (cache.revision !== revision) return {}
+  return Object.fromEntries(sourceIds.split(',').flatMap(id => {
+    const result = cache.results[id]
+    return result?.sourceId === id ? [[id, result]] : []
+  }))
+}
+
 export function useSourceConnections(sourceIds: string, check?: (sourceId: string, signal: AbortSignal) => Promise<SourceConnection>, revision = 0) {
+  const [initialCache] = useState(readCache)
+  const cache = useRef(initialCache)
   const [refresh, setRefresh] = useState(0)
-  const [results, setResults] = useState<Record<string, ConnectionCheck>>({})
+  const [results, setResults] = useState<Record<string, ConnectionCheck>>(() => check ? retainedResults(initialCache, sourceIds, revision) : {})
+  const [checking, setChecking] = useState(false)
   useEffect(() => {
-    if (!check) { setResults({}); return }
+    if (!check) { setResults({}); setChecking(false); return }
     const checkConnection = check
     const ids = sourceIds ? sourceIds.split(',') : []
     const stopped = new AbortController()
-    setResults(Object.fromEntries(ids.map(id => [id, pending('waiting')])))
+    // Keep only results for the current configuration and installed connectors.
+    const retained = retainedResults(cache.current, sourceIds, revision)
+    cache.current = { revision, results: retained }
+    writeCache(cache.current)
+    setResults(Object.fromEntries(ids.map(id => [id, retained[id] ?? pending('waiting')])))
+    setChecking(ids.length > 0)
     const show = (sourceId: string, result: ConnectionCheck) => {
-      if (!stopped.signal.aborted) setResults(current => ({ ...current, [sourceId]: result }))
+      if (stopped.signal.aborted) return
+      if ('sourceId' in result) {
+        cache.current = { revision, results: { ...cache.current.results, [sourceId]: result } }
+        writeCache(cache.current)
+      }
+      setResults(current => ({ ...current, [sourceId]: result }))
     }
     // Each check has its own deadline, even if the request ignores its signal.
     async function checkOne(sourceId: string): Promise<SourceConnection> {
@@ -46,14 +88,15 @@ export function useSourceConnections(sourceIds: string, check?: (sourceId: strin
     // Each result appears as it arrives; a slow connector holds up only its own.
     async function run() {
       for (let sourceId = ids.shift(); sourceId && !stopped.signal.aborted; sourceId = ids.shift()) {
-        show(sourceId, pending('checking'))
+        if (!retained[sourceId]) show(sourceId, pending('checking'))
         show(sourceId, await checkOne(sourceId))
       }
     }
-    void Promise.all(Array.from({ length: CHECK_CONCURRENCY }, run))
+    void Promise.all(Array.from({ length: CHECK_CONCURRENCY }, run)).then(() => {
+      if (!stopped.signal.aborted) setChecking(false)
+    })
     return () => stopped.abort()
   }, [sourceIds, check, revision, refresh])
-  const checking = Object.values(results).some(result => result.state === 'waiting' || result.state === 'checking')
   return { results, recheck: () => setRefresh(value => value + 1), checking }
 }
 
