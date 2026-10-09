@@ -12,6 +12,7 @@ const PERMISSIONS = 'https://graph.facebook.com/v26.0/me/permissions';
 const READ_SCOPE = 'ads_mcp_management ads_read';
 const APP_ID = '123456789012345'; // Synthetic public Meta App ID.
 const OAUTH_KEY = 'ankka-mcp-gateway/source-oauth/v1';
+const DIAGNOSTIC_KEY = 'ankka-mcp-gateway/source-oauth-diagnostic/v1';
 const config = {
   issuer: ISSUER, authorization_endpoint: 'https://www.facebook.com/v26.0/dialog/oauth',
   token_endpoint: 'https://graph.facebook.com/v26.0/oauth/access_token',
@@ -30,6 +31,7 @@ async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metad
   const gateway = await pausedGateway({ endpoint });
   const stub = gateway.env.ADMIN_STATE.get('v1:management');
   const registrations = [], imports = [], calls = [];
+  let providerReadable = true;
   const accessToken = crypto.randomUUID(), refreshToken = crypto.randomUUID();
   const post = (path, body) => stub.fetch(new Request(`https://admin-state.invalid${path}`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
@@ -51,6 +53,7 @@ async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metad
         return Response.json({ success: true, result: {} });
       }
       if (url.pathname.endsWith('/sync')) return Response.json({ success: true, result: {} });
+      if (!providerReadable) return Response.json({ success: false, errors: [] }, { status: 503 });
       return Response.json({ success: true, result: gateway.provider.state.servers.get(gateway.action.resources[0].provider.id) });
     }
     assert.equal(request.headers.has('authorization'), false);
@@ -90,6 +93,7 @@ async function metaFixture(run, { endpoint = ENDPOINT, issuers = [ISSUER], metad
     if (endpoint === ENDPOINT) startInput.metaAppId = APP_ID;
     const started = await post('/source-oauth/start', { ...startInput, ...input });
     await run({ started, registrations, imports, calls, storage: gateway.storage, sourceId: gateway.source.id, accessToken, refreshToken,
+      failProviderReads() { providerReadable = false; },
       async finish() {
         const authorization = new URL((await started.clone().json()).authorizationUrl);
         return post('/source-oauth/callback', { actorEmail: 'admin@example.com', state: authorization.searchParams.get('state'),
@@ -204,14 +208,35 @@ test('Meta rejects write permissions, missing reads, ambiguous or incomplete per
     { permissions: () => Response.json({ data: [] }) },
     { permissions: () => Response.json({ data: Array.from({ length: 101 }, (_, index) => ({ permission: `read_${index}`, status: 'declined' })) }) },
   ];
-  for (const options of cases) await metaFixture(async ({ started, finish, imports, storage }) => {
+  for (const options of cases) await metaFixture(async ({ started, finish, imports, storage, sourceId }) => {
     assert.equal(started.status, 200);
     const finished = await finish();
     assert.equal(finished.status, 409);
     assert.equal((await finished.json()).error, 'source_oauth_scope_unsupported');
     assert.equal(imports.length, 0);
     assert.equal(storage.snapshot(OAUTH_KEY), undefined);
+    // Only fixed labels are retained, so the refused grant is identifiable
+    // without recording any provider permission names or response fields.
+    const { at, ...diagnostic } = storage.snapshot(`${DIAGNOSTIC_KEY}/${sourceId}`);
+    assert.ok(Number.isFinite(Date.parse(at)));
+    assert.deepEqual(diagnostic, options.permissions
+      ? { stage: 'permission_check', reason: 'scope_unsupported', status: 'failed', httpStatus: 200 }
+      : { stage: 'authorization_callback', reason: 'source_oauth_scope_unsupported', status: 'failed', httpStatus: null },
+    JSON.stringify(options));
   }, options);
+});
+
+test('Meta records a Cloudflare re-read failure distinctly from a refused grant', async () => {
+  await metaFixture(async ({ started, finish, imports, storage, sourceId, failProviderReads }) => {
+    assert.equal(started.status, 200);
+    failProviderReads();
+    const finished = await finish();
+    assert.equal(finished.status, 409);
+    assert.equal((await finished.json()).error, 'source_oauth_unavailable');
+    assert.equal(imports.length, 0);
+    const { at, ...diagnostic } = storage.snapshot(`${DIAGNOSTIC_KEY}/${sourceId}`);
+    assert.deepEqual(diagnostic, { stage: 'authorization_callback', reason: 'source_oauth_unavailable', status: 'failed', httpStatus: null });
+  });
 });
 
 test('Meta does not forward its token through redirects or import an unverifiable grant', async () => {
@@ -225,6 +250,8 @@ test('Meta does not forward its token through redirects or import an unverifiabl
     assert.equal((await finish()).status, 409);
     assert.equal(imports.length, 0);
     assert.equal(storage.snapshot(OAUTH_KEY), undefined);
-    assert.equal(storage.snapshot(`ankka-mcp-gateway/source-oauth-diagnostic/v1/${sourceId}`).stage, 'permission_check');
+    const diagnostic = storage.snapshot(`${DIAGNOSTIC_KEY}/${sourceId}`);
+    assert.equal(diagnostic.stage, 'permission_check');
+    assert.equal(diagnostic.reason, undefined, 'an unavailable permission read is not a refused grant');
   }, { permissions });
 });

@@ -69,6 +69,12 @@ default `public_profile` identity permission. Declined or expired permissions
 do not grant authority. Missing, duplicate, malformed, paginated, oversized or
 unavailable evidence fails closed. The gateway follows no redirects or pages.
 
+`diagnose_mcp_source` records a refused grant as stage `permission_check` with
+reason `scope_unsupported`, and an unavailable permission read as
+`permission_check` with its HTTP status and no reason. A scope refused in the
+token response itself records `authorization_callback` with reason
+`source_oauth_scope_unsupported`. Permission names are never retained.
+
 If a previous connection granted write permissions, remove that grant in Meta
 and authorize again with the restricted permission set. Do not bypass a refused
 grant by manually importing a broader token in Cloudflare. A denied connection

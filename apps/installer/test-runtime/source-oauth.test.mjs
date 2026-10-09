@@ -12,10 +12,11 @@ import { pausedGateway, sourceUrl } from './paused-source-fixture.mjs';
 
 const origin = 'https://manage.example.com';
 const oauthKey = 'ankka-mcp-gateway/source-oauth/v1';
+const diagnosticKey = 'ankka-mcp-gateway/source-oauth-diagnostic/v1';
 const moduleCode = await build({ entryPoints: [fileURLToPath(new URL('./source-oauth-worker.mjs', import.meta.url))],
   bundle: true, write: false, format: 'esm', platform: 'browser', target: 'es2022', external: ['cloudflare:workers'] });
 
-async function assertSourceOauthRestart(endpoint) {
+async function assertSourceOauthRestart(endpoint, { extraGrant } = {}) {
   const meta = endpoint === 'https://mcp.facebook.com/ads';
   const gateway = await pausedGateway({ endpoint, publicCatalogue: endpoint === 'https://mcp.gorgias.com/mcp' });
   const scope = meta ? 'ads_mcp_management ads_read' : endpoint === sourceUrl ? undefined : 'openid offline tickets:read';
@@ -57,7 +58,8 @@ async function assertSourceOauthRestart(endpoint) {
     }
     if (meta && url.href === 'https://graph.facebook.com/v26.0/me/permissions') {
       assert.equal(request.headers.get('authorization'), `Bearer ${accessToken}`);
-      return Response.json({ data: scope.split(' ').map((permission) => ({ permission, status: 'granted' })) });
+      return Response.json({ data: [...scope.split(' '), ...(extraGrant ? [extraGrant] : [])]
+        .map((permission) => ({ permission, status: 'granted' })) });
     }
     if (url.origin === 'https://api.cloudflare.com') {
       if (request.method === 'PUT') {
@@ -106,10 +108,19 @@ async function assertSourceOauthRestart(endpoint) {
     const input = { actorEmail: 'admin@example.com', state: authorization.searchParams.get('state'), browser,
       code: 'synthetic-code', denied: false, issuer: null };
     const callbacks = await Promise.all([post('/source-oauth/callback', input), post('/source-oauth/callback', input)]);
-    assert.deepEqual(callbacks.map((response) => response.status).sort(), [200, 409]);
-    assert.equal(exchanges, 1); assert.equal(imports, 1);
+    assert.deepEqual(callbacks.map((response) => response.status).sort(), extraGrant ? [409, 409] : [200, 409]);
+    assert.equal(exchanges, 1); assert.equal(imports, extraGrant ? 0 : 1);
     const retained = await (await runtime.dispatchFetch(`${origin}/fixture/state`)).json();
     assert.equal(retained[oauthKey], undefined);
+    if (extraGrant) {
+      // The replayed callback finds no attempt and records nothing over the refusal.
+      assert.deepEqual((await Promise.all(callbacks.map((response) => response.json()))).map((body) => body.error).sort(),
+        ['source_oauth_invalid', 'source_oauth_scope_unsupported']);
+      const { at, ...diagnostic } = retained[`${diagnosticKey}/${gateway.source.id}`];
+      assert.ok(Number.isFinite(Date.parse(at)));
+      assert.deepEqual(diagnostic, { stage: 'permission_check', reason: 'scope_unsupported', status: 'failed', httpStatus: 200 });
+      assert.ok(!JSON.stringify(retained).includes(extraGrant));
+    }
     assert.ok(!JSON.stringify(retained).includes(accessToken)); assert.ok(!JSON.stringify(retained).includes(refreshToken));
   } finally { await runtime?.dispose(); await rm(directory, { recursive: true, force: true }); }
 }
@@ -118,3 +129,6 @@ for (const endpoint of [sourceUrl, 'https://mcp.gorgias.com/mcp', 'https://mcp.f
   test(`production source OAuth consumes its SQLite attempt once across callbacks and restart: ${endpoint}`,
     () => assertSourceOauthRestart(endpoint));
 }
+
+test('production Meta OAuth records a fixed permission_check diagnostic when the grant exceeds read permissions',
+  () => assertSourceOauthRestart('https://mcp.facebook.com/ads', { extraGrant: 'ads_management' }));
