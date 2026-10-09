@@ -52,6 +52,10 @@ installed release; a document or fixture is not a compatibility certification.
   recovery, and the coverage they do not claim.
 - [Live lifecycle validation](LIVE_LIFECYCLE.md): the browser, OAuth and
   signed-release qualification layer.
+- [Debugging and release operations](OPERATIONS.md): diagnosis, live
+  verification, and release guidance for maintainers and agents.
+- [Solved problems](solutions/README.md): known failure signatures, their
+  causes, and fixes, searchable by error text.
 
 ## Review trust and privacy
 
