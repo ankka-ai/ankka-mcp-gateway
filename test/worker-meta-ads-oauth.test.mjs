@@ -235,6 +235,7 @@ test('Meta records a Cloudflare re-read failure distinctly from a refused grant'
     assert.equal((await finished.json()).error, 'source_oauth_unavailable');
     assert.equal(imports.length, 0);
     const { at, ...diagnostic } = storage.snapshot(`${DIAGNOSTIC_KEY}/${sourceId}`);
+    assert.ok(Number.isFinite(Date.parse(at)));
     assert.deepEqual(diagnostic, { stage: 'authorization_callback', reason: 'source_oauth_unavailable', status: 'failed', httpStatus: null });
   });
 });

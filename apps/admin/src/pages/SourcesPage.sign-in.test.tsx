@@ -5,6 +5,7 @@ import { GatewayApiError, type GatewayAdminApi, type GatewayStatus, type Managed
 import { SYNTHETIC_SOURCE_CATALOG } from '../catalog/fixtures'
 import { GatewayProvider, useGateway } from '../GatewayContext'
 import { SourcesPage } from './SourcesPage'
+import { CONNECTION_CACHE_KEY } from '../components/SourceConnection'
 
 // A sign-in source is installed with nothing enabled. Once its operator has connected it, the paused installation lists
 // its real tools from Cloudflare's synced list, and the administrator who started it chooses.
@@ -59,7 +60,10 @@ async function choice() {
 }
 
 describe('choosing the tools of a connected sign-in connector', () => {
-  afterEach(cleanup)
+  afterEach(() => {
+    cleanup()
+    sessionStorage.removeItem(CONNECTION_CACHE_KEY)
+  })
 
   it.each([
     ['Gorgias', 'https://mcp.gorgias.com/mcp', 'Gorgias authorization here is limited to reading tickets. Other Gorgias operations may be unavailable.'],
