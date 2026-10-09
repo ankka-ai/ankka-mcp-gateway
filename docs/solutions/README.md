@@ -46,4 +46,5 @@ when there is one.
 - [Source actions refused while another lifecycle action runs](runtime-errors/source-actions-refused-during-lifecycle-action.md)
 - [Cloudflare keeps a stale MCP server status after the origin recovers](integration-issues/cloudflare-mcp-server-stale-status-after-origin-recovers.md)
 - [New sources stay hidden from clients that connected earlier](integration-issues/new-source-hidden-from-connected-portal-clients.md)
+- [Gateway Management tool edits refused in individual sign-in mode](integration-issues/management-tool-edits-refused-in-individual-sign-in-mode.md)
 - [Timeouts that only appear when several local gates run at once](test-failures/load-only-timeouts-from-parallel-local-gates.md)
