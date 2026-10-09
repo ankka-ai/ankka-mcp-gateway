@@ -159,7 +159,11 @@ For agent authentication, CLI commands and edge failures, start with
    source, its revision, and the unfinished action.
 2. Call `diagnose_mcp_source` with that source ID. Diagnostics retain a fixed
    stage, status, HTTP status when available, and observation time. Discovery,
-   dynamic client registration, and token exchange failures are distinguishable.
+   dynamic client registration, token exchange and provider permission check
+   failures are distinguishable. Gateway refusals also carry a fixed `reason`;
+   without a more specific one, it is the refusal code, such as
+   `source_oauth_scope_unsupported` or `source_oauth_unavailable`, under stage
+   `authorization_start` or `authorization_callback`.
    Token exchange failures may also include `oauthError`, restricted to standard
    OAuth error codes such as `invalid_grant` or `invalid_client`. Provider error
    descriptions and unrecognized codes are discarded.
@@ -306,7 +310,8 @@ the existing service-identity boundary.
 | Access login redirect or authentication challenge | Establish the correct endpoint's Access session; do not follow redirects with credentials. |
 | Gateway refusal or MCP tool error | Check source installation, audience, assignment and tool selection; account API permissions do not replace them. |
 | Provider consent reports an invalid nonce | Failure is on the provider consent endpoint. Do not replay the consent URL; a fresh attempt in the same browser can distinguish an old session from a recurring issue. |
-| Gateway reports authorization failure; diagnostic says `authorization_callback` | Use the fixed `reason` when present, such as `attempt_expired`, `attempt_mismatch`, `issuer_mismatch` or `source_changed`. Older releases record only this broad stage, which cannot establish the cause. |
+| Gateway reports authorization failure; diagnostic says `authorization_callback` | Use the fixed `reason` when present, such as `attempt_expired`, `attempt_mismatch`, `issuer_mismatch` or `source_changed`, or a refusal code: `source_oauth_scope_unsupported` for a refused scope, `source_oauth_unavailable` typically when the gateway could not re-read or match the Cloudflare source record. Older releases record only this broad stage, which cannot establish the cause. |
+| Diagnostic says `permission_check` | With reason `scope_unsupported`, the provider's permission read succeeded but the grant was refused; see [Meta Ads](META_ADS.md). Without a reason, the permission read itself failed; inspect the HTTP status. |
 | Diagnostic says `token_response` | The exchange returned HTTP 200, but a credential field failed validation. The fixed `reason` names the field without retaining its value. |
 | Diagnostic says `credential_import` with `provider_rejected` | Cloudflare rejected or did not confirm credential import; inspect the recorded HTTP status before retrying. |
 | Diagnostic says `token_exchange` | Use its HTTP status and standard `oauthError`, when recorded, to investigate the exchange. Never retain raw token responses. |

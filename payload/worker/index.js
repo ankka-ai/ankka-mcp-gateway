@@ -5382,20 +5382,22 @@ async function metaAdsGrantedScope(accessToken) {
   const permissions = await oauthJson(META_ADS_PERMISSIONS_URL, {
     headers: { accept: 'application/json', authorization: `Bearer ${accessToken}` },
   }, 'permission_check');
+  // The read succeeded; a refusal past this point is about the grant itself.
+  const refuse = () => sourceOauthDiagnosticFailure('permission_check', 'scope_unsupported', 200, 'source_oauth_scope_unsupported');
   if (permissions.error !== undefined || !Array.isArray(permissions.data) || permissions.data.length < 2 || permissions.data.length > 100 ||
       (permissions.paging !== undefined && (!isRecord(permissions.paging) ||
         permissions.paging.next !== undefined || permissions.paging.previous !== undefined))) {
-    sourceOauthFailure('source_oauth_scope_unsupported');
+    refuse();
   }
   const seen = new Set(), granted = [];
   for (const entry of permissions.data) {
     if (!isRecord(entry) || !oauthText(entry.permission, 256) || seen.has(entry.permission) ||
-        !['granted', 'declined', 'expired'].includes(entry.status)) sourceOauthFailure('source_oauth_scope_unsupported');
+        !['granted', 'declined', 'expired'].includes(entry.status)) refuse();
     seen.add(entry.permission);
     if (entry.status === 'granted') granted.push(entry.permission);
   }
   const scope = granted.join(' ');
-  verifySourceOauthScope(META_ADS_MCP_URL, scope, META_ADS_READ_SCOPES);
+  try { verifySourceOauthScope(META_ADS_MCP_URL, scope, META_ADS_READ_SCOPES); } catch { refuse(); }
   return META_ADS_GRANTED_SCOPES.filter((value) => granted.includes(value)).join(' ');
 }
 
@@ -7357,11 +7359,12 @@ export class AdminState {
           return result;
         } catch (error) {
           const diagnostic = error instanceof SourceDiscoveryError && error.diagnostic;
+          // Source discovery codes are fixed literals, never provider text.
+          const code = error instanceof SourceDiscoveryError ? error.code : 'source_oauth_unavailable';
           await record(diagnostic && ['discovery', 'client_registration', 'token_exchange', 'token_response', 'permission_check', 'authorization_callback', 'credential_import'].includes(diagnostic.stage)
             ? diagnostic : { stage: url.pathname.endsWith('/start') ? 'authorization_start' : 'authorization_callback',
-              status: 'failed', httpStatus: null });
-          return sourceToolsRefusal(error instanceof SourceDiscoveryError ? error.status : 502,
-            error instanceof SourceDiscoveryError ? error.code : 'source_oauth_unavailable');
+              reason: code, status: 'failed', httpStatus: null });
+          return sourceToolsRefusal(error instanceof SourceDiscoveryError ? error.status : 502, code);
         }
       }
       if (url.pathname === INTERNAL_BOOTSTRAP_PATH) {
