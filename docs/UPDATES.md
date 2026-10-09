@@ -121,6 +121,29 @@ the stage and cause as its code and leaves the running version untouched.
 An upload whose outcome is unknown is left to the handover: the alarm either
 proves the new release or reports recovery-required.
 
+## Updates without a browser
+
+When the gateway holds a [management token](MANAGEMENT_TOKEN.md) with Workers
+Scripts Edit, `apply_gateway_update` and `rollback_gateway_update` on Gateway
+Management run the prepared operation in the gateway itself instead of
+returning a browser handoff. The sequence above is unchanged from the account
+check onwards: the token is checked against the account and the gateway's own
+Worker exactly as the `upgrade` grant is, the signed release and its digests
+are verified before any upload, the handover alarm finishes the journal, and
+the action record names the manager who asked. The token is not revoked
+afterwards; it is the operator's standing credential. `review_gateway_update`
+reports `applies: management_token` when this path is available and
+`applies: browser_consent` otherwise, and a refused token answers with a fixed
+reason while the browser handoff remains available.
+
+This moves a boundary deliberately: anyone with a management assignment, or a
+session that compromises one, can move the gateway to any signed release in
+its channel, newer or older, without a person approving it. Cloudflare's
+Workers Scripts permission is account-wide; the gateway writes only to its own
+Worker, which the ownership checks enforce. A token without that permission
+fails the account check with `management_credential_rejected` and the
+dashboard's consent flow still works.
+
 ## Rollback
 
 A successful update retains the previous release reference and Cloudflare

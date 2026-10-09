@@ -897,7 +897,7 @@ describe('management token custody in the gateway callback', () => {
     const html = await page.text();
     expect(html).toContain('Add your management token');
     // The link and the name carry the management hostname, as script literals the page assigns after checking the origin.
-    expect(html).toContain(JSON.stringify('https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22mcp_portals%22%2C%22type%22%3A%22edit%22%7D%5D&name=Ankka%20gateway%20manage.example.com'));
+    expect(html).toContain(JSON.stringify('https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22mcp_portals%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D&name=Ankka%20gateway%20manage.example.com'));
     expect(html).toContain(JSON.stringify('Ankka gateway manage.example.com'));
     // One field, never echoed, never part of a form submission.
     expect(html.match(/<input\b/gu)).toHaveLength(1);
@@ -1120,5 +1120,86 @@ describe('management token custody in the gateway callback', () => {
     await f.attempts.port.write({ ...earlier, actionId: `action_${'m'.repeat(32)}` });
     const next = await f.target.fetch(f.start());
     expect(next.status).toBe(200);
+  });
+});
+
+describe('unattended updates with the management token', () => {
+  const TOKEN = `cfat_${'T'.repeat(40)}`;
+  const runningSchema = v.strictObject({
+    schemaVersion: v.literal(1), status: v.literal('running'), attemptId: v.string(), actionId: v.literal(ACTION_ID),
+    operation: v.picklist(['update', 'rollback']),
+  });
+  const rejectedSchema = v.strictObject({
+    schemaVersion: v.literal(1), error: v.literal('management_credential_rejected'), reason: v.string(),
+  });
+  const prepared = { status: 'authorization_required' as const, expiresAt: ACTION_EXPIRES_AT };
+  type HandoffClaim = typeof runtimeClaim | typeof baseClaim;
+  function unattendedRequest(claim: HandoffClaim = runtimeClaim): Request {
+    return new Request('https://admin-state.invalid/runtime-updates/unattended', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ schemaVersion: 1, handoff: base64UrlEncode(new TextEncoder().encode(JSON.stringify(claim))) }),
+    });
+  }
+
+  it('runs a prepared update with the token: account checked like a grant, no consent, nothing revoked, the token never stored', async () => {
+    const attempts = attemptPort();
+    const updates: CustomerOperationRuntimeUpdateInput[] = [];
+    const attemptsDuringUpdate: (CustomerOperationAttempt | null)[] = [];
+    const harness = transport();
+    let driver: CustomerRuntimeUpdateDriver | null = null;
+    let alarm = { due: false };
+    const target = router({
+      ...dependencies({
+        port: attempts.port, harness, applied: [], updates, attemptsDuringUpdate, action: null, runtimeAction: prepared,
+        onUpdateDriver: (value, flag) => { driver = value; alarm = flag; },
+      }),
+      managementCredential: () => TOKEN,
+    });
+    const started = await target.startUnattended(unattendedRequest());
+    expect(started.status).toBe(200);
+    const body = await responseJson(started, runningSchema);
+    expect(body.operation).toBe('update');
+    expect(harness.calls).toEqual([`https://api.cloudflare.com/client/v4/accounts/${ACCOUNT_ID}/workers/workers/ankka-gateway`]);
+    expect(attempts.current()).toBeNull();
+    for (const secret of [TOKEN, ACTION_KEY]) expect(attempts.writes.join('\n')).not.toContain(secret);
+    expect(alarm.due).toBe(true);
+    if (driver === null) throw new Error('driver missing');
+    const running: CustomerRuntimeUpdateDriver = driver;
+    expect(await running.continue()).toBe('settled');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.accessToken).toBe(TOKEN);
+    expect(updates[0]?.actionKey).toBe(ACTION_KEY);
+    expect(updates[0]?.operation).toBe('update');
+    expect(attemptsDuringUpdate).toEqual([null]);
+    // The standing token is never revoked and the pass makes no further provider call here.
+    expect(harness.revoked()).toBe(false);
+    expect(harness.calls).toHaveLength(1);
+    expect((await running.view(body.attemptId))?.result).toBe('applied');
+  });
+
+  it('refuses without a token, with a refused account, for a source handoff, and while a consent attempt is pending', async () => {
+    const attempts = attemptPort();
+    const deps = (harness: Harness) => dependencies({ port: attempts.port, harness, applied: [], action: null, runtimeAction: prepared });
+    const noToken = await router(deps(transport())).startUnattended(unattendedRequest());
+    expect(noToken.status).toBe(409);
+    expect((await responseJson(noToken, errorSchema)).error).toBe('management_credential_required');
+
+    const refused = transport(SOURCE_SCOPES, 'refused');
+    const rejected = await router({ ...deps(refused), managementCredential: () => TOKEN }).startUnattended(unattendedRequest());
+    expect(rejected.status).toBe(409);
+    expect((await responseJson(rejected, rejectedSchema)).reason).toMatch(/^grant_account_mismatch/u);
+    expect(attempts.current()).toBeNull();
+
+    const sourceHandoff = await router({ ...deps(transport()), managementCredential: () => TOKEN }).startUnattended(unattendedRequest(baseClaim));
+    expect(sourceHandoff.status).toBe(400);
+    expect((await responseJson(sourceHandoff, errorSchema)).error).toBe('operation_invalid');
+
+    const consent = router(deps(transport('workers-scripts.write')));
+    await authorize(consent, runtimeStartRequest(), 'workers-scripts.write');
+    expect(attempts.current()?.phase).toBe('authorizing');
+    const pending = await router({ ...deps(transport()), managementCredential: () => TOKEN }).startUnattended(unattendedRequest());
+    expect(pending.status).toBe(409);
+    expect((await responseJson(pending, errorSchema)).error).toBe('operation_pending');
   });
 });

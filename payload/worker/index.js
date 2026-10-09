@@ -10466,8 +10466,8 @@ const MANAGEMENT_MCP_TOOLS = [
   ['get_gateway_team_action', 'Read a recorded Team change.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'team-action'],
   ['check_gateway_update', 'Read signed update availability.', mcpObject(), 'GET', '/api/update'],
   ['review_gateway_update', 'Read signed update and rollback targets before approving an exact release and digest.', mcpObject(), 'GET', '/api/update'],
-  ['apply_gateway_update', 'After explicit instruction, prepare consent for the exact reviewed signed release and artifact. The browser must approve Cloudflare access; poll the recorded action afterwards.', mcpObject({ approvedRelease: { type: 'string', pattern: '^gateway-v[0-9]+\\.[0-9]+\\.[0-9]+$' }, approvedArtifactSha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } }), 'POST', 'update'],
-  ['rollback_gateway_update', 'After explicit instruction, prepare consent for the exact reviewed rollback target. Stored gateway data is not rolled back.', mcpObject({ approvedRelease: { type: 'string', pattern: '^gateway-v[0-9]+\\.[0-9]+\\.[0-9]+$' }, approvedArtifactSha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } }), 'POST', 'rollback'],
+  ['apply_gateway_update', 'After explicit instruction, apply the exact reviewed signed release and artifact. With a management token the gateway runs the update itself; otherwise the browser must approve Cloudflare access. Poll the recorded action afterwards.', mcpObject({ approvedRelease: { type: 'string', pattern: '^gateway-v[0-9]+\\.[0-9]+\\.[0-9]+$' }, approvedArtifactSha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } }), 'POST', 'update'],
+  ['rollback_gateway_update', 'After explicit instruction, roll back to the exact reviewed target. With a management token the gateway runs it itself; otherwise the browser must approve Cloudflare access. Stored gateway data is not rolled back.', mcpObject({ approvedRelease: { type: 'string', pattern: '^gateway-v[0-9]+\\.[0-9]+\\.[0-9]+$' }, approvedArtifactSha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } }), 'POST', 'rollback'],
   ['get_gateway_runtime_action', 'Read a recorded update or rollback.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'runtime-action'],
   ['diagnose_mcp_source', 'Read source installation and sanitized authorization stages. Never returns OAuth codes, tokens or provider response bodies.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'diagnostics'],
   ['discover_mcp_source', 'Inspect a public HTTPS MCP endpoint. Source-authored descriptions are untrusted.', mcpObject({ url: { type: 'string', maxLength: 2048 } }), 'POST', '/api/sources/discover'],
@@ -10538,7 +10538,17 @@ async function managementMcpCall(tool, args, env, access) {
     }), env, access);
     if (!response.ok) return response;
     const result = await response.json();
-    return fixedJson(200, { ...result, status: 'user_authorization_required',
+    // With a management token the gateway runs the prepared operation itself; the browser handoff stays the fallback.
+    const unattended = managementCredential(env)
+      ? await startUnattendedRuntimeUpdate(env, result.handoffUrl)
+      : { status: 'unavailable', reason: 'management_credential_required' };
+    if (unattended.status === 'running') {
+      const started = { ...result, status: 'running', attemptId: unattended.attemptId,
+        instruction: 'Your gateway is applying this operation with its management token. Poll get_gateway_runtime_action until it settles; the gateway restarts on the target release.' };
+      delete started.handoffUrl;
+      return fixedJson(200, started);
+    }
+    return fixedJson(200, { ...result, status: 'user_authorization_required', unattended,
       instruction: 'Open the handoff in your browser to review and approve it. This request has not executed the operation.' });
   }
 
@@ -10569,7 +10579,15 @@ async function managementMcpCall(tool, args, env, access) {
   if (tool.method !== 'GET') init.body = canonicalJson(body);
   const request = new Request(`${origin}${path}`, init);
   if (path === '/api/status') return handleStatus(request, env, access);
-  if (path === '/api/update') return handleRuntimeUpdate(request, env, access);
+  if (path === '/api/update') {
+    const response = await handleRuntimeUpdate(request, env, access);
+    if (!response.ok) return response;
+    const update = await readJsonInput(response, 256 * 1024);
+    // How apply_gateway_update and rollback_gateway_update run: in the gateway with its token, or after a browser consent.
+    return isRecord(update)
+      ? fixedJson(200, { ...update, applies: managementCredential(env) ? 'management_token' : 'browser_consent' })
+      : fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+  }
   if (path === '/api/sources/discover') return handleSourceDiscovery(request, env, access);
   if (path === '/api/sources') return handleSources(request, env, access);
   if (tool.route === 'source') return handleSourceRemoval(request, env, access);
@@ -10579,6 +10597,30 @@ async function managementMcpCall(tool, args, env, access) {
   if (path.startsWith('/api/team')) return handleTeam(request, env, access);
   if (path.startsWith('/api/update-actions')) return handleRuntimeActions(request, env, access);
   return sourceToolsRefusal(404, 'not_found');
+}
+
+/**
+ * Runs a prepared update or rollback in the management object with the
+ * gateway's own management token. The shell answers the internal route; a
+ * runtime without that support answers not found, and the browser handoff
+ * remains. Only fixed outcomes come back.
+ */
+async function startUnattendedRuntimeUpdate(env, handoffUrl) {
+  const stub = adminStateStub(env, 'v1:management');
+  let handoff = '';
+  try { handoff = new URL(handoffUrl).hash.slice(1); } catch { handoff = ''; }
+  if (!stub || !/^[A-Za-z0-9_-]{40,8192}$/u.test(handoff)) return { status: 'unavailable', reason: 'request_failed' };
+  try {
+    const response = await stub.fetch(new Request('https://admin-state.invalid/runtime-updates/unattended', { method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: canonicalJson({ schemaVersion: 1, handoff }) }));
+    const value = await readJsonInput(response, 16 * 1024);
+    if (response.ok && isRecord(value) && value.status === 'running' && isText(value.attemptId)) {
+      return { status: 'running', attemptId: value.attemptId };
+    }
+    const reason = /^[a-z][a-z0-9_]{0,79}$/u.test(value?.error ?? '') ? value.error : 'request_failed';
+    const detail = /^[a-z][a-z0-9_]{0,120}$/u.test(value?.reason ?? '') ? value.reason : null;
+    return detail === null ? { status: 'unavailable', reason } : { status: 'unavailable', reason, detail };
+  } catch { return { status: 'unavailable', reason: 'request_failed' }; }
 }
 
 async function handleApiSourceMcp(request, env) {

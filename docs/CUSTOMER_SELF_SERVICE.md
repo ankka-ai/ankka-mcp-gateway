@@ -85,9 +85,10 @@ Those approvals are temporary; your gateway keeps no Cloudflare authority from
 them. Adding a source and giving a teammate access are writes into your
 account, so the gateway needs one standing credential of its own: the
 account-owned [management token](MANAGEMENT_TOKEN.md) with exactly **Access:
-Apps and Policies Edit** and **MCP Portals Edit**. Cloudflare does not support
-scoping an API token to one Access policy: this token can edit every Access
-policy in the account, and the setup page says so before asking for it. It
+Apps and Policies Edit**, **MCP Portals Edit** and **Workers Scripts Edit**.
+Cloudflare does not support scoping an API token to one Access policy or one
+Worker: this token can edit every Access policy and every Worker in the
+account, and the setup page says so before asking for it. It
 stays inside your account as an encrypted secret of your Worker. Do not add
 any other API token to the gateway, and revoke the retired preview Team token
 if you created one. See [Team access](TEAM_ACCESS.md).
@@ -113,7 +114,7 @@ your Worker; the initial domain list and deployment evidence remain in the
 hosted session for its one-hour lifetime. The setup capability expires after
 ten minutes. MCP source credentials never enter this flow.
 
-The management token step opens Cloudflare's token page with both permissions
+The management token step opens Cloudflare's token page with all three permissions
 and a name that contains your management hostname already filled in. You
 create the token there and paste it into the one field on your gateway's
 page. Your Worker keeps it only in memory, beside the approval that follows,

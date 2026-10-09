@@ -29,14 +29,17 @@ export const CUSTOMER_INSTALL_MANAGEMENT_STEP_PATH = '/__ankka/install/managemen
 export const CUSTOMER_MANAGEMENT_BINDING = 'ANKKA_MANAGEMENT_TOKEN' as const;
 
 /**
- * The two permissions the template link pre-fills on Cloudflare's account
- * token page: "Access: Apps and Policies Edit" and "MCP Portals Edit". A link
- * built from exactly these keys was verified against the Cloudflare dashboard
- * on 2026-09-19: it pre-filled both permissions.
+ * The three permissions the template link pre-fills on Cloudflare's account
+ * token page: "Access: Apps and Policies Edit", "MCP Portals Edit" and
+ * "Workers Scripts Edit". A link built from the first two keys was verified
+ * against the Cloudflare dashboard on 2026-09-19. The third key is the one
+ * Cloudflare documents for Workers scripts; it lets the gateway apply its own
+ * signed updates and rollbacks without a browser consent.
  */
 export const CLOUDFLARE_MANAGEMENT_PERMISSION_GROUP_KEYS = Object.freeze([
   Object.freeze({ key: 'access', type: 'edit' }),
   Object.freeze({ key: 'mcp_portals', type: 'edit' }),
+  Object.freeze({ key: 'workers_scripts', type: 'edit' }),
 ] as const);
 
 /** The pre-filled name carries the management hostname, so the token can be found again in Cloudflare later. */

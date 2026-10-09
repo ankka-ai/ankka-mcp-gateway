@@ -16,7 +16,7 @@ export const MANAGEMENT_ACCESS_PURPOSE = 'Add connectors and manage team access 
 export const MANAGEMENT_ACCESS_REACH = 'This token can edit all Access policies in your Cloudflare account. It stays in your gateway and never passes through Ankka.'
 export const MANAGEMENT_ACCESS_STEPS = 'Create the token first as a Cloudflare account Administrator or Super Administrator. The next approval expires after a few minutes.'
 
-/** Step one of the flow, before any approval is spent: the link that creates the token with both permissions and its name. */
+/** Step one of the flow, before any approval is spent: the link that creates the token with its three permissions and its name. */
 export function ManagementTokenCreateLink() {
   const hostname = window.location.hostname
   return (

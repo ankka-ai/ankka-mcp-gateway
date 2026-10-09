@@ -1,5 +1,5 @@
 import * as v from 'valibot';
-import type { CustomerCloudflareTransport, EphemeralCustomerCloudflareGrant } from './customer-cloudflare-grant';
+import type { CustomerCloudflareTransport } from './customer-cloudflare-grant';
 import type {
   CustomerOperationAttempt, CustomerOperationResult, CustomerOperationRuntimeUpdateInput,
 } from './customer-operation-router';
@@ -124,6 +124,32 @@ export interface CustomerUpdateView {
   readonly targetRelease: string | null;
 }
 
+/**
+ * What an update needs from its credential: a bearer token for the pass, an
+ * end-of-attempt revocation, and a discard. A consent grant revokes itself;
+ * the gateway's own management token is never revoked and outlives the pass.
+ */
+export interface CustomerUpdateCredential {
+  withAccessToken<Value>(operation: (accessToken: string) => Promise<Value>): Promise<Value>;
+  revoke(input: { readonly clientId: string; readonly transport: CustomerCloudflareTransport }): Promise<void>;
+  discard(): void;
+}
+
+/** The management token as an update credential: used for the pass, never revoked, forgotten when the attempt ends. */
+export function managementCredentialUpdateCredential(token: string): CustomerUpdateCredential {
+  let value: string | undefined = token;
+  return Object.freeze({
+    async withAccessToken<Value>(operation: (accessToken: string) => Promise<Value>): Promise<Value> {
+      if (value === undefined) throw new Error('credential_discarded');
+      return operation(value);
+    },
+    async revoke(): Promise<void> {
+      // A standing account token is the operator's to revoke, in Cloudflare.
+    },
+    discard(): void { value = undefined; },
+  });
+}
+
 export interface CustomerRuntimeUpdatePorts {
   readonly outcomes: CustomerUpdateOutcomePort;
   readonly transport: CustomerCloudflareTransport;
@@ -137,7 +163,7 @@ export interface CustomerRuntimeUpdatePorts {
 
 interface PendingUpdate {
   readonly attempt: CustomerOperationAttempt;
-  readonly grant: EphemeralCustomerCloudflareGrant;
+  readonly grant: CustomerUpdateCredential;
   readonly actionKey: string;
   stage: CustomerUpdateStage;
 }
@@ -161,7 +187,7 @@ export class CustomerRuntimeUpdateDriver {
   /** Records the running attempt, takes the grant and the key, and schedules the pass. */
   async start(input: {
     readonly attempt: CustomerOperationAttempt;
-    readonly grant: EphemeralCustomerCloudflareGrant;
+    readonly grant: CustomerUpdateCredential;
     readonly actionKey: string;
   }): Promise<'started' | 'failed'> {
     this.forget();

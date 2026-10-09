@@ -44,10 +44,10 @@ class MemoryStorage implements CustomerGatewayOwnershipStorage {
 }
 
 describe('management token template link', () => {
-  it('pre-fills exactly the two verified permissions and a name that carries the management hostname', () => {
+  it('pre-fills exactly the three permissions and a name that carries the management hostname', () => {
     const link = customerManagementCredentialTemplateLink('manage.example.com');
     expect(link).toBe('https://dash.cloudflare.com/?to=/:account/api-tokens' +
-      '&permissionGroupKeys=%5B%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22mcp_portals%22%2C%22type%22%3A%22edit%22%7D%5D' +
+      '&permissionGroupKeys=%5B%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22mcp_portals%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D' +
       '&name=Ankka%20gateway%20manage.example.com');
     const url = new URL(link);
     expect(url.origin).toBe('https://dash.cloudflare.com');
@@ -60,6 +60,7 @@ describe('management token template link', () => {
     expect(CLOUDFLARE_MANAGEMENT_PERMISSION_GROUP_KEYS).toEqual([
       { key: 'access', type: 'edit' },
       { key: 'mcp_portals', type: 'edit' },
+      { key: 'workers_scripts', type: 'edit' },
     ]);
     expect(url.searchParams.get('name')).toBe(customerManagementCredentialName('manage.example.com'));
     expect(url.searchParams.get('name')).toContain('manage.example.com');

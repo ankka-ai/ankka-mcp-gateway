@@ -1,9 +1,12 @@
 # Customer-owned management credential
 
 Issue #123 replaces repeated Cloudflare consent for routine source installation
-and Team policy management with one account-owned API token. Deployment, DNS,
-Worker updates, teardown, and upstream-provider authentication retain their
-separate authority. This does not turn MCP tools into write-capable tools.
+and Team policy management with one account-owned API token. With the Workers
+Scripts Edit permission the same token also lets the gateway apply its own
+signed updates and rollbacks when an agent asks through Gateway Management;
+see [Updates](UPDATES.md#updates-without-a-browser). Deployment, DNS, teardown,
+and upstream-provider authentication retain their separate authority. This does
+not turn MCP tools into write-capable tools.
 
 ## Credential custody
 
@@ -68,8 +71,8 @@ about this step and never the value: `held`, `installed`, `skipped`, or
 
 New setup requires the token before the final Cloudflare approval. Older
 gateways without one can still add it from Settings. Until the token exists,
-adding sources and managing team access stay disabled; updates, rollback, and
-removal do not need it.
+adding sources and managing team access stay disabled; updates and rollback
+fall back to a browser consent, and removal never needs it.
 
 ### What the Settings flow does with the value
 
@@ -134,11 +137,14 @@ old one has the earlier creation date.
 https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=<URL-encoded JSON>&name=<name>
 ```
 
-The JSON is `[{"key":"access","type":"edit"},{"key":"mcp_portals","type":"edit"}]`
+The JSON is `[{"key":"access","type":"edit"},{"key":"mcp_portals","type":"edit"},{"key":"workers_scripts","type":"edit"}]`
 and the name is `Ankka gateway <management hostname>`, so the token can be
-found again in Cloudflare later. This link was verified against the Cloudflare
-dashboard on 2026-09-19: it pre-filled **Access: Apps and Policies Edit** and
-**MCP Portals Edit**. `:account` is Cloudflare's own placeholder; the dashboard
+found again in Cloudflare later. A link with the first two keys was verified
+against the Cloudflare dashboard on 2026-09-19: it pre-filled **Access: Apps
+and Policies Edit** and **MCP Portals Edit**. The third key is the one
+Cloudflare documents for **Workers Scripts Edit**; a token created before it
+was added can be edited in Cloudflare to gain that permission without
+replacing it. `:account` is Cloudflare's own placeholder; the dashboard
 asks which account when you have more than one. The link carries permission
 keys and a name, never a credential. See Cloudflare's
 [template link guide](https://developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/).
