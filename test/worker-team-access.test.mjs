@@ -118,6 +118,17 @@ function teamProvider() {
   };
 }
 
+// One RSA key pair for the file: generating it for every fixture took about a
+// third of this file's runtime. Each fixture still publishes its own key id.
+let accessKeyPair;
+function accessSigningKeys() {
+  accessKeyPair ??= crypto.subtle.generateKey({
+    name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048,
+    publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256',
+  }, true, ['sign', 'verify']);
+  return accessKeyPair;
+}
+
 async function fixture(run, claimInput) {
   const provider = teamProvider();
   const options = { provider };
@@ -145,10 +156,7 @@ async function fixture(run, claimInput) {
       } };
     },
   };
-  const keys = await crypto.subtle.generateKey({
-    name: 'RSASSA-PKCS1-v1_5', modulusLength: 2048,
-    publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256',
-  }, true, ['sign', 'verify']);
+  const keys = await accessSigningKeys();
   const jwk = await crypto.subtle.exportKey('jwk', keys.publicKey);
   const kid = `synthetic-team-regression-key-${crypto.randomUUID()}`;
   async function headers(email = ADMIN, audience = gateway.env.CF_ACCESS_AUD) {
