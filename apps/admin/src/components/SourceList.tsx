@@ -9,6 +9,9 @@ import { MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
 import type { InstalledSourceTools, ManagedSource, SourceConnection, ToolMetadata } from '../api'
 
+// Gateway-hosted sources (agent-authored API sources and the feedback source) sign each person in individually.
+const gatewayHostedSource = (id: string) => id === 'source-666565646261636b' || /^source-a9[a-f0-9]{14}$/u.test(id)
+
 const filters = [
   { value: 'all', label: 'All' },
   { value: 'connected', label: 'Connected' },
@@ -119,7 +122,7 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
             const isExpanded = expanded === source.id || pendingRemovalSourceId === source.id
             const sourceDetailsId = `${detailsId}-${source.id}`
             const connection = source.authMode === 'oauth'
-              ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'Individual sign-in (previous setup)' : 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
+              ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'Individual sign-in (previous setup)' : gatewayHostedSource(source.id) ? 'Individual sign-in' : 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
               : 'Public'
 
             return (
@@ -137,7 +140,7 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
                     </DisclosureTrigger>
                   </th>
                   <td className="hidden px-3 py-3 text-kumo-subtle sm:table-cell">
-                    {source.authMode === 'oauth' ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'OAuth' : 'Legacy OAuth' : 'OAuth' : 'Public'}
+                    {source.authMode === 'oauth' ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' || gatewayHostedSource(source.id) ? 'OAuth' : 'Legacy OAuth' : 'OAuth' : 'Public'}
                   </td>
                   <td className="px-3 py-3">
                     {pendingRemovalSourceId === source.id ? <span className="text-warning-strong">Removal started</span> : source.status === 'installed' ? (

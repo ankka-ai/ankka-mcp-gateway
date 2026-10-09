@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add a built-in feedback source. Any assigned session can report a wrong
+  description, missing capability, stale data or routing problem about a
+  connected source with `submit_gateway_feedback`, and read reports with
+  `list_gateway_feedback`. Gateway Management lists and resolves them. Reports
+  stay in your Cloudflare account under fixed size bounds.
+
 - Allow manually configured Cloudflare policies alongside Ankka-managed Team
   policies. Team reads, saves, management-token verification, and built-in
   connector authorization use the saved policy IDs and preserve other policies.

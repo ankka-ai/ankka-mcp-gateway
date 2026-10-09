@@ -28,6 +28,8 @@ handlers as Edit tools and Save name. They appear in an agent’s tool list only
 installed Gateway Management allowlist includes them. The dashboard can edit
 tools or rename a connector without that allowlist entry. The source calls the same handlers, ownership
 checks, revision checks, action journals, and recovery rules as the dashboard.
+`list_gateway_feedback` and `resolve_gateway_feedback` read and triage the reports
+that sessions file through the built-in [feedback source](GATEWAY_FEEDBACK.md).
 It has no arbitrary HTTP, Cloudflare API, shell, account-selection, or credential
 input tool. Connector-specific provisioning, including BigQuery setup, continues
 to use its existing dashboard workflow.

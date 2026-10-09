@@ -85,6 +85,26 @@ describe('connector installation recovery', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Add Gateway Management' })).not.toBeInTheDocument())
   })
 
+  it('adds Gateway Feedback through normal discovery and connector draft APIs', async () => {
+    const user = userEvent.setup()
+    const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
+    api.getSources = vi.fn(async () => sources)
+    api.discoverSource = vi.fn().mockResolvedValue({ schemaVersion: 1, url: `${window.location.origin}/api/feedback/mcp`,
+      authMode: 'oauth', tools: [{ name: 'submit_gateway_feedback' }, { name: 'list_gateway_feedback' }] })
+    api.saveSourceDraft = vi.fn().mockResolvedValue({ ...sources, revision: 5, sources: [{
+      ...draft, id: 'source-666565646261636b', label: 'Gateway Feedback', onBehalfOfUser: true,
+    }] })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Add Gateway Feedback' }))
+    await waitFor(() => expect(api.saveSourceDraft).toHaveBeenCalledExactlyOnceWith(4, {
+      label: 'Gateway Feedback', url: `${window.location.origin}/api/feedback/mcp`, authMode: 'oauth',
+      enabledTools: ['list_gateway_feedback', 'submit_gateway_feedback'],
+    }))
+    expect(api.discoverSource).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/api/feedback/mcp`)
+    expect(api.prepareSourceAction).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Add Gateway Feedback' })).not.toBeInTheDocument())
+  })
+
   it('removes a failed BigQuery setup and its status card without starting another authorization', async () => {
     const user = userEvent.setup()
     const action = pendingAction({ state: 'failed', status: 'failed', canCancel: false,
