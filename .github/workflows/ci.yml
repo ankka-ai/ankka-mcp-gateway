@@ -76,11 +76,20 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
 
-  build-app-tests:
+  # The installer suite runs on one worker and was most of this job: about
+  # 215 of 320 seconds, 95 of them in its two slowest files. Those files run
+  # on their own runner. The rest leg excludes them, so a new installer test
+  # file always runs; renaming one fails the slowest leg with no test files.
+  app-tests:
+    name: app-tests (${{ matrix.part }})
     needs: install
     if: needs.install.outputs.reused != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [apps, installer-slowest, installer-rest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -97,8 +106,20 @@ jobs:
       - if: steps.modules.outputs.cache-hit != 'true'
         run: npm ci
       - run: npm run check:toolchain
-      - run: npm run build
-      - run: npm run test:apps
+      - if: matrix.part == 'apps'
+        run: npm run build
+      - if: matrix.part == 'apps'
+        run: npm run test:apps:quick
+      - if: matrix.part == 'installer-slowest'
+        run: >-
+          npm run test --workspace @ankka/gateway-installer --
+          test/customer-bigquery-teardown-runtime.test.mjs
+          test/customer-stage2-converger.test.ts
+      - if: matrix.part == 'installer-rest'
+        run: >-
+          npm run test --workspace @ankka/gateway-installer --
+          --exclude test/customer-bigquery-teardown-runtime.test.mjs
+          --exclude test/customer-stage2-converger.test.ts
 
   core-tests:
     needs: install
@@ -152,7 +173,7 @@ jobs:
       - run: npm run check:history
 
   check:
-    needs: [install, lint-typecheck, build-app-tests, core-tests, boundary-history]
+    needs: [install, lint-typecheck, app-tests, core-tests, boundary-history]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
