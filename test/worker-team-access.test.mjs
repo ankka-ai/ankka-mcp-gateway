@@ -5239,6 +5239,128 @@ test('built-in API sources install, isolate data access, update Team policies an
   assert.deepEqual((await gateway.view()).teams, [{ ...stock, sourceIds: [] }]);
 }));
 
+test('the built-in feedback source installs, records reports under the reporter identity, and operators resolve them', () => fixture(async (gateway) => {
+  const endpoint = `${MANAGEMENT_ORIGIN}/api/feedback/mcp`;
+  const FEEDBACK_ID = 'source-666565646261636b';
+  const discovery = await (await gateway.api('/api/sources/discover', { method: 'POST', body: { url: endpoint } })).json();
+  assert.deepEqual(discovery.tools.map((tool) => tool.name), ['submit_gateway_feedback', 'list_gateway_feedback']);
+  assert.equal(discovery.authentication, 'oauth');
+  const current = await (await gateway.api('/api/sources')).json();
+  const save = (revision, enabledTools) => gateway.api('/api/sources', { method: 'PUT', body: {
+    schemaVersion: 1, revision, source: { label: 'Gateway Feedback', url: endpoint, authMode: 'oauth', enabledTools },
+  } });
+  // Only the gateway's own feedback tools can be selected.
+  assert.equal((await save(current.revision, ['delete_everything'])).status, 400);
+  const savedResponse = await save(current.revision, ['list_gateway_feedback', 'submit_gateway_feedback']);
+  assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
+  const saved = await savedResponse.json();
+  const source = saved.sources.find((item) => item.url === endpoint);
+  assert.equal(source.id, FEEDBACK_ID);
+  assert.equal(source.onBehalfOfUser, true);
+  const started = await gateway.api('/api/source-actions', { method: 'POST', body: {
+    schemaVersion: 1, revision: saved.revision, sourceId: source.id,
+  } });
+  assert.equal(started.status, 409, await started.clone().text());
+  const action = (await (await gateway.api('/api/source-actions')).json()).actions.find((entry) => entry.sourceId === source.id);
+  const server = [...gateway.provider.state.servers.values()].find((entry) => entry.hostname === endpoint);
+  assert.ok(server);
+  server.tools = discovery.tools.map((tool) => ({ name: tool.name })); server.status = 'ready'; server.authentication_status = 'authenticated';
+  const native = [...gateway.provider.state.apps.values()].find((entry) => entry.domain === 'manage.example.com/api/feedback/mcp');
+  assert.ok(native);
+  native.aud = 'synthetic-feedback-audience';
+  const rpc = async (method, params = {}, email = MEMBER, audience = native.aud) => {
+    const response = await worker.fetch(new Request(endpoint, { method: 'POST',
+      headers: await gateway.headers(email, audience), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    }), gateway.env);
+    return { status: response.status, body: await response.json() };
+  };
+  const call = async (name, args, email, audience) => rpc('tools/call', { name, arguments: args }, email, audience);
+  const result = (reply) => reply.body.result.structuredContent;
+  // The draft catalogue is readable by the administrator for Portal synchronization; nobody can submit yet.
+  assert.equal((await rpc('tools/list', {}, ADMIN)).status, 200);
+  assert.equal((await call('submit_gateway_feedback', { message: 'early' }, ADMIN)).status, 401);
+  const resumed = await gateway.api(`/api/source-actions/${action.actionId}/renew`, { method: 'POST', body: {
+    schemaVersion: 1, revision: saved.revision, sourceId: source.id,
+  } });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await call('submit_gateway_feedback', { message: 'unassigned' })).status, 401);
+  const team = await gateway.view();
+  const assigned = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members: team.members.map((member) => ({ ...member,
+      sourceIds: member.email === MEMBER ? [...member.sourceIds, source.id].sort() : member.sourceIds })),
+  } });
+  assert.equal(assigned.status, 200, await assigned.clone().text());
+  const initialized = await rpc('initialize', { protocolVersion: '2025-06-18' });
+  assert.equal(initialized.body.result.serverInfo.name, 'ankka-gateway-feedback');
+  assert.match(initialized.body.result.instructions, /submit_gateway_feedback/u);
+
+  const known = current.sources.find((item) => item.status === 'installed').id;
+  const first = await call('submit_gateway_feedback', {
+    message: 'Asked for last week\'s orders.\nThe search returned fulfilment tools first.', sourceId: known,
+    toolName: 'cancelOrder', category: 'routing', severity: 'medium', origin: 'agent', evidence: 'search "order" -> 74 results\n\texpected the SQL tool',
+  });
+  assert.equal(first.body.result.isError, false, JSON.stringify(first.body));
+  assert.equal(result(first).result.feedbackId, 'fb_1');
+  assert.equal(result(first).result.status, 'open');
+  assert.equal(result(await call('submit_gateway_feedback', { message: 'ghost', sourceId: 'source-0000000000000000' })).error.code, 'feedback_source_unknown');
+  for (const args of [{ message: '' }, { message: 'x', category: 'rant' }, { message: 'x'.repeat(2001) }, { message: 'x', extra: true }, {}]) {
+    assert.equal((await call('submit_gateway_feedback', args)).body.error.code, -32602, JSON.stringify(args));
+  }
+  assert.equal(result(await call('submit_gateway_feedback', { message: 'Second report', origin: 'human', severity: 'high' })).result.feedbackId, 'fb_2');
+  const listed = result(await call('list_gateway_feedback', {})).result;
+  assert.equal(listed.total, 2);
+  assert.deepEqual(listed.items.map((item) => item.id), ['fb_2', 'fb_1']);
+  assert.equal(listed.items[1].reporter, MEMBER);
+  assert.equal(listed.items[1].origin, 'agent');
+  assert.equal(listed.items[1].toolName, 'cancelOrder');
+  assert.equal(listed.items[1].category, 'routing');
+  assert.equal(listed.items[1].sourceId, known);
+  assert.equal(listed.items[0].severity, 'high');
+  assert.equal(listed.items[0].origin, 'human');
+  assert.equal(listed.items[0].category, 'other');
+  assert.deepEqual(result(await call('list_gateway_feedback', { sourceId: known })).result.items.map((item) => item.id), ['fb_1']);
+  assert.equal((await call('list_gateway_feedback', {}, NEW_PERSON)).status, 401);
+  assert.equal((await call('list_gateway_feedback', {}, MEMBER, MANAGEMENT_AUDIENCE)).status, 401);
+  assert.equal((await call('resolve_gateway_feedback', { feedbackId: 'fb_1', status: 'resolved' })).body.error.code, -32602);
+
+  // Operators triage through Gateway Management; the reporter view reflects it.
+  await installManagementSource(gateway, ['list_gateway_feedback', 'resolve_gateway_feedback']);
+  const open = await managementRpc(gateway, 'tools/call', { name: 'list_gateway_feedback', arguments: { status: 'open' } });
+  assert.equal(result(open).result.total, 2);
+  const resolved = await managementRpc(gateway, 'tools/call', { name: 'resolve_gateway_feedback', arguments: { feedbackId: 'fb_1', status: 'resolved', resolution: 'Fixed in marketing_ads.yaml' } });
+  assert.equal(resolved.body.result.isError, false, JSON.stringify(resolved.body));
+  assert.equal(result(resolved).result.item.status, 'resolved');
+  assert.equal(result(resolved).result.item.resolvedBy, ADMIN);
+  assert.equal(result(resolved).result.item.resolution, 'Fixed in marketing_ads.yaml');
+  assert.equal(result(await managementRpc(gateway, 'tools/call', { name: 'resolve_gateway_feedback', arguments: { feedbackId: 'fb_9', status: 'resolved' } })).error.code, 'feedback_not_found');
+  assert.deepEqual(result(await call('list_gateway_feedback', {})).result.items.map((item) => item.id), ['fb_2']);
+  const everything = result(await call('list_gateway_feedback', { status: 'all', limit: 1 })).result;
+  assert.equal(everything.total, 2);
+  assert.equal(everything.items.length, 1);
+  const reopened = await managementRpc(gateway, 'tools/call', { name: 'resolve_gateway_feedback', arguments: { feedbackId: 'fb_1', status: 'open' } });
+  assert.equal(result(reopened).result.item.resolvedBy, null);
+
+  // A fixed capacity: open reports are never dropped, the oldest resolved report makes room.
+  for (let index = 3; index <= 200; index += 1) {
+    assert.equal(result(await call('submit_gateway_feedback', { message: `Report ${index}` })).result.feedbackId, `fb_${index}`);
+  }
+  assert.equal(result(await call('submit_gateway_feedback', { message: 'one too many' })).error.code, 'feedback_capacity_exceeded');
+  assert.equal(result(await managementRpc(gateway, 'tools/call', { name: 'resolve_gateway_feedback', arguments: { feedbackId: 'fb_5', status: 'resolved' } })).result.item.status, 'resolved');
+  assert.equal(result(await call('submit_gateway_feedback', { message: 'fits again' })).result.feedbackId, 'fb_201');
+  const stored = gateway.managementStorage.snapshot('ankka-mcp-gateway/feedback/v1');
+  assert.equal(stored.items.length, 200);
+  assert.equal(stored.items.some((item) => item.id === 'fb_5'), false);
+  assert.equal(stored.nextId, 202);
+
+  const sources = await (await gateway.api('/api/sources')).json();
+  const removed = await gateway.api(`/api/sources/${source.id}`, { method: 'DELETE', body: { schemaVersion: 1, revision: sources.revision } });
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.equal(gateway.provider.state.apps.has(native.id), false);
+  assert.equal((await rpc('tools/list')).status, 401);
+  // Reports outlive the source assignment so operators can still read them.
+  assert.equal(result(await managementRpc(gateway, 'tools/call', { name: 'list_gateway_feedback', arguments: { status: 'all' } })).result.total, 200);
+}));
+
 const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
 
 async function installAdditionalSource(gateway, extra = {}) {

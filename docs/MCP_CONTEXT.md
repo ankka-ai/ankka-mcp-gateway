@@ -98,6 +98,10 @@ Repeat in both modes and supported clients after refreshing cached definitions.
 Measure routing accuracy separately from answer accuracy, latency and tokens.
 Descriptions guide selection; upstream permissions and allowlists enforce access.
 
+Sessions can report what did not work through the built-in
+[feedback source](GATEWAY_FEEDBACK.md); open reports are a good starting point
+for the next description pass.
+
 ## When an upstream changes its tools
 
 The saved tool list records what your team approved. Cloudflare's synced

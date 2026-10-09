@@ -185,6 +185,21 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       setManagementError(error instanceof Error ? error.message : 'Gateway Management could not be added.')
     } finally { setAddingManagement(false) }
   }
+  const [feedbackError, setFeedbackError] = useState<string | null>(null)
+  const [addingFeedback, setAddingFeedback] = useState(false)
+  const feedbackInstalled = sources?.sources.some((source) => source.id === 'source-666565646261636b') === true
+  async function addFeedbackSource() {
+    setAddingFeedback(true)
+    setFeedbackError(null)
+    try {
+      const url = `${window.location.origin}/api/feedback/mcp`
+      const discovered = await discoverSource(url)
+      await saveSourceDraft({ label: 'Gateway Feedback', url, authMode: 'oauth',
+        enabledTools: discovered.tools.map((tool) => tool.name).sort() })
+    } catch (error) {
+      setFeedbackError(error instanceof Error ? error.message : 'Gateway Feedback could not be added.')
+    } finally { setAddingFeedback(false) }
+  }
   const [showLibrary, setShowLibrary] = useState(false)
   const [providerConnector, setProviderConnector] = useState<NativeConnectorRecipe | null>(null)
   const [showBigQuery, setShowBigQuery] = useState(false)
@@ -534,6 +549,12 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         <p className="mt-2 text-sm text-kumo-subtle">Let your agents manage connectors, troubleshoot connections, and change Team access. Install this built-in connector, then assign it in Team like any other connector. It is initially assigned to the person who adds it.</p>
         <Button className="mt-3" variant="secondary" disabled={!installationEnabled || applyBlocked || addingManagement} onClick={() => void addManagementSource()}>{addingManagement ? 'Adding…' : 'Add Gateway Management'}</Button>
         {managementError ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{managementError}</p> : null}
+      </div> : null}
+      {!feedbackInstalled ? <div className="mt-6 rounded-lg border border-kumo-line p-4">
+        <h2 className="text-sm font-semibold text-kumo-strong">Gateway Feedback</h2>
+        <p className="mt-2 text-sm text-kumo-subtle">Let your team’s agents report a wrong description, a missing capability or stale data about any connector, and read the reports. Install this built-in connector, then assign it in Team to everyone who should report. Reports stay in your Cloudflare account.</p>
+        <Button className="mt-3" variant="secondary" disabled={!installationEnabled || applyBlocked || addingFeedback} onClick={() => void addFeedbackSource()}>{addingFeedback ? 'Adding…' : 'Add Gateway Feedback'}</Button>
+        {feedbackError ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{feedbackError}</p> : null}
       </div> : null}
 
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}
