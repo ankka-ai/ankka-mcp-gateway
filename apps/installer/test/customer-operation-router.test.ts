@@ -897,7 +897,7 @@ describe('management token custody in the gateway callback', () => {
     const html = await page.text();
     expect(html).toContain('Add your management token');
     // The link and the name carry the management hostname, as script literals the page assigns after checking the origin.
-    expect(html).toContain(JSON.stringify('https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22mcp_portals%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22workers_scripts%22%2C%22type%22%3A%22edit%22%7D%5D&name=Ankka%20gateway%20manage.example.com'));
+    expect(html).toContain(JSON.stringify('https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=%5B%7B%22key%22%3A%22access%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22mcp_portals%22%2C%22type%22%3A%22edit%22%7D%2C%7B%22key%22%3A%22d7ba8d4dce414197a3efab21b2f87eb8%22%2C%22type%22%3A%22edit%22%7D%5D&name=Ankka%20gateway%20manage.example.com'));
     expect(html).toContain(JSON.stringify('Ankka gateway manage.example.com'));
     // One field, never echoed, never part of a form submission.
     expect(html.match(/<input\b/gu)).toHaveLength(1);

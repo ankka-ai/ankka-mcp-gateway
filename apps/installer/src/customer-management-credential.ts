@@ -30,16 +30,19 @@ export const CUSTOMER_MANAGEMENT_BINDING = 'ANKKA_MANAGEMENT_TOKEN' as const;
 
 /**
  * The three permissions the template link pre-fills on Cloudflare's account
- * token page: "Access: Apps and Policies Edit", "MCP Portals Edit" and
- * "Workers Scripts Edit". A link built from the first two keys was verified
- * against the Cloudflare dashboard on 2026-09-19. The third key is the one
- * Cloudflare documents for Workers scripts; it lets the gateway apply its own
- * signed updates and rollbacks without a browser consent.
+ * token page: "Access: Apps and Policies Edit", "MCP Portals Edit" and the
+ * Workers "Editor" role. The first two are short keys, verified against the
+ * Cloudflare dashboard on 2026-09-19. The third is the public permission-group
+ * id of "Workers Editor" from Cloudflare's permission-groups catalogue, since
+ * the four Workers roles have no documented short key yet; a link with it was
+ * verified to pre-fill Workers: Editor on 2026-10-10. Editor updates and deploys
+ * the gateway's existing Worker, which is what its own signed updates and
+ * rollbacks need; the legacy "Workers Scripts Edit" permission also works.
  */
 export const CLOUDFLARE_MANAGEMENT_PERMISSION_GROUP_KEYS = Object.freeze([
   Object.freeze({ key: 'access', type: 'edit' }),
   Object.freeze({ key: 'mcp_portals', type: 'edit' }),
-  Object.freeze({ key: 'workers_scripts', type: 'edit' }),
+  Object.freeze({ key: 'd7ba8d4dce414197a3efab21b2f87eb8', type: 'edit' }),
 ] as const);
 
 /** The pre-filled name carries the management hostname, so the token can be found again in Cloudflare later. */

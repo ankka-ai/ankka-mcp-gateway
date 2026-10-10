@@ -137,14 +137,19 @@ old one has the earlier creation date.
 https://dash.cloudflare.com/?to=/:account/api-tokens&permissionGroupKeys=<URL-encoded JSON>&name=<name>
 ```
 
-The JSON is `[{"key":"access","type":"edit"},{"key":"mcp_portals","type":"edit"},{"key":"workers_scripts","type":"edit"}]`
+The JSON is `[{"key":"access","type":"edit"},{"key":"mcp_portals","type":"edit"},{"key":"d7ba8d4dce414197a3efab21b2f87eb8","type":"edit"}]`
 and the name is `Ankka gateway <management hostname>`, so the token can be
 found again in Cloudflare later. A link with the first two keys was verified
 against the Cloudflare dashboard on 2026-09-19: it pre-filled **Access: Apps
-and Policies Edit** and **MCP Portals Edit**. The third key is the one
-Cloudflare documents for **Workers Scripts Edit**; a token created before it
-was added can be edited in Cloudflare to gain that permission without
-replacing it. `:account` is Cloudflare's own placeholder; the dashboard
+and Policies Edit** and **MCP Portals Edit**. The third entry is the public
+permission-group id of **Workers Editor**, one of Cloudflare's four Workers
+roles, which have no documented short key yet; account-token links resolve a
+permission-group id in `key`, and this one was verified to pre-fill
+**Workers: Editor** on 2026-10-10. Editor updates and deploys existing
+Workers, which is all the gateway's own update needs. The legacy **Workers
+Scripts Edit** permission also works. A token created before this permission
+was added can be edited in Cloudflare to gain it without replacing the token.
+`:account` is Cloudflare's own placeholder; the dashboard
 asks which account when you have more than one. The link carries permission
 keys and a name, never a credential. See Cloudflare's
 [template link guide](https://developers.cloudflare.com/fundamentals/api/how-to/account-owned-token-template/).

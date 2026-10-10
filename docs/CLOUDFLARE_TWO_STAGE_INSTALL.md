@@ -463,7 +463,7 @@ must explain the policy block without asking for broader permissions.
    starts only after review. See [the setup contract](WORKER_HOSTED_SETUP.md).
 9. On the same review page the Worker offers the management token step: a
    Cloudflare template link that fills in **Access: Apps and Policies Edit**,
-   **MCP Portals Edit**, **Workers Scripts Edit** and a name containing the management hostname, one
+   **MCP Portals Edit**, **Workers Editor** and a name containing the management hostname, one
    paste field. The page offers the second approval only while the gateway
    holds the required token. The pasted
    value is sent once by same-origin POST under the setup session, checked

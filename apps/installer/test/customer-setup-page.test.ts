@@ -118,7 +118,7 @@ describe('customer setup management token step', () => {
     const html = await customerSetupPage().text();
     expect(html).toContain('<h2 id="credential-heading">Management token</h2>');
     expect(html).toContain('Adding a connector or giving a teammate access writes to your Cloudflare account, and the approvals in this setup are temporary.');
-    expect(html).toContain('<strong>Access: Apps and Policies Edit</strong>, <strong>MCP Portals Edit</strong> and <strong>Workers Scripts Edit</strong>');
+    expect(html).toContain('<strong>Access: Apps and Policies Edit</strong>, <strong>MCP Portals Edit</strong> and <strong>Workers Editor</strong>');
     expect(html).toContain('Creating it needs a Super Administrator or Administrator of your Cloudflare account.');
     expect(html).toContain('Cloudflare cannot limit this token to your gateway: it can edit every Access policy and every Worker in the account.');
     expect(html).toContain('It never passes through anything Ankka hosts.');
