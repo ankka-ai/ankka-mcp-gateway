@@ -21,11 +21,12 @@ import {
 import { CLOUDFLARE_API_ORIGIN } from './constants';
 import type { CustomerCloudflareTransport } from './customer-cloudflare-grant';
 import { withDeadline } from './http';
-import { adaptVerifiedReleaseBundleForWorkerDirectUpload } from './release-direct-upload-adapter';
+import { adaptVerifiedUpdateComponentsForWorkerDirectUpload } from './release-direct-upload-adapter';
 import {
   RELEASE_ENVELOPE_SCHEMA_VERSION,
   RELEASE_SIGNATURE_CONTEXT,
-  verifySignedReleaseEnvelope,
+  UPDATE_RELEASE_COMPONENTS,
+  verifySignedReleaseComponents,
   type ReleasePayloadFile,
   type VerifiedReleaseBundle,
   type VerifiedReleasePayloadBlob,
@@ -346,18 +347,17 @@ async function controlPlaneBytes(
   }
 }
 
-function manifestFiles(manifest: ReleaseManifest) {
-  return [
-    ...manifest.components.admin.files,
-    ...manifest.components.installer.files,
-    ...manifest.components.worker.files,
-    ...manifest.components.workerBootstrap.files,
-    ...manifest.components.workerCleanup.files,
-    ...manifest.components.workerRetirement.files,
-  ];
+/**
+ * The files an update uploads. The installer, bootstrap, cleanup and
+ * retirement components serve fresh installs and removal only; their signed
+ * records stay in the manifest, but their bytes are not fetched, which keeps
+ * this pass well inside a Free account's 50 subrequests.
+ */
+function uploadedFiles(manifest: ReleaseManifest) {
+  return UPDATE_RELEASE_COMPONENTS.flatMap((component) => manifest.components[component].files);
 }
 
-/** Fetches the approved bundle independently of the mutable channel selection. */
+/** Fetches the approved bundle independently of the mutable channel selection; its payload holds the uploaded components only. */
 async function loadTargetBundle(input: CustomerRuntimeUpdateInput): Promise<VerifiedReleaseBundle> {
   const releasePath = `/api/releases/${input.channel}/by-id/${input.target.release}/${input.target.artifactSha256.slice('sha256:'.length)}`;
   let channel: ReturnType<typeof parsePublicUpdateChannel>;
@@ -384,7 +384,7 @@ async function loadTargetBundle(input: CustomerRuntimeUpdateInput): Promise<Veri
       manifest.artifact.byteSize > MAX_BUNDLE_BYTES) fail('release_invalid', 'release_read');
   const files: ReleasePayloadFile[] = [];
   const blobs: VerifiedReleasePayloadBlob[] = [];
-  for (const record of manifestFiles(manifest)) {
+  for (const record of uploadedFiles(manifest)) {
     if (!FILE_PATH.test(record.path)) fail('release_invalid', 'release_read');
     const bytes = await controlPlaneBytes(
       input, `${releasePath}/files/${record.path}`, record.byteSize,
@@ -410,10 +410,11 @@ async function loadTargetBundle(input: CustomerRuntimeUpdateInput): Promise<Veri
     signatureContext: RELEASE_SIGNATURE_CONTEXT,
   });
   try {
-    await verifySignedReleaseEnvelope(
+    await verifySignedReleaseComponents(
       canonicalJson(envelope),
       input.channel,
       Object.freeze({ [input.updateKeyId]: input.updatePublicKey }),
+      UPDATE_RELEASE_COMPONENTS,
       files,
     );
   } catch {
@@ -586,7 +587,7 @@ export async function runCustomerRuntimeUpdate(
     if (!apiLoader && current.apiConnectionsConfigured) fail('release_invalid', 'release_prepare');
     let prepared: PreparedVerifiedWorkerRelease;
     try {
-      const direct = await adaptVerifiedReleaseBundleForWorkerDirectUpload(bundle);
+      const direct = await adaptVerifiedUpdateComponentsForWorkerDirectUpload(bundle);
       if (direct.release !== input.target.release ||
           `sha256:${direct.artifactSha256}` !== input.target.artifactSha256) fail('release_invalid', 'release_prepare');
       prepared = await prepareVerifiedWorkerRelease({

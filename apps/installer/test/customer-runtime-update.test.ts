@@ -37,6 +37,8 @@ const TO_RELEASE = 'gateway-v0.1.35';
 const SESSION_JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJzZXNzaW9uIn0.c2Vzc2lvbi1zaWduYXR1cmU';
 const COMPLETION_JWT = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjb21wbGV0ZSJ9.Y29tcGxldGlvbi1zaWduYXR1cmU';
 const encoder = new TextEncoder();
+/** The components an update uploads, and so the only files it fetches. */
+const UPLOADED = /^payload\/(?:admin|worker)\//u;
 
 function hex(bytes: Uint8Array): string {
   return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
@@ -368,7 +370,7 @@ describe('gateway-local runtime update', () => {
       .resolves.toEqual({ status: 'uploaded', fromVersionId: OLD_VERSION });
     expect(handovers).toEqual([OLD_VERSION]);
     const publicRequests = fake.requests.filter((request) => new URL(request.url).origin === CONTROL_PLANE);
-    expect(publicRequests).toHaveLength(retained.files.size + 1);
+    expect(publicRequests).toHaveLength([...retained.files.keys()].filter((path) => UPLOADED.test(path)).length + 1);
     expect(publicRequests.every((request) => request.authorization === null &&
       new URL(request.url).pathname.startsWith(server.retainedPath))).toBe(true);
     const uploaded = fake.requests.find((request) => request.method === 'PUT')?.form?.get('index.js');
@@ -472,7 +474,9 @@ describe('gateway-local runtime update', () => {
       { command: 'progress', stage: 'current_verified', fromVersionId: OLD_VERSION, toVersionId: null },
       { command: 'progress', stage: 'assets_uploaded', fromVersionId: OLD_VERSION, toVersionId: null },
     ]);
-    const files = [...release.files.keys()].map((path) => `file:${path}`);
+    // Only the management assets and the Worker modules are fetched; the other components' records stay signed.
+    const files = [...release.files.keys()].filter((path) => UPLOADED.test(path)).map((path) => `file:${path}`);
+    expect(files.length).toBeLessThan(release.files.size);
     expect(fake.events).toEqual([
       'control:begin', 'worker', 'deployments', 'version', 'control:progress:current_verified',
       'descriptor', ...files, 'asset-session', 'asset-bucket', 'control:progress:assets_uploaded',

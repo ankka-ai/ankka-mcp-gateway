@@ -4,6 +4,13 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Fetch only what an update uploads. A gateway updating itself now downloads
+  the Worker modules and management assets, not the installer, bootstrap,
+  cleanup and retirement files it never uploads. Each fetched file is still
+  checked against its signed record, and the whole signed manifest is still
+  verified. For gateway-v0.2.40 the pass drops from 45 to 38 subrequests
+  (Workers Free allows 50) and from 10.5 MB to 5.4 MB.
+
 - Say when an update's new release already serves but the gateway has not
   recorded it yet. `get_gateway_runtime_action` and the dashboard's update
   notice report `servingRelease` and `journalPending` while the management
