@@ -8,7 +8,8 @@
 const PERMISSION_GROUP_KEYS = Object.freeze([
   Object.freeze({ key: 'access', type: 'edit' }),
   Object.freeze({ key: 'mcp_portals', type: 'edit' }),
-  Object.freeze({ key: 'workers_scripts', type: 'edit' }),
+  // Cloudflare's public permission-group id for the Workers "Editor" role; the four Workers roles have no short key yet.
+  Object.freeze({ key: 'd7ba8d4dce414197a3efab21b2f87eb8', type: 'edit' }),
 ] as const)
 
 export function managementTokenName(managementHostname: string): string {

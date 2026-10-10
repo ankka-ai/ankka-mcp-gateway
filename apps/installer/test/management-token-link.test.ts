@@ -16,7 +16,7 @@ describe('the create-token link', () => {
     const link = new URL(managementTokenCreateLink('manage.example.com'));
     expect(link.origin).toBe('https://dash.cloudflare.com');
     expect(JSON.parse(link.searchParams.get('permissionGroupKeys') ?? 'null')).toEqual([
-      { key: 'access', type: 'edit' }, { key: 'mcp_portals', type: 'edit' }, { key: 'workers_scripts', type: 'edit' },
+      { key: 'access', type: 'edit' }, { key: 'mcp_portals', type: 'edit' }, { key: 'd7ba8d4dce414197a3efab21b2f87eb8', type: 'edit' },
     ]);
   });
 });

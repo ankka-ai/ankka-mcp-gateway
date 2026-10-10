@@ -85,7 +85,7 @@ Those approvals are temporary; your gateway keeps no Cloudflare authority from
 them. Adding a source and giving a teammate access are writes into your
 account, so the gateway needs one standing credential of its own: the
 account-owned [management token](MANAGEMENT_TOKEN.md) with exactly **Access:
-Apps and Policies Edit**, **MCP Portals Edit** and **Workers Scripts Edit**.
+Apps and Policies Edit**, **MCP Portals Edit** and **Workers Editor**.
 Cloudflare does not support scoping an API token to one Access policy or one
 Worker: this token can edit every Access policy and every Worker in the
 account, and the setup page says so before asking for it. It

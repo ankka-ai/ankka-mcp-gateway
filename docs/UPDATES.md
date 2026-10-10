@@ -123,8 +123,9 @@ proves the new release or reports recovery-required.
 
 ## Updates without a browser
 
-When the gateway holds a [management token](MANAGEMENT_TOKEN.md) with Workers
-Scripts Edit, `apply_gateway_update` and `rollback_gateway_update` on Gateway
+When the gateway holds a [management token](MANAGEMENT_TOKEN.md) with the
+Workers Editor role (or the legacy Workers Scripts Edit permission),
+`apply_gateway_update` and `rollback_gateway_update` on Gateway
 Management run the prepared operation in the gateway itself instead of
 returning a browser handoff. The sequence above is unchanged from the account
 check onwards: the token is checked against the account and the gateway's own
