@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Say when an update's new release already serves but the gateway has not
+  recorded it yet. `get_gateway_runtime_action` and the dashboard's update
+  notice report `servingRelease` and `journalPending` while the management
+  object still runs the previous release; stages and statuses are unchanged.
+  This takes effect for updates from a release that includes it.
+
 - Let agents apply signed updates and rollbacks without a browser consent.
   With a management token that has the Workers Editor role (or the legacy
   Workers Scripts Edit permission), `apply_gateway_update` and

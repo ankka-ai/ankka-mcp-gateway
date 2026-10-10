@@ -5080,6 +5080,63 @@ test('management rollback runs in the gateway with the management token when the
   assertNoMutation(gateway.provider, before);
 }));
 
+test('a runtime action read names the serving release and a pending journal while the old object still holds the handover', () => fixture(async (gateway) => {
+  await installManagementSource(gateway);
+  const { prepare, begin } = await runtimeAction(gateway, { operation: 'update', release: 'gateway-v9.9.9' });
+  const action = await (await prepare()).json();
+  assert.equal((await begin()).status, 200);
+  const journal = gateway.managementStorage.snapshot(UPDATES_KEY);
+  await gateway.managementStorage.put(UPDATES_KEY, { ...journal,
+    actions: journal.actions.map((entry) => ({ ...entry, stage: 'assets_uploaded' })) });
+  const recorded = gateway.managementStorage.snapshot(UPDATES_KEY);
+  // The entrypoint runs `release`; the management object behind it still runs the old one and says whether its handover is due.
+  const serving = (release, artifactSha256, armed) => {
+    const namespace = gateway.env.ADMIN_STATE;
+    return { ...gateway.env, ANKKA_GATEWAY_RELEASE: release, ANKKA_GATEWAY_RELEASE_SHA256: artifactSha256,
+      ADMIN_STATE: { ...namespace, get(name) {
+        const stub = namespace.get(name);
+        return { fetch: async (request) => {
+          const response = await stub.fetch(request);
+          if (!armed) return response;
+          const headers = new Headers(response.headers);
+          headers.set('x-ankka-runtime-handover', 'armed');
+          return new Response(response.body, { status: response.status, headers });
+        } };
+      } } };
+  };
+  const read = async (env) => {
+    const response = await worker.fetch(new Request(`${MANAGEMENT_ORIGIN}/api/update-actions/${action.actionId}`, {
+      headers: await gateway.headers(),
+    }), env);
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json();
+  };
+  const { release, artifactSha256 } = action.to;
+  const pending = await read(serving(release, artifactSha256, true));
+  assert.deepEqual(pending, { ...action, status: 'applying', stage: 'assets_uploaded', servingRelease: release, journalPending: true });
+  for (const [env, servingRelease] of [
+    [serving(release, artifactSha256, false), release],
+    [serving(release, `sha256:${'5'.repeat(64)}`, true), release],
+    [serving(gateway.env.ANKKA_GATEWAY_RELEASE, gateway.env.ANKKA_GATEWAY_RELEASE_SHA256, true), gateway.env.ANKKA_GATEWAY_RELEASE],
+  ]) {
+    assert.deepEqual(await read(env), { ...pending, servingRelease, journalPending: false });
+  }
+  const tool = await managementRpc({ ...gateway, env: serving(release, artifactSha256, true) }, 'tools/call', {
+    name: 'get_gateway_runtime_action', arguments: { actionId: action.actionId },
+  });
+  assert.deepEqual(tool.body.result.structuredContent.result, pending);
+  assert.deepEqual(gateway.managementStorage.snapshot(UPDATES_KEY), recorded, 'reads leave the journal as recorded');
+  // Once the object itself runs the target, the same read completes the journal and nothing is pending.
+  Object.assign(gateway.env, { ANKKA_GATEWAY_RELEASE: release, ANKKA_GATEWAY_RELEASE_SHA256: artifactSha256 });
+  gateway.reloadManagement();
+  assert.deepEqual(await read(serving(release, artifactSha256, true)),
+    { ...pending, status: 'succeeded', stage: 'health_verified', journalPending: false });
+  // The dashboard's strict client accepts the added fields.
+  await dashboardClient(gateway, async (dashboard) => {
+    assert.equal((await dashboard.getRuntimeAction(action.actionId)).servingRelease, release);
+  });
+}));
+
 for (const accountLookup of ['available', 'unavailable', 'collision']) {
   test(`management installation recovers an unacknowledged application only after authoritative lookup (${accountLookup})`, () => fixture(async (gateway) => {
     let rejected = false;

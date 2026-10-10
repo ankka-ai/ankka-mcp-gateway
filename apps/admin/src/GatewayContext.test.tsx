@@ -157,6 +157,24 @@ describe('GatewayProvider', () => {
     expect(getRuntimeAction).toHaveBeenCalledTimes(3)
   })
 
+  it('says the target is live while the gateway is still recording the update', async () => {
+    vi.useFakeTimers()
+    const action = { schemaVersion: 1 as const, actionId: pendingAction.actionId, operation: 'update' as const,
+      status: 'applying' as const, stage: 'assets_uploaded', failureCode: null,
+      from: { release: 'gateway-v1.0.0', artifactSha256: 'a'.repeat(64) },
+      to: { release: 'gateway-v1.0.1', artifactSha256: 'b'.repeat(64) },
+      expiresAt: new Date(Date.now() + 60_000).toISOString(), servingRelease: 'gateway-v1.0.1', journalPending: true }
+    window.history.replaceState(null, '', `/settings?runtimeAction=${action.actionId}`)
+    const getRuntimeAction = vi.fn<GatewayAdminApi['getRuntimeAction']>()
+      .mockResolvedValueOnce(action)
+      .mockResolvedValue({ ...action, status: 'succeeded', stage: 'health_verified', journalPending: false })
+    render(<GatewayProvider api={api({ getRuntimeAction })}><RuntimeNoticeProbe /></GatewayProvider>)
+    await act(async () => {})
+    expect(screen.getByText('gateway-v1.0.1 is live. Your gateway is still recording the update…')).toBeVisible()
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500) })
+    expect(screen.getByText('Update activated and health-checked. Durable Object data was preserved.')).toBeVisible()
+  })
+
   it('stops waiting for an unconfirmed handover when the authorization expires', async () => {
     vi.useFakeTimers()
     window.history.replaceState(null, '', `/settings?runtimeAction=${pendingAction.actionId}`)

@@ -57,6 +57,10 @@ Workers Editor role, the gateway then runs the operation itself and answers
 consent handoff and does not execute a deployment. Either way the existing
 operation driver performs the upload; see
 [Updates without a browser](UPDATES.md#updates-without-a-browser).
+`get_gateway_runtime_action` also returns `servingRelease` and
+`journalPending`. `journalPending: true` means the target release already serves
+and only the gateway's record of it is still `applying`; poll until `succeeded`
+rather than retrying the update.
 
 Full gateway removal continues through the dashboard. Removing the management
 source's Access application during teardown would cut off an assigned person's

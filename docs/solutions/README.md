@@ -48,3 +48,4 @@ when there is one.
 - [New sources stay hidden from clients that connected earlier](integration-issues/new-source-hidden-from-connected-portal-clients.md)
 - [Gateway Management tool edits refused in individual sign-in mode](integration-issues/management-tool-edits-refused-in-individual-sign-in-mode.md)
 - [Timeouts that only appear when several local gates run at once](test-failures/load-only-timeouts-from-parallel-local-gates.md)
+- [An update reads applying after its target release already serves](runtime-errors/update-stays-applying-after-target-serves.md)

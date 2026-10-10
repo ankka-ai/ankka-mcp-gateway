@@ -267,6 +267,25 @@ function exactRecoveryJournal(journal: CustomerStage2Journal, config: ParsedFina
   return finalRuntime !== null && ['send_armed', 'submitted', 'verified'].includes(finalRuntime.phase);
 }
 
+/** The runtime's internal read of one update or rollback action. */
+const RUNTIME_ACTION_READ_PATH = /^\/runtime-updates\/(action_[A-Za-z0-9_-]{32})$/u;
+/** Mirrors the runtime's RUNTIME_HANDOVER_HEADER, which turns it into the public `journalPending`. */
+const RUNTIME_HANDOVER_HEADER = 'x-ankka-runtime-handover';
+
+/**
+ * Whether the handover that finishes this action is still stored, so its
+ * finalization is due on the new version. Read-only: an unusable or expired
+ * record is left for the alarm, which owns its removal.
+ */
+export async function customerRuntimeHandoverArmed(
+  storage: Pick<DurableObjectStorage, 'get'>,
+  actionId: string,
+  now = Date.now(),
+): Promise<boolean> {
+  const parsed = v.safeParse(runtimeHandoverSchema, await storage.get(RUNTIME_HANDOVER_KEY));
+  return parsed.success && parsed.output.actionId === actionId && now < parsed.output.actionExpiresAt;
+}
+
 /** Finish the journal on the running target, retaining transient failures for the next alarm. */
 export async function finishCustomerRuntimeHandover(
   storage: Pick<DurableObjectStorage, 'get' | 'delete' | 'setAlarm'>,
@@ -836,6 +855,18 @@ export class AdminState extends RuntimeAdminState {
       try { return await (await this.operationRouter(config, managementOrigin)).startUnattended(request); }
       catch { return unavailable(); }
     }
+    // The entrypoint that forwards this read may already run the target; it compares, this object only says
+    // whether its handover is still due. A header, so a runtime that does not know it passes the body unchanged.
+    const runtimeActionId = url.origin === 'https://admin-state.invalid' && request.method === 'GET'
+      ? RUNTIME_ACTION_READ_PATH.exec(url.pathname)?.[1] : undefined;
+    if (runtimeActionId !== undefined) {
+      const response = await super.fetch(request);
+      if (response.status !== 200 ||
+          !await customerRuntimeHandoverArmed(this.finalState.storage, runtimeActionId).catch(() => false)) return response;
+      const headers = new Headers(response.headers);
+      headers.set(RUNTIME_HANDOVER_HEADER, 'armed');
+      return new Response(response.body, { status: response.status, headers });
+    }
     const teardownRoute = url.pathname === CUSTOMER_TEARDOWN_PATH || url.pathname.startsWith(`${CUSTOMER_TEARDOWN_PATH}/`) ||
       (url.pathname === CUSTOMER_INSTALL_OAUTH_CALLBACK_PATH && customerTeardownCookiePresent(request));
     if (url.origin === managementOrigin && teardownRoute) {
@@ -945,8 +976,8 @@ export default {
           ['/api/bigquery', '/api/bigquery/resume', '/api/bigquery/remove'].includes(url.pathname)) {
         if (url.origin !== `https://${config.ANKKA_MANAGEMENT_HOSTNAME}`) return notFound();
         // The update page waits for the version Cloudflare serves where the browser asks. That is this entrypoint's
-        // release, which shares its version with the dashboard's assets here; the one management object restarts on
-        // the new version right after the upload, wherever the browser is, so its own release would confirm too early.
+        // release, which shares its version with the dashboard's assets here; the one management object can restart on
+        // the new version before this location serves it, so its own release would confirm too early.
         const forwarded = url.pathname === CUSTOMER_OPERATION_UPDATE_PROGRESS_PATH
           ? withCustomerServingRelease(request, config.ANKKA_GATEWAY_RELEASE)
           : request;
