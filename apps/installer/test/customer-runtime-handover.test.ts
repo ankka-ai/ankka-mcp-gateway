@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { finishCustomerRuntimeHandover } from '../src/customer-gateway-entrypoint';
+import { customerRuntimeHandoverArmed, finishCustomerRuntimeHandover } from '../src/customer-gateway-entrypoint';
 import { sealOperationSecret } from '../src/customer-operation-secrets';
 
 const KEY = 'ankka-mcp-gateway/customer-runtime-handover/v1';
@@ -75,5 +75,22 @@ describe('runtime handover completion', () => {
     await finishCustomerRuntimeHandover(state.storage, config, control, state.record.actionExpiresAt);
     expect(control).toHaveBeenCalledTimes(1);
     expect(state.entries.has(KEY)).toBe(false);
+  });
+});
+
+describe('runtime handover visibility', () => {
+  it('reports a handover as due only for its own unexpired action, and never removes the record', async () => {
+    const state = await fixture();
+    expect(await customerRuntimeHandoverArmed(state.storage, state.record.actionId, NOW)).toBe(true);
+    // Past the deadline the alarm still owns the record until it reports the failure.
+    expect(await customerRuntimeHandoverArmed(state.storage, state.record.actionId, state.record.deadline)).toBe(true);
+    expect(await customerRuntimeHandoverArmed(state.storage, `action_${'c'.repeat(32)}`, NOW)).toBe(false);
+    expect(await customerRuntimeHandoverArmed(state.storage, state.record.actionId, state.record.actionExpiresAt)).toBe(false);
+    state.entries.set(KEY, { ...state.record, schemaVersion: 2 });
+    expect(await customerRuntimeHandoverArmed(state.storage, state.record.actionId, NOW)).toBe(false);
+    expect(state.entries.has(KEY)).toBe(true);
+    expect(state.setAlarm).not.toHaveBeenCalled();
+    state.entries.delete(KEY);
+    expect(await customerRuntimeHandoverArmed(state.storage, state.record.actionId, NOW)).toBe(false);
   });
 });

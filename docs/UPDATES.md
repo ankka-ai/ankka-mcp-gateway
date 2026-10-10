@@ -89,17 +89,43 @@ An update starts in the gateway dashboard and runs on the gateway itself:
 5. The page hands the browser to Settings, which polls the action. The new
    version's alarm finds itself running the target release and completes the
    journal with `finalize`; if the old version still runs after five minutes,
-   it marks the action as needing recovery instead.
+   it marks the action as needing recovery instead. A read of the action that
+   the management object answers on the target release completes it the same
+   way.
 
 The serving release is the stateless entrypoint's own `ANKKA_GATEWAY_RELEASE`,
 which it names on the progress request it forwards to the management object.
 That is the version Cloudflare runs where the browser asks, and the same
 version's assets answer the dashboard's navigation there. The management
-object's own release cannot stand in for it: there is one object, it restarts
-on the new version right after the upload wherever the browser is, and it
-would confirm while that location still serves the previous dashboard. The
+object's own release cannot stand in for it: there is one object, and
+Cloudflare rolls new code out to edge locations and to that object
+independently, so either can run the previous version for a while. The
 object's release proves something else: that the upload was applied, also when
 the version that ran it was replaced before it could record its end.
+
+The object can also be the one behind. Cloudflare documents that a request can
+reach the new Worker version and then a Durable Object that still runs the old
+code, typically for seconds to minutes. Until that object restarts on the
+target, its alarm finds the old release and waits, and the action stays
+`applying` at its last recorded stage, usually `assets_uploaded`, although the
+target already serves. In the first unattended update on a production gateway
+on 2026-10-10, the entrypoint served the target at least 100 seconds before the
+journal recorded `succeeded`. Each action read through the gateway entrypoint
+(`GET /api/update-actions/<actionId>` and `get_gateway_runtime_action`)
+therefore also returns:
+
+- `servingRelease`: the release of the entrypoint that answered the read.
+- `journalPending`: `true` while the action is `applying`, the management
+  object still holds the handover for it, and the answering entrypoint runs
+  the exact target release and artifact digest. The upload has activated and
+  only the record is behind; keep polling until `succeeded`.
+
+The management object reports whether it still holds the handover in a
+response header, which the entrypoint turns into `journalPending`; the
+journal's stages, statuses and write rules are unchanged. Both releases must
+carry this: the object answering in the window runs the release being
+replaced, so an update from a release without it reports
+`journalPending: false` throughout, as before.
 
 Both releases must carry this step. The page a browser follows comes from the
 release being replaced, so an update from a release without the step hands
@@ -136,6 +162,13 @@ afterwards; it is the operator's standing credential. `review_gateway_update`
 reports `applies: management_token` when this path is available and
 `applies: browser_consent` otherwise, and a refused token answers with a fixed
 reason while the browser handoff remains available.
+
+`apply_gateway_update` answers `running` before the upload starts; poll
+`get_gateway_runtime_action` until the action reads `succeeded`. Expect
+`journalPending: true` for a while after the upload: the new release already
+serves and the gateway has not recorded it yet. `review_gateway_update` can
+report the target as current during that time, since it answers from the
+entrypoint's release; the action record is what confirms the update.
 
 This moves a boundary deliberately: anyone with a management assignment, or a
 session that compromises one, can move the gateway to any signed release in

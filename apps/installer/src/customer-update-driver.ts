@@ -17,13 +17,13 @@ export type CustomerUpdateStage = (typeof CUSTOMER_UPDATE_STAGES)[number];
  * Names the release of the stateless entrypoint that forwarded a progress
  * request: the Worker version Cloudflare runs at the browser's edge location,
  * and so the version whose dashboard a navigation from there receives. The
- * management object cannot stand in for it: there is one object, it restarts
- * on the new version right after the upload, and that location keeps serving
- * the previous version for a while. An entrypoint that knows the header sets
- * it itself and so replaces what a browser sent; one from before it forwards
- * the request as it arrived, which for the page's own polls names nothing.
- * The header carries no authority either way: it only tells the update page
- * when to hand the browser to its own dashboard.
+ * management object cannot stand in for it: there is one object, and it can
+ * run the new version while that location still serves the previous one. An
+ * entrypoint that knows the header sets it itself and so replaces what a
+ * browser sent; one from before it forwards the request as it arrived, which
+ * for the page's own polls names nothing. The header carries no authority
+ * either way: it only tells the update page when to hand the browser to its
+ * own dashboard.
  */
 export const CUSTOMER_SERVING_RELEASE_HEADER = 'x-ankka-serving-release';
 

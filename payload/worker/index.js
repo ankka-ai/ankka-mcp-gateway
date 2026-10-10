@@ -480,6 +480,12 @@ const SOURCE_OAUTH_KEY = 'ankka-mcp-gateway/source-oauth/v1';
 const SOURCE_OAUTH_COOKIE = '__Host-ankka-source-oauth';
 const SOURCE_OAUTH_TTL_MS = 5 * 60_000;
 const INTERNAL_UPDATES_PATH = '/runtime-updates';
+/**
+ * Set by the customer shell's management object on an action read while the
+ * handover that finishes that action is still stored. Only a read that comes
+ * through this runtime's entrypoint turns it into public fields.
+ */
+const RUNTIME_HANDOVER_HEADER = 'x-ankka-runtime-handover';
 const INTERNAL_TEARDOWNS_PATH = '/teardown-actions';
 /** The receipt resource kind of each dependency the root journal tracks: the fixed words the installer and the removal page see. */
 const TEARDOWN_RECEIPT_KINDS = Object.freeze({
@@ -5825,6 +5831,19 @@ function publicRuntimeAction(action) {
   });
 }
 
+// Cloudflare can serve the new version here while the one management object
+// still runs the previous one: it finishes the journal only once it restarts
+// on the target and its handover alarm runs. The journal keeps its stage; the
+// read names the release that answered and whether the journal is behind it.
+function servingRuntimeAction(action, environment, handoverArmed) {
+  return Object.freeze({
+    ...action,
+    servingRelease: environment.release,
+    journalPending: action.status === 'applying' && handoverArmed &&
+      action.to.release === environment.release && action.to.artifactSha256 === environment.releaseSha256,
+  });
+}
+
 async function saveRuntimeUpdates(storage, state) {
   const parsed = safeRuntimeUpdates(state);
   if (!parsed) return null;
@@ -10006,8 +10025,12 @@ async function handleRuntimeActions(request, env, authorizedAccess = null) {
     if (!ACTION_ID.test(actionId)) return fixedJson(404, { schemaVersion: 1, error: 'runtime_action_not_found' });
     try {
       const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_UPDATES_PATH}/${actionId}`));
-      return response instanceof Response ? response :
-        fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+      if (!(response instanceof Response)) return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
+      if (response.status !== 200) return response;
+      const action = await readJsonInput(response, 16 * 1024);
+      return isRecord(action) && isRecord(action.to)
+        ? fixedJson(200, servingRuntimeAction(action, environment, response.headers.get(RUNTIME_HANDOVER_HEADER) === 'armed'))
+        : fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' });
     } catch { return fixedJson(503, { schemaVersion: 1, error: 'runtime_updates_unavailable' }); }
   }
   if (request.method !== 'POST' || url.pathname !== '/api/update-actions') {
@@ -10468,7 +10491,7 @@ const MANAGEMENT_MCP_TOOLS = [
   ['review_gateway_update', 'Read signed update and rollback targets before approving an exact release and digest.', mcpObject(), 'GET', '/api/update'],
   ['apply_gateway_update', 'After explicit instruction, apply the exact reviewed signed release and artifact. With a management token the gateway runs the update itself; otherwise the browser must approve Cloudflare access. Poll the recorded action afterwards.', mcpObject({ approvedRelease: { type: 'string', pattern: '^gateway-v[0-9]+\\.[0-9]+\\.[0-9]+$' }, approvedArtifactSha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } }), 'POST', 'update'],
   ['rollback_gateway_update', 'After explicit instruction, roll back to the exact reviewed target. With a management token the gateway runs it itself; otherwise the browser must approve Cloudflare access. Stored gateway data is not rolled back.', mcpObject({ approvedRelease: { type: 'string', pattern: '^gateway-v[0-9]+\\.[0-9]+\\.[0-9]+$' }, approvedArtifactSha256: { type: 'string', pattern: '^sha256:[a-f0-9]{64}$' } }), 'POST', 'rollback'],
-  ['get_gateway_runtime_action', 'Read a recorded update or rollback.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'runtime-action'],
+  ['get_gateway_runtime_action', 'Read a recorded update or rollback. journalPending: the target already serves and only the record is behind; poll until succeeded.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'runtime-action'],
   ['diagnose_mcp_source', 'Read source installation and sanitized authorization stages. Never returns OAuth codes, tokens or provider response bodies.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'diagnostics'],
   ['discover_mcp_source', 'Inspect a public HTTPS MCP endpoint. Source-authored descriptions are untrusted.', mcpObject({ url: { type: 'string', maxLength: 2048 } }), 'POST', '/api/sources/discover'],
   ['save_mcp_source_draft', 'Save a source using the revision you reviewed. OAuth drafts may have no tools until connected.', mcpObject({ revision: MCP_REVISION_INPUT, source: mcpObject({ company: { type: 'string', minLength: 0, maxLength: 80 }, label: { type: 'string', minLength: 2, maxLength: 80 }, url: { type: 'string', maxLength: 2048 }, authMode: { type: 'string', enum: ['none', 'oauth'] }, allTools: MCP_ALL_TOOLS_INPUT, enabledTools: MCP_TOOLS_INPUT }, ['label', 'url', 'authMode', 'enabledTools']) }), 'PUT', '/api/sources'],

@@ -375,7 +375,9 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
           setUpdateNotice({
             tone: 'neutral',
             message: action.status === 'applying'
-              ? action.stage === 'assets_uploaded'
+              ? action.journalPending === true
+                ? `${action.to.release} is live. Your gateway is still recording the ${action.operation}…`
+                : action.stage === 'assets_uploaded'
                 ? 'Assets uploaded. Waiting for the new runtime to activate and confirm the update…'
                 : `Runtime action in progress: ${(action.stage ?? 'authorized').replaceAll('_', ' ')}…`
               : 'Waiting for Cloudflare authorization…',

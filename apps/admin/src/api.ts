@@ -281,6 +281,10 @@ const runtimeActionSchema = v.strictObject({
   to: runtimeVersionSchema,
   expiresAt: v.string(),
   failureCode: v.nullable(v.string()),
+  /** The release of the gateway entrypoint that answered; absent from a gateway release before it was reported. */
+  servingRelease: v.optional(v.string()),
+  /** The target already serves here while the gateway has not yet recorded the action as succeeded. */
+  journalPending: v.optional(v.boolean()),
 })
 // The removal journal never records `succeeded`: once the connected resources are gone the action reads `gateway_removed`.
 const teardownActionStatusSchema = v.picklist([
