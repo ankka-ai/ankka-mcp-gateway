@@ -6,6 +6,7 @@ import {
   canonicalJson,
   parseControlPlaneOrigin,
   parseCanonicalReleaseManifest,
+  type ReleaseComponentName,
   type ReleaseFileRecord,
   type ReleaseManifest,
 } from './release-manifest';
@@ -195,13 +196,44 @@ export async function verifyReleaseManifestDigests(manifest: ReleaseManifest): P
   if (expectedArtifactTree !== manifest.artifact.treeSha256) invalid();
 }
 
+/**
+ * What a gateway update uploads: its own Worker modules and the management
+ * assets. The signed manifest still names every component, and its digests
+ * are checked whole; only these components' bytes are fetched and compared.
+ */
+export const UPDATE_RELEASE_COMPONENTS = Object.freeze(['admin', 'worker'] as const satisfies readonly ReleaseComponentName[]);
+
 export async function verifyReleasePayload(
   manifest: ReleaseManifest,
   payload: readonly ReleasePayloadFile[],
 ): Promise<void> {
+  await verifyPayloadRecords(manifest, allFileRecords(manifest), manifest.artifact.fileCount, manifest.artifact.byteSize, payload);
+}
+
+/** Exactly the named components' files, each against its signed record; the worker must be among them. */
+export async function verifyReleaseComponentPayload(
+  manifest: ReleaseManifest,
+  components: readonly ReleaseComponentName[],
+  payload: readonly ReleasePayloadFile[],
+): Promise<void> {
+  if (!components.includes('worker') || new Set(components).size !== components.length) invalid();
+  const records = components.flatMap((component) => manifest.components[component].files)
+    .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const byteSize = records.reduce((sum, record) => sum + record.byteSize, 0);
+  if (!Number.isSafeInteger(byteSize)) invalid();
+  await verifyPayloadRecords(manifest, records, records.length, byteSize, payload);
+}
+
+async function verifyPayloadRecords(
+  manifest: ReleaseManifest,
+  records: readonly ReleaseFileRecord[],
+  fileCount: number,
+  byteSize: number,
+  payload: readonly ReleasePayloadFile[],
+): Promise<void> {
   await verifyReleaseManifestDigests(manifest);
   const parsed = v.safeParse(v.array(releasePayloadFileSchema), payload);
-  if (!parsed.success || parsed.output.length !== manifest.artifact.fileCount) invalid();
+  if (!parsed.success || parsed.output.length !== fileCount) invalid();
 
   const supplied = new Map<string, Uint8Array>();
   for (const entry of parsed.output) {
@@ -212,14 +244,14 @@ export async function verifyReleasePayload(
   }
 
   let totalBytes = 0;
-  for (const record of allFileRecords(manifest)) {
+  for (const record of records) {
     const bytes = supplied.get(record.path);
     if (!bytes || bytes.byteLength !== record.byteSize) invalid();
     totalBytes += bytes.byteLength;
     if (!Number.isSafeInteger(totalBytes) || await sha256Hex(bytes) !== record.sha256) invalid();
     supplied.delete(record.path);
   }
-  if (supplied.size !== 0 || totalBytes !== manifest.artifact.byteSize) invalid();
+  if (supplied.size !== 0 || totalBytes !== byteSize) invalid();
 
   const worker = payload.find((file) => file.path === 'payload/worker/index.js');
   if (!worker) invalid();
@@ -241,6 +273,40 @@ export async function verifySignedReleaseEnvelope(
   pinnedPublicKeys: Readonly<Record<string, string>>,
   payload: readonly ReleasePayloadFile[],
 ): Promise<VerifiedRelease> {
+  const envelope = await verifiedEnvelope(serialized, expectedChannel, pinnedPublicKeys);
+  await verifyReleasePayload(envelope.parsedManifest, payload);
+  return Object.freeze({
+    verification: 'ed25519',
+    keyId: envelope.keyId,
+    manifest: envelope.parsedManifest,
+  });
+}
+
+/**
+ * The same signature check as {@link verifySignedReleaseEnvelope}, with only
+ * the named components' bytes: for a gateway update, which uploads nothing else.
+ */
+export async function verifySignedReleaseComponents(
+  serialized: string,
+  expectedChannel: string,
+  pinnedPublicKeys: Readonly<Record<string, string>>,
+  components: readonly ReleaseComponentName[],
+  payload: readonly ReleasePayloadFile[],
+): Promise<VerifiedRelease> {
+  const envelope = await verifiedEnvelope(serialized, expectedChannel, pinnedPublicKeys);
+  await verifyReleaseComponentPayload(envelope.parsedManifest, components, payload);
+  return Object.freeze({
+    verification: 'ed25519',
+    keyId: envelope.keyId,
+    manifest: envelope.parsedManifest,
+  });
+}
+
+async function verifiedEnvelope(
+  serialized: string,
+  expectedChannel: string,
+  pinnedPublicKeys: Readonly<Record<string, string>>,
+): Promise<ParsedEnvelope> {
   const envelope = parseEnvelope(serialized, expectedChannel);
   const encodedPublicKey = pinnedPublicKeys[envelope.keyId];
   if (!encodedPublicKey) throw new DeployError(503, 'release_unavailable');
@@ -285,12 +351,7 @@ export async function verifySignedReleaseEnvelope(
     invalid();
   }
   if (!verified) invalid();
-  await verifyReleasePayload(envelope.parsedManifest, payload);
-  return Object.freeze({
-    verification: 'ed25519',
-    keyId: envelope.keyId,
-    manifest: envelope.parsedManifest,
-  });
+  return envelope;
 }
 
 export class EnvironmentReleaseManifestProvider implements ReleaseBundleProvider {

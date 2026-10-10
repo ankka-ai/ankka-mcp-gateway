@@ -2,6 +2,7 @@ import { DeployError } from './errors';
 import type { VerifiedWorkerDirectUploadRelease } from './cloudflare-worker-direct-upload';
 import type { VerifiedCustomerBootstrapWorkerRelease } from './customer-bootstrap-worker-deployment';
 import {
+  UPDATE_RELEASE_COMPONENTS,
   verifyReleaseManifestDigests,
 } from './release';
 import {
@@ -94,16 +95,21 @@ function safeRelativePath(value: string): boolean {
   return value.split('/').every((segment) => segment !== '' && segment !== '.' && segment !== '..');
 }
 
-function expectedPayload(manifest: ReleaseManifest): readonly ExpectedPayloadRecord[] {
+const ALL_COMPONENTS = Object.freeze([
+  'admin',
+  'installer',
+  'worker',
+  'workerBootstrap',
+  'workerCleanup',
+  'workerRetirement',
+] as const);
+
+function expectedPayload(
+  manifest: ReleaseManifest,
+  components: readonly ReleaseComponentName[] = ALL_COMPONENTS,
+): readonly ExpectedPayloadRecord[] {
   const expected: ExpectedPayloadRecord[] = [];
-  for (const component of [
-    'admin',
-    'installer',
-    'worker',
-    'workerBootstrap',
-    'workerCleanup',
-    'workerRetirement',
-  ] as const) {
+  for (const component of components) {
     for (const record of manifest.components[component].files) {
       expected.push(Object.freeze({ component, record }));
     }
@@ -115,9 +121,10 @@ function expectedPayload(manifest: ReleaseManifest): readonly ExpectedPayloadRec
 function snapshotPayload(
   input: readonly ParsedVerifiedPayloadBlob[],
   expected: readonly ExpectedPayloadRecord[],
-  manifest: ReleaseManifest,
+  fileCount: number,
+  byteSize: number,
 ): ReadonlyMap<string, PayloadSnapshot> {
-  if (input.length !== manifest.artifact.fileCount || input.length !== expected.length) invalid();
+  if (input.length !== fileCount || input.length !== expected.length) invalid();
   const records = new Map(expected.map((entry) => [entry.record.path, entry]));
   const snapshots = new Map<string, PayloadSnapshot>();
   let declaredBytes = 0;
@@ -144,7 +151,7 @@ function snapshotPayload(
       blob: entry.bytes,
     }));
   }
-  if (snapshots.size !== expected.length || declaredBytes !== manifest.artifact.byteSize) invalid();
+  if (snapshots.size !== expected.length || declaredBytes !== byteSize) invalid();
   return snapshots;
 }
 
@@ -200,6 +207,87 @@ export async function adaptVerifiedReleaseBundleForWorkerDirectUpload<Input>(
   return (await adaptVerifiedReleaseBundleForGatewayDeployments(bundle)).primary;
 }
 
+type WorkerModule = VerifiedWorkerDirectUploadRelease['worker']['modules'][number];
+type WorkerAsset = VerifiedWorkerDirectUploadRelease['worker']['assets']['files'][number];
+
+/** The gateway Worker itself: its modules, the management assets, and the contract the manifest signs. */
+function primaryRelease(
+  manifest: ReleaseManifest,
+  modules: readonly WorkerModule[],
+  assets: readonly WorkerAsset[],
+): VerifiedWorkerDirectUploadRelease {
+  const durableObjectBinding = manifest.cloudflare.durableObjects.bindings[0];
+  const durableObjectExport = manifest.cloudflare.durableObjects.exports.AdminState;
+  if (durableObjectBinding === undefined) invalid();
+  return Object.freeze({
+    verification: 'ed25519',
+    release: manifest.release,
+    artifactSha256: manifest.artifact.treeSha256,
+    worker: Object.freeze({
+      mainModule: manifest.cloudflare.mainModule,
+      compatibilityDate: manifest.cloudflare.compatibilityDate,
+      compatibilityFlags: Object.freeze([] as const),
+      modules: Object.freeze([...modules]),
+      assets: Object.freeze({
+        binding: manifest.cloudflare.assets.binding,
+        notFoundHandling: manifest.cloudflare.assets.notFoundHandling,
+        runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*'] as const),
+        files: Object.freeze([...assets]),
+      }),
+      durableObject: Object.freeze({
+        binding: durableObjectBinding.binding,
+        className: durableObjectBinding.className,
+        storage: durableObjectExport.storage,
+      }),
+    }),
+  });
+}
+
+/**
+ * The primary Worker for a gateway updating itself. The bundle carries only
+ * the admin and worker components' files, each read and checked against its
+ * signed record; the manifest's digests are still checked whole, and no other
+ * component is ever uploaded by an update.
+ */
+export async function adaptVerifiedUpdateComponentsForWorkerDirectUpload<Input>(
+  bundle: Input,
+): Promise<VerifiedWorkerDirectUploadRelease> {
+  const input = parseVerifiedReleaseBundle(bundle);
+  const { manifest } = input;
+  await verifyReleaseManifestDigests(manifest);
+  const expected = expectedPayload(manifest, UPDATE_RELEASE_COMPONENTS);
+  const byteSize = expected.reduce((sum, entry) => sum + entry.record.byteSize, 0);
+  const snapshots = snapshotPayload(input.payload, expected, expected.length, byteSize);
+  const modules: WorkerModule[] = [];
+  const assets: WorkerAsset[] = [];
+  let readBytes = 0;
+  for (const expectedEntry of expected) {
+    const snapshot = snapshots.get(expectedEntry.record.path);
+    if (!snapshot || snapshot.component !== expectedEntry.component || snapshot.record !== expectedEntry.record) invalid();
+    const bytes = await readExactBlob(snapshot);
+    readBytes += bytes.byteLength;
+    if (!Number.isSafeInteger(readBytes) || readBytes > MAX_RELEASE_PAYLOAD_BYTES) invalid();
+    const { record } = snapshot;
+    if (snapshot.component === 'worker') {
+      modules.push(Object.freeze({
+        name: workerModuleName(record.path, WORKER_PREFIX), contentType: record.contentType, sha256: record.sha256, bytes,
+      }));
+    } else {
+      assets.push(Object.freeze({ path: adminAssetPath(record.path), contentType: record.contentType, sha256: record.sha256, bytes }));
+    }
+  }
+  if (
+    readBytes !== byteSize ||
+    modules.length !== manifest.components.worker.fileCount ||
+    assets.length !== manifest.components.admin.fileCount ||
+    !modules.some((module) => module.name === manifest.cloudflare.mainModule) ||
+    !assets.some((asset) => asset.path === '/index.html')
+  ) invalid();
+  modules.sort((left, right) => lexicalCompare(left.name, right.name));
+  assets.sort((left, right) => lexicalCompare(left.path, right.path));
+  return primaryRelease(manifest, modules, assets);
+}
+
 /**
  * Pure handoff from the signed five-component release bundle to the three
  * customer-Worker deployment variants. This module is intentionally not
@@ -212,7 +300,7 @@ export async function adaptVerifiedReleaseBundleForGatewayDeployments<Input>(
   const { manifest } = input;
   await verifyReleaseManifestDigests(manifest);
   const expected = expectedPayload(manifest);
-  const snapshots = snapshotPayload(input.payload, expected, manifest);
+  const snapshots = snapshotPayload(input.payload, expected, manifest.artifact.fileCount, manifest.artifact.byteSize);
   const modules: Array<VerifiedWorkerDirectUploadRelease['worker']['modules'][number]> = [];
   const bootstrapModules: Array<VerifiedWorkerDirectUploadRelease['worker']['modules'][number]> = [];
   const cleanupModules: Array<VerifiedWorkerDirectUploadRelease['worker']['modules'][number]> = [];
@@ -288,9 +376,6 @@ export async function adaptVerifiedReleaseBundleForGatewayDeployments<Input>(
   cleanupModules.sort((left, right) => lexicalCompare(left.name, right.name));
   retirementModules.sort((left, right) => lexicalCompare(left.name, right.name));
   assets.sort((left, right) => lexicalCompare(left.path, right.path));
-  const durableObjectBinding = manifest.cloudflare.durableObjects.bindings[0];
-  const durableObjectExport = manifest.cloudflare.durableObjects.exports.AdminState;
-  if (durableObjectBinding === undefined) invalid();
   const bootstrapContract = manifest.cloudflare.workerVariants.bootstrap;
   const bootstrapDurableObjectBinding = bootstrapContract.durableObjects.bindings[0];
   const bootstrapDurableObjectExport = bootstrapContract.durableObjects.exports.AdminState;
@@ -318,28 +403,7 @@ export async function adaptVerifiedReleaseBundleForGatewayDeployments<Input>(
       }),
     }),
   });
-  const primary: VerifiedWorkerDirectUploadRelease = Object.freeze({
-    verification: 'ed25519',
-    release: manifest.release,
-    artifactSha256: manifest.artifact.treeSha256,
-    worker: Object.freeze({
-      mainModule: manifest.cloudflare.mainModule,
-      compatibilityDate: manifest.cloudflare.compatibilityDate,
-      compatibilityFlags: Object.freeze([] as const),
-      modules: Object.freeze(modules),
-      assets: Object.freeze({
-        binding: manifest.cloudflare.assets.binding,
-        notFoundHandling: manifest.cloudflare.assets.notFoundHandling,
-        runWorkerFirst: Object.freeze(['/__ankka/*', '/api/*'] as const),
-        files: Object.freeze(assets),
-      }),
-      durableObject: Object.freeze({
-        binding: durableObjectBinding.binding,
-        className: durableObjectBinding.className,
-        storage: durableObjectExport.storage,
-      }),
-    }),
-  });
+  const primary = primaryRelease(manifest, modules, assets);
   const cleanup: VerifiedCleanupWorkerRelease = Object.freeze({
     verification: 'ed25519',
     release: manifest.release,

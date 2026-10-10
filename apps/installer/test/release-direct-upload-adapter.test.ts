@@ -5,6 +5,7 @@ import { prepareVerifiedWorkerRelease } from '../src/cloudflare-worker-direct-up
 import {
   adaptVerifiedReleaseBundleForGatewayDeployments,
   adaptVerifiedReleaseBundleForWorkerDirectUpload,
+  adaptVerifiedUpdateComponentsForWorkerDirectUpload,
 } from '../src/release-direct-upload-adapter';
 import type { VerifiedReleaseBundle, VerifiedReleasePayloadBlob } from '../src/release';
 import {
@@ -254,6 +255,28 @@ describe('verified release bundle direct-upload adapter', () => {
     });
     expect(prepared.modules.map((entry) => entry.name)).toEqual(['index.js', 'support.wasm']);
     expect(prepared.assets.map((entry) => entry.path)).toEqual(['/app.js', '/index.html']);
+  });
+
+  it('builds an update\'s Worker from the admin and worker files alone, exactly as from the whole bundle', async () => {
+    const input = await fixture();
+    const uploaded = input.bundle.payload.filter((entry) => /^payload\/(?:admin|worker)\//u.test(entry.path));
+    expect(uploaded.length).toBeLessThan(input.bundle.payload.length);
+    const update = await adaptVerifiedUpdateComponentsForWorkerDirectUpload(replacePayload(input.bundle, uploaded));
+    expect(update).toEqual(await adaptVerifiedReleaseBundleForWorkerDirectUpload(input.bundle));
+    expect(Object.isFrozen(update.worker.modules)).toBe(true);
+    const expectUpdateInvalid = async <Input>(bundle: Input) => {
+      await expect(adaptVerifiedUpdateComponentsForWorkerDirectUpload(bundle)).rejects.toMatchObject({ code: 'release_invalid' });
+    };
+    // Any other component's file, a missing uploaded file, or one that differs from its signed record is refused.
+    await expectUpdateInvalid(input.bundle);
+    await expectUpdateInvalid(replacePayload(input.bundle, uploaded.slice(1)));
+    const first = requiredFixture(uploaded.at(0), 'first uploaded file');
+    await expectUpdateInvalid(replacePayload(input.bundle, [first, ...uploaded]));
+    await expectUpdateInvalid(replacePayload(input.bundle, uploaded.map((entry, index) => index === 0
+      ? { ...entry, bytes: new Blob(['X'.repeat(entry.byteSize)], { type: entry.contentType }) } : entry)));
+    // The records of components it does not read still bind the manifest's digests.
+    await expectUpdateInvalid(replaceManifest({ ...input.bundle, payload: uploaded },
+      withFilePatch(input.manifest, 'workerBootstrap', 0, { sha256: 'd'.repeat(64) })));
   });
 
   it('exposes exact cleanup and declarative-retirement variants without installer bytes', async () => {

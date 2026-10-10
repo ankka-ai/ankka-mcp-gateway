@@ -67,9 +67,16 @@ An update starts in the gateway dashboard and runs on the gateway itself:
    the gateway Worker. Behind the page, the management object reads the
    active Worker version and current bindings, then
    fetches the approved release descriptor from
-   `/api/releases/<channel>/by-id/<release>/<artifact-sha256>` and its manifest
-   files from that route's `/files/<path>` suffix, then verifies
-   the signature and every digest with the update key it was installed with.
+   `/api/releases/<channel>/by-id/<release>/<artifact-sha256>`. From that
+   route's `/files/<path>` suffix it fetches the files of the two components
+   an update uploads: the Worker modules and the management assets. It
+   verifies the signature with the update key it was installed with, every
+   tree digest in the signed manifest, and each fetched file against its
+   signed record. The installer, bootstrap, cleanup and retirement components
+   serve fresh installs and removal only. Their records remain part of the
+   signed manifest, but an update does not fetch their bytes. That keeps the
+   pass at 38 subrequests for a release with 30 management assets, inside the
+   50 a Workers Free invocation allows.
 3. The callback answers at once with the gateway's own
    `/__ankka/operation/update` page, and the management object runs the
    update behind it in its own invocation: it uploads the new management

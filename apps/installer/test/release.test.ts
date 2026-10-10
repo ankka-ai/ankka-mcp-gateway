@@ -8,7 +8,10 @@ import {
   RELEASE_ENVELOPE_SCHEMA_VERSION,
   RELEASE_SIGNATURE_CONTEXT,
   releaseSignatureCanonicalJson,
+  UPDATE_RELEASE_COMPONENTS,
+  verifyReleaseComponentPayload,
   verifyReleasePayload,
+  verifySignedReleaseComponents,
   verifySignedReleaseEnvelope,
   type ReleasePayloadFile,
 } from '../src/release';
@@ -323,6 +326,36 @@ describe('signed rich release gate', () => {
     await expect(verifyReleasePayload(fixture.manifest, fixture.payload.map((file, index) =>
       index === 0 ? { ...file, bytes: encoder.encode('X'.repeat(file.bytes.byteLength)) } : file,
     ))).rejects.toMatchObject({ code: 'release_invalid' });
+  });
+
+  it('verifies an update with only the components it uploads, every signed record still bound', async () => {
+    const fixture = await releaseFixture();
+    const signing = await signer();
+    const serialized = await signing.envelope(fixture.manifestBytes);
+    const keys = { 'test-key': signing.publicKey };
+    const uploaded = fixture.payload.filter((file) => /^payload\/(?:admin|worker)\//u.test(file.path));
+    expect(uploaded.length).toBeLessThan(fixture.payload.length);
+    await expect(verifySignedReleaseComponents(serialized, 'stable', keys, UPDATE_RELEASE_COMPONENTS, uploaded))
+      .resolves.toMatchObject({ verification: 'ed25519', keyId: 'test-key', manifest: fixture.manifest });
+    for (const payload of [
+      fixture.payload,
+      uploaded.slice(1),
+      uploaded.map((file, index) => index === 0 ? { ...file, bytes: encoder.encode('X'.repeat(file.bytes.byteLength)) } : file),
+    ]) {
+      await expect(verifySignedReleaseComponents(serialized, 'stable', keys, UPDATE_RELEASE_COMPONENTS, payload))
+        .rejects.toMatchObject({ code: 'release_invalid' });
+    }
+    // A record whose bytes are not fetched is still covered by the signature and the tree digests.
+    const tampered = withFilePatch(fixture.manifest, 'workerBootstrap', 0, { sha256: 'd'.repeat(64) });
+    await expect(verifySignedReleaseComponents(
+      canonicalJson({ ...parsedEnvelope(serialized), manifest: canonicalJson(tampered) }),
+      'stable', keys, UPDATE_RELEASE_COMPONENTS, uploaded,
+    )).rejects.toMatchObject({ code: 'release_invalid' });
+    await expect(verifySignedReleaseComponents(await signing.envelope(canonicalJson(tampered)),
+      'stable', keys, UPDATE_RELEASE_COMPONENTS, uploaded)).rejects.toMatchObject({ code: 'release_invalid' });
+    // The worker always takes part: its source declares the control-plane origin.
+    await expect(verifyReleaseComponentPayload(fixture.manifest, ['admin'],
+      fixture.payload.filter((file) => file.path.startsWith('payload/admin/')))).rejects.toMatchObject({ code: 'release_invalid' });
   });
 
   it('rejects signed drift in scopes, content types, safety flags, bindings, and envelope fields', async () => {
