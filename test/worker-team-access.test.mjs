@@ -4829,7 +4829,12 @@ test('management MCP hands provider consent to the browser and reads sanitized r
   const headers = await gateway.headers(ADMIN, MANAGEMENT_AUDIENCE);
   const page = await worker.fetch(new Request(handoff.authorizationUrl, { headers }), gateway.env);
   assert.equal(page.status, 200);
+  // A no-referrer page would make the browser post the form with `Origin: null` and the handoff would refuse itself.
+  assert.equal(page.headers.get('referrer-policy'), 'same-origin');
   assert.match(await page.text(), /Continue to provider/u);
+  const nullOrigin = await worker.fetch(new Request(handoff.authorizationUrl, { method: 'POST', headers: { ...headers, origin: 'null' } }), gateway.env);
+  assert.equal(nullOrigin.status, 403);
+  assert.equal((await nullOrigin.json()).error, 'origin_required');
   gateway.oauthHook((request) => request.url.endsWith('/register')
     ? Response.json({ error: 'synthetic-provider-detail-never-reflected' }, { status: 400 }) : undefined);
   const failed = await worker.fetch(new Request(handoff.authorizationUrl, { method: 'POST', headers }), gateway.env);
