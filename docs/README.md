@@ -31,6 +31,9 @@ installed release; a document or fixture is not a compatibility certification.
 - [Start here](GATEWAY_START_HERE.md): one operator-written page every
   session reads before it searches for tools, which source owns which facts
   and where the method and vocabulary live.
+- [Curating a gateway](GATEWAY_CURATION.md): the pass that makes a model
+  open the right source first on a large gateway, what belongs in the gateway
+  versus a knowledge source, and how to verify routing.
 - [Updates and rollback](UPDATES.md): operator-approved changes and the
   distinction between Worker versions and retained gateway data.
 - [Portal audit logging](CUSTOMER_AUDIT_LOGGING.md): logs in your account,

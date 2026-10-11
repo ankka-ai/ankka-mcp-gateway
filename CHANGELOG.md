@@ -4,6 +4,11 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Document the curation practice for a large gateway: what belongs in the
+  gateway versus a directly connected knowledge source, the pass that puts it
+  in place, and how to verify routing with representative questions. Note
+  the Skills over MCP extension's current client support in the context guide.
+
 - Let Gateway Management change named teams. `save_gateway_team` accepts an
   optional `teams` list with the same fields the dashboard saves (`id`, `name`,
   `memberEmails`, `sourceIds`, optional `allSources`), so an agent can assign a
