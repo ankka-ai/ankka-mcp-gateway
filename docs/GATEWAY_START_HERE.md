@@ -52,6 +52,14 @@ The text lives in the gateway's existing Durable Object state under one key,
 with the author and time. It survives removing and reinstalling the source.
 The bound is 16,000 characters; a longer text is refused, never truncated.
 
+## When your team has a knowledge source
+
+If your team controls a wiki or documentation server and connects it to the
+client directly, put the map there and let that server's own instructions
+carry the "use together with the gateway" rule; its instructions reach the
+model at session start, which the Portal does not pass through. Start here
+is then unnecessary. See [Curating a gateway](GATEWAY_CURATION.md).
+
 ## What it is not
 
 It is not a Cloudflare Portal description, which is not proven to reach the
