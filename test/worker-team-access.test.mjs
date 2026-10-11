@@ -4798,6 +4798,29 @@ test('management source assignment ignores manual policies and live removal reje
   assertManualPoliciesUnchanged(gateway, manual, baseline);
 }));
 
+test('management MCP changes a named team’s sources and keeps named teams when teams is omitted', () => fixture(async (gateway) => {
+  const { source } = await installManagementSource(gateway);
+  const before = await gateway.view();
+  const created = await gateway.api('/api/team-actions', { method: 'POST', body: { schemaVersion: 1, expectedRevision: before.revision,
+    members: before.members, teams: [{ id: 'team-2222222222222222', name: 'Analysts', memberEmails: [MEMBER], sourceIds: [] }] } });
+  assert.equal(created.status, 200, await created.clone().text());
+  const read = await managementRpc(gateway, 'tools/call', { name: 'get_gateway_team', arguments: {} });
+  const team = read.body.result.structuredContent.result;
+  const assigned = team.sources.find((item) => item.status === 'installed' && item.id !== source.id).id;
+  const saved = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: {
+    expectedRevision: team.revision, members: team.members, teams: [{ ...team.teams[0], sourceIds: [assigned] }],
+  } });
+  assert.equal(saved.body.result.structuredContent.ok, true, JSON.stringify(saved.body));
+  const after = await gateway.view();
+  assert.deepEqual(after.teams.map(({ id, sourceIds }) => ({ id, sourceIds })), [{ id: 'team-2222222222222222', sourceIds: [assigned] }]);
+  assert.deepEqual(after.members, team.members);
+  const kept = await managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: {
+    expectedRevision: after.revision, members: [...after.members, { email: NEW_PERSON, sourceIds: [] }],
+  } });
+  assert.equal(kept.body.result.structuredContent.ok, true, JSON.stringify(kept.body));
+  assert.deepEqual((await gateway.view()).teams, after.teams);
+}));
+
 test('management MCP rejects unassigned callers, other audiences, drift, cross-origin requests and arbitrary tools', () => fixture(async (gateway) => {
   const { application } = await installManagementSource(gateway);
   for (const options of [{ email: MEMBER }, { audience: gateway.env.CF_ACCESS_AUD },

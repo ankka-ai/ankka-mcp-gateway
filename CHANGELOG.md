@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let Gateway Management change named teams. `save_gateway_team` accepts an
+  optional `teams` list with the same fields the dashboard saves (`id`, `name`,
+  `memberEmails`, `sourceIds`, optional `allSources`), so an agent can assign a
+  source to a team or remove it. Omitting `teams` keeps the current named teams
+  unchanged, as before.
+
 - Add a built-in Start here source. Its one tool, `get_source_map`, returns a
   page your gateway operators write for every session to read before it
   searches for tools: which connector owns which facts, what each is not for,
