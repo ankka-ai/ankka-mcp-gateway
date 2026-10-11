@@ -5465,6 +5465,87 @@ test('the built-in feedback source installs, records reports under the reporter 
   assert.equal(result(await managementRpc(gateway, 'tools/call', { name: 'list_gateway_feedback', arguments: { status: 'all' } })).result.total, 200);
 }));
 
+test('the built-in Start here source serves the generated map until operators write one, and the written map reaches assigned sessions', () => fixture(async (gateway) => {
+  const endpoint = `${MANAGEMENT_ORIGIN}/api/guide/mcp`;
+  const GUIDE_ID = 'source-67756964656d6170';
+  const discovery = await (await gateway.api('/api/sources/discover', { method: 'POST', body: { url: endpoint } })).json();
+  assert.deepEqual(discovery.tools.map((tool) => tool.name), ['get_source_map']);
+  const current = await (await gateway.api('/api/sources')).json();
+  const save = (revision, enabledTools) => gateway.api('/api/sources', { method: 'PUT', body: {
+    schemaVersion: 1, revision, source: { label: 'Start here', url: endpoint, authMode: 'oauth', enabledTools, company: 'Company B' },
+  } });
+  assert.equal((await save(current.revision, ['submit_gateway_feedback'])).status, 400);
+  const savedResponse = await save(current.revision, ['get_source_map']);
+  assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
+  const saved = await savedResponse.json();
+  const source = saved.sources.find((item) => item.url === endpoint);
+  assert.equal(source.id, GUIDE_ID);
+  assert.equal(source.onBehalfOfUser, true);
+  const started = await gateway.api('/api/source-actions', { method: 'POST', body: { schemaVersion: 1, revision: saved.revision, sourceId: source.id } });
+  assert.equal(started.status, 409, await started.clone().text());
+  const action = (await (await gateway.api('/api/source-actions')).json()).actions.find((entry) => entry.sourceId === source.id);
+  const server = [...gateway.provider.state.servers.values()].find((entry) => entry.hostname === endpoint);
+  assert.ok(server);
+  server.tools = [{ name: 'get_source_map' }]; server.status = 'ready'; server.authentication_status = 'authenticated';
+  const native = [...gateway.provider.state.apps.values()].find((entry) => entry.domain === 'manage.example.com/api/guide/mcp');
+  assert.ok(native);
+  native.aud = 'synthetic-guide-audience';
+  const rpc = async (method, params = {}, email = MEMBER, audience = native.aud) => {
+    const response = await worker.fetch(new Request(endpoint, { method: 'POST',
+      headers: await gateway.headers(email, audience), body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+    }), gateway.env);
+    return { status: response.status, body: await response.json() };
+  };
+  const call = async (args, email, audience) => rpc('tools/call', { name: 'get_source_map', arguments: args }, email, audience);
+  const result = (reply) => reply.body.result.structuredContent;
+  assert.equal((await rpc('tools/list', {}, ADMIN)).status, 200);
+  assert.equal((await call({}, ADMIN)).status, 401);
+  const resumed = await gateway.api(`/api/source-actions/${action.actionId}/renew`, { method: 'POST', body: { schemaVersion: 1, revision: saved.revision, sourceId: source.id } });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await call({})).status, 401);
+  const team = await gateway.view();
+  const assigned = await gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: team.revision, members: team.members.map((member) => ({ ...member,
+      sourceIds: member.email === MEMBER ? [...member.sourceIds, source.id].sort() : member.sourceIds })),
+  } });
+  assert.equal(assigned.status, 200, await assigned.clone().text());
+  const initialized = await rpc('initialize', { protocolVersion: '2025-06-18' });
+  assert.equal(initialized.body.result.serverInfo.name, 'ankka-gateway-guide');
+  assert.match(initialized.body.result.instructions, /get_source_map/u);
+
+  // Until an operator writes the map, the generated default lists the installed sources as the Portal names them.
+  const generated = await call({});
+  assert.equal(generated.body.result.isError, false, JSON.stringify(generated.body));
+  assert.equal(result(generated).result.authored, false);
+  assert.match(result(generated).result.text, /No source map has been written/u);
+  assert.match(result(generated).result.text, /Company B · Start here: 1 tools/u);
+  assert.equal((await call({ extra: true })).body.error.code, -32602);
+
+  await installManagementSource(gateway, ['get_gateway_guide', 'set_gateway_guide']);
+  assert.equal(result(await managementRpc(gateway, 'tools/call', { name: 'get_gateway_guide', arguments: {} })).result.authored, false);
+  const text = 'Orders and money: Postgres.\nSite behaviour: GA4.\n\tMethod: wiki page P-method.';
+  const written = await managementRpc(gateway, 'tools/call', { name: 'set_gateway_guide', arguments: { text } });
+  assert.equal(written.body.result.isError, false, JSON.stringify(written.body));
+  assert.equal(result(written).result.updatedBy, ADMIN);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'set_gateway_guide', arguments: { text: '' } })).body.error.code, -32602);
+  assert.equal((await managementRpc(gateway, 'tools/call', { name: 'set_gateway_guide', arguments: { text: 'x'.repeat(16_001) } })).body.error.code, -32602);
+  const read = result(await call({})).result;
+  assert.equal(read.authored, true);
+  assert.equal(read.text, text);
+  assert.equal(read.updatedBy, ADMIN);
+  assert.equal((await call({}, NEW_PERSON)).status, 401);
+  assert.equal((await call({}, MEMBER, MANAGEMENT_AUDIENCE)).status, 401);
+  assert.equal(gateway.managementStorage.snapshot('ankka-mcp-gateway/guide/v1').text, text);
+
+  const sources = await (await gateway.api('/api/sources')).json();
+  const removed = await gateway.api(`/api/sources/${source.id}`, { method: 'DELETE', body: { schemaVersion: 1, revision: sources.revision } });
+  assert.equal(removed.status, 200, await removed.clone().text());
+  assert.equal(gateway.provider.state.apps.has(native.id), false);
+  assert.equal((await rpc('tools/list')).status, 401);
+  // The written map outlives the source so a reinstall starts from it.
+  assert.equal(result(await managementRpc(gateway, 'tools/call', { name: 'get_gateway_guide', arguments: {} })).result.text, text);
+}));
+
 const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
 
 async function installAdditionalSource(gateway, extra = {}) {

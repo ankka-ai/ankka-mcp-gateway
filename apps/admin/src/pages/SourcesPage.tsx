@@ -200,6 +200,21 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
       setFeedbackError(error instanceof Error ? error.message : 'Gateway Feedback could not be added.')
     } finally { setAddingFeedback(false) }
   }
+  const [guideError, setGuideError] = useState<string | null>(null)
+  const [addingGuide, setAddingGuide] = useState(false)
+  const guideInstalled = sources?.sources.some((source) => source.id === 'source-67756964656d6170') === true
+  async function addGuideSource() {
+    setAddingGuide(true)
+    setGuideError(null)
+    try {
+      const url = `${window.location.origin}/api/guide/mcp`
+      const discovered = await discoverSource(url)
+      await saveSourceDraft({ label: 'Start here', url, authMode: 'oauth',
+        enabledTools: discovered.tools.map((tool) => tool.name).sort() })
+    } catch (error) {
+      setGuideError(error instanceof Error ? error.message : 'Start here could not be added.')
+    } finally { setAddingGuide(false) }
+  }
   const [showLibrary, setShowLibrary] = useState(false)
   const [providerConnector, setProviderConnector] = useState<NativeConnectorRecipe | null>(null)
   const [showBigQuery, setShowBigQuery] = useState(false)
@@ -555,6 +570,12 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         <p className="mt-2 text-sm text-kumo-subtle">Let your team’s agents report a wrong description, a missing capability or stale data about any connector, and read the reports. Install this built-in connector, then assign it in Team to everyone who should report. Reports stay in your Cloudflare account.</p>
         <Button className="mt-3" variant="secondary" disabled={!installationEnabled || applyBlocked || addingFeedback} onClick={() => void addFeedbackSource()}>{addingFeedback ? 'Adding…' : 'Add Gateway Feedback'}</Button>
         {feedbackError ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{feedbackError}</p> : null}
+      </div> : null}
+      {!guideInstalled ? <div className="mt-6 rounded-lg border border-kumo-line p-4">
+        <h2 className="text-sm font-semibold text-kumo-strong">Start here</h2>
+        <p className="mt-2 text-sm text-kumo-subtle">Give every session one page to read before it searches for tools: which connector owns which facts, what each is not for, and where your team keeps its method and vocabulary. Install this built-in connector, assign it in Team, then write the text with the set_gateway_guide tool on Gateway Management. Until you do, it lists your connectors.</p>
+        <Button className="mt-3" variant="secondary" disabled={!installationEnabled || applyBlocked || addingGuide} onClick={() => void addGuideSource()}>{addingGuide ? 'Adding…' : 'Add Start here'}</Button>
+        {guideError ? <p role="alert" className="mt-2 text-sm text-kumo-danger">{guideError}</p> : null}
       </div> : null}
 
       {bigQueryError ? <p role="alert" className="notice-banner notice-error mt-6">{bigQueryError}</p> : null}

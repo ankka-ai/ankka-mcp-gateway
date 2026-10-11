@@ -9,7 +9,10 @@ const API_SOURCE_PATH = /^\/api\/api-sources\/([a-z][a-z0-9-]{0,31})\/mcp$/u;
 // A reserved source identity for gateway feedback, installed and assigned like any other source.
 const FEEDBACK_SOURCE_ID = 'source-666565646261636b';
 const FEEDBACK_MCP_PATH = '/api/feedback/mcp';
-function nativeSourceId(id) { return id === MANAGEMENT_SOURCE_ID || id === FEEDBACK_SOURCE_ID || API_SOURCE_ID.test(id); }
+// A reserved source identity for the operator-written source map ("Start here"), installed like any other source.
+const GUIDE_SOURCE_ID = 'source-67756964656d6170';
+const GUIDE_MCP_PATH = '/api/guide/mcp';
+function nativeSourceId(id) { return id === MANAGEMENT_SOURCE_ID || id === FEEDBACK_SOURCE_ID || id === GUIDE_SOURCE_ID || API_SOURCE_ID.test(id); }
 function apiConnectionKey(url, env) {
   const origin = managementSourceUrl(env);
   if (!origin) return null;
@@ -3074,6 +3077,7 @@ function safeManagedSource(value) {
   if (!isBoolean(onBehalfOfUser) || (authMode === 'none' && onBehalfOfUser !== false)) return null;
   if (API_SOURCE_ID.test(value.id) && (authMode !== 'oauth' || onBehalfOfUser !== true || !API_SOURCE_PATH.test(new URL(value.url).pathname))) return null;
   if (value.id === FEEDBACK_SOURCE_ID && (authMode !== 'oauth' || onBehalfOfUser !== true || new URL(value.url).pathname !== FEEDBACK_MCP_PATH)) return null;
+  if (value.id === GUIDE_SOURCE_ID && (authMode !== 'oauth' || onBehalfOfUser !== true || new URL(value.url).pathname !== GUIDE_MCP_PATH)) return null;
   // A sign-in source is saved before its tools can be listed. Only such a
   // draft may have none; an installed source without tools is invalid state.
   const enabledTools = exactSortedUniqueStrings(
@@ -3201,23 +3205,23 @@ export function parseSourceSave(value) {
   return Object.freeze({ revision: value.revision, source: Object.freeze(source) });
 }
 
-export async function saveDraftSource(current, input, management = null, apiSource = false, feedback = false) {
+export async function saveDraftSource(current, input, management = null, apiSource = false, reservedId = null) {
   if (input.revision !== current.revision) return null;
   const existing = current.sources.find((source) => source.url === input.source.url);
   if (existing?.status === 'installed') return null;
   const digest = await sha256Hex(input.source.url);
   // Keep ordinary URL-derived IDs outside the reserved API prefix. The collision check below still applies.
   const externalDigest = digest.startsWith('a9') ? `a8${digest.slice(2)}` : digest;
-  const id = management ? MANAGEMENT_SOURCE_ID : feedback ? FEEDBACK_SOURCE_ID
-    : existing?.id ?? (apiSource ? `source-a9${digest.slice(0, 14)}` : `source-${externalDigest.slice(0, 16)}`);
-  if (!management && !feedback && API_SOURCE_ID.test(id) !== apiSource) return null;
+  const id = management ? MANAGEMENT_SOURCE_ID : reservedId
+    ?? existing?.id ?? (apiSource ? `source-a9${digest.slice(0, 14)}` : `source-${externalDigest.slice(0, 16)}`);
+  if (!management && reservedId === null && API_SOURCE_ID.test(id) !== apiSource) return null;
   if (current.sources.some((candidate) => candidate.id === id && candidate.url !== input.source.url)) return null;
   const source = {
     id,
     label: input.source.label,
     url: input.source.url,
     authMode: input.source.authMode,
-    onBehalfOfUser: apiSource || feedback,
+    onBehalfOfUser: apiSource || reservedId !== null,
     enabledTools: [...input.source.enabledTools],
     status: 'draft',
   };
@@ -7338,12 +7342,18 @@ export class AdminState {
     if (sourceConnection && request.method === 'POST') {
       return this.checkSourceConnection(sourceConnection[1], request.headers.get('x-ankka-actor-email'));
     }
-    // Reading feedback neither authorizes work nor changes the journal.
+    // Reading feedback or the source map neither authorizes work nor changes the journal.
     if (request.method === 'POST' && requestUrl.pathname === '/feedback/list') {
       return readJsonInput(request, 4_096).then((input) => listFeedback(this.state.storage, input));
     }
+    if (request.method === 'POST' && requestUrl.pathname === '/guide/read') {
+      return readJsonInput(request, 1_024).then((input) => readGuide(this.state.storage, input));
+    }
     const operation = async () => {
       const url = new URL(request.url);
+      if (url.pathname === '/guide/write' && request.method === 'POST') {
+        return writeGuide(this.state.storage, await readJsonInput(request, 32_768), request.headers.get('x-ankka-actor-email'), Date.now());
+      }
       if (url.pathname === '/feedback/submit' && request.method === 'POST') {
         return submitFeedback(this.state.storage, await readJsonInput(request, 16_384), request.headers.get('x-ankka-actor-email'), Date.now());
       }
@@ -7702,13 +7712,14 @@ export class AdminState {
           revision: current.revision,
         });
         const builtin = input.source.url === managementSourceUrl(this.env);
-        const feedback = input.source.url === feedbackSourceUrl(this.env);
+        const reservedId = input.source.url === feedbackSourceUrl(this.env) ? FEEDBACK_SOURCE_ID
+          : input.source.url === guideSourceUrl(this.env) ? GUIDE_SOURCE_ID : null;
         const apiSource = apiConnectionKey(input.source.url, this.env) !== null;
-        if (builtin || apiSource || feedback) {
+        if (builtin || apiSource || reservedId) {
           try { await verifyGatewaySource(input.source, this.env); } catch { return sourceToolsRefusal(400, 'source_invalid'); }
           if (!normalizedEmail(request.headers.get('x-ankka-actor-email'))) return sourceToolsRefusal(403, 'access_required');
         }
-        const updated = await saveDraftSource(current, input, builtin ? { actorEmail: request.headers.get('x-ankka-actor-email') } : null, apiSource, feedback);
+        const updated = await saveDraftSource(current, input, builtin ? { actorEmail: request.headers.get('x-ankka-actor-email') } : null, apiSource, reservedId);
         if (!updated) return fixedJson(413, {
           schemaVersion: 1,
           error: 'source_capacity_exceeded',
@@ -7716,7 +7727,7 @@ export class AdminState {
         });
         // Older runtimes cannot read an empty tool selection or the built-in
         // source identity. Company also needs the current parser. Arm compatibility before saving.
-        if ((builtin || apiSource || feedback || input.source.allTools || input.source.company || input.source.enabledTools.length === 0) &&
+        if ((builtin || apiSource || reservedId || input.source.allTools || input.source.company || input.source.enabledTools.length === 0) &&
             !await armSourceCompatibility(this.state.storage, this.env)) {
           return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
         }
@@ -8248,7 +8259,8 @@ async function handleSourceDiscovery(request, env, authorizedAccess = null) {
   if (!exactKeys(input, ['url'])) return fixedJson(400, { schemaVersion: 1, error: 'source_url_invalid' });
   try {
     const gatewayTools = input.url === managementSourceUrl(env) ? managementToolDefinitions(env)
-      : input.url === feedbackSourceUrl(env) ? feedbackToolDefinitions() : null;
+      : input.url === feedbackSourceUrl(env) ? feedbackToolDefinitions()
+      : input.url === guideSourceUrl(env) ? guideToolDefinitions() : null;
     const discovered = gatewayTools
       ? { endpoint: input.url, protocolVersion: '2025-06-18', authMode: 'oauth',
         tools: gatewayTools.map((tool) => ({ name: tool.name, description: tool.description,
@@ -8424,7 +8436,7 @@ async function handleSourceIcon(request, env) {
     const sources = safeManagementSources(await response.json());
     const sourceId = new URL(request.url).pathname.split('/').at(-2);
     const source = sources?.sources.find((item) => item.id === sourceId);
-    if (!source || source.id === MANAGEMENT_SOURCE_ID || source.id === FEEDBACK_SOURCE_ID) return unavailable();
+    if (!source || source.id === MANAGEMENT_SOURCE_ID || source.id === FEEDBACK_SOURCE_ID || source.id === GUIDE_SOURCE_ID) return unavailable();
     const icon = await fetchMcpSourceIcon(source.url);
     return icon ? new Response(icon.bytes, { headers: {
       'content-type': icon.type, 'cache-control': 'private, max-age=300', 'x-content-type-options': 'nosniff',
@@ -10294,10 +10306,16 @@ function feedbackSourceUrl(env) {
   return environment ? `https://${environment.managementHostname}${FEEDBACK_MCP_PATH}` : null;
 }
 
+function guideSourceUrl(env) {
+  const environment = parseManagementEnvironment(env);
+  return environment ? `https://${environment.managementHostname}${GUIDE_MCP_PATH}` : null;
+}
+
 /** The exact endpoint a gateway-hosted source must declare; null when the source is not one of ours. */
 function nativeSourceUrl(source, env) {
   if (source.id === MANAGEMENT_SOURCE_ID) return managementSourceUrl(env);
   if (source.id === FEEDBACK_SOURCE_ID) return feedbackSourceUrl(env);
+  if (source.id === GUIDE_SOURCE_ID) return guideSourceUrl(env);
   return apiConnectionKey(source.url, env) === null ? null : source.url;
 }
 
@@ -10312,9 +10330,10 @@ async function verifyGatewaySource(source, env) {
         source.enabledTools.some((name) => !tools.some((tool) => tool.name === name))) throw new SourceDiscoveryError(400, 'source_invalid');
     return;
   }
-  if (source.url === feedbackSourceUrl(env)) {
+  const gatewayTools = source.url === feedbackSourceUrl(env) ? FEEDBACK_MCP_TOOLS : source.url === guideSourceUrl(env) ? GUIDE_MCP_TOOLS : null;
+  if (gatewayTools) {
     if (source.authMode !== 'oauth' || source.enabledTools.length === 0 ||
-        source.enabledTools.some((name) => !FEEDBACK_MCP_TOOLS.some((tool) => tool.name === name))) {
+        source.enabledTools.some((name) => !gatewayTools.some((tool) => tool.name === name))) {
       throw new SourceDiscoveryError(400, 'source_invalid');
     }
     return;
@@ -10472,6 +10491,17 @@ function feedbackToolDefinitions() {
   return FEEDBACK_MCP_TOOLS.map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
 }
 const FEEDBACK_INSTRUCTIONS = 'Use submit_gateway_feedback when a connected source misbehaves: a wrong or unclear description, a missing capability, stale or wrong data, confusing output, or a tool that was hard to find. One problem per report. Never include credentials or personal data.';
+const GUIDE_TEXT_MAX = 16_000;
+const MCP_GUIDE_TEXT_INPUT = { type: 'string', minLength: 1, maxLength: GUIDE_TEXT_MAX, contentMediaType: 'text/plain',
+  description: 'The source map your team wants every session to read first: which connected source owns which facts, what each is not for, and where the method and vocabulary are. Plain text or Markdown.' };
+const GUIDE_MCP_TOOLS = [
+  ['get_source_map', 'Call this first for any business or data question. Returns the source map your gateway operators wrote: which connected source owns which facts, what each source is not for, and where the method and vocabulary are kept. Read it before searching for tools. Short; maintained by the operators, not generated.', mcpObject({}, []), 'read'],
+].map(([name, description, inputSchema, route]) => ({ name, description, inputSchema, route,
+  annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } }));
+function guideToolDefinitions() {
+  return GUIDE_MCP_TOOLS.map(({ name, description, inputSchema, annotations }) => ({ name, description, inputSchema, annotations }));
+}
+const GUIDE_INSTRUCTIONS = 'Call get_source_map first for any business or data question. It says which connected source owns which facts and where the method and vocabulary are.';
 const MCP_API_DEFINITION_INPUT = { type: 'string', maxLength: 24576, contentMediaType: 'application/json' };
 const MANAGEMENT_MCP_TOOLS = [
   ['get_api_source_runtime', 'Read configured API connections and the authoring guide; provide connectionKey to read its saved code and revision. No credentials are returned.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT }, []), 'POST', 'api-source:read'],
@@ -10509,9 +10539,11 @@ const MANAGEMENT_MCP_TOOLS = [
   ['remove_mcp_source', 'Remove a source and its owned resources after explicit instruction. Its tools and assignments stop being available.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', 'source'],
   ['list_gateway_feedback', FEEDBACK_LIST_DESCRIPTION, FEEDBACK_LIST_INPUT, 'POST', 'feedback-list'],
   ['resolve_gateway_feedback', 'Mark a feedback report resolved with a short reference such as a commit, pull request or note, or reopen it. Read it with list_gateway_feedback first.', mcpObject({ feedbackId: MCP_FEEDBACK_ID_INPUT, status: { type: 'string', enum: ['resolved', 'open'] }, resolution: { type: 'string', minLength: 1, maxLength: 500 } }, ['feedbackId', 'status']), 'POST', 'feedback-resolve'],
+  ['get_gateway_guide', 'Read the source map the Start here connector returns, who last wrote it and when, or the generated default when none is written.', mcpObject({}, []), 'POST', 'guide-read'],
+  ['set_gateway_guide', 'Replace the source map the Start here connector returns to every assigned session. Write it as the one page a session should read first: which source owns which facts, what each is not for, where the method and vocabulary live. Keep it short and maintain it in one place.', mcpObject({ text: MCP_GUIDE_TEXT_INPUT }), 'POST', 'guide-write'],
 ].map(([name, description, inputSchema, method, route]) => ({ name, description, inputSchema, method, route,
-  annotations: { readOnlyHint: method === 'GET' || route === 'api-source:read' || route === 'feedback-list', destructiveHint: method === 'DELETE' || ['rollback', 'api-source:disable', 'api-source:activate'].includes(route),
-    idempotentHint: method === 'GET' || route === 'api-source:read' || route === 'feedback-list', openWorldHint: route !== 'feedback-list' && route !== 'feedback-resolve' } }));
+  annotations: { readOnlyHint: method === 'GET' || ['api-source:read', 'feedback-list', 'guide-read'].includes(route), destructiveHint: method === 'DELETE' || ['rollback', 'api-source:disable', 'api-source:activate'].includes(route),
+    idempotentHint: method === 'GET' || ['api-source:read', 'feedback-list', 'guide-read'].includes(route), openWorldHint: !['feedback-list', 'feedback-resolve', 'guide-read', 'guide-write'].includes(route) } }));
 
 function mcpInputMatches(value, schema) {
   if (schema.type === 'object') return isRecord(value) &&
@@ -10587,6 +10619,9 @@ async function managementMcpCall(tool, args, env, access) {
   }
   if (tool.route === 'feedback-list' || tool.route === 'feedback-resolve') {
     return feedbackStoreCall(env, tool.route === 'feedback-list' ? 'list' : 'resolve', args, access.actorEmail);
+  }
+  if (tool.route === 'guide-read' || tool.route === 'guide-write') {
+    return guideStoreCall(env, tool.route === 'guide-read' ? 'read' : 'write', args, access.actorEmail);
   }
   const routes = { action: `/api/source-actions/${args.actionId}`, tools: `/api/source-actions/${args.actionId}/tools`,
     renew: `/api/source-actions/${args.actionId}/renew`, 'team-action': `/api/team-actions/${args.actionId}`,
@@ -10815,9 +10850,64 @@ function feedbackStoreCall(env, operation, input, actorEmail) {
     body: canonicalJson({ schemaVersion: 1, ...input }) }));
 }
 
-async function handleFeedbackMcp(request, env) {
+// The operator-written source map ("Start here"). One text, replaced whole,
+// read by every assigned session before it searches for tools.
+const GUIDE_KEY = 'ankka-mcp-gateway/guide/v1';
+
+function safeGuideState(value) {
+  if (!exactKeys(value, ['schemaVersion', 'text', 'updatedAt', 'updatedBy']) || value.schemaVersion !== 1 ||
+      !feedbackField(value.text, GUIDE_TEXT_MAX) || !isoTime(value.updatedAt) ||
+      normalizedEmail(value.updatedBy) !== value.updatedBy) return null;
+  return Object.freeze({ ...value });
+}
+
+/** Without an operator text, the map is the installed sources as the Portal names them. */
+function defaultGuideText(sources) {
+  const lines = (sources?.sources ?? []).filter((source) => source.status === 'installed')
+    .map((source) => `- ${source.company ? `${source.company} · ` : ''}${source.label}: ${source.allTools ? 'all tools' : `${source.enabledTools.length} tools`}`);
+  return ['No source map has been written for this gateway yet. Connected sources:', ...lines,
+    'Gateway operators replace this text with set_gateway_guide on Gateway Management.'].join('\n');
+}
+
+async function readGuide(storage, input) {
+  if (!isRecord(input) || input.schemaVersion !== 1 || Object.keys(input).length !== 1) return sourceToolsRefusal(400, 'guide_invalid');
+  const raw = await storage.get(GUIDE_KEY);
+  const state = raw === undefined ? null : safeGuideState(raw);
+  if (raw !== undefined && !state) return sourceToolsRefusal(503, 'guide_unavailable');
+  if (state) return fixedJson(200, { schemaVersion: 1, authored: true, text: state.text, updatedAt: state.updatedAt, updatedBy: state.updatedBy });
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  return fixedJson(200, { schemaVersion: 1, authored: false, text: defaultGuideText(sources), updatedAt: null, updatedBy: null });
+}
+
+async function writeGuide(storage, input, actorEmail, nowMs) {
+  const actor = normalizedEmail(actorEmail);
+  if (!actor) return sourceToolsRefusal(403, 'access_required');
+  const fields = feedbackArguments(input, MANAGEMENT_MCP_TOOLS.find((tool) => tool.route === 'guide-write').inputSchema);
+  if (!fields) return sourceToolsRefusal(400, 'guide_invalid');
+  const state = safeGuideState({ schemaVersion: 1, text: fields.text, updatedAt: new Date(nowMs).toISOString(), updatedBy: actor });
+  if (!state) return sourceToolsRefusal(400, 'guide_invalid');
+  await storage.put(GUIDE_KEY, state);
+  return fixedJson(200, { schemaVersion: 1, authored: true, text: state.text, updatedAt: state.updatedAt, updatedBy: state.updatedBy });
+}
+
+function guideStoreCall(env, operation, input, actorEmail) {
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return sourceToolsRefusal(503, 'guide_unavailable');
+  return stub.fetch(new Request(`https://admin-state.invalid/guide/${operation}`, { method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-ankka-actor-email': actorEmail },
+    body: canonicalJson({ schemaVersion: 1, ...input }) }));
+}
+
+const NATIVE_MCP_PROTOCOLS = ['2025-03-26', '2025-06-18', '2025-11-25', '2026-07-28'];
+const FEEDBACK_NATIVE = Object.freeze({ sourceId: FEEDBACK_SOURCE_ID, path: FEEDBACK_MCP_PATH, url: feedbackSourceUrl, serverName: 'ankka-gateway-feedback',
+  instructions: FEEDBACK_INSTRUCTIONS, tools: FEEDBACK_MCP_TOOLS, definitions: feedbackToolDefinitions, call: feedbackStoreCall });
+const GUIDE_NATIVE = Object.freeze({ sourceId: GUIDE_SOURCE_ID, path: GUIDE_MCP_PATH, url: guideSourceUrl, serverName: 'ankka-gateway-guide',
+  instructions: GUIDE_INSTRUCTIONS, tools: GUIDE_MCP_TOOLS, definitions: guideToolDefinitions, call: guideStoreCall });
+
+/** One gateway-hosted MCP endpoint: fixed tools, per-person assignment, the store behind the management object. */
+async function handleNativeMcp(request, env, native) {
   const url = new URL(request.url);
-  const endpoint = feedbackSourceUrl(env);
+  const endpoint = native.url(env);
   if (!endpoint || request.url !== endpoint) return sourceToolsRefusal(404, 'not_found');
   if (request.headers.has('origin') && request.headers.get('origin') !== url.origin) return sourceToolsRefusal(403, 'origin_required');
   if (request.method !== 'POST') return new Response(null, { status: 405, headers: { ...PUBLIC_HEADERS, allow: 'POST' } });
@@ -10830,35 +10920,37 @@ async function handleFeedbackMcp(request, env) {
       Object.keys(message).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key))) return error(-32600, 'Invalid request');
   // Discovery describes the catalogue to the administrator for Portal synchronization; only tools/call needs an assignment.
   const discovery = message.method !== 'tools/call';
-  const access = await managementSourceAccess(request, env, discovery, Date.now(), discovery, FEEDBACK_SOURCE_ID);
+  const access = await managementSourceAccess(request, env, discovery, Date.now(), discovery, native.sourceId);
   if (!access) return fixedJson(401, { error: 'access_required' }, { 'www-authenticate':
-    `Bearer resource_metadata="${url.origin}/.well-known/cloudflare-access-protected-resource${FEEDBACK_MCP_PATH}"` });
+    `Bearer resource_metadata="${url.origin}/.well-known/cloudflare-access-protected-resource${native.path}"` });
   if (!Object.hasOwn(message, 'id')) {
     return message.method.startsWith('notifications/') ? new Response(null, { status: 202, headers: PUBLIC_HEADERS }) : error(-32600, 'Invalid request');
   }
   if (id === null) return error(-32600, 'Invalid request');
   if (message.method === 'initialize') {
     if (!isRecord(message.params) || !isText(message.params.protocolVersion)) return error(-32602, 'Invalid params');
-    return rpc({ protocolVersion: ['2025-03-26', '2025-06-18', '2025-11-25', '2026-07-28'].includes(message.params.protocolVersion)
-      ? message.params.protocolVersion : '2025-06-18', capabilities: { tools: {} },
-    serverInfo: { name: 'ankka-gateway-feedback', version: env.ANKKA_GATEWAY_RELEASE }, instructions: FEEDBACK_INSTRUCTIONS });
+    return rpc({ protocolVersion: NATIVE_MCP_PROTOCOLS.includes(message.params.protocolVersion) ? message.params.protocolVersion : '2025-06-18',
+      capabilities: { tools: {} }, serverInfo: { name: native.serverName, version: env.ANKKA_GATEWAY_RELEASE }, instructions: native.instructions });
   }
   if (message.method === 'ping') return rpc({});
-  if (message.method === 'tools/list') return rpc({ tools: feedbackToolDefinitions() });
+  if (message.method === 'tools/list') return rpc({ tools: native.definitions() });
   if (message.method !== 'tools/call') return error(-32601, 'Method not found');
   const params = message.params;
   if (!isRecord(params) || !isText(params.name) || Object.keys(params).some((key) => !['name', 'arguments', '_meta'].includes(key))) return error(-32602, 'Invalid params');
-  const tool = FEEDBACK_MCP_TOOLS.find((entry) => entry.name === params.name && (access.allTools || access.enabledTools.includes(entry.name)));
+  const tool = native.tools.find((entry) => entry.name === params.name && (access.allTools || access.enabledTools.includes(entry.name)));
   if (!tool || !mcpInputMatches(params.arguments ?? {}, tool.inputSchema)) return error(-32602, 'Unknown tool or invalid arguments');
   let result;
   try {
-    const response = await feedbackStoreCall(env, tool.route, params.arguments ?? {}, access.actorEmail);
+    const response = await native.call(env, tool.route, params.arguments ?? {}, access.actorEmail);
     const value = await readJsonInput(response, 256 * 1024);
     result = response.ok && isRecord(value) ? { ok: true, result: value } :
       { ok: false, error: { code: /^[a-z][a-z0-9_]{0,79}$/u.test(value?.error ?? '') ? value.error : 'request_failed' } };
   } catch { result = { ok: false, error: { code: 'request_failed' } }; }
   return rpc({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, isError: !result.ok });
 }
+
+function handleFeedbackMcp(request, env) { return handleNativeMcp(request, env, FEEDBACK_NATIVE); }
+function handleGuideMcp(request, env) { return handleNativeMcp(request, env, GUIDE_NATIVE); }
 
 async function handleManagementMcp(request, env) {
   const endpoint = managementSourceUrl(env);
@@ -10956,6 +11048,7 @@ export default {
     const url = new URL(request.url);
     if (API_SOURCE_PATH.test(url.pathname)) return handleApiSourceMcp(request, env);
     if (url.pathname === FEEDBACK_MCP_PATH) return handleFeedbackMcp(request, env);
+    if (url.pathname === GUIDE_MCP_PATH) return handleGuideMcp(request, env);
     if (url.pathname === MANAGEMENT_MCP_PATH || url.pathname.startsWith(`${MANAGEMENT_MCP_PATH}/`)) return handleManagementMcp(request, env);
     if (url.pathname === SOURCE_OAUTH_CALLBACK) return handleSourceOauthCallback(request, env);
     if (url.pathname === BOOTSTRAP_PATH) return handleBootstrap(request, env);

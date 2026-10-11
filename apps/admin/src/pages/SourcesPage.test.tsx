@@ -105,6 +105,24 @@ describe('connector installation recovery', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'Add Gateway Feedback' })).not.toBeInTheDocument())
   })
 
+  it('adds Start here through normal discovery and connector draft APIs', async () => {
+    const user = userEvent.setup()
+    const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
+    api.getSources = vi.fn(async () => sources)
+    api.discoverSource = vi.fn().mockResolvedValue({ schemaVersion: 1, url: `${window.location.origin}/api/guide/mcp`,
+      authMode: 'oauth', tools: [{ name: 'get_source_map' }] })
+    api.saveSourceDraft = vi.fn().mockResolvedValue({ ...sources, revision: 5, sources: [{
+      ...draft, id: 'source-67756964656d6170', label: 'Start here', onBehalfOfUser: true,
+    }] })
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: 'Add Start here' }))
+    await waitFor(() => expect(api.saveSourceDraft).toHaveBeenCalledExactlyOnceWith(4, {
+      label: 'Start here', url: `${window.location.origin}/api/guide/mcp`, authMode: 'oauth', enabledTools: ['get_source_map'],
+    }))
+    expect(api.discoverSource).toHaveBeenCalledExactlyOnceWith(`${window.location.origin}/api/guide/mcp`)
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Add Start here' })).not.toBeInTheDocument())
+  })
+
   it('removes a failed BigQuery setup and its status card without starting another authorization', async () => {
     const user = userEvent.setup()
     const action = pendingAction({ state: 'failed', status: 'failed', canCancel: false,
