@@ -4,6 +4,10 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Document that the Portal's Code Mode tool descriptions list the connected
+  servers as of session start and do not refresh when servers are enabled
+  later, with the mitigation for source maps.
+
 - Document the curation practice for a large gateway: what belongs in the
   gateway versus a directly connected knowledge source, the pass that puts it
   in place, and how to verify routing with representative questions. Note

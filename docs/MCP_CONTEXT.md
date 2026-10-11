@@ -45,6 +45,15 @@ tool names; it does not declare those overrides.
 Some clients also defer tool loading. Verify the actual model context. See
 [Large sources and Code Mode](LARGE_SOURCES_AND_CODE_MODE.md).
 
+In Code Mode, the Portal's own search and execute tool descriptions carry a
+"Connected servers" line. It is rendered when the client session starts and is
+not refreshed when the person enables more servers during that session, so a
+model reading it can conclude a source is missing while the source is enabled
+and its tools are callable. Observed 2026-10-11 in a claude.ai session. Tell
+sessions, in your source map or method page, to call `portal_list_servers`
+before treating a source as unavailable, and have people re-approve the server
+list when sources are added.
+
 ## Company context
 
 Set **Company (optional)** when adding a custom/catalog connector or BigQuery,
