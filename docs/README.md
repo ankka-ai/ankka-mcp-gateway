@@ -28,6 +28,9 @@ installed release; a document or fixture is not a compatibility certification.
 - [Gateway feedback](GATEWAY_FEEDBACK.md): let sessions report wrong
   descriptions, missing capabilities or stale data about any connected source,
   and triage the reports through Gateway Management.
+- [Start here](GATEWAY_START_HERE.md): one operator-written page every
+  session reads before it searches for tools, which source owns which facts
+  and where the method and vocabulary live.
 - [Updates and rollback](UPDATES.md): operator-approved changes and the
   distinction between Worker versions and retained gateway data.
 - [Portal audit logging](CUSTOMER_AUDIT_LOGGING.md): logs in your account,

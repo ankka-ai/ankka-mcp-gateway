@@ -30,6 +30,8 @@ tools or rename a connector without that allowlist entry. The source calls the s
 checks, revision checks, action journals, and recovery rules as the dashboard.
 `list_gateway_feedback` and `resolve_gateway_feedback` read and triage the reports
 that sessions file through the built-in [feedback source](GATEWAY_FEEDBACK.md).
+`get_gateway_guide` and `set_gateway_guide` read and replace the source map the
+built-in [Start here source](GATEWAY_START_HERE.md) returns.
 It has no arbitrary HTTP, Cloudflare API, shell, account-selection, or credential
 input tool. Connector-specific provisioning, including BigQuery setup, continues
 to use its existing dashboard workflow.

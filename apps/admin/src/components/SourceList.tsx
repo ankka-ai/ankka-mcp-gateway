@@ -10,7 +10,7 @@ import { Fragment, type ReactNode, useId, useState } from 'react'
 import type { InstalledSourceTools, ManagedSource, SourceConnection, ToolMetadata } from '../api'
 
 // Gateway-hosted sources (agent-authored API sources and the feedback source) sign each person in individually.
-const gatewayHostedSource = (id: string) => id === 'source-666565646261636b' || /^source-a9[a-f0-9]{14}$/u.test(id)
+const gatewayHostedSource = (id: string) => id === 'source-666565646261636b' || id === 'source-67756964656d6170' || /^source-a9[a-f0-9]{14}$/u.test(id)
 
 const filters = [
   { value: 'all', label: 'All' },

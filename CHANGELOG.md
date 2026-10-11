@@ -4,6 +4,13 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add a built-in Start here source. Its one tool, `get_source_map`, returns a
+  page your gateway operators write for every session to read before it
+  searches for tools: which connector owns which facts, what each is not for,
+  and where the team keeps its method and vocabulary. Until it is written, it
+  lists the installed connectors. Gateway Management gains `get_gateway_guide`
+  and `set_gateway_guide`.
+
 - Fetch only what an update uploads. A gateway updating itself now downloads
   the Worker modules and management assets, not the installer, bootstrap,
   cleanup and retirement files it never uploads. Each fetched file is still
