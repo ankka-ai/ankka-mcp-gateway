@@ -2100,9 +2100,26 @@ function resultId(value) {
   return isRecord(value) ? safeProviderId(value.id) : null;
 }
 
+const KLAVIYO_MCP_URL = 'https://mcp.klaviyo.com/mcp';
+// Klaviyo's full tool list (about 300 tools, over 6 MB with output schemas)
+// fails Cloudflare's capability sync. Its documented options keep this
+// connection read-only and drop output schemas (about 150 tools, under 0.5 MB).
+// The saved source URL and its OAuth resource stay the plain endpoint.
+const KLAVIYO_SERVER_URL = `${KLAVIYO_MCP_URL}?include-output-schemas=false&read-only=true`;
+
+/** The upstream URL Cloudflare's server record calls for one source endpoint. */
+function mcpServerHostname(endpoint) {
+  return endpoint === KLAVIYO_MCP_URL ? KLAVIYO_SERVER_URL : endpoint;
+}
+
 function mcpMatches(value, desired) {
   const oauth = desired.desired.authentication.mode === 'oauth';
-  return isRecord(value) && value.id === desired.key && value.hostname === desired.desired.endpoint &&
+  const endpoint = desired.desired.endpoint;
+  // A Klaviyo server created before the options were added keeps the plain URL.
+  // It still matches, so it can be removed and added again.
+  const hostname = isRecord(value) && (value.hostname === mcpServerHostname(endpoint) ||
+    (endpoint === KLAVIYO_MCP_URL && value.hostname === endpoint));
+  return hostname && value.id === desired.key &&
     value.description === marker(desired.desired.metadata.installationId, desired.key) &&
     value.auth_type === (oauth ? 'oauth' : 'unauthenticated') && value.secure_web_gateway === false &&
     (!oauth || value.is_shared_oauth_callback_enabled === true);
@@ -2390,7 +2407,7 @@ async function createResource(state, kind, token) {
     body = {
       id: desired.key,
       name: state.source?.company ? sourceDisplayName(state.source) : desired.desired.name,
-      hostname: desired.desired.endpoint,
+      hostname: mcpServerHostname(desired.desired.endpoint),
       auth_type: oauth ? 'oauth' : 'unauthenticated',
       secure_web_gateway: false,
       description: marker(state.installationId, desired.key),

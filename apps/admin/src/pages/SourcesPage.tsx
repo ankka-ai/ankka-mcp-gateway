@@ -702,6 +702,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                     {discovery.endpoint === 'https://mcp.facebook.com/ads' ? (
                       <p className="mt-3">Meta Ads authorization here is limited to reporting. Your gateway checks Meta’s granted permissions before connecting; campaign, budget, and catalog changes are not allowed. Connect only the ad accounts you want to share with your team.</p>
                     ) : null}
+                    {discovery.endpoint === 'https://mcp.klaviyo.com/mcp' ? (
+                      <p className="mt-3">Klaviyo connects here read-only: reporting and lookups only. Campaign, flow, list, and profile changes are not available.</p>
+                    ) : null}
                     {catalogSource ? (
                       <p className="mt-3">The catalog recommends {catalogSource.implementation.recommendedTools.length} tool{catalogSource.implementation.recommendedTools.length === 1 ? '' : 's'} for this connector. Those that exist in its real list are preselected when you choose.</p>
                     ) : null}

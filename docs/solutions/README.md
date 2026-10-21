@@ -49,3 +49,4 @@ when there is one.
 - [Gateway Management tool edits refused in individual sign-in mode](integration-issues/management-tool-edits-refused-in-individual-sign-in-mode.md)
 - [Timeouts that only appear when several local gates run at once](test-failures/load-only-timeouts-from-parallel-local-gates.md)
 - [An update reads applying after its target release already serves](runtime-errors/update-stays-applying-after-target-serves.md)
+- [Cloudflare cannot sync a very large tool list](integration-issues/cloudflare-sync-fails-on-very-large-tool-lists.md)
