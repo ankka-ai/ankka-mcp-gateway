@@ -4,6 +4,13 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Connect Klaviyo. Its full tool list, over 6 MB, failed Cloudflare's sync, so
+  the source authorized but showed no tools. The gateway now creates the
+  Klaviyo server with Klaviyo's documented `read-only=true` and
+  `include-output-schemas=false` options: about 150 read tools, under 0.5 MB.
+  The saved URL stays `https://mcp.klaviyo.com/mcp`. Remove and re-add a
+  Klaviyo connector created before this release.
+
 - Document that the Portal's Code Mode tool descriptions list the connected
   servers as of session start and do not refresh when servers are enabled
   later, with the mitigation for source maps.

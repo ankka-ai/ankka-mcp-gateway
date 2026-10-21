@@ -263,6 +263,15 @@ additional grants, unavailable permission evidence, and endpoint changes stop
 the connection. No permission response or provider token is retained in gateway
 state. See [Meta Ads](META_ADS.md) for setup and remaining live qualification.
 
+For `https://mcp.klaviyo.com/mcp`, the gateway saves and authorizes that plain
+endpoint but creates its Cloudflare MCP server at
+`https://mcp.klaviyo.com/mcp?include-output-schemas=false&read-only=true`.
+Klaviyo's full tool list, over 6 MB with output schemas, fails Cloudflare's
+capability sync; these documented Klaviyo options keep the connection
+read-only and the list under 0.5 MB. Campaign, flow, list, profile and template
+changes remain unavailable. A Klaviyo connector added before this change must
+be removed and added again after updating the gateway.
+
 Credential-bearing URLs, private-network endpoints, custom credential headers,
 and manually supplied bearer tokens are rejected.
 
