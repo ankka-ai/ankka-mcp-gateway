@@ -4,6 +4,14 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Record a gateway update as finished about three seconds after the upload
+  instead of about five minutes. Cloudflare keeps the gateway's management
+  object on the previous code for about five minutes after an upload, so the
+  action stayed `applying` and could briefly read `recovery_required`. The
+  object now resets itself once the update pass has revoked its grant and
+  recorded its end, and restarts on the new code. Takes effect for updates and
+  rollbacks from this release on.
+
 - Connect Klaviyo. Its full tool list, over 6 MB, failed Cloudflare's sync, so
   the source authorized but showed no tools. The gateway now creates the
   Klaviyo server with Klaviyo's documented `read-only=true` and
