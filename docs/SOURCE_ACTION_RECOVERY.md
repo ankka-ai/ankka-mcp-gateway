@@ -198,6 +198,9 @@ preserves allowed tools and Team assignments. When Cloudflare exposes the previo
 requested scopes in its non-secret summary, the gateway retains them and rejects
 expanded token grants. Individual sign-in connectors use
 their MCP client's flow. **Open in Cloudflare** remains the manual fallback.
+**Sign in again** starts the same flow while the connection still works, so an
+operator can renew a shared sign-in before the provider ends it, for example
+when a Cloudflare Access grant session runs out.
 
 For the exact Meta Ads endpoint, include the public numeric `metaAppId` in that
 JSON request. Meta refuses automatic registration for custom clients, so the

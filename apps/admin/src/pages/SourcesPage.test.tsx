@@ -65,6 +65,21 @@ describe('connector installation recovery', () => {
     expect(api.authorizeSource).not.toHaveBeenCalled()
   })
 
+  it('signs in again to a connected shared connector through the same reconnect dialog', async () => {
+    const user = userEvent.setup()
+    const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
+    const source = { ...draft, authMode: 'oauth' as const, status: 'installed' as const }
+    api.getSources = vi.fn(async () => ({ ...sources, sources: [source] }))
+    api.checkSourceConnection = vi.fn(async () => ({ schemaVersion: 1 as const, sourceId: source.id, state: 'connected' as const, reason: null, checkedAt: null }))
+    api.reconnectSource = vi.fn().mockRejectedValue(new GatewayApiError(409, 'source_oauth_unavailable'))
+    render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
+    await user.click(await screen.findByRole('button', { name: `Sign in again to ${source.label}` }, { timeout: 5000 }))
+    const dialog = screen.getByRole('dialog', { name: `Reconnect ${source.label}` })
+    expect(within(dialog).queryByRole('link', { name: 'Open in Cloudflare' })).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Sign in to reconnect' }))
+    expect(api.reconnectSource).toHaveBeenCalledExactlyOnceWith(4, source.id)
+  })
+
   it('adds Gateway Management through normal discovery and connector draft APIs', async () => {
     const user = userEvent.setup()
     const api = actionApi({ schemaVersion: 1, actions: [], blockingAction: null })
