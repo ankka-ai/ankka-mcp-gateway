@@ -119,7 +119,10 @@ export function ConnectionStatus({ result, label, onReconnect, disabled }: { res
       : 'bg-kumo-tint text-kumo-subtle'
   return <div className="flex flex-wrap items-center gap-2">
     <span role="status" className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${color}`}>{connectionLabel(result)}</span>
-    {result?.state === 'authorization_required' && onReconnect ? <Button variant="primary" disabled={disabled} onClick={onReconnect} aria-label={`Reconnect ${label}`}>Reconnect</Button> : null}
+    {!onReconnect ? null : result?.state === 'authorization_required'
+      ? <Button variant="primary" disabled={disabled} onClick={onReconnect} aria-label={`Reconnect ${label}`}>Reconnect</Button>
+      // A shared sign-in can expire on the provider's schedule; let operators renew it before it breaks.
+      : <Button variant="secondary" disabled={disabled} onClick={onReconnect} aria-label={`Sign in again to ${label}`}>Sign in again</Button>}
   </div>
 }
 

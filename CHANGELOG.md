@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let operators renew a shared sign-in before it breaks. Every installed
+  operator-connected OAuth connector now shows **Sign in again** next to its
+  connection badge, not only after it needs reconnecting. It opens the same
+  reconnect dialog and keeps allowed tools and Team assignments. Use it before a
+  provider's sign-in ends, such as a two-week Cloudflare Access grant.
+
 - Connect Klaviyo. Its full tool list, over 6 MB, failed Cloudflare's sync, so
   the source authorized but showed no tools. The gateway now creates the
   Klaviyo server with Klaviyo's documented `read-only=true` and
