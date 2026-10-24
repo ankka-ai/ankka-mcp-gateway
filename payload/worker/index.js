@@ -11017,12 +11017,16 @@ async function handleManagementMcp(request, env) {
   return rpc({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, isError: !result.ok });
 }
 
-function managementMcpPage(title, content) {
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>
+function htmlAttribute(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function managementMcpPage(title, content, { head = '', headers = {} } = {}) {
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>${head}<style>
   :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#141414;color:#eee}body{margin:0;padding:clamp(2rem,10vw,6rem) 1.5rem}header{max-width:48rem;margin:0 auto 3rem}.wordmark{display:block;width:100%;height:auto;mask-image:linear-gradient(#000,transparent)}main{max-width:34rem;margin:auto}h1{font-size:1.6rem;font-weight:500}p{line-height:1.6;color:#bbb}button{font:inherit;border:1px solid #555;border-radius:.5rem;padding:.75rem 1rem;background:#eee;color:#141414;cursor:pointer}button:focus-visible{outline:3px solid #9ac6ff;outline-offset:4px}
   </style></head><body><header aria-label="Ankka"><svg class="wordmark" viewBox="0 0 175 19" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <path fill="currentColor" d="M0 18.2697V5.97501C0 4.32038 0.517065 2.96069 1.5512 1.89591C2.63896 0.785177 4.0561 0.229808 5.80263 0.229808C7.51852 0.229808 8.93567 0.785177 10.0541 1.89591C11.0882 2.92238 11.6053 4.28208 11.6053 5.97501V17.2356L9.42209 18.2697H9.3072V10.1805H2.29807V17.2356L0.114903 18.2697H0ZM2.29807 8.08922H9.3072V5.97501C9.3072 4.94852 9.03143 4.11739 8.47988 3.48158C7.79812 2.69258 6.90572 2.29808 5.80263 2.29808C4.69958 2.29808 3.80714 2.69258 3.12538 3.48158C2.57384 4.11739 2.29807 4.94852 2.29807 5.97501V8.08922ZM40.9103 18.2697V5.97501C40.9103 4.32038 41.4274 2.96069 42.4615 1.89591C43.5493 0.785177 44.9664 0.229808 46.713 0.229808C48.4365 0.229808 49.8538 0.785177 50.9645 1.89591C51.9986 2.92238 52.5156 4.28208 52.5156 5.97501V17.2356L50.3326 18.2697H50.2177V5.97501C50.2177 4.94852 49.9418 4.11739 49.3905 3.48158C48.7085 2.69258 47.8161 2.29808 46.713 2.29808C45.6099 2.29808 44.7175 2.69258 44.0357 3.48158C43.4842 4.11739 43.2084 4.94852 43.2084 5.97501V17.2356L41.0252 18.2697H40.9103ZM81.8206 18.2697V1.03413L84.0037 0H84.1185V8.65226L90.3579 0H90.4727L92.4951 0.953699L87.3704 7.779C89.1324 7.81728 90.5189 8.3305 91.5302 9.3187C92.5643 10.3298 93.0813 11.6896 93.0813 13.3978V17.2356L90.8983 18.2697H90.7829V13.3978C90.7829 12.3713 90.5075 11.5402 89.9557 10.9044C89.274 10.1153 88.4393 9.72085 87.451 9.72085C86.4472 9.72085 85.6125 10.1153 84.9458 10.9044C84.3944 11.5555 84.1185 12.3866 84.1185 13.3978V17.2356L81.9355 18.2697H81.8206ZM122.157 18.2697V1.03413L124.34 0H124.455V8.65226L130.694 0H130.809L132.831 0.953699L127.706 7.779C129.468 7.81728 130.854 8.3305 131.866 9.3187C132.9 10.3298 133.417 11.6896 133.417 13.3978V17.2356L131.234 18.2697H131.119V13.3978C131.119 12.3713 130.843 11.5402 130.292 10.9044C129.61 10.1153 128.775 9.72085 127.787 9.72085C126.783 9.72085 125.948 10.1153 125.282 10.9044C124.73 11.5555 124.455 12.3866 124.455 13.3978V17.2356L122.271 18.2697H122.157ZM162.492 18.2697V5.97501C162.492 4.32038 163.009 2.96069 164.043 1.89591C165.131 0.785177 166.548 0.229808 168.295 0.229808C170.011 0.229808 171.428 0.785177 172.546 1.89591C173.58 2.92238 174.097 4.28208 174.097 5.97501V17.2356L171.914 18.2697H171.799V10.1805H164.791V17.2356L162.607 18.2697H162.492ZM164.791 8.08922H171.799V5.97501C171.799 4.94852 171.524 4.11739 170.972 3.48158C170.291 2.69258 169.398 2.29808 168.295 2.29808C167.192 2.29808 166.299 2.69258 165.618 3.48158C165.066 4.11739 164.791 4.94852 164.791 5.97501V8.08922Z" />
-        </svg></header><main><h1>${title}</h1>${content}</main></body></html>`, { headers: { ...PUBLIC_HEADERS,
+        </svg></header><main><h1>${title}</h1>${content}</main></body></html>`, { headers: { ...PUBLIC_HEADERS, ...headers,
     // A form posted from a no-referrer page carries `Origin: null`, which the same-origin
     // check below would refuse. Same-origin keeps the origin on the post and sends nothing elsewhere.
     'referrer-policy': 'same-origin',
@@ -11058,8 +11062,16 @@ async function managementMcpBrowser(request, env) {
       sourceId: source.id, revision: sources.revision, actorEmail: access.actorEmail, remote: true }) }));
   if (!response.ok) return response;
   const body = await response.json();
-  return new Response(null, { status: 303, headers: { ...PUBLIC_HEADERS, location: body.authorizationUrl,
-    'set-cookie': response.headers.get('set-cookie') } });
+  // Browsers apply this page's `form-action 'self'` to a redirect that answers its form, so a 303 to the
+  // provider is dropped silently. Answer with a page that continues on its own; a refresh or link is not a form.
+  let authorization = null;
+  try { authorization = new URL(body.authorizationUrl); } catch { /* refused below */ }
+  if (authorization?.protocol !== 'https:') return sourceToolsRefusal(502, 'source_oauth_unavailable');
+  const target = htmlAttribute(authorization.href);
+  const cookie = response.headers.get('set-cookie');
+  return managementMcpPage('Opening your provider',
+    `<p>If your provider does not open, continue below. Then return to your agent to finish setup.</p><p><a href="${target}" rel="noreferrer">Continue to provider</a></p>`,
+    { head: `<meta http-equiv="refresh" content="0;url=${target}">`, headers: cookie ? { 'set-cookie': cookie } : {} });
 }
 
 
