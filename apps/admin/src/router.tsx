@@ -5,6 +5,7 @@ import {
   redirect,
 } from '@tanstack/react-router'
 import { AppShell } from './components/AppShell'
+import { ConnectPage } from './pages/ConnectPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { SourcesPage } from './pages/SourcesPage'
 import { TeamPage } from './pages/TeamPage'
@@ -48,6 +49,12 @@ const teamRoute = createRoute({
   component: TeamPage,
 })
 
+const connectRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/connect',
+  component: ConnectPage,
+})
+
 const fallbackRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '$',
@@ -60,6 +67,7 @@ export const routeTree = rootRoute.addChildren([
   indexRoute,
   sourcesRoute,
   teamRoute,
+  connectRoute,
   settingsRoute,
   legacyUpdatesRoute,
   fallbackRoute,

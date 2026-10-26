@@ -32,6 +32,11 @@ checks, revision checks, action journals, and recovery rules as the dashboard.
 that sessions file through the built-in [feedback source](GATEWAY_FEEDBACK.md).
 `get_gateway_guide` and `set_gateway_guide` read and replace the source map the
 built-in [Start here source](GATEWAY_START_HERE.md) returns.
+`get_connect_examples` and `set_connect_examples` read and replace the example
+questions on the [team connect pages](TEAM_CONNECT_PAGES.md), with the same
+revision and installed-source checks as the dashboard editor. The read also
+returns the installed sources an example can name and each team's sources and
+page link.
 `save_gateway_team` takes the roster read from `get_gateway_team` and an
 optional `teams` list that replaces the [named teams](TEAM_ACCESS.md#named-teams),
 as the dashboard's Save does. Each team keeps its `id`, `name`, `memberEmails`

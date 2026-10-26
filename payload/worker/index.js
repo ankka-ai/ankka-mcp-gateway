@@ -7366,10 +7366,31 @@ export class AdminState {
     if (request.method === 'POST' && requestUrl.pathname === '/guide/read') {
       return readJsonInput(request, 1_024).then((input) => readGuide(this.state.storage, input));
     }
+    // Reading the connect page state or rendering a page changes nothing.
+    if (request.method === 'GET' && requestUrl.pathname === '/connect/state') {
+      return readConnectState(this.state.storage).then((state) => state
+        ? fixedJson(200, publicConnectState(state, this.env)) : fixedJson(503, { schemaVersion: 1, error: 'connect_unavailable' }));
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/connect/manage') {
+      return connectManageView(this.state.storage, this.env).then((view) => view
+        ? fixedJson(200, view) : fixedJson(503, { schemaVersion: 1, error: 'connect_unavailable' }));
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/connect/view') {
+      return connectViewContext(this.state.storage, this.env).then((context) => context
+        ? fixedJson(200, context) : fixedJson(503, { schemaVersion: 1, error: 'connect_unavailable' }));
+    }
     const operation = async () => {
       const url = new URL(request.url);
       if (url.pathname === '/guide/write' && request.method === 'POST') {
         return writeGuide(this.state.storage, await readJsonInput(request, 32_768), request.headers.get('x-ankka-actor-email'), Date.now());
+      }
+      if (url.pathname === '/connect/examples' && request.method === 'PUT') {
+        return writeConnectExamples(this.state.storage, this.env, await readJsonInput(request, 128 * 1024),
+          request.headers.get('x-ankka-actor-email'), Date.now());
+      }
+      if (url.pathname === '/connect/page' && request.method === 'POST') {
+        return setConnectPage(this.state.storage, this.env, await readJsonInput(request, 1_024),
+          request.headers.get('x-ankka-actor-email'), Date.now());
       }
       if (url.pathname === '/feedback/submit' && request.method === 'POST') {
         return submitFeedback(this.state.storage, await readJsonInput(request, 16_384), request.headers.get('x-ankka-actor-email'), Date.now());
@@ -7549,6 +7570,10 @@ export class AdminState {
         // Removal deletes the policies that name a team's Access group, not the group itself.
         if (teamGroupOwners(await readTeamState(this.state.storage, this.env)).size > 0) {
           return fixedJson(409, { schemaVersion: 1, error: 'teardown_teams_present' });
+        }
+        // Removal does not know the connect page's Access application; turning the page off deletes it.
+        if (await this.state.storage.get(CONNECT_PAGE_KEY) !== undefined) {
+          return fixedJson(409, { schemaVersion: 1, error: 'teardown_connect_page_present' });
         }
         const environment = parseManagementEnvironment(this.env);
         const input = await request.json().catch(() => null);
@@ -8766,6 +8791,7 @@ async function currentTeardownState(storage, env, managed) {
 
 async function teamTeardownBlocked(storage) {
   if (await sourceRemovalBlocks(storage)) return true;
+  if (await storage.get(CONNECT_PAGE_KEY) !== undefined) return true;
   const team = await storage.get(TEAM_KEY);
   if (team === undefined) return false;
   // Native audience mutations cannot be interpreted by the immutable legacy
@@ -10248,7 +10274,7 @@ async function handleTeardownActions(request, env, currentPolicies = false) {
   if (!(prepared instanceof Response) || prepared.status !== 200) {
     const refusal = prepared instanceof Response ? await prepared.json().catch(() => null) : null;
     return fixedJson(409, { schemaVersion: 1,
-      error: refusal?.error === 'teardown_teams_present' ? refusal.error : 'teardown_action_conflict' });
+      error: ['teardown_teams_present', 'teardown_connect_page_present'].includes(refusal?.error) ? refusal.error : 'teardown_action_conflict' });
   }
   const claim = canonicalJson({
     schemaVersion: 3,
@@ -10520,6 +10546,13 @@ function guideToolDefinitions() {
 }
 const GUIDE_INSTRUCTIONS = 'Call get_source_map first for any business or data question. It says which connected source owns which facts and where the method and vocabulary are.';
 const MCP_API_DEFINITION_INPUT = { type: 'string', maxLength: 24576, contentMediaType: 'application/json' };
+const MCP_CONNECT_REVISION_INPUT = { type: 'integer', minimum: 0, description: 'The revision get_connect_examples returned; 0 before any examples are saved.' };
+const MCP_CONNECT_EXAMPLES_INPUT = { type: 'array', maxItems: 60, items: mcpObject({
+  id: { type: 'string', pattern: '^example-[a-f0-9]{12}$', description: 'Keep an existing example’s id. A new example uses example- and 12 random lowercase hex digits.' },
+  prompt: { type: 'string', minLength: 1, maxLength: 600, contentMediaType: 'text/plain', description: 'The question, as a person on the team would ask it. No leading or trailing spaces.' },
+  answer: { type: 'string', minLength: 1, maxLength: 300, contentMediaType: 'text/plain', description: 'What the answer shows, such as "A ranked table of campaigns with spend and return, and which one to scale". Optional.' },
+  sourceIds: { type: 'array', maxItems: 4, uniqueItems: true, items: MCP_SOURCE_INPUT, description: 'The installed sources the question needs; empty for a question everyone can ask.' },
+}, ['id', 'prompt', 'sourceIds']) };
 const MANAGEMENT_MCP_TOOLS = [
   ['get_api_source_runtime', 'Read configured API connections and the authoring guide; provide connectionKey to read its saved code and revision. No credentials are returned.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT }, []), 'POST', 'api-source:read'],
   ['save_api_source_draft', 'Save secret-free agent-written JavaScript tools in the account-owned API runtime. Read get_api_source_runtime first. Does not activate code or change the connection.', mcpObject({ connectionKey: MCP_API_CONNECTION_INPUT, revision: MCP_REVISION_INPUT, definitionJson: MCP_API_DEFINITION_INPUT }), 'POST', 'api-source:save'],
@@ -10558,9 +10591,11 @@ const MANAGEMENT_MCP_TOOLS = [
   ['resolve_gateway_feedback', 'Mark a feedback report resolved with a short reference such as a commit, pull request or note, or reopen it. Read it with list_gateway_feedback first.', mcpObject({ feedbackId: MCP_FEEDBACK_ID_INPUT, status: { type: 'string', enum: ['resolved', 'open'] }, resolution: { type: 'string', minLength: 1, maxLength: 500 } }, ['feedbackId', 'status']), 'POST', 'feedback-resolve'],
   ['get_gateway_guide', 'Read the source map the Start here connector returns, who last wrote it and when, or the generated default when none is written.', mcpObject({}, []), 'POST', 'guide-read'],
   ['set_gateway_guide', 'Replace the source map the Start here connector returns to every assigned session. Write it as the one page a session should read first: which source owns which facts, what each is not for, where the method and vocabulary live. Keep it short and maintain it in one place.', mcpObject({ text: MCP_GUIDE_TEXT_INPUT }), 'POST', 'guide-write'],
+  ['get_connect_examples', 'Read the example questions shown on the team connect pages, their revision, the installed sources an example can name, each team’s sources and page link, and whether the pages are on. A person sees an example only when they can use every source it names.', mcpObject({}, []), 'GET', 'connect-read'],
+  ['set_connect_examples', 'Replace every example question on the team connect pages with the reviewed list, using the revision from get_connect_examples. Write each question the way the team would ask it, describe in answer what the response shows, and name the sources it needs: people who cannot use all of them do not see it.', mcpObject({ expectedRevision: MCP_CONNECT_REVISION_INPUT, examples: MCP_CONNECT_EXAMPLES_INPUT }), 'PUT', 'connect-write'],
 ].map(([name, description, inputSchema, method, route]) => ({ name, description, inputSchema, method, route,
-  annotations: { readOnlyHint: method === 'GET' || ['api-source:read', 'feedback-list', 'guide-read'].includes(route), destructiveHint: method === 'DELETE' || ['rollback', 'api-source:disable', 'api-source:activate'].includes(route),
-    idempotentHint: method === 'GET' || ['api-source:read', 'feedback-list', 'guide-read'].includes(route), openWorldHint: !['feedback-list', 'feedback-resolve', 'guide-read', 'guide-write'].includes(route) } }));
+  annotations: { readOnlyHint: method === 'GET' || ['api-source:read', 'feedback-list', 'guide-read', 'connect-read'].includes(route), destructiveHint: method === 'DELETE' || ['rollback', 'api-source:disable', 'api-source:activate'].includes(route),
+    idempotentHint: method === 'GET' || ['api-source:read', 'feedback-list', 'guide-read', 'connect-read'].includes(route), openWorldHint: !['feedback-list', 'feedback-resolve', 'guide-read', 'guide-write', 'connect-read', 'connect-write'].includes(route) } }));
 
 function mcpInputMatches(value, schema) {
   if (schema.type === 'object') return isRecord(value) &&
@@ -10639,6 +10674,16 @@ async function managementMcpCall(tool, args, env, access) {
   }
   if (tool.route === 'guide-read' || tool.route === 'guide-write') {
     return guideStoreCall(env, tool.route === 'guide-read' ? 'read' : 'write', args, access.actorEmail);
+  }
+  if (tool.route === 'connect-read' || tool.route === 'connect-write') {
+    const stub = adminStateStub(env, 'v1:management');
+    if (!stub) return sourceToolsRefusal(503, 'connect_unavailable');
+    const init = { method: tool.method, headers: { 'x-ankka-actor-email': access.actorEmail } };
+    if (tool.route === 'connect-write') {
+      init.headers['content-type'] = 'application/json';
+      init.body = canonicalJson({ schemaVersion: 1, expectedRevision: args.expectedRevision, examples: args.examples });
+    }
+    return stub.fetch(new Request(`https://admin-state.invalid/connect/${tool.route === 'connect-read' ? 'manage' : 'examples'}`, init));
   }
   const routes = { action: `/api/source-actions/${args.actionId}`, tools: `/api/source-actions/${args.actionId}/tools`,
     renew: `/api/source-actions/${args.actionId}/renew`, 'team-action': `/api/team-actions/${args.actionId}`,
@@ -11017,6 +11062,471 @@ async function handleManagementMcp(request, env) {
   return rpc({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, isError: !result.ok });
 }
 
+// Team connect pages. A page per team shows how to connect an assistant to this
+// gateway and example questions the team's own sources can answer. The page's
+// Access application only requires a sign-in; this Worker then shows a person
+// their own access, and a team's page only to its members and dashboard
+// administrators. The page grants nothing: tools stay behind the Portal.
+const CONNECT_PATH = '/__ankka/connect';
+const CONNECT_EXAMPLES_KEY = 'ankka-mcp-gateway/connect-examples/v1';
+const CONNECT_PAGE_KEY = 'ankka-mcp-gateway/connect-page/v1';
+const CONNECT_EXAMPLES_MAX = 60;
+const CONNECT_PROMPT_MAX = 600;
+const CONNECT_ANSWER_MAX = 300;
+const CONNECT_EXAMPLE_SOURCES_MAX = 4;
+const CONNECT_EXAMPLE_ID = /^example-[a-f0-9]{12}$/u;
+const CONNECT_AUD = /^[A-Za-z0-9_-]{8,256}$/u;
+const CONNECT_PAGE_STATUSES = ['enabling', 'on', 'disabling'];
+const CONNECT_FAILURES = ['connect_page_permission_missing', 'connect_page_conflict', 'connect_page_drift',
+  'connect_page_unconfirmed', 'connect_page_removal_pending'];
+
+function connectPrompt(value, maxLength = CONNECT_PROMPT_MAX) {
+  return isText(value) && value === value.trim() && value.length >= 1 && value.length <= maxLength &&
+    !hasControlCharacter(value.replace(/\n/gu, ''));
+}
+
+/**
+ * One example question, the installed sources it needs (none means every person can try it), and
+ * optionally what its answer shows, so people know what kind of response to expect.
+ */
+function safeConnectExample(value, installedIds = null) {
+  const answered = isRecord(value) && Object.hasOwn(value, 'answer');
+  if (!exactKeys(value, ['id', 'prompt', 'sourceIds', ...(answered ? ['answer'] : [])]) || !isText(value.id) || !CONNECT_EXAMPLE_ID.test(value.id) ||
+      !connectPrompt(value.prompt) || (answered && !connectPrompt(value.answer, CONNECT_ANSWER_MAX)) ||
+      !Array.isArray(value.sourceIds) || value.sourceIds.length > CONNECT_EXAMPLE_SOURCES_MAX ||
+      value.sourceIds.some((id) => !isText(id) || !SOURCE_ID.test(id) || (installedIds !== null && !installedIds.has(id))) ||
+      new Set(value.sourceIds).size !== value.sourceIds.length) return null;
+  const example = { id: value.id, prompt: value.prompt, sourceIds: Object.freeze([...value.sourceIds].sort(compareText)) };
+  if (answered) example.answer = value.answer;
+  return Object.freeze(example);
+}
+
+function safeConnectExamples(value) {
+  if (!exactKeys(value, ['schemaVersion', 'revision', 'examples', 'updatedAt', 'updatedBy']) || value.schemaVersion !== 1 ||
+      !Number.isSafeInteger(value.revision) || value.revision < 1 || !Array.isArray(value.examples) ||
+      value.examples.length > CONNECT_EXAMPLES_MAX || !isoTime(value.updatedAt) ||
+      normalizedEmail(value.updatedBy) !== value.updatedBy) return null;
+  const examples = value.examples.map((example) => safeConnectExample(example));
+  if (examples.some((example) => example === null) || new Set(examples.map((example) => example.id)).size !== examples.length) return null;
+  return Object.freeze({ ...value, examples: Object.freeze(examples) });
+}
+
+function safeConnectPage(value) {
+  if (!exactKeys(value, ['schemaVersion', 'status', 'applicationId', 'policyId', 'aud', 'failureCode', 'updatedAt', 'updatedBy']) ||
+      value.schemaVersion !== 1 || !CONNECT_PAGE_STATUSES.includes(value.status) ||
+      !(value.applicationId === null || safeProviderId(value.applicationId)) ||
+      !(value.policyId === null || safeProviderId(value.policyId)) ||
+      !(value.aud === null || (isText(value.aud) && CONNECT_AUD.test(value.aud))) ||
+      !(value.failureCode === null || CONNECT_FAILURES.includes(value.failureCode)) ||
+      !isoTime(value.updatedAt) || normalizedEmail(value.updatedBy) !== value.updatedBy ||
+      (value.status === 'on' && (!value.applicationId || !value.policyId || !value.aud || value.failureCode !== null))) return null;
+  return Object.freeze({ ...value });
+}
+
+/** Saved examples and the page's Access application; null when either record is unreadable. */
+async function readConnectState(storage) {
+  const rawExamples = await storage.get(CONNECT_EXAMPLES_KEY);
+  const examples = rawExamples === undefined
+    ? { revision: 0, examples: [], updatedAt: null, updatedBy: null } : safeConnectExamples(rawExamples);
+  const rawPage = await storage.get(CONNECT_PAGE_KEY);
+  const page = rawPage === undefined ? null : safeConnectPage(rawPage);
+  if (!examples || (rawPage !== undefined && !page)) return null;
+  return { examples, page };
+}
+
+function publicConnectState(state, env) {
+  return { schemaVersion: 1, revision: state.examples.revision, examples: state.examples.examples,
+    updatedAt: state.examples.updatedAt, updatedBy: state.examples.updatedBy,
+    page: { status: state.page?.status ?? 'off', failureCode: state.page?.failureCode ?? null },
+    managementCredentialConfigured: managementCredential(env) !== null };
+}
+
+async function writeConnectExamples(storage, env, input, actorEmail, nowMs) {
+  const actor = normalizedEmail(actorEmail);
+  if (!actor) return fixedJson(403, { schemaVersion: 1, error: 'access_required' });
+  const state = await readConnectState(storage);
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  if (!state || !sources) return fixedJson(503, { schemaVersion: 1, error: 'connect_unavailable' });
+  if (!exactKeys(input, ['schemaVersion', 'expectedRevision', 'examples']) || input.schemaVersion !== 1 ||
+      !Number.isSafeInteger(input.expectedRevision) || !Array.isArray(input.examples) ||
+      input.examples.length > CONNECT_EXAMPLES_MAX) return fixedJson(400, { schemaVersion: 1, error: 'connect_examples_invalid' });
+  if (input.expectedRevision !== state.examples.revision) return fixedJson(409, { schemaVersion: 1, error: 'connect_examples_revision_conflict' });
+  const installed = new Set(sources.sources.filter((source) => source.status === 'installed').map((source) => source.id));
+  const examples = input.examples.map((example) => safeConnectExample(example, installed));
+  if (examples.some((example) => example === null) || new Set(examples.map((example) => example?.id)).size !== examples.length) {
+    return fixedJson(400, { schemaVersion: 1, error: 'connect_examples_invalid' });
+  }
+  const next = { schemaVersion: 1, revision: state.examples.revision + 1, examples,
+    updatedAt: new Date(nowMs).toISOString(), updatedBy: actor };
+  await storage.put(CONNECT_EXAMPLES_KEY, next);
+  return fixedJson(200, publicConnectState({ ...state, examples: next }, env));
+}
+
+function connectApplicationName(installationId) { return `ankka-${installationId}-connect`; }
+
+function connectApplicationMatches(value, context) {
+  return isRecord(value) && safeProviderId(value.id) !== null && value.type === 'self_hosted' &&
+    value.name === context.name && value.domain === context.destination &&
+    (!Object.hasOwn(value, 'account_id') || value.account_id === context.accountId) &&
+    Array.isArray(value.destinations) && value.destinations.length === 1 && exactKeys(value.destinations[0], ['type', 'uri']) &&
+    value.destinations[0].type === 'public' && value.destinations[0].uri === context.destination &&
+    isText(value.aud) && CONNECT_AUD.test(value.aud);
+}
+
+/** Any application that claims this page's name or path. Only the exact owned one is ever adopted. */
+function connectApplicationCandidate(value, context) {
+  if (!isRecord(value)) return false;
+  const destinations = Array.isArray(value.destinations) ? value.destinations : [];
+  return value.name === context.name || value.domain === context.destination ||
+    destinations.some((item) => isRecord(item) && item.uri === context.destination);
+}
+
+// Sign-in only. Who may see which team's page is decided by the Worker from the saved Team.
+function connectPolicyBody(context) {
+  return { name: context.policyName, decision: 'allow', include: [{ everyone: {} }], exclude: [], require: [] };
+}
+
+function connectPolicyMatches(observed, context, policyId) {
+  return isRecord(observed) && observed.id === policyId && teamNeutralPolicyFields(observed) &&
+    observed.name === context.policyName && observed.decision === 'allow' &&
+    canonicalJson(observed.include) === canonicalJson([{ everyone: {} }]) &&
+    Array.isArray(observed.exclude) && observed.exclude.length === 0 &&
+    Array.isArray(observed.require) && observed.require.length === 0;
+}
+
+function connectProviderFailure(response) {
+  return response.status === 'auth' ? 'connect_page_permission_missing' : 'connect_page_unconfirmed';
+}
+
+async function readConnectApplication(context, token, applicationId) {
+  return providerCall(`/accounts/${encodeURIComponent(context.accountId)}/access/apps/${encodeURIComponent(applicationId)}`,
+    token, { signal: context.signal });
+}
+
+/** Creates or adopts the page's application and its one policy. Returns their ids, or a fixed failure code. */
+async function enableConnectApplication(context, token, current, record) {
+  const account = encodeURIComponent(context.accountId);
+  const zone = encodeURIComponent(context.zoneId);
+  let application = null;
+  if (current?.applicationId) {
+    const read = await readConnectApplication(context, token, current.applicationId);
+    if (read.status === 'ok') application = read.result;
+    else if (read.status !== 'absent') return connectProviderFailure(read);
+  }
+  if (!application) {
+    const listed = await providerList(`/accounts/${account}/access/apps`, token, {}, context.signal);
+    if (listed.status !== 'ok') return connectProviderFailure(listed);
+    const candidates = listed.result.filter((value) => connectApplicationCandidate(value, context));
+    if (candidates.length > 1 || (candidates.length === 1 && !connectApplicationMatches(candidates[0], context))) return 'connect_page_conflict';
+    application = candidates[0] ?? null;
+  }
+  if (!application) {
+    const created = await providerCall(`/zones/${zone}/access/apps`, token, { method: 'POST', signal: context.signal,
+      body: canonicalJson({ name: context.name, type: 'self_hosted', domain: context.destination,
+        destinations: [{ type: 'public', uri: context.destination }], app_launcher_visible: false }) });
+    const id = created.status === 'ok' ? resultId(created.result) : null;
+    // A lost response leaves the application unrecorded; the next attempt adopts it by its exact name.
+    if (!id) return connectProviderFailure(created);
+    await record({ applicationId: id });
+    const read = await readConnectApplication(context, token, id);
+    if (read.status !== 'ok') return connectProviderFailure(read);
+    application = read.result;
+  }
+  if (!connectApplicationMatches(application, context)) return 'connect_page_drift';
+  await record({ applicationId: application.id, aud: application.aud });
+  const policies = await providerList(`/accounts/${account}/access/apps/${encodeURIComponent(application.id)}/policies`, token, {}, context.signal);
+  if (policies.status !== 'ok') return connectProviderFailure(policies);
+  if (policies.result.length > 1 || (policies.result.length === 1 &&
+      !connectPolicyMatches(policies.result[0], context, policies.result[0]?.id))) return 'connect_page_drift';
+  let policyId = policies.result[0]?.id ?? null;
+  if (!policyId) {
+    const created = await providerCall(`/zones/${zone}/access/apps/${encodeURIComponent(application.id)}/policies`, token,
+      { method: 'POST', signal: context.signal, body: canonicalJson(connectPolicyBody(context)) });
+    policyId = created.status === 'ok' ? resultId(created.result) : null;
+    if (!policyId) return connectProviderFailure(created);
+    await record({ policyId });
+    const read = await providerCall(`/accounts/${account}/access/apps/${encodeURIComponent(application.id)}/policies/${encodeURIComponent(policyId)}`,
+      token, { signal: context.signal });
+    if (read.status !== 'ok') return connectProviderFailure(read);
+    if (!connectPolicyMatches(read.result, context, policyId)) return 'connect_page_drift';
+  }
+  return { applicationId: application.id, policyId, aud: application.aud };
+}
+
+/** Deletes the page's own application, never one that changed shape; null once it is gone. */
+async function disableConnectApplication(context, token, current) {
+  let applicationId = current.applicationId;
+  if (applicationId) {
+    const read = await readConnectApplication(context, token, applicationId);
+    if (read.status === 'absent') return null;
+    if (read.status !== 'ok') return connectProviderFailure(read);
+    if (read.result?.id !== applicationId || !connectApplicationMatches(read.result, context)) return 'connect_page_drift';
+  } else {
+    const listed = await providerList(`/accounts/${encodeURIComponent(context.accountId)}/access/apps`, token, {}, context.signal);
+    if (listed.status !== 'ok') return connectProviderFailure(listed);
+    const owned = listed.result.filter((value) => isRecord(value) && value.name === context.name);
+    if (owned.length === 0) return null;
+    if (owned.length > 1 || !connectApplicationMatches(owned[0], context)) return 'connect_page_drift';
+    applicationId = owned[0].id;
+  }
+  const deleted = await providerCall(`/zones/${encodeURIComponent(context.zoneId)}/access/apps/${encodeURIComponent(applicationId)}`,
+    token, { method: 'DELETE', signal: context.signal });
+  if (!['ok', 'absent'].includes(deleted.status) && !(deleted.status === 'blocked' && deleted.httpStatus === 202)) {
+    return connectProviderFailure(deleted);
+  }
+  // Access may accept deletion asynchronously. Acceptance is not absence.
+  const check = await readConnectApplication(context, token, applicationId);
+  if (check.status === 'absent') return null;
+  return check.status === 'ok' ? 'connect_page_removal_pending' : connectProviderFailure(check);
+}
+
+/**
+ * Turns the connect page on or off with the gateway's management token. Each
+ * step is recorded before the next provider call, so an interrupted attempt is
+ * resumed by repeating it, and teardown waits while any record remains.
+ */
+async function setConnectPage(storage, env, input, actorEmail, nowMs) {
+  const actor = normalizedEmail(actorEmail);
+  if (!actor) return fixedJson(403, { schemaVersion: 1, error: 'access_required' });
+  if (!exactKeys(input, ['schemaVersion', 'enabled']) || input.schemaVersion !== 1 || !isBoolean(input.enabled)) {
+    return fixedJson(400, { schemaVersion: 1, error: 'connect_page_invalid' });
+  }
+  const state = await readConnectState(storage);
+  const environment = parseManagementEnvironment(env);
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  if (!state || !environment || !control || control.accountId !== environment.accountId || control.zoneId !== environment.zoneId) {
+    return fixedJson(503, { schemaVersion: 1, error: 'connect_unavailable' });
+  }
+  const token = managementCredential(env);
+  if (!token) return fixedJson(409, { schemaVersion: 1, error: 'connect_management_credential_missing' });
+  let current = state.page;
+  if (input.enabled ? current?.status === 'on' : current === null) return fixedJson(200, publicConnectState(state, env));
+  if (input.enabled) {
+    // Releases before this page cannot see its application, so they may neither run nor remove this gateway.
+    if (await currentTeardownLocksRuntime(storage, nowMs) || !await armSourceCompatibility(storage, env)) {
+      return fixedJson(409, { schemaVersion: 1, error: 'connect_lifecycle_pending' });
+    }
+  }
+  const record = async (patch) => {
+    current = { schemaVersion: 1, applicationId: null, policyId: null, aud: null, ...current, failureCode: null, ...patch,
+      updatedAt: new Date(nowMs).toISOString(), updatedBy: actor };
+    await storage.put(CONNECT_PAGE_KEY, current);
+  };
+  const context = { accountId: environment.accountId, zoneId: environment.zoneId,
+    name: connectApplicationName(control.installationId),
+    policyName: `Connect page viewers [${connectApplicationName(control.installationId)}]`,
+    destination: `${environment.managementHostname}${CONNECT_PATH}`, signal: AbortSignal.timeout(30_000) };
+  if (input.enabled) {
+    await record({ status: 'enabling' });
+    const outcome = await enableConnectApplication(context, token, current, record);
+    if (isText(outcome)) await record({ failureCode: outcome });
+    else await record({ status: 'on', ...outcome });
+  } else {
+    await record({ status: 'disabling' });
+    const outcome = await disableConnectApplication(context, token, current);
+    if (outcome) await record({ failureCode: outcome });
+    else {
+      await storage.delete(CONNECT_PAGE_KEY);
+      current = null;
+    }
+  }
+  return fixedJson(200, publicConnectState({ ...state, page: current }, env));
+}
+
+/** Everything one page view needs; the Worker verifies the visitor before it shows any of it. */
+async function connectViewContext(storage, env) {
+  const state = await readConnectState(storage);
+  const team = await readTeamState(storage, env);
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const status = safePublicStatus(await storage.get(STATUS_KEY));
+  if (!state || !team || !sources || !status) return null;
+  return {
+    page: state.page?.status === 'on' ? { aud: state.page.aud } : null,
+    gateway: { name: status.gateway.name, mcpUrl: status.gateway.mcpUrl },
+    members: team.members.map((member) => ({ email: member.email, sourceIds: member.sourceIds, dashboardAccess: member.dashboardAccess === true })),
+    teams: (team.teams ?? []).map((item) => ({ id: item.id, name: item.name, memberEmails: item.memberEmails, sourceIds: item.sourceIds })),
+    // The source URL stays in the Worker, for icons; the page receives only id, name and icon key.
+    sources: sources.sources.filter((source) => source.status === 'installed')
+      .map((source) => ({ id: source.id, name: sourceDisplayName(source), url: source.url, icon: connectSourceIcon(source) }))
+      .sort((left, right) => compareText(left.name.toLowerCase(), right.name.toLowerCase())),
+    examples: state.examples.examples,
+  };
+}
+
+/** The examples with what an agent needs to write them: the sources they can name, each team's sources and link. */
+async function connectManageView(storage, env) {
+  const state = await readConnectState(storage);
+  const team = await readTeamState(storage, env);
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const environment = parseManagementEnvironment(env);
+  if (!state || !team || !sources || !environment) return null;
+  const pageUrl = `https://${environment.managementHostname}${CONNECT_PATH}`;
+  return { ...publicConnectState(state, env), pageUrl,
+    sources: sources.sources.filter((source) => source.status === 'installed').map((source) => ({ id: source.id, name: sourceDisplayName(source) })),
+    teams: (team.teams ?? []).map((item) => ({ id: item.id, name: item.name, sourceIds: item.sourceIds, pageUrl: `${pageUrl}/${item.id}` })) };
+}
+
+async function handleConnectAdmin(request, env) {
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  if (access.actor.kind !== 'human') return fixedJson(403, { schemaVersion: 1, error: 'service_operation_denied' });
+  const url = new URL(request.url);
+  const environment = parseManagementEnvironment(env);
+  const stub = adminStateStub(env, 'v1:management');
+  if (!environment || url.hostname !== environment.managementHostname || !stub) {
+    return fixedJson(503, { schemaVersion: 1, error: 'connect_unavailable' });
+  }
+  const routes = { '/api/connect': ['GET', '/connect/state'], '/api/connect/examples': ['PUT', '/connect/examples'],
+    '/api/connect/page': ['POST', '/connect/page'] };
+  const route = routes[url.pathname];
+  if (!route) return fixedJson(404, { schemaVersion: 1, error: 'not_found' });
+  if (request.method !== route[0]) return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: route[0] });
+  const init = { method: route[0], headers: { 'x-ankka-actor-email': access.actorEmail } };
+  if (route[0] !== 'GET') {
+    if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
+    const input = await readJsonInput(request, 128 * 1024);
+    if (input === null) return fixedJson(400, { schemaVersion: 1, error: 'request_invalid' });
+    init.headers['content-type'] = 'application/json';
+    init.body = canonicalJson(input);
+  }
+  try { return await stub.fetch(new Request(`https://admin-state.invalid${route[1]}`, init)); }
+  catch { return fixedJson(503, { schemaVersion: 1, error: 'connect_unavailable' }); }
+}
+
+function htmlText(value) {
+  return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+}
+
+function connectNotice(status, title, message, link = null) {
+  const page = managementMcpPage(htmlText(title), `<p>${htmlText(message)}</p>${link ? `<p><a href="${htmlText(link.href)}">${htmlText(link.label)}</a></p>` : ''}`,
+    { headers: { 'x-robots-tag': 'noindex, nofollow' } });
+  return new Response(page.body, { status, headers: page.headers });
+}
+
+// The page is the dashboard build's second page. Its files are the public dashboard assets, served here
+// under the page's own Access application; the shell's links are rewritten to reach them at this path.
+const CONNECT_SHELL_PATH = '/team-connect';
+const CONNECT_SHELL_MARKER = '<meta name="ankka-page" content="team-connect"';
+const CONNECT_ASSET_TYPES = Object.freeze({ js: /^(?:text|application)\/javascript\b/u, css: /^text\/css\b/u,
+  svg: /^image\/svg\+xml\b/u, png: /^image\/png\b/u });
+const CONNECT_PAGE_CSP = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+  "font-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+const CONNECT_AHREFS_MCP_URL = 'https://api.ahrefs.com/mcp/mcp';
+
+/** The icons the page bundles, by the key it receives. Gateway-hosted sources show the gateway's own. */
+function connectSourceIcon(source) {
+  if (nativeSourceId(source.id)) return 'ankka';
+  if (source.url === META_ADS_MCP_URL) return 'meta';
+  return source.url === CONNECT_AHREFS_MCP_URL ? 'ahrefs' : null;
+}
+
+function connectRoute(pathname) {
+  if (pathname === CONNECT_PATH) return { kind: 'page', teamId: null };
+  if (!pathname.startsWith(`${CONNECT_PATH}/`)) return null;
+  const rest = pathname.slice(CONNECT_PATH.length + 1);
+  if (TEAM_ID.test(rest)) return { kind: 'page', teamId: rest };
+  if (rest === 'view') return { kind: 'view' };
+  const asset = /^assets\/([a-z]+-[a-f0-9]{8}\.(js|css|svg|png))$/u.exec(rest);
+  if (asset) return { kind: 'asset', file: asset[1], extension: asset[2] };
+  const icon = /^icons\/(source-[a-f0-9]{16})$/u.exec(rest);
+  return icon ? { kind: 'icon', sourceId: icon[1] } : null;
+}
+
+async function connectAsset(env, url, route) {
+  const missing = () => new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } });
+  if (!env.ASSETS || !isCallable(env.ASSETS.fetch)) return missing();
+  let response;
+  try { response = await env.ASSETS.fetch(new Request(new URL(`/assets/${route.file}`, url.origin))); } catch { return missing(); }
+  // A missing file comes back as the dashboard's index.html; only the expected type is a hit.
+  if (!response.ok || !CONNECT_ASSET_TYPES[route.extension].test(response.headers.get('content-type') ?? '')) return missing();
+  return new Response(response.body, { headers: { 'content-type': response.headers.get('content-type'),
+    'cache-control': 'private, max-age=31536000, immutable', 'x-content-type-options': 'nosniff',
+    'cross-origin-resource-policy': 'same-origin' } });
+}
+
+async function connectShell(env, url) {
+  let html = null;
+  try {
+    const response = env.ASSETS && isCallable(env.ASSETS.fetch)
+      ? await env.ASSETS.fetch(new Request(new URL(CONNECT_SHELL_PATH, url.origin))) : null;
+    html = response?.ok ? await response.text() : null;
+  } catch { html = null; }
+  if (!html?.includes(CONNECT_SHELL_MARKER)) return connectNotice(503, 'This page is unavailable', 'Try again in a moment.');
+  return new Response(html.replaceAll('="/assets/', `="${CONNECT_PATH}/assets/`), { headers: { ...PUBLIC_HEADERS,
+    'content-type': 'text/html; charset=utf-8', 'cache-control': 'private, no-store', 'x-robots-tag': 'noindex, nofollow',
+    'content-security-policy': CONNECT_PAGE_CSP } });
+}
+
+/** What a verified visitor may see: their own sources and teams, and whether they administer the gateway. */
+function connectVisitor(context, configuration, email) {
+  const member = context.members.find((item) => item.email === email);
+  if (!member) return null;
+  const ownTeams = context.teams.filter((item) => item.memberEmails.includes(email));
+  return { email, ownTeams, administrator: configuration.emails.includes(email) || member.dashboardAccess,
+    sourceIds: new Set([...member.sourceIds, ...ownTeams.flatMap((item) => item.sourceIds)]) };
+}
+
+function connectView(context, visitor, team) {
+  const allowed = team ? new Set(team.sourceIds) : visitor.sourceIds;
+  const sources = context.sources.filter((source) => allowed.has(source.id));
+  const visible = new Set(sources.map((source) => source.id));
+  return { schemaVersion: 1, gateway: context.gateway, viewer: { email: visitor.email },
+    team: team ? { id: team.id, name: team.name } : null,
+    sources: sources.map(({ id, name, icon }) => ({ id, name, icon })),
+    examples: context.examples.filter((example) => example.sourceIds.every((id) => visible.has(id))) };
+}
+
+async function handleConnectPage(request, env) {
+  const url = new URL(request.url);
+  const environment = parseManagementEnvironment(env);
+  const configuration = accessConfiguration(env);
+  const route = connectRoute(url.pathname);
+  const json = route?.kind === 'view';
+  const refuse = (status, error, title, message, link = null) => json
+    ? fixedJson(status, { schemaVersion: 1, error }) : connectNotice(status, title, message, link);
+  if (!environment || !configuration || url.hostname !== environment.managementHostname || !route) {
+    return connectNotice(404, 'Page not found', 'Check the link you were sent.');
+  }
+  if (request.method !== 'GET') return new Response(null, { status: 405, headers: { ...PUBLIC_HEADERS, allow: 'GET' } });
+  if (route.kind === 'asset') return connectAsset(env, url, route);
+  let context = null;
+  try {
+    const response = await adminStateStub(env, 'v1:management')?.fetch(new Request('https://admin-state.invalid/connect/view'));
+    context = response?.ok ? await response.json() : null;
+  } catch { context = null; }
+  if (!context) return refuse(503, 'connect_unavailable', 'This page is unavailable', 'Try again in a moment.');
+  if (!context.page) return refuse(404, 'connect_page_off', 'This page is turned off', 'Ask your gateway administrator for the current link.');
+  // The page's own Access application signs people in; its audience is not the dashboard's.
+  const claimed = normalizedEmail(request.headers.get('cf-access-authenticated-user-email'));
+  const actor = claimed ? await verifyAccessAssertion(request, { ...configuration, aud: context.page.aud, emails: [claimed], serviceClientId: null }) : null;
+  if (actor?.kind !== 'human') return refuse(401, 'access_required', 'Sign in to continue', 'Open this link again and sign in with your work account.');
+  // The shell holds no gateway data. The page asks for its view, which answers what this visitor may see.
+  if (route.kind === 'page') return connectShell(env, url);
+  const visitor = connectVisitor(context, configuration, actor.email);
+  if (!visitor) return fixedJson(403, { schemaVersion: 1, error: 'connect_not_member' });
+  if (route.kind === 'icon') {
+    const source = context.sources.find((item) => item.id === route.sourceId);
+    const missing = new Response(null, { status: 404, headers: { 'cache-control': 'private, max-age=300' } });
+    if (!source || source.icon !== null || !(visitor.administrator || visitor.sourceIds.has(source.id))) return missing;
+    const icon = await fetchMcpSourceIcon(source.url).catch(() => null);
+    return icon ? new Response(icon.bytes, { headers: { 'content-type': icon.type, 'cache-control': 'private, max-age=300',
+      'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox",
+      'cross-origin-resource-policy': 'same-origin' } }) : missing;
+  }
+  const teamId = url.searchParams.get('team');
+  if ([...url.searchParams.keys()].some((key) => key !== 'team') || (teamId !== null && !TEAM_ID.test(teamId))) {
+    return fixedJson(400, { schemaVersion: 1, error: 'connect_request_invalid' });
+  }
+  const team = teamId === null ? null : context.teams.find((item) => item.id === teamId) ?? null;
+  if (teamId !== null && !team) return fixedJson(404, { schemaVersion: 1, error: 'connect_team_missing' });
+  if (team && !visitor.administrator && !visitor.ownTeams.includes(team)) return fixedJson(403, { schemaVersion: 1, error: 'connect_other_team' });
+  return fixedJson(200, connectView(context, visitor, team), { 'cache-control': 'private, no-store' });
+}
+
+// The original Ankka letterforms; pages fade them out towards the bottom.
+const ANKKA_WORDMARK = '<svg class="wordmark" viewBox="0 0 175 19" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><path fill="currentColor" d="M0 18.2697V5.97501C0 4.32038 0.517065 2.96069 1.5512 1.89591C2.63896 0.785177 4.0561 0.229808 5.80263 0.229808C7.51852 0.229808 8.93567 0.785177 10.0541 1.89591C11.0882 2.92238 11.6053 4.28208 11.6053 5.97501V17.2356L9.42209 18.2697H9.3072V10.1805H2.29807V17.2356L0.114903 18.2697H0ZM2.29807 8.08922H9.3072V5.97501C9.3072 4.94852 9.03143 4.11739 8.47988 3.48158C7.79812 2.69258 6.90572 2.29808 5.80263 2.29808C4.69958 2.29808 3.80714 2.69258 3.12538 3.48158C2.57384 4.11739 2.29807 4.94852 2.29807 5.97501V8.08922ZM40.9103 18.2697V5.97501C40.9103 4.32038 41.4274 2.96069 42.4615 1.89591C43.5493 0.785177 44.9664 0.229808 46.713 0.229808C48.4365 0.229808 49.8538 0.785177 50.9645 1.89591C51.9986 2.92238 52.5156 4.28208 52.5156 5.97501V17.2356L50.3326 18.2697H50.2177V5.97501C50.2177 4.94852 49.9418 4.11739 49.3905 3.48158C48.7085 2.69258 47.8161 2.29808 46.713 2.29808C45.6099 2.29808 44.7175 2.69258 44.0357 3.48158C43.4842 4.11739 43.2084 4.94852 43.2084 5.97501V17.2356L41.0252 18.2697H40.9103ZM81.8206 18.2697V1.03413L84.0037 0H84.1185V8.65226L90.3579 0H90.4727L92.4951 0.953699L87.3704 7.779C89.1324 7.81728 90.5189 8.3305 91.5302 9.3187C92.5643 10.3298 93.0813 11.6896 93.0813 13.3978V17.2356L90.8983 18.2697H90.7829V13.3978C90.7829 12.3713 90.5075 11.5402 89.9557 10.9044C89.274 10.1153 88.4393 9.72085 87.451 9.72085C86.4472 9.72085 85.6125 10.1153 84.9458 10.9044C84.3944 11.5555 84.1185 12.3866 84.1185 13.3978V17.2356L81.9355 18.2697H81.8206ZM122.157 18.2697V1.03413L124.34 0H124.455V8.65226L130.694 0H130.809L132.831 0.953699L127.706 7.779C129.468 7.81728 130.854 8.3305 131.866 9.3187C132.9 10.3298 133.417 11.6896 133.417 13.3978V17.2356L131.234 18.2697H131.119V13.3978C131.119 12.3713 130.843 11.5402 130.292 10.9044C129.61 10.1153 128.775 9.72085 127.787 9.72085C126.783 9.72085 125.948 10.1153 125.282 10.9044C124.73 11.5555 124.455 12.3866 124.455 13.3978V17.2356L122.271 18.2697H122.157ZM162.492 18.2697V5.97501C162.492 4.32038 163.009 2.96069 164.043 1.89591C165.131 0.785177 166.548 0.229808 168.295 0.229808C170.011 0.229808 171.428 0.785177 172.546 1.89591C173.58 2.92238 174.097 4.28208 174.097 5.97501V17.2356L171.914 18.2697H171.799V10.1805H164.791V17.2356L162.607 18.2697H162.492ZM164.791 8.08922H171.799V5.97501C171.799 4.94852 171.524 4.11739 170.972 3.48158C170.291 2.69258 169.398 2.29808 168.295 2.29808C167.192 2.29808 166.299 2.69258 165.618 3.48158C165.066 4.11739 164.791 4.94852 164.791 5.97501V8.08922Z"/></svg>';
+
 function htmlAttribute(value) {
   return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }
@@ -11024,9 +11534,7 @@ function htmlAttribute(value) {
 function managementMcpPage(title, content, { head = '', headers = {} } = {}) {
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>${head}<style>
   :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#141414;color:#eee}body{margin:0;padding:clamp(2rem,10vw,6rem) 1.5rem}header{max-width:48rem;margin:0 auto 3rem}.wordmark{display:block;width:100%;height:auto;mask-image:linear-gradient(#000,transparent)}main{max-width:34rem;margin:auto}h1{font-size:1.6rem;font-weight:500}p{line-height:1.6;color:#bbb}button{font:inherit;border:1px solid #555;border-radius:.5rem;padding:.75rem 1rem;background:#eee;color:#141414;cursor:pointer}button:focus-visible{outline:3px solid #9ac6ff;outline-offset:4px}
-  </style></head><body><header aria-label="Ankka"><svg class="wordmark" viewBox="0 0 175 19" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-          <path fill="currentColor" d="M0 18.2697V5.97501C0 4.32038 0.517065 2.96069 1.5512 1.89591C2.63896 0.785177 4.0561 0.229808 5.80263 0.229808C7.51852 0.229808 8.93567 0.785177 10.0541 1.89591C11.0882 2.92238 11.6053 4.28208 11.6053 5.97501V17.2356L9.42209 18.2697H9.3072V10.1805H2.29807V17.2356L0.114903 18.2697H0ZM2.29807 8.08922H9.3072V5.97501C9.3072 4.94852 9.03143 4.11739 8.47988 3.48158C7.79812 2.69258 6.90572 2.29808 5.80263 2.29808C4.69958 2.29808 3.80714 2.69258 3.12538 3.48158C2.57384 4.11739 2.29807 4.94852 2.29807 5.97501V8.08922ZM40.9103 18.2697V5.97501C40.9103 4.32038 41.4274 2.96069 42.4615 1.89591C43.5493 0.785177 44.9664 0.229808 46.713 0.229808C48.4365 0.229808 49.8538 0.785177 50.9645 1.89591C51.9986 2.92238 52.5156 4.28208 52.5156 5.97501V17.2356L50.3326 18.2697H50.2177V5.97501C50.2177 4.94852 49.9418 4.11739 49.3905 3.48158C48.7085 2.69258 47.8161 2.29808 46.713 2.29808C45.6099 2.29808 44.7175 2.69258 44.0357 3.48158C43.4842 4.11739 43.2084 4.94852 43.2084 5.97501V17.2356L41.0252 18.2697H40.9103ZM81.8206 18.2697V1.03413L84.0037 0H84.1185V8.65226L90.3579 0H90.4727L92.4951 0.953699L87.3704 7.779C89.1324 7.81728 90.5189 8.3305 91.5302 9.3187C92.5643 10.3298 93.0813 11.6896 93.0813 13.3978V17.2356L90.8983 18.2697H90.7829V13.3978C90.7829 12.3713 90.5075 11.5402 89.9557 10.9044C89.274 10.1153 88.4393 9.72085 87.451 9.72085C86.4472 9.72085 85.6125 10.1153 84.9458 10.9044C84.3944 11.5555 84.1185 12.3866 84.1185 13.3978V17.2356L81.9355 18.2697H81.8206ZM122.157 18.2697V1.03413L124.34 0H124.455V8.65226L130.694 0H130.809L132.831 0.953699L127.706 7.779C129.468 7.81728 130.854 8.3305 131.866 9.3187C132.9 10.3298 133.417 11.6896 133.417 13.3978V17.2356L131.234 18.2697H131.119V13.3978C131.119 12.3713 130.843 11.5402 130.292 10.9044C129.61 10.1153 128.775 9.72085 127.787 9.72085C126.783 9.72085 125.948 10.1153 125.282 10.9044C124.73 11.5555 124.455 12.3866 124.455 13.3978V17.2356L122.271 18.2697H122.157ZM162.492 18.2697V5.97501C162.492 4.32038 163.009 2.96069 164.043 1.89591C165.131 0.785177 166.548 0.229808 168.295 0.229808C170.011 0.229808 171.428 0.785177 172.546 1.89591C173.58 2.92238 174.097 4.28208 174.097 5.97501V17.2356L171.914 18.2697H171.799V10.1805H164.791V17.2356L162.607 18.2697H162.492ZM164.791 8.08922H171.799V5.97501C171.799 4.94852 171.524 4.11739 170.972 3.48158C170.291 2.69258 169.398 2.29808 168.295 2.29808C167.192 2.29808 166.299 2.69258 165.618 3.48158C165.066 4.11739 164.791 4.94852 164.791 5.97501V8.08922Z" />
-        </svg></header><main><h1>${title}</h1>${content}</main></body></html>`, { headers: { ...PUBLIC_HEADERS, ...headers,
+  </style></head><body><header aria-label="Ankka">${ANKKA_WORDMARK}</header><main><h1>${title}</h1>${content}</main></body></html>`, { headers: { ...PUBLIC_HEADERS, ...headers,
     // A form posted from a no-referrer page carries `Origin: null`, which the same-origin
     // check below would refuse. Same-origin keeps the origin on the post and sends nothing elsewhere.
     'referrer-policy': 'same-origin',
@@ -11101,6 +11609,8 @@ export default {
       return handleTeam(request, env);
     }
     if (url.pathname.startsWith('/api/management-credential/')) return handleManagementCredential(request, env);
+    if (url.pathname === '/api/connect' || url.pathname.startsWith('/api/connect/')) return handleConnectAdmin(request, env);
+    if (url.pathname === CONNECT_PATH || url.pathname.startsWith(`${CONNECT_PATH}/`)) return handleConnectPage(request, env);
     if (url.pathname === '/api/source-actions' || url.pathname.startsWith('/api/source-actions/')) {
       return handleSourceActions(request, env);
     }

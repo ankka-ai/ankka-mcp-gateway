@@ -25,6 +25,9 @@ installed release; a document or fixture is not a compatibility certification.
   acceptance required before enabling the workflow.
 - [Team access](TEAM_ACCESS.md): V1 Cloudflare-managed membership, legacy
   recovery, future editor options, and session-propagation limits.
+- [Team connect pages](TEAM_CONNECT_PAGES.md): one link per team that shows
+  how to connect an assistant and example questions the team's connectors can
+  answer; who can open it and how it is turned on and off.
 - [Gateway feedback](GATEWAY_FEEDBACK.md): let sessions report wrong
   descriptions, missing capabilities or stale data about any connected source,
   and triage the reports through Gateway Management.

@@ -48,7 +48,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(),
     prepareTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     getTeardownAction: vi.fn(),
     ...overrides,
   }
