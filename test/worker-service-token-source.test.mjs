@@ -196,7 +196,7 @@ test('a service-token source installs a bearer record without credentials and wa
   gateway.hook(({ record }) => record.pathname.endsWith('/sync') ? envelope({ ...gateway.provider.state.servers.get(created.body.id),
     status: 'error', error: 'synthetic-private-detail', error_details: { status_code: 302 } }) : undefined);
   const refused = await (await gateway.api(`/api/sources/${source.id}/connection`, { method: 'POST' })).json();
-  assert.equal(refused.state, 'credential_required');
+  assert.equal(refused.state, 'service_auth_required');
   assert.equal(refused.reconnectUrl, undefined);
   assert.equal(JSON.stringify(refused).includes('synthetic-private'), false);
   // A service-token source has no sign-in to renew.

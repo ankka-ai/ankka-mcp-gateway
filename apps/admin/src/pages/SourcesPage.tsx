@@ -44,7 +44,7 @@ const CONNECTION_PAUSES = new Set([
 const NO_RECOMMENDED_TOOLS: readonly string[] = []
 // The pause reason each live list state stands for. A list that cannot be offered keeps the recorded reason.
 const LIVE_PAUSE = {
-  connection_required: 'source_connection_required', credential_required: 'source_credential_required',
+  connection_required: 'source_connection_required', service_auth_required: 'source_credential_required',
   sync_required: 'source_sync_required', ready: 'source_tools_required',
 } satisfies Partial<Record<SourceActionTools['state'], string>>
 

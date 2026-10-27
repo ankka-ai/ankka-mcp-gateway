@@ -518,13 +518,13 @@ const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
 const SOURCE_LABEL_EDIT_KEY = 'ankka-mcp-gateway/source-label-edit/v1';
 // One installed source moving from its shared sign-in to an Access service
 // token: from creating the new server record until the record it left is deleted.
-const SOURCE_TOKEN_SWITCH_KEY = 'ankka-mcp-gateway/source-token-switch/v1';
+const SOURCE_AUTH_SWITCH_KEY = 'ankka-mcp-gateway/source-token-switch/v1';
 // A source behind a self-hosted Access application in this gateway's account,
 // reached with an Access service token the customer writes into Cloudflare.
 // The gateway creates its bearer server record without credentials and never
 // asks for, receives, stores or logs the token.
-const SERVICE_TOKEN_MODE = 'access_service_token';
-const SOURCE_AUTH_MODES = Object.freeze(['none', 'oauth', SERVICE_TOKEN_MODE]);
+const ACCESS_SERVICE_MODE = 'access_service_token';
+const SOURCE_AUTH_MODES = Object.freeze(['none', 'oauth', ACCESS_SERVICE_MODE]);
 const INTERNAL_SOURCE_REMOVAL_PATH = '/source-removal';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
 const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
@@ -1746,7 +1746,7 @@ async function buildDesiredResources(settings, installationId, sourceDefaultDeny
   // an existing record's type, so switching creates a second one beside it.
   // Its key keeps the visible `mcp-source-<id>` prefix and differs in the digest.
   const mcpKey = source === null ? null : await stableResourceKey('mcp', installationId,
-    source.authentication.mode === SERVICE_TOKEN_MODE ? `${source.id}:${SERVICE_TOKEN_MODE}` : source.id);
+    source.authentication.mode === ACCESS_SERVICE_MODE ? `${source.id}:${ACCESS_SERVICE_MODE}` : source.id);
   const sourceApplicationKey = source === null ? null : await stableResourceKey('source-app', installationId, source.id);
   const sourceAccessKey = source === null ? null : await stableResourceKey('source-access', installationId, source.id);
   const portalKey = await stableResourceKey('portal', installationId, settings.connect.hostname);
@@ -2127,7 +2127,7 @@ function mcpServerHostname(endpoint) {
 
 /** The Cloudflare server record type for a source mode: a bearer record exists only for the service-token mode. */
 function mcpAuthType(mode) {
-  return mode === 'oauth' ? 'oauth' : mode === SERVICE_TOKEN_MODE ? 'bearer' : 'unauthenticated';
+  return mode === 'oauth' ? 'oauth' : mode === ACCESS_SERVICE_MODE ? 'bearer' : 'unauthenticated';
 }
 
 function mcpMatches(value, desired) {
@@ -3109,7 +3109,7 @@ function safeManagedSource(value) {
       !validSourceLabel(value.label) || !publicMcpUrl(value.url) ||
       (value.status !== 'installed' && value.status !== 'draft')) return null;
   const authMode = legacyPublic ? 'none' : value.authMode;
-  if (!SOURCE_AUTH_MODES.includes(authMode) || (authMode === SERVICE_TOKEN_MODE && (!current || nativeSourceId(value.id)))) return null;
+  if (!SOURCE_AUTH_MODES.includes(authMode) || (authMode === ACCESS_SERVICE_MODE && (!current || nativeSourceId(value.id)))) return null;
   const onBehalfOfUser = current ? value.onBehalfOfUser : authMode === 'oauth';
   if (!isBoolean(onBehalfOfUser) || (authMode !== 'oauth' && onBehalfOfUser !== false)) return null;
   if (API_SOURCE_ID.test(value.id) && (authMode !== 'oauth' || onBehalfOfUser !== true || !API_SOURCE_PATH.test(new URL(value.url).pathname))) return null;
@@ -4011,7 +4011,7 @@ function serviceTokenMissing(server) {
 }
 
 function sourceConnectionFailure(server, source) {
-  if (source.authMode === SERVICE_TOKEN_MODE && serviceTokenMissing(server)) return 'source_credential_required';
+  if (source.authMode === ACCESS_SERVICE_MODE && serviceTokenMissing(server)) return 'source_credential_required';
   if (!isRecord(server)) return 'source_sync_required';
   if (['required', 'stale'].includes(server.authentication_status)) return 'source_connection_required';
   if (server.status !== 'ready' || !Array.isArray(server.tools) ||
@@ -4033,7 +4033,7 @@ function syncedSourceCatalogue(server) {
   const state = (value, tools = []) => Object.freeze({ state: value, tools: Object.freeze(tools) });
   if (!isRecord(server)) return state('sync_required');
   // Only the service-token mode creates bearer records; its shape is checked by the caller.
-  if (server.auth_type === 'bearer' && serviceTokenMissing(server)) return state('credential_required');
+  if (server.auth_type === 'bearer' && serviceTokenMissing(server)) return state('service_auth_required');
   if (['required', 'stale'].includes(server.authentication_status)) return state('connection_required');
   if (server.status !== 'ready' || !Array.isArray(server.tools)) return state('sync_required');
   if (server.tools.length > MCP_MAX_TOOLS) return state('unsupported');
@@ -4199,7 +4199,7 @@ async function finalizeSourceAction(storage, action, env) {
  */
 async function readActionServer(path, token, desiredState) {
   const server = await providerCall(path, token);
-  if (desiredState.source.authMode !== SERVICE_TOKEN_MODE || server.status !== 'ok' ||
+  if (desiredState.source.authMode !== ACCESS_SERVICE_MODE || server.status !== 'ok' ||
       !mcpMatches(server.result, desiredState.desiredResources[0]) || !serviceTokenMissing(server.result)) return server;
   // Read back even after an uncertain answer; Cloudflare may have accepted it.
   await providerCall(`${path}/sync`, token, { method: 'POST' });
@@ -4369,7 +4369,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
       `/access/ai-controls/mcp/servers/${encodeURIComponent(action.resources[0].provider.id)}`;
     const server = await readActionServer(serverPath, parsed.claim.cloudflareAccessToken, desiredState);
     if (server.status !== 'ok' || server.result?.id !== action.resources[0].provider.id ||
-        (desiredState.source.authMode === SERVICE_TOKEN_MODE && !mcpMatches(server.result, desiredState.desiredResources[0]))) {
+        (desiredState.source.authMode === ACCESS_SERVICE_MODE && !mcpMatches(server.result, desiredState.desiredResources[0]))) {
       return failSourceAction(storage, action, 'source_action_recovery_required', false,
         providerDetail('mcp_server', 'connection', server));
     }
@@ -4453,7 +4453,7 @@ const SOURCE_CONNECTION_CHECK_TIMEOUT_MS = 20_000;
 const SOURCE_CONNECTION_CHECK_CONCURRENCY = 8;
 const SOURCE_CATALOGUE_REFUSALS = Object.freeze({
   connection_required: 'source_connection_required',
-  credential_required: 'source_credential_required',
+  service_auth_required: 'source_credential_required',
   sync_required: 'source_sync_required',
   unsupported: 'source_tools_unsupported',
 });
@@ -4868,14 +4868,14 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (portal.status === 'auth') return view('unknown', 'management_credential_required');
   if (portal.status !== 'ok') return view('unknown', 'check_failed');
   if (!mappings || !portalWithinToolApproval(portal.result, control, mappings)) return view('unknown', 'configuration_changed');
-  const serviceToken = source.authMode === SERVICE_TOKEN_MODE;
+  const serviceToken = source.authMode === ACCESS_SERVICE_MODE;
   if (source.authMode === 'oauth') {
     reconnectUrl = `https://dash.cloudflare.com/${encodeURIComponent(control.accountId)}` +
       `/one/access-controls/ai-controls/mcp-server/edit/${encodeURIComponent(serverId)}`;
   }
   if (serviceToken) credentialTarget = { accountId: control.accountId, serverId };
   if (['required', 'stale'].includes(server.result.authentication_status)) {
-    return view(serviceToken ? 'credential_required' : 'authorization_required', null, new Date().toISOString());
+    return view(serviceToken ? 'service_auth_required' : 'authorization_required', null, new Date().toISOString());
   }
   const synced = await providerCall(`${path}/sync`, token, { method: 'POST', signal });
   // A failed management request says nothing about the upstream connection.
@@ -4887,7 +4887,7 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   // origin: a refusal or a sign-in redirect is the token, not an outage.
   const refusal = result.error_details?.status_code;
   if (serviceToken && Number.isInteger(refusal) && (refusal === 401 || refusal === 403 || (refusal >= 300 && refusal < 400))) {
-    return view('credential_required', null, checkedAt);
+    return view('service_auth_required', null, checkedAt);
   }
   if (result.error_details?.status_code === 401) return view('authorization_required', null, checkedAt);
   if (result.error_details?.status_code === 403) return view('forbidden', null, checkedAt);
@@ -5300,7 +5300,7 @@ function safeSourceTokenSwitch(value) {
 
 /** True when a switch is corrupt or belongs to another source. A null source blocks every switch. */
 async function sourceTokenSwitchBlocks(storage, sourceId = null) {
-  const pending = safeSourceTokenSwitch(await storage.get(SOURCE_TOKEN_SWITCH_KEY));
+  const pending = safeSourceTokenSwitch(await storage.get(SOURCE_AUTH_SWITCH_KEY));
   if (pending === false) return true;
   return pending !== null && pending.sourceId !== sourceId;
 }
@@ -5353,7 +5353,7 @@ async function tokenSwitchContext(storage, env, sourceId, actorEmail, pending) {
     return tokenSwitchRefusal('source_switch_unavailable');
   }
   const oauth = await tokenSwitchState(control, source, ownership, 'oauth');
-  const serviceToken = await tokenSwitchState(control, source, ownership, SERVICE_TOKEN_MODE);
+  const serviceToken = await tokenSwitchState(control, source, ownership, ACCESS_SERVICE_MODE);
   const tokenResources = [
     receiptResource(serviceToken, serviceToken.desiredResources[0], Object.freeze({ id: serviceToken.desiredResources[0].key })),
     Object.freeze({ ...ownership.resources[1], desiredHash: serviceToken.desiredResources[1].desiredHash }),
@@ -5362,7 +5362,7 @@ async function tokenSwitchContext(storage, env, sourceId, actorEmail, pending) {
   const oauthResources = pending ? pending.oauthResources : ownership.resources;
   // Saved state is exactly the sign-in source before the commit, or exactly the token source after it.
   const committed = pending?.committed === true;
-  const expectedMode = committed ? SERVICE_TOKEN_MODE : 'oauth';
+  const expectedMode = committed ? ACCESS_SERVICE_MODE : 'oauth';
   if (source.authMode !== expectedMode ||
       canonicalJson(ownership.resources) !== canonicalJson(committed ? tokenResources : oauthResources) ||
       oauthResources[0].key !== oauth.desiredResources[0].key || oauthResources[0].desiredHash !== oauth.desiredResources[0].desiredHash ||
@@ -5390,7 +5390,7 @@ function tokenServerOverridesMatch(server, state) {
 async function persistTokenSwitch(storage, pending) {
   const parsed = safeSourceTokenSwitch(pending);
   if (!parsed) return null;
-  await storage.put(SOURCE_TOKEN_SWITCH_KEY, parsed);
+  await storage.put(SOURCE_AUTH_SWITCH_KEY, parsed);
   return parsed;
 }
 
@@ -5508,7 +5508,7 @@ async function commitTokenSwitch(storage, env, context, pending, forward) {
   const nextSources = safeManagementSources({
     ...sources, revision: sources.revision + 1,
     sources: sources.sources.map((candidate) => candidate.id === source.id
-      ? { ...candidate, authMode: forward ? SERVICE_TOKEN_MODE : 'oauth' } : candidate),
+      ? { ...candidate, authMode: forward ? ACCESS_SERVICE_MODE : 'oauth' } : candidate),
   });
   const nextControl = safeManagementControl({
     ...control,
@@ -5521,7 +5521,7 @@ async function commitTokenSwitch(storage, env, context, pending, forward) {
   const next = safeSourceTokenSwitch({ ...pending, phase: 'retiring', retire: forward ? 'oauth' : 'token', committed: forward, reason: null });
   if (!next) return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
   // One atomic write: the source, its ownership and the journal move together.
-  await storage.put({ [SOURCES_KEY]: nextSources, [CONTROL_KEY]: nextControl, [SOURCE_TOKEN_SWITCH_KEY]: next });
+  await storage.put({ [SOURCES_KEY]: nextSources, [CONTROL_KEY]: nextControl, [SOURCE_AUTH_SWITCH_KEY]: next });
   return retireTokenSwitch(storage, env, { ...context, sources: nextSources, control: nextControl }, next);
 }
 
@@ -5538,7 +5538,7 @@ async function retireTokenSwitch(storage, env, context, pending) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const server = await readTokenSwitchServer(context, state, serverId);
     if (server.status === 'absent') {
-      await storage.delete(SOURCE_TOKEN_SWITCH_KEY);
+      await storage.delete(SOURCE_AUTH_SWITCH_KEY);
       return fixedJson(200, context.sources);
     }
     if (server.status !== 'ok' || attempt === 1) return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
@@ -5597,7 +5597,7 @@ async function updateSourceTokenSwitch(storage, env, sourceId, input, actorEmail
       !Number.isSafeInteger(input.revision) || input.revision < 1 || !['start', 'continue', 'rollback'].includes(input.operation)) {
     return tokenSwitchRefusal('source_switch_invalid', 400);
   }
-  const pending = safeSourceTokenSwitch(await storage.get(SOURCE_TOKEN_SWITCH_KEY));
+  const pending = safeSourceTokenSwitch(await storage.get(SOURCE_AUTH_SWITCH_KEY));
   if (pending === false) return tokenSwitchRefusal('source_switch_recovery_required');
   if (pending && pending.sourceId !== sourceId) return sourceActionConflict('lifecycle_pending');
   if ((input.operation === 'start') === Boolean(pending)) {
@@ -8275,7 +8275,7 @@ export class AdminState {
         // Older runtimes cannot read an empty tool selection or the built-in
         // source identity. Company also needs the current parser. Arm compatibility before saving.
         if ((builtin || apiSource || reservedId || input.source.allTools || input.source.company || input.source.enabledTools.length === 0 ||
-            input.source.authMode === SERVICE_TOKEN_MODE) &&
+            input.source.authMode === ACCESS_SERVICE_MODE) &&
             !await armSourceCompatibility(this.state.storage, this.env)) {
           return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
         }
@@ -8343,7 +8343,7 @@ export class AdminState {
     }
     if (url.pathname === INTERNAL_SOURCE_REMOVAL_PATH) {
       const removal = safeSourceRemoval(await this.state.storage.get(SOURCE_REMOVAL_KEY));
-      const tokenSwitch = safeSourceTokenSwitch(await this.state.storage.get(SOURCE_TOKEN_SWITCH_KEY));
+      const tokenSwitch = safeSourceTokenSwitch(await this.state.storage.get(SOURCE_AUTH_SWITCH_KEY));
       const control = tokenSwitch ? safeManagementControl(await this.state.storage.get(CONTROL_KEY)) : null;
       return removal === false || tokenSwitch === false || (tokenSwitch && !control) ? sourceRemovalRefusal('source_removal_unavailable')
         : fixedJson(200, { pendingRemoval: removal ? { sourceId: removal.sourceId } : null,
@@ -8841,7 +8841,7 @@ async function handleSourceDiscovery(request, env, authorizedAccess = null) {
       // page; only its service token can reach the origin. Tools come after.
       if (gatewayTools || !await tokenCovered()) throw error;
       return fixedJson(200, { schemaVersion: 1, status: 'service_token_required', endpoint: publicMcpUrl(input.url),
-        protocolVersion: null, authentication: SERVICE_TOKEN_MODE, tools: [] });
+        protocolVersion: null, authentication: ACCESS_SERVICE_MODE, tools: [] });
     }
     const result = {
       schemaVersion: 1,
@@ -10923,7 +10923,7 @@ async function verifyGatewaySource(source, env) {
   if (source.url !== managementSourceUrl(env)) {
     // Only the token can reach a service-token origin, so nothing here can
     // list its tools; Cloudflare's sync does, once the token is written.
-    return source.authMode === SERVICE_TOKEN_MODE ? verifyServiceTokenSource(source, env) : verifyManagedSource(source);
+    return source.authMode === ACCESS_SERVICE_MODE ? verifyServiceTokenSource(source, env) : verifyManagedSource(source);
   }
   if (source.authMode !== 'oauth' || source.enabledTools.length === 0 ||
       source.enabledTools.some((name) => !MANAGEMENT_MCP_TOOLS.some((tool) => tool.name === name))) {

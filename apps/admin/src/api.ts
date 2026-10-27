@@ -75,7 +75,7 @@ interface InstalledToolsInput { schemaVersion: number; revision: number; enabled
 export const sourceConnectionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   sourceId: v.string(),
-  state: v.picklist(['connected', 'authorization_required', 'credential_required', 'forbidden', 'unavailable', 'unknown', 'user_managed']),
+  state: v.picklist(['connected', 'authorization_required', 'service_auth_required', 'forbidden', 'unavailable', 'unknown', 'user_managed']),
   reason: v.nullable(v.picklist(['management_credential_required', 'lifecycle_pending', 'configuration_changed', 'check_failed', 'check_pending'])),
   checkedAt: v.nullable(v.pipe(v.string(), v.isoTimestamp())),
   reconnectUrl: v.optional(cloudflareSourceUrlSchema),
@@ -220,7 +220,7 @@ const sourceActionToolsSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: sourceActionPointerSchema.entries.actionId,
   sourceId: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u)),
-  state: v.picklist(['connection_required', 'credential_required', 'sync_required', 'unsupported', 'ready']),
+  state: v.picklist(['connection_required', 'service_auth_required', 'sync_required', 'unsupported', 'ready']),
   tools: v.pipe(v.array(discoveredToolSchema), v.maxLength(500)),
 })
 const installedSourceToolsSchema = v.strictObject({
