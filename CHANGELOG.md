@@ -4,6 +4,19 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Connect a source behind your own Cloudflare Access application with an
+  Access service token, so it no longer depends on one person's sign-in that
+  Access ends after 14 days. The option appears only when a self-hosted Access
+  application in the gateway's account covers the endpoint. The gateway creates
+  the source's bearer server record without credentials and pauses; you create
+  the token in Cloudflare and write it into that record yourself. The gateway
+  never handles the token. An installed connector that uses your shared sign-in
+  can switch with **Switch to service token**: allowed tools and Team
+  assignments stay, its tool names change once to the new record's prefix, and
+  it can be rolled back while the old record exists. A missing or wrong token
+  shows as **Service token rejected**, with no **Sign in again** or
+  **Reconnect**. See [Access service-token sources](docs/SERVICE_TOKEN_SOURCES.md).
+
 - Let operators renew a shared sign-in before it breaks. Every installed
   operator-connected OAuth connector now shows **Sign in again** next to its
   connection badge, not only after it needs reconnecting. It opens the same

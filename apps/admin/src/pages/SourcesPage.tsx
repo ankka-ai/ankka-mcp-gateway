@@ -18,6 +18,7 @@ import { SourceList } from '../components/SourceList'
 import { SourceRemoval } from '../components/SourceRemoval'
 import { SourceToolChoice } from '../components/SourceToolChoice'
 import { SourceAuthorization, SourceAuthorizationResult } from '../components/SourceAuthorization'
+import { ServiceTokenInstructions } from '../components/ServiceToken'
 import { ToolChecklist } from '../components/ToolChecklist'
 import { bigQueryPreflightGuidance } from '../bigQueryFailure'
 
@@ -38,11 +39,13 @@ function BigQueryFailure({ setup }: { setup: BigQuerySetups['setups'][number] | 
 // sync, or for the tools to be chosen. They are an expected outcome of installing, not a failed request.
 const CONNECTION_PAUSES = new Set([
   'source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'source_tools_required', 'source_tools_chosen',
+  'source_credential_required',
 ])
 const NO_RECOMMENDED_TOOLS: readonly string[] = []
 // The pause reason each live list state stands for. A list that cannot be offered keeps the recorded reason.
 const LIVE_PAUSE = {
-  connection_required: 'source_connection_required', sync_required: 'source_sync_required', ready: 'source_tools_required',
+  connection_required: 'source_connection_required', credential_required: 'source_credential_required',
+  sync_required: 'source_sync_required', ready: 'source_tools_required',
 } satisfies Partial<Record<SourceActionTools['state'], string>>
 
 const actionLabels = {
@@ -63,6 +66,7 @@ function actionLabel(action: SourceActionSummary): string {
   if (action.state === 'failed' && isBigQueryPreflightFailure(action.failureCode)) return 'BigQuery setup failed'
   if (action.state === 'recovery_required') {
     if (action.failureCode === 'source_connection_required') return 'Connect your connector'
+    if (action.failureCode === 'source_credential_required') return 'Write the service token'
     if (action.failureCode === 'bigquery_setup_required') return 'Resume BigQuery setup'
     if (action.failureCode === 'source_sync_required') return 'Sync connector tools'
     if (action.failureCode === 'source_tools_mismatch') return 'Review connector tools'
@@ -79,6 +83,9 @@ function unchosenToolsGuidance(action: SourceActionSummary): string | null {
   }
   if (action.failureCode === 'source_sync_required') {
     return 'This connector is installed with nothing enabled. Open it in Cloudflare and sync its capabilities, resolving any connection error. When its status is Ready, come back: this page lists its real tools so you can choose which to allow.'
+  }
+  if (action.failureCode === 'source_credential_required') {
+    return 'This connector is installed with nothing enabled and nobody assigned. Write its Access service token into its server record as shown below, then resume: this page lists its real tools so you can choose which to allow. Your gateway never sees the token.'
   }
   if (action.failureCode === 'source_tools_required') {
     return 'This connector is connected and nothing is enabled yet. Choose the tools to allow from its real list below; the gateway then attaches it with exactly those. Nobody has been assigned access.'
@@ -126,6 +133,9 @@ function actionGuidance(action: SourceActionSummary, pollingPaused: boolean, acc
       }
       if (action.failureCode === 'source_sync_required') {
         return 'Open the server in Cloudflare and sync its capabilities. Resolve any connection error, then return when its status is Ready to resume and finish installation.'
+      }
+      if (action.failureCode === 'source_credential_required') {
+        return 'Cloudflare Access did not admit this connector’s service token yet. Write a valid token into its server record as shown below, then resume. Nobody has been assigned access.'
       }
       if (action.failureCode === 'source_tools_mismatch') {
         return 'The synced connector is missing one or more tools from your saved selection. Review its catalogue in Cloudflare and restore the selected tools before resuming. The gateway will keep your exact selection.'
@@ -249,6 +259,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
   const [discovery, setDiscovery] = useState<SourceDiscovery | null>(null)
   const [selected, setSelected] = useState<string[]>([])
   const [allTools, setAllTools] = useState(false)
+  // Connect through an Access service token you write into Cloudflare, instead of a shared sign-in.
+  const [serviceToken, setServiceToken] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   // What Cloudflare says about a paused sign-in source right now, by action. The journal records a reason only when
   // the executor runs, so the live list can be ahead of it.
@@ -263,7 +275,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
   // OAuth sources can publish their catalogue before sign-in. Choose their
   // tools from Cloudflare's connected list; never enable the public preview.
-  const signIn = discovery?.authentication === 'oauth' && !discovery.connectionBlock
+  const tokenMode = discovery !== null && !discovery.connectionBlock && (discovery.status === 'service_token_required' ||
+    (serviceToken && discovery.serviceTokenAvailable === true))
+  const signIn = (discovery?.authentication === 'oauth' || tokenMode) && !discovery?.connectionBlock
   const enabledTools = useMemo(() => signIn ? [] : (allTools ? (discovery?.tools ?? []).map((tool) => tool.name) : [...selected]).sort(), [allTools, discovery, selected, signIn])
   const missingRecommendedTools = useMemo(() => {
     if (!catalogSource || !discovery || discovery.tools.length === 0) return []
@@ -343,6 +357,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     setDiscovery(null)
     setSelected([])
     setAllTools(false)
+    setServiceToken(false)
     setFormError(null)
   }
 
@@ -378,6 +393,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     setDiscovery(null)
     setSelected([])
     setAllTools(false)
+    setServiceToken(false)
     try {
       const next = await discoverSource(url.trim())
       if (catalogSource && next.endpoint !== catalogSource.implementation.deployment.url) {
@@ -412,7 +428,8 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     }
     setFormError(null)
     try {
-      const draft: SourceDraftInput = { label: label.trim(), url: discovery.endpoint, authMode: discovery.authentication, enabledTools }
+      const draft: SourceDraftInput = { label: label.trim(), url: discovery.endpoint,
+        authMode: tokenMode ? 'access_service_token' : discovery.authentication, enabledTools }
       if (!signIn && allTools) draft.allTools = true
       if (company.trim()) draft.company = company.trim()
       await saveSourceDraft(draft)
@@ -444,7 +461,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
     const actionSource = sources.sources.find((source) => source.id === action.sourceId)
     // A sign-in source paused before the Portal: its tools are chosen here, from its real list. A BigQuery
     // bridge has a fixed allowlist and its own setup flow.
-    const signInPause = actionSource !== undefined && actionSource.status === 'draft' && actionSource.authMode === 'oauth' &&
+    const signInPause = actionSource !== undefined && actionSource.status === 'draft' && actionSource.authMode !== 'none' &&
       action.state === 'recovery_required' && action.failureCode !== null && CONNECTION_PAUSES.has(action.failureCode) &&
       bigQuery?.setups.some((setup) => setup.actionId === action.actionId) !== true
     const toolsChosen = !signInPause || actionSource.enabledTools.length > 0
@@ -478,6 +495,9 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
         {preflightFailed ? <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">Error code: {action.failureCode}</p> : null}
         {signInPause && actionSource && action.canRenew === true && sources.applyMode === 'account_token' && shown.failureCode === 'source_connection_required' ? (
           <SourceAuthorization actionId={action.actionId} sourceId={actionSource.id} sourceUrl={actionSource.url} revision={sources.revision} disabled={!installationEnabled || isBusy || isCheckingSourceActions} />
+        ) : null}
+        {shown.failureCode === 'source_credential_required' && action.credentialTarget && action.state === 'recovery_required' ? (
+          <ServiceTokenInstructions target={action.credentialTarget} />
         ) : null}
         {action.connectionUrl && action.state === 'recovery_required' ? (
           <a className="mt-3 inline-flex text-sm underline underline-offset-4" href={action.connectionUrl} target="_blank" rel="noopener noreferrer">Open connector in Cloudflare</a>
@@ -670,15 +690,25 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   <div>
                     <h3 id="catalogue-title" className="text-sm font-semibold text-subheading">Tool allowlist</h3>
                     <p className="mt-1 text-xs leading-5 text-kumo-subtle">
-                      {signIn && discovery.tools.length > 0
+                      {tokenMode
+                        ? 'This connector is reached with an Access service token, so its tools are listed after you write the token into Cloudflare.'
+                        : signIn && discovery.tools.length > 0
                         ? `${discovery.tools.length} tools are advertised publicly. Sign in before choosing which tools to allow.`
                         : discovery.authentication === 'oauth' && discovery.tools.length === 0
                         ? 'This connector needs sign-in, so its tools can only be listed after you connect it.'
                         : `${discovery.tools.length} tools discovered with MCP ${discovery.protocolVersion ?? 'compatible protocol'}.${catalogSource ? ' Catalog recommendations that still exist are preselected for review.' : ''}`}
                     </p>
                   </div>
-                  <StatusPill tone="waiting">{discovery.authentication === 'oauth' ? 'OAuth protected' : 'Public endpoint'}</StatusPill>
+                  <StatusPill tone="waiting">{tokenMode ? 'Behind your Access' : discovery.authentication === 'oauth' ? 'OAuth protected' : 'Public endpoint'}</StatusPill>
                 </div>
+
+                {discovery.serviceTokenAvailable && discovery.status !== 'service_token_required' ? (
+                  <label className="mt-5 flex max-w-[80ch] items-start gap-3 rounded-xl border border-kumo-line bg-kumo-tint/55 p-4 text-xs leading-5 text-kumo-subtle">
+                    <input type="checkbox" className="mt-0.5" checked={serviceToken} onChange={(event) => setServiceToken(event.target.checked)} />
+                    <span><strong className="block text-sm text-kumo-default">Use an Access service token instead of a shared sign-in</strong>
+                      This endpoint is behind a self-hosted Cloudflare Access application in your account. A service token does not expire with anyone’s sign-in. You create it in Cloudflare and write it into the connector yourself; your gateway never sees it.</span>
+                  </label>
+                ) : null}
 
                 {discovery.connectionBlock ? (
                   <p className="mt-5 rounded-xl border border-warning/30 bg-warning-soft p-4 text-xs leading-5 text-warning-strong" role="alert">
@@ -688,7 +718,16 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   </p>
                 ) : null}
 
-                {signIn ? (
+                {tokenMode ? (
+                  <div className="mt-5 max-w-[80ch] text-xs leading-5 text-kumo-subtle" aria-label="What happens next">
+                    <p className="text-sm font-medium text-kumo-default">Write the token before choosing tools. What happens next:</p>
+                    <ol className="mt-2 list-decimal space-y-1.5 pl-5">
+                      <li>Save this draft and install it. The gateway creates the connector’s server record without credentials, with nothing enabled and nobody assigned, and does not attach it to your Portal.</li>
+                      <li>Create a service token in Cloudflare and write it into that record from your own shell. This page shows the exact command. The token stays in your Cloudflare account.</li>
+                      <li>Come back to this page. It lists the connector’s real tools and you choose which to allow. Only those are attached.</li>
+                    </ol>
+                  </div>
+                ) : signIn ? (
                   <div className="mt-5 max-w-[80ch] text-xs leading-5 text-kumo-subtle" aria-label="What happens next">
                     <p className="text-sm font-medium text-kumo-default">Connect before choosing tools. What happens next:</p>
                     <ol className="mt-2 list-decimal space-y-1.5 pl-5">
@@ -734,7 +773,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
 
                 <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
                   <Button type="submit" variant="primary" className="pressable" loading={isBusy} aria-describedby={signIn && rollbackNote ? 'save-draft-rollback-note' : undefined} disabled={(!signIn && enabledTools.length === 0) || Boolean(discovery.connectionBlock)}>Save draft</Button>
-                  <span className="text-xs text-kumo-subtle">{signIn ? 'This draft is saved with no tools. You choose them after connecting the connector.' : allTools ? 'All current and future tools allowed' : `${enabledTools.length} exact tool${enabledTools.length === 1 ? '' : 's'} selected`}</span>
+                  <span className="text-xs text-kumo-subtle">{tokenMode ? 'This draft is saved with no tools. You choose them after writing its service token.' : signIn ? 'This draft is saved with no tools. You choose them after connecting the connector.' : allTools ? 'All current and future tools allowed' : `${enabledTools.length} exact tool${enabledTools.length === 1 ? '' : 's'} selected`}</span>
                   {/* Older releases cannot read a source saved without tools, so for this one draft the save is what ends a rollback. */}
                   {signIn && rollbackNote ? (
                     <p id="save-draft-rollback-note" className="basis-full text-xs leading-5 text-kumo-subtle">{rollbackNote} Older releases cannot read a connector saved without tools.</p>
@@ -794,6 +833,11 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
             onSaveSourceTools={async (sourceId, revision, enabledTools, toolMetadata, allTools) => {
               await api.updateInstalledSourceTools(revision, sourceId, enabledTools, toolMetadata, undefined, allTools)
               await refreshSources()
+            }}
+            tokenSwitch={sources.tokenSwitch}
+            onTokenSwitch={async (sourceId, operation) => {
+              try { await api.switchSourceToServiceToken(sources.revision, sourceId, operation) }
+              finally { await refreshSources().catch(() => {}) }
             }}
             onRenameSource={async (sourceId, label, company) => {
               await api.renameInstalledSource(sources.revision, sourceId, label, company)

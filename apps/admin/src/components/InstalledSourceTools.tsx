@@ -13,6 +13,7 @@ interface InstalledSourceToolsProps {
 
 const WAITING = {
   connection_required: 'This connector needs authorization before its tools can be listed. After connecting it in Cloudflare, check again. Nothing changes until you save.',
+  credential_required: 'Cloudflare Access did not admit this connector’s service token, so its tools cannot be listed. Write a valid token into its server record, then check again. Nothing changes until you save.',
   sync_required: 'Cloudflare has not finished syncing the tools of this connector. In Cloudflare, use Sync capabilities, then check again. Nothing changes until you save.',
   unsupported: 'Cloudflare’s synced list for this connector cannot be offered here. Nothing was changed.',
 } satisfies Record<Exclude<InstalledSourceTools['state'], 'ready'>, string>

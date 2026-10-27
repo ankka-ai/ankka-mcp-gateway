@@ -5,9 +5,10 @@ import { InstalledSourceName, InstalledSourceToolsEditor } from './InstalledSour
 import { SourceRemoval } from './SourceRemoval'
 import { GatewayApiError } from '../api'
 import { ConnectionDetails, ConnectionStatus, useSourceConnections } from './SourceConnection'
+import { ServiceTokenSwitchPanel } from './ServiceToken'
 import { MagnifyingGlass } from '@phosphor-icons/react'
 import { Fragment, type ReactNode, useId, useState } from 'react'
-import type { InstalledSourceTools, ManagedSource, SourceConnection, ToolMetadata } from '../api'
+import type { InstalledSourceTools, ManagedSource, ServiceTokenSwitch, ServiceTokenSwitchOperation, SourceConnection, ToolMetadata } from '../api'
 
 // Gateway-hosted sources (agent-authored API sources and the feedback source) sign each person in individually.
 const gatewayHostedSource = (id: string) => id === 'source-666565646261636b' || id === 'source-67756964656d6170' || /^source-a9[a-f0-9]{14}$/u.test(id)
@@ -47,9 +48,12 @@ interface SourceListProps {
   onSaveSourceTools?(sourceId: string, revision: number, enabledTools: string[], toolMetadata?: ToolMetadata, allTools?: boolean): Promise<void>
   onRenameSource?(sourceId: string, label: string, company?: string): Promise<void>
   sourceToolsDisabled?: boolean
+  /** An open switch to an Access service token, as the gateway's journal records it. */
+  tokenSwitch?: ServiceTokenSwitch | null | undefined
+  onTokenSwitch?(sourceId: string, operation: ServiceTokenSwitchOperation): Promise<void>
 }
 
-export function SourceList({ sources, connectionRevision, onCheckConnection, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, onReconnect, onShareManagement, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, onRenameSource, sourceToolsDisabled = false }: SourceListProps) {
+export function SourceList({ sources, connectionRevision, onCheckConnection, installationEnabled, authorizeDisabled = false, isBusy, installationDetails, draftLabel, installNote = null, onAuthorize, onReconnect, onShareManagement, removalEnabled, removalDisabled, removalCredentialConfigured, pendingRemovalSourceId, managedBigQuerySourceIds = [], removalNote = null, onRemove, onRefresh, canRemove, removeDisabled = false, onRemoveDraft, onLoadSourceTools, onSaveSourceTools, onRenameSource, sourceToolsDisabled = false, tokenSwitch = null, onTokenSwitch }: SourceListProps) {
   const [sharing, setSharing] = useState(false)
   const [shareError, setShareError] = useState<string | null>(null)
   async function shareManagement() {
@@ -119,11 +123,14 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
         <tbody>
           {visibleSources.map((source) => {
             const installation = installationDetails?.(source.id)
-            const isExpanded = expanded === source.id || pendingRemovalSourceId === source.id
+            const isExpanded = expanded === source.id || pendingRemovalSourceId === source.id || tokenSwitch?.sourceId === source.id
             const sourceDetailsId = `${detailsId}-${source.id}`
             const connection = source.authMode === 'oauth'
               ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' ? 'Individual sign-in (previous setup)' : gatewayHostedSource(source.id) ? 'Individual sign-in' : 'Legacy user-bound OAuth' : 'Operator-connected OAuth'
-              : 'Public'
+              : source.authMode === 'access_service_token' ? 'Cloudflare Access service token' : 'Public'
+            // A shared sign-in to an endpoint behind your own Access application can move to a service token.
+            const switchable = source.status === 'installed' && source.authMode === 'oauth' && !source.onBehalfOfUser &&
+              source.id !== 'source-616e6b6b616d6370' && !gatewayHostedSource(source.id)
 
             return (
               <Fragment key={source.id}>
@@ -140,7 +147,8 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
                     </DisclosureTrigger>
                   </th>
                   <td className="hidden px-3 py-3 text-kumo-subtle sm:table-cell">
-                    {source.authMode === 'oauth' ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' || gatewayHostedSource(source.id) ? 'OAuth' : 'Legacy OAuth' : 'OAuth' : 'Public'}
+                    {source.authMode === 'oauth' ? source.onBehalfOfUser ? source.id === 'source-616e6b6b616d6370' || gatewayHostedSource(source.id) ? 'OAuth' : 'Legacy OAuth' : 'OAuth'
+                      : source.authMode === 'access_service_token' ? 'Service token' : 'Public'}
                   </td>
                   <td className="px-3 py-3">
                     {pendingRemovalSourceId === source.id ? <span className="text-warning-strong">Removal started</span> : source.status === 'installed' ? (
@@ -205,6 +213,10 @@ export function SourceList({ sources, connectionRevision, onCheckConnection, ins
                           onLoad={onLoadSourceTools}
                           onSave={onSaveSourceTools}
                         />
+                      ) : null}
+                      {onTokenSwitch && (switchable || tokenSwitch?.sourceId === source.id) ? (
+                        <ServiceTokenSwitchPanel source={source} tokenSwitch={tokenSwitch ?? null}
+                          disabled={isBusy || (sourceToolsDisabled && tokenSwitch?.sourceId !== source.id)} onSwitch={onTokenSwitch} />
                       ) : null}
                       {source.status === 'installed' && removalEnabled && onRemove && onRefresh ? <SourceRemoval
                         source={source}
