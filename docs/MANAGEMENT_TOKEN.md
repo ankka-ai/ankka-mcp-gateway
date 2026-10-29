@@ -329,6 +329,7 @@ belongs to the disposable-account qualification below.
 | --- | --- |
 | GET account token verification | The account token itself; no token-management permission requested |
 | GET account/zone Access apps, exact app and attached policies; POST source app/policy; PUT attached Team policy | Access: Apps and Policies Write |
+| POST and DELETE the connect page's own app, POST its one policy ([Team connect pages](TEAM_CONNECT_PAGES.md)) | Access: Apps and Policies Write |
 | GET/POST MCP servers; GET/PUT the exact owned Portal | MCP Portals Write |
 
 Named teams add Cloudflare Access group create, update, and delete. Cloudflare's

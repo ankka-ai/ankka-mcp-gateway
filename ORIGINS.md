@@ -128,6 +128,9 @@ titles and fixed sizes removed, monochrome fills adjusted for the dark page,
 and Gemini's inline mask style converted to a presentation attribute for CSP
 compatibility. ChatGPT's invalid child fill was normalized to `currentColor`.
 The SVGs contain no scripts, external references, or private metadata and are
-bundled into the page without provider requests. The generic plug icon is
+bundled into the page without provider requests. The Claude, ChatGPT and
+Cursor paths and the plug are reused unchanged in
+`apps/admin/src/connect/ClientIcons.tsx` for team connect pages; its terminal
+glyph is original repository artwork. The generic plug icon is
 original repository artwork. Brand and trademark rights remain with the
 respective providers; these icons identify compatibility only.

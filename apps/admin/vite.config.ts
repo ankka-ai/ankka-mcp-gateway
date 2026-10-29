@@ -1,5 +1,6 @@
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
@@ -23,6 +24,11 @@ export default defineConfig({
     assetsInlineLimit: 0,
     sourcemap: false,
     rollupOptions: {
+      // The team connect page is a second page of the same build. The gateway serves it under /__ankka/connect.
+      input: {
+        admin: fileURLToPath(new URL('index.html', import.meta.url)),
+        connect: fileURLToPath(new URL('team-connect.html', import.meta.url)),
+      },
       output: {
         assetFileNames: 'assets/admin-[hash:8][extname]',
         chunkFileNames: 'assets/admin-[hash:8].js',
@@ -36,6 +42,13 @@ export default defineConfig({
           return undefined
         },
       },
+    },
+  },
+  experimental: {
+    // Files the connect page loads live under /__ankka/connect/assets as well as /assets, so scripts and
+    // styles find their images and chunks next to themselves. The gateway rewrites the page's own links.
+    renderBuiltUrl(_filename, { hostType }) {
+      return hostType === 'html' ? undefined : { relative: true }
     },
   },
 })
