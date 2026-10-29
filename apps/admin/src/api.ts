@@ -1,6 +1,14 @@
 import * as v from 'valibot'
 
-const sourceAuthModeSchema = v.picklist(['none', 'oauth'])
+const sourceAuthModeSchema = v.picklist(['none', 'oauth', 'access_service_token'])
+/**
+ * Where you write a service-token source's credential: identifiers only. The gateway never handles the token.
+ */
+const credentialTargetSchema = v.strictObject({
+  accountId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}$/u)),
+  serverId: v.pipe(v.string(), v.regex(/^[a-z0-9][a-z0-9-]{0,31}$/u)),
+})
+export type CredentialTarget = v.InferOutput<typeof credentialTargetSchema>
 const cloudflareSourceUrlSchema = v.pipe(v.string(), v.regex(/^https:\/\/dash\.cloudflare\.com\/[a-f0-9]{32}\/one\/access-controls\/ai-controls\/mcp-server\/edit\/[a-z0-9_-]+$/u))
 const sourceStatusSchema = v.picklist(['installed', 'draft'])
 const runtimeOperationSchema = v.picklist(['update', 'rollback'])
@@ -67,10 +75,11 @@ interface InstalledToolsInput { schemaVersion: number; revision: number; enabled
 export const sourceConnectionSchema = v.strictObject({
   schemaVersion: v.literal(1),
   sourceId: v.string(),
-  state: v.picklist(['connected', 'authorization_required', 'forbidden', 'unavailable', 'unknown', 'user_managed']),
+  state: v.picklist(['connected', 'authorization_required', 'service_auth_required', 'forbidden', 'unavailable', 'unknown', 'user_managed']),
   reason: v.nullable(v.picklist(['management_credential_required', 'lifecycle_pending', 'configuration_changed', 'check_failed', 'check_pending'])),
   checkedAt: v.nullable(v.pipe(v.string(), v.isoTimestamp())),
   reconnectUrl: v.optional(cloudflareSourceUrlSchema),
+  credentialTarget: v.optional(credentialTargetSchema),
 })
 export type SourceConnection = v.InferOutput<typeof sourceConnectionSchema>
 
@@ -97,6 +106,14 @@ const managedSourcesSchema = v.strictObject({
   removalEnabled: v.optional(v.boolean()),
   removalCredentialConfigured: v.optional(v.boolean()),
   pendingRemoval: v.optional(v.nullable(v.strictObject({ sourceId: v.pipe(v.string(), v.regex(/^source-[a-f0-9]{16}$/u)) }))),
+  // An installed sign-in source moving to its Access service token, while the gateway's journal is open.
+  tokenSwitch: v.optional(v.nullable(v.strictObject({
+    sourceId: v.pipe(v.string(), v.regex(/^source-[a-f0-9]{16}$/u)),
+    phase: v.picklist(['create_armed', 'credential', 'moving', 'returning', 'retiring']),
+    reason: v.nullable(v.string()),
+    credentialTarget: credentialTargetSchema,
+    canRollback: v.boolean(),
+  }))),
   sources: v.array(managedSourceSchema),
 })
 const discoveredToolSchema = v.strictObject({
@@ -110,12 +127,14 @@ const discoveredToolSchema = v.strictObject({
 })
 const sourceDiscoverySchema = v.strictObject({
   schemaVersion: v.literal(1),
-  status: v.picklist(['discovered', 'authorization_required']),
+  status: v.picklist(['discovered', 'authorization_required', 'service_token_required']),
   endpoint: v.string(),
   protocolVersion: v.nullable(v.string()),
   authentication: sourceAuthModeSchema,
   tools: v.array(discoveredToolSchema),
   connectionBlock: v.optional(v.literal('source_google_shared_oauth_unsupported')),
+  // The endpoint sits behind a self-hosted Access application in your account, so it can use a service token.
+  serviceTokenAvailable: v.optional(v.literal(true)),
 })
 const bigQuerySetupsSchema = v.strictObject({
   schemaVersion: v.literal(1), available: v.boolean(), setups: v.array(v.strictObject({
@@ -151,6 +170,8 @@ const sourceActionFailureCodes = new Set([
   'source_connection_required', 'source_sync_required', 'source_tools_mismatch', 'bigquery_setup_required',
   // A sign-in source waits with nothing enabled: for its tools to be chosen, then for the chosen tools to be attached.
   'source_tools_required', 'source_tools_chosen', 'source_removal_required',
+  // A service-token source waits for you to write its token into Cloudflare.
+  'source_credential_required',
 ])
 /** Who prepared an action: an administrator, or the gateway's one configured service identity. */
 const actorKindSchema = v.optional(v.picklist(['human', 'service']))
@@ -180,6 +201,7 @@ const sourceActionSummarySchema = v.strictObject({
   canCancel: v.boolean(),
   canRenew: v.optional(v.boolean()),
   connectionUrl: v.optional(cloudflareSourceUrlSchema),
+  credentialTarget: v.optional(credentialTargetSchema),
 })
 const sourceActionsSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -198,7 +220,7 @@ const sourceActionToolsSchema = v.strictObject({
   schemaVersion: v.literal(1),
   actionId: sourceActionPointerSchema.entries.actionId,
   sourceId: v.pipe(v.string(), v.regex(/^[a-z][a-z0-9-]{0,31}$/u)),
-  state: v.picklist(['connection_required', 'sync_required', 'unsupported', 'ready']),
+  state: v.picklist(['connection_required', 'service_auth_required', 'sync_required', 'unsupported', 'ready']),
   tools: v.pipe(v.array(discoveredToolSchema), v.maxLength(500)),
 })
 const installedSourceToolsSchema = v.strictObject({
@@ -425,6 +447,8 @@ const runtimePreparedActionSchema = v.strictObject({
 const errorResponseSchema = v.object({ error: v.string() })
 
 export type SourceAuthMode = v.InferOutput<typeof sourceAuthModeSchema>
+export type ServiceTokenSwitchOperation = 'start' | 'continue' | 'rollback'
+export type ServiceTokenSwitch = NonNullable<ManagedSources['tokenSwitch']>
 export type SourceStatus = v.InferOutput<typeof sourceStatusSchema>
 export type RuntimeOperation = v.InferOutput<typeof runtimeOperationSchema>
 export type ActionStatus = v.InferOutput<typeof actionStatusSchema>
@@ -498,6 +522,11 @@ export interface GatewayAdminApi {
   getSourceActionTools(actionId: string): Promise<SourceActionTools>
   authorizeSource(actionId: string, revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization>
   reconnectSource(revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization>
+  /**
+   * Moves an installed shared sign-in connector to an Access service token you write into Cloudflare yourself:
+   * `start` creates its new server record, `continue` resumes, `rollback` returns to the sign-in record while it exists.
+   */
+  switchSourceToServiceToken(revision: number, sourceId: string, operation: ServiceTokenSwitchOperation): Promise<ManagedSources>
   /** Saves the tool choice as its own revision-bound step; the recorded installation is resumed separately. */
   chooseSourceActionTools(actionId: string, revision: number, sourceId: string, enabledTools: string[], allTools?: boolean): Promise<SourceToolChoice>
   /** Cloudflare’s synced catalogue for an installed connector, plus the saved selection and allTools mode. */
@@ -599,7 +628,18 @@ const ERROR_MESSAGES = new Map([
   ['source_response_invalid', 'The endpoint returned an invalid or oversized MCP response.'],
   ['source_tool_list_invalid', 'The endpoint returned an invalid or duplicate tool catalogue.'],
   ['source_tools_changed', 'The tool catalogue changed. Inspect it again before saving.'],
+  ['source_access_application_required', 'A service token needs a self-hosted Cloudflare Access application in this account in front of this endpoint. Add one, or connect with sign-in instead.'],
+  ['source_access_unavailable', 'Your gateway could not read the Access applications in your account. Check the management token, then try again.'],
+  ['source_switch_invalid', 'The switch request was rejected. Refresh the connector list and try again.'],
+  ['source_switch_unavailable', 'Only an installed connector that uses your shared sign-in can switch to a service token.'],
+  ['source_switch_pending', 'This connector is already switching to its service token. Continue or roll back that switch.'],
+  ['source_switch_not_found', 'This connector is not switching to a service token. Refresh the connector list.'],
+  ['source_switch_drift', 'The new server record or the Portal no longer matches what your gateway created, so the switch stopped. Write only the token into the record, then continue, or roll back.'],
+  ['source_switch_provider_unavailable', 'Cloudflare did not answer every read the switch needs. Nothing new was changed. Continue to try again.'],
+  ['source_switch_recovery_required', 'The switch could not confirm its last step. Continue to resume from the saved progress, or roll back while the sign-in record exists.'],
+  ['source_switch_rollback_unavailable', 'The sign-in record is already gone, so the switch can only continue.'],
   // An installation that waits for the operator is not a failed request: say what it waits for.
+  ['source_credential_required', 'The connector’s server record has no working service token yet. Write the token into it as shown below, then continue.'],
   ['source_connection_required', 'The connector is installed with nothing enabled and nobody assigned. Connect it in Cloudflare, then continue below.'],
   ['source_sync_required', 'Cloudflare has not finished syncing the tools of this connector. Sync its capabilities in Cloudflare, then continue below.'],
   ['source_tools_required', 'The connector is connected and nothing is enabled yet. Choose its tools below to finish installation.'],
@@ -833,6 +873,12 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   authorizeSource(actionId: string, revision: number, sourceId: string, metaAppId?: string): Promise<SourceAuthorization> {
     return this.#request(`/api/source-actions/${encodeURIComponent(actionId)}/authorize`, sourceAuthorizationSchema, {
       method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, sourceId, metaAppId }),
+    })
+  }
+
+  switchSourceToServiceToken(revision: number, sourceId: string, operation: ServiceTokenSwitchOperation): Promise<ManagedSources> {
+    return this.#request(`/api/sources/${encodeURIComponent(sourceId)}/service-token`, managedSourcesSchema, {
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, revision, operation }),
     })
   }
 
