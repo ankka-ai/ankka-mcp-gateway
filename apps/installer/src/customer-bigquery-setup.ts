@@ -12,7 +12,7 @@ import { BigQueryPreflightError } from './customer-bigquery-preflight';
 const PREFIX = 'ankka-mcp-gateway/bigquery-source/v1/';
 type BigQuerySourceDraft = { label: string; url: string; authMode: 'oauth'; enabledTools: string[]; company?: string };
 const sourceSchema = v.object({ id: v.string(), label: v.string(), company: v.optional(v.string()), url: v.string(),
-  authMode: v.picklist(['none', 'oauth']), onBehalfOfUser: v.boolean(), enabledTools: v.array(v.string()),
+  authMode: v.picklist(['none', 'oauth', 'access_service_token']), onBehalfOfUser: v.boolean(), enabledTools: v.array(v.string()),
   status: v.picklist(['installed', 'draft']) });
 const sourcesSchema = v.object({ revision: v.number(), sources: v.array(sourceSchema) });
 const actionSchema = v.object({ actionId: v.string(), sourceId: v.string(), status: v.string(), expiresAt: v.string(),
