@@ -1,5 +1,6 @@
 import { GatewayApiError } from './api'
 import type {
+  AgentGrant,
   GatewayAdminApi,
   InstalledSourceTools,
   GatewayStatus,
@@ -208,11 +209,14 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
         { email: 'admin@example.com', sourceIds: scenario === 'empty' ? [] : ['source-1111111111111111'] },
         { email: 'analyst@example.com', sourceIds: [] },
       ],
-      sources: this.#sources.sources.map(({ id, label, company, enabledTools, status: sourceStatus }) => ({ id, label: company ? `${company} · ${label}` : label, enabledTools, status: sourceStatus })),
+      sources: this.#teamSources(),
       teams: [],
+      agents: [],
+      agentDrift: null,
       pendingAction: null,
       proposedMembers: null,
       proposedTeams: null,
+      proposedAgents: null,
     }
     if (scenario === 'team-populated') {
       this.#team.adminEmails = ['jordan.rivera+gateway@example.com']
@@ -225,6 +229,11 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
         memberEmails: this.#team.members.map(({ email }) => email),
         sourceIds: this.#sources.sources.map(({ id }) => id),
       }]
+      // A synthetic agent: preview identifiers only, never a real service token.
+      this.#team.agents = this.#appliedAgents([{
+        id: 'agent-0123456789abcdef', name: 'Weekly reports', clientId: `${'0'.repeat(32)}.access`,
+        tokenId: '00000000-0000-4000-8000-000000000000', enabled: true, teamId: 'team-0123456789abcdef',
+      }], this.#team.teams)
     }
     if (scenario === 'team-recovery' || scenario === 'team-legacy') {
       this.#team.pendingAction = { schemaVersion: 1, actionId: ACTION_ID, status: scenario === 'team-recovery' ? 'recovery_required' : 'authorization_required', expiresAt: new Date(Date.now() + 600_000).toISOString(), failureCode: scenario === 'team-recovery' ? 'team_action_recovery_required' : null, canCancel: scenario === 'team-legacy' }
@@ -260,10 +269,28 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const installedIds = this.#sources.sources.filter(source => source.status === 'installed').map(source => source.id).sort()
     this.#team.members = this.#team.members.map(member => member.allSources ? { ...member, sourceIds: installedIds } : member)
     this.#team.teams = this.#team.teams.map(team => team.allSources ? { ...team, sourceIds: installedIds } : team)
-    return structuredClone({ ...this.#team, sources: this.#sources.sources.map(({ id, label, company, enabledTools, status: sourceStatus }) => ({ id, label: company ? `${company} · ${label}` : label, enabledTools, status: sourceStatus })) })
+    return structuredClone({ ...this.#team, sources: this.#teamSources() })
   }
 
-  async prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult> {
+  // As the gateway answers: an agent's service token reaches only connectors the Portal signs in to itself.
+  #teamSources(): Team['sources'] {
+    return this.#sources.sources.map(({ id, label, company, enabledTools, status: sourceStatus, onBehalfOfUser }) => {
+      const entry: Team['sources'][number] = { id, label: company ? `${company} · ${label}` : label, enabledTools, status: sourceStatus }
+      if (sourceStatus === 'installed') entry.agentAccess = id === 'source-616e6b6b616d6370' ? 'management' : onBehalfOfUser ? 'individual_sign_in' : 'available'
+      return entry
+    })
+  }
+
+  // What the gateway records once a save has applied: each enabled agent's token on the connectors it reaches.
+  #appliedAgents(agents: AgentGrant[], teams: TeamGrant[]): Team['agents'] {
+    const available = new Set(this.#teamSources().filter(source => source.agentAccess === 'available').map(source => source.id))
+    return agents.map(agent => {
+      const reached = agent.teamId !== undefined ? teams.find(team => team.id === agent.teamId)?.sourceIds ?? [] : agent.sourceIds ?? []
+      return { ...agent, appliedSourceIds: agent.enabled ? reached.filter(id => available.has(id)).sort() : [] }
+    })
+  }
+
+  async prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]): Promise<TeamActionResult> {
     if (!this.#team.editingEnabled) throw new GatewayApiError(403, this.#team.editingDisabledReason === 'managed_in_cloudflare'
       ? 'team_editing_managed_in_cloudflare'
       : this.#team.editingDisabledReason === 'release_review_required' ? 'team_release_review_required' : 'team_action_conflict')
@@ -276,9 +303,12 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const action: TeamActionResult['action'] = { schemaVersion: 1, actionId: ACTION_ID, status: 'succeeded', expiresAt, failureCode: null, canCancel: false }
     this.#team.members = structuredClone(members)
     if (teams !== undefined) this.#team.teams = structuredClone(teams)
+    const savedAgents = agents ?? this.#team.agents.map(({ appliedSourceIds: _applied, ...agent }) => agent)
+    this.#team.agents = this.#appliedAgents(structuredClone(savedAgents), this.#team.teams)
     this.#team.revision += 1
     this.#team.proposedMembers = null
     this.#team.proposedTeams = null
+    this.#team.proposedAgents = null
     this.#team.pendingAction = action
     return { schemaVersion: 1, action: structuredClone(action) }
   }

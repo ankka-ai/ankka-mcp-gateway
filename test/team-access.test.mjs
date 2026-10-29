@@ -3,6 +3,8 @@ import test from 'node:test';
 
 import {
   TeamAccessError,
+  agentPolicy,
+  agentPolicyMatches,
   normalizeTeamAccessRequest,
   planTeamAccessChange,
   teamPolicy,
@@ -455,4 +457,124 @@ test('an expected group rule matches that group and rejects a different one', ()
   assert.equal(teamPolicyMatches(observed(expected), expected, 'erp-policy'), true);
   assert.equal(teamPolicyMatches(observed(teamPolicy([ADMIN], 'ERP people', [LEGAL_GROUP])), expected, 'erp-policy'), false);
   assert.equal(teamPolicyMatches(observed(teamPolicy([ADMIN], 'ERP people')), expected, 'erp-policy'), false);
+});
+
+// Agents: one Service Auth policy per Access application, beside people's policies.
+const AGENT_TOKEN = '11111111-2222-4333-8444-555555555555';
+const OTHER_TOKEN = '66666666-7777-4888-8999-aaaaaaaaaaaa';
+const AGENT_NAME = 'ankka-acg-000000000000000000000001-agents';
+
+function agentContext(extra = {}) {
+  return { ...context(), agentSourceIds: ['erp', 'wiki'], agentPolicyName: AGENT_NAME, ...extra };
+}
+
+function agent(overrides = {}) {
+  const value = { id: 'agent-0000000000000001', name: 'Reports', clientId: `${'a'.repeat(32)}.access`, tokenId: AGENT_TOKEN,
+    enabled: true, sourceIds: ['erp'], ...overrides };
+  if (Object.hasOwn(overrides, 'teamId')) delete value.sourceIds;
+  return value;
+}
+
+test('without agents a plan carries no agent fields, so a retained proposal keeps its hash', () => {
+  const plan = planTeamAccessChange(request(), agentContext());
+  assert.equal(Object.hasOwn(plan, 'agentPolicies'), false);
+  assert.equal(Object.hasOwn(plan, 'agentPolicyChanges'), false);
+  assert.equal(Object.hasOwn(plan.nextState, 'agents'), false);
+  assert.deepEqual(planTeamAccessChange({ ...request(), agents: [] }, agentContext()), plan);
+  assert.deepEqual(planTeamAccessChange(request(), context()), plan);
+});
+
+test('an enabled agent gets the Portal and each source it reaches; switched off it gets nothing', () => {
+  const plan = planTeamAccessChange({ ...request(), agents: [agent()] }, agentContext());
+  const expected = agentPolicy([AGENT_TOKEN], AGENT_NAME);
+  assert.deepEqual(plan.agentPolicies, [
+    { kind: 'portal_agents', applicationId: 'portal-app', policyId: null, before: null, after: expected },
+    { kind: 'source_agents', applicationId: 'erp-app', policyId: null, before: null, after: expected, sourceId: 'erp' },
+  ]);
+  assert.deepEqual(plan.agentPolicyChanges, plan.agentPolicies);
+  assert.deepEqual(expected, { name: AGENT_NAME, decision: 'non_identity',
+    include: [{ service_token: { token_id: AGENT_TOKEN } }], exclude: [], require: [] });
+  // People's policies are untouched by an agent.
+  assert.deepEqual(plan.policyChanges, []);
+  const off = planTeamAccessChange({ ...request(), agents: [agent({ enabled: false })] }, agentContext());
+  assert.equal(Object.hasOwn(off, 'agentPolicies'), false);
+  assert.deepEqual(off.nextState.agents, [agent({ enabled: false })]);
+});
+
+test('an agent that follows a team reaches only that team\'s connectors that admit a service token', () => {
+  const teams = [{ id: 'team-1111111111111111', name: 'All Access', memberEmails: [], sourceIds: ['erp', 'wiki'] }];
+  // wiki signs in per person here: it never takes an agent, even through a team.
+  const plan = planTeamAccessChange({ ...request(), teams, agents: [agent({ teamId: 'team-1111111111111111' })] },
+    agentContext({ agentSourceIds: ['erp'] }));
+  assert.deepEqual(plan.agentPolicies.map(({ kind, sourceId }) => [kind, sourceId]), [['portal_agents', undefined], ['source_agents', 'erp']]);
+  // A team without any reachable connector admits the agent nowhere, not even to the Portal.
+  const none = planTeamAccessChange({ ...request(), teams, agents: [agent({ teamId: 'team-1111111111111111' })] },
+    agentContext({ agentSourceIds: [] }));
+  assert.equal(Object.hasOwn(none, 'agentPolicies'), false);
+});
+
+test('an explicit unsupported connector or a missing team is refused', () => {
+  assert.throws(() => planTeamAccessChange({ ...request(), agents: [agent({ sourceIds: ['wiki'] })] },
+    agentContext({ agentSourceIds: ['erp'] })), code('team_agent_source_unsupported'));
+  assert.throws(() => planTeamAccessChange({ ...request(), agents: [agent({ teamId: 'team-2222222222222222' })] },
+    agentContext()), code('team_agent_team_missing'));
+  assert.throws(() => planTeamAccessChange({ ...request(), agents: [agent({ sourceIds: ['draft'] })] }, agentContext()),
+    code('team_access_invalid_request'));
+  assert.throws(() => planTeamAccessChange({ ...request(), agents: [agent()] }, context()), code('team_access_invalid_target'));
+});
+
+test('recorded agent policies are the before state; removing the agent deletes them', () => {
+  const records = [
+    { applicationId: 'portal-app', policyId: 'portal-agents', tokenIds: [AGENT_TOKEN] },
+    { applicationId: 'erp-app', policyId: 'erp-agents', tokenIds: [AGENT_TOKEN], sourceId: 'erp' },
+  ];
+  const current = agentContext({ currentAgents: [agent()], currentAgentPolicies: records });
+  const kept = planTeamAccessChange(request(), current);
+  assert.deepEqual(kept.agentPolicyChanges, []);
+  assert.deepEqual(kept.agentPolicies.map(({ policyId, before, after }) => [policyId, before === null, after === null]),
+    [['portal-agents', false, false], ['erp-agents', false, false]]);
+  const removed = planTeamAccessChange({ ...request(), agents: [] }, current);
+  assert.deepEqual(removed.agentPolicyChanges.map(({ policyId, after }) => [policyId, after]), [['portal-agents', null], ['erp-agents', null]]);
+  assert.deepEqual(removed.nextState.agents, []);
+  const second = agent({ id: 'agent-0000000000000002', clientId: `${'b'.repeat(32)}.access`, tokenId: OTHER_TOKEN, sourceIds: ['wiki'] });
+  const added = planTeamAccessChange({ ...request(), agents: [agent(), second] }, current);
+  assert.deepEqual(added.agentPolicyChanges.map(({ applicationId, policyId, after }) => [applicationId, policyId, after.include.length]),
+    [['portal-app', 'portal-agents', 2], ['wiki-app', null, 1]]);
+  // A record for an application the gateway does not own is invalid state.
+  assert.throws(() => planTeamAccessChange(request(), agentContext({ currentAgents: [agent()],
+    currentAgentPolicies: [{ ...records[1], applicationId: 'foreign-app' }] })), code('team_access_invalid_state'));
+});
+
+test('agent identities are exact and unique, and the service identity is never an agent', () => {
+  for (const invalid of [
+    agent({ clientId: 'synthetic' }), agent({ tokenId: `${'a'.repeat(32)}.access` }), agent({ id: 'agent-1' }),
+    agent({ name: ' padded ' }), { ...agent(), clientSecret: 'never' }, { ...agent({ teamId: 'team-1111111111111111' }), sourceIds: [] },
+  ]) assert.throws(() => normalizeTeamAccessRequest({ ...request(), agents: [invalid] }, agentContext()), code('team_access_invalid_request'));
+  assert.throws(() => normalizeTeamAccessRequest({ ...request(), agents: [agent(), agent({ id: 'agent-0000000000000002' })] }, agentContext()));
+  assert.throws(() => normalizeTeamAccessRequest({ ...request(), agents: [agent()] },
+    agentContext({ serviceActor: `service:${'a'.repeat(32)}.access` })), code('team_access_invalid_request'));
+});
+
+test('a live agent policy matches only its exact id, name, decision and token set', () => {
+  const expected = agentPolicy([AGENT_TOKEN, OTHER_TOKEN], AGENT_NAME);
+  const live = { id: 'erp-agents', ...structuredClone(expected), include: [...expected.include].reverse(),
+    precedence: 2, reusable: false, uid: 'erp-agents' };
+  assert.equal(agentPolicyMatches(live, expected, 'erp-agents'), true);
+  for (const changed of [
+    { ...live, id: 'other' }, { ...live, name: 'Agents' }, { ...live, decision: 'allow' },
+    { ...live, include: [{ service_token: { token_id: AGENT_TOKEN } }] },
+    { ...live, include: [...live.include, { any_valid_service_token: {} }] },
+    { ...live, require: [{ everyone: {} }] }, { ...live, session_duration: '24h' },
+  ]) assert.equal(agentPolicyMatches(changed, expected, 'erp-agents'), false, JSON.stringify(changed));
+});
+
+test('a saved agent keeps loading when a listed connector stops admitting agents, and loses only that connector', () => {
+  const records = [
+    { applicationId: 'portal-app', policyId: 'portal-agents', tokenIds: [AGENT_TOKEN] },
+    { applicationId: 'erp-app', policyId: 'erp-agents', tokenIds: [AGENT_TOKEN], sourceId: 'erp' },
+  ];
+  const current = agentContext({ agentSourceIds: [], currentAgents: [agent()], currentAgentPolicies: records });
+  const plan = planTeamAccessChange(request(), current);
+  assert.deepEqual(plan.agentPolicyChanges.map(({ applicationId, after }) => [applicationId, after]), [['portal-app', null], ['erp-app', null]]);
+  assert.throws(() => planTeamAccessChange({ ...request(), agents: [agent()] }, current), code('team_agent_source_unsupported'));
 });

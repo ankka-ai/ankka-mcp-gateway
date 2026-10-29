@@ -2,9 +2,11 @@ import { Button } from '../components/Button'
 import { AddUserDialog } from '../components/AddUserDialog'
 import { MemberAccessDialog } from '../components/MemberAccessDialog'
 import { TeamGrantDialog } from '../components/TeamGrantDialog'
+import { AgentDialog } from '../components/AgentDialog'
+import { Checkbox } from '../components/Checkbox'
 import { Trash, X } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type Team, type TeamAction, type TeamGrant, type TeamMember } from '../api'
+import { GatewayApiError, SOURCE_ADDITION_PAUSED_MESSAGE, type AgentGrant, type Team, type TeamAction, type TeamGrant, type TeamMember } from '../api'
 import { ManagementTokenCard } from '../components/ManagementTokenCard'
 import { PageHeader } from '../components/PageHeader'
 import { StatusPill } from '../components/StatusPill'
@@ -25,6 +27,33 @@ function canonicalTeams(teams: TeamGrant[]): TeamGrant[] {
     if (team.allSources) normalized.allSources = true
     return normalized
   }).sort((left, right) => left.id.localeCompare(right.id))
+}
+
+function canonicalAgents(agents: AgentGrant[]): AgentGrant[] {
+  return agents.map((agent) => {
+    const normalized: AgentGrant = { id: agent.id, name: agent.name.trim(), clientId: agent.clientId, tokenId: agent.tokenId, enabled: agent.enabled }
+    if (agent.teamId !== undefined) normalized.teamId = agent.teamId
+    else normalized.sourceIds = [...new Set(agent.sourceIds ?? [])].sort()
+    return normalized
+  }).sort((left, right) => left.id.localeCompare(right.id))
+}
+
+/** The connectors an agent reaches once saved: its list, or its team's, limited to connectors that admit agents. */
+function agentReach(agent: AgentGrant, teams: TeamGrant[], sources: Team['sources']): string[] {
+  const available = new Set(sources.filter(source => source.agentAccess === 'available').map(source => source.id))
+  const listed = agent.teamId !== undefined ? teams.find(team => team.id === agent.teamId)?.sourceIds ?? [] : agent.sourceIds ?? []
+  return listed.filter(id => available.has(id)).sort()
+}
+
+/** Where an agent policy drifted, and the one way to clear it: no secret, no provider text. */
+function agentDriftMessage(team: Team): string {
+  const drift = team.agentDrift
+  if (!drift) return ''
+  const where = drift.policyKind === 'portal_agents' ? 'the Portal'
+    : `${team.sources.find(source => source.id === drift.sourceId)?.label ?? 'a connector'}`
+  return drift.reason === 'team_agent_policy_missing'
+    ? `The agent policy on ${where} was deleted in Cloudflare. Switch off or remove the agents that used it and save; switch them on again afterwards to recreate it. Other Team changes wait until then.`
+    : `The agent policy on ${where} was changed in Cloudflare, or another policy uses its name. Restore it exactly as saved, or delete the copy, then refresh. Team changes wait until then; this page will not reset it.`
 }
 
 function membersForTeams(members: TeamMember[], teams: TeamGrant[]): TeamMember[] {
@@ -75,6 +104,7 @@ export function TeamPage() {
   const [team, setTeam] = useState<Team | null>(null)
   const [draft, setDraft] = useState<TeamMember[]>([])
   const [teamDraft, setTeamDraft] = useState<TeamGrant[]>([])
+  const [agentDraft, setAgentDraft] = useState<AgentGrant[]>([])
   const [action, setAction] = useState<TeamAction | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -108,6 +138,7 @@ export function TeamPage() {
     setAction(next.pendingAction)
     setDraft(withAdministrators(next, next.members))
     setTeamDraft(canonicalTeams(next.teams ?? []))
+    setAgentDraft(canonicalAgents(next.agents ?? []))
     setNeedsRefresh(false)
     if (next.pendingAction && !['authorization_required', 'applying'].includes(next.pendingAction.status)) clearCallback()
   }, [clearCallback])
@@ -187,12 +218,15 @@ export function TeamPage() {
   const administrators = useMemo(() => new Set(team?.adminEmails.map((value) => value.toLowerCase()) ?? []), [team?.adminEmails])
   const effectiveMembers = useMemo(() => team ? withAdministrators(team, team.members) : [], [team])
   const effectiveTeams = useMemo(() => canonicalTeams(team?.teams ?? []), [team])
+  const effectiveAgents = useMemo(() => canonicalAgents(team?.agents ?? []), [team])
   const recorded = isRecordedChange(action)
   const displayedMembers = recorded ? team?.proposedMembers ?? [] : draft
   const displayedTeams = recorded ? canonicalTeams(team?.proposedTeams ?? effectiveTeams) : teamDraft
+  const displayedAgents = recorded ? canonicalAgents(team?.proposedAgents ?? effectiveAgents) : agentDraft
   const membersChanged = JSON.stringify(canonicalMembers(draft)) !== JSON.stringify(effectiveMembers)
   const teamsChanged = JSON.stringify(canonicalTeams(teamDraft)) !== JSON.stringify(effectiveTeams)
-  const changed = membersChanged || teamsChanged
+  const agentsChanged = JSON.stringify(canonicalAgents(agentDraft)) !== JSON.stringify(effectiveAgents)
+  const changed = membersChanged || teamsChanged || agentsChanged
   useEffect(() => {
     if (changed || needsRefresh) setSuccessActionId(null)
   }, [changed, needsRefresh])
@@ -224,19 +258,25 @@ export function TeamPage() {
     if (!team?.editingEnabled || loading || isBusy || needsRefresh || callbackId !== null || actionInFlight.current || action?.status === 'applying' || (!recorded && !changed)) return
     const members = recorded ? team.proposedMembers : membersForTeams(draft, teamDraft)
     const teams = recorded ? canonicalTeams(team.proposedTeams ?? team.teams ?? []) : canonicalTeams(teamDraft)
+    // Agents are sent only when they change, or exactly as a recorded change carries them.
+    const agents = recorded ? team.proposedAgents ?? undefined : agentsChanged ? canonicalAgents(agentDraft) : undefined
     if (!members) return
+    if (!recorded && agents?.some(agent => agent.teamId !== undefined && !teams.some(grant => grant.id === agent.teamId))) {
+      setError(new GatewayApiError(400, 'team_agent_team_missing').message)
+      return
+    }
     actionInFlight.current = true
     setSaving(true)
     setSuccessActionId(null)
     setError(null)
     try {
-      const { action: pendingAction } = await prepareTeamAction(team.revision, members, teams)
+      const { action: pendingAction } = await prepareTeamAction(team.revision, members, teams, agents)
       if (!ACTION_ID.test(pendingAction.actionId) || (recorded && pendingAction.actionId !== action?.actionId)) {
         throw new GatewayApiError(502, 'team_action_invalid')
       }
       observedActionId.current = pendingAction.actionId
       setAction(pendingAction)
-      setTeam((current) => current ? { ...current, pendingAction, proposedMembers: members, proposedTeams: teams } : current)
+      setTeam((current) => current ? { ...current, pendingAction, proposedMembers: members, proposedTeams: teams, proposedAgents: agents ?? null } : current)
       if (await readTeam()) clearCallback()
     } catch (cause) {
       setNeedsRefresh(true)
@@ -303,6 +343,39 @@ export function TeamPage() {
     </div>
   )
 
+  const updateAgent = (agent: AgentGrant) => setAgentDraft(current => canonicalAgents([...current.filter(entry => entry.id !== agent.id), agent]))
+  const renderAgent = (agent: AgentGrant) => {
+    const followed = agent.teamId !== undefined ? displayedTeams.find(grant => grant.id === agent.teamId) : undefined
+    const reach = agentReach(agent, displayedTeams, team?.sources ?? [])
+    const saved = team?.agents.find(entry => entry.id === agent.id)
+    // A followed team can gain connectors after a save: Cloudflare has what was last applied until the next save.
+    const pendingReach = !recorded && !changed && saved !== undefined && saved.enabled &&
+      JSON.stringify(agentReach(saved, effectiveTeams, team?.sources ?? [])) !== JSON.stringify(saved.appliedSourceIds)
+    const summary = agent.teamId !== undefined
+      ? `Follows ${followed?.name ?? 'a team that no longer exists'}: ${reach.length} ${reach.length === 1 ? 'connector' : 'connectors'}`
+      : `${reach.length} ${reach.length === 1 ? 'connector' : 'connectors'} selected`
+    return <div key={agent.id} role="group" aria-label={agent.name} className="flex min-w-0 items-center justify-between gap-4 border-b border-kumo-line/70 py-4">
+      <div className="min-w-0">
+        <p className="break-words text-sm font-medium text-kumo-strong">{agent.name}</p>
+        <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">{agent.clientId}</p>
+        <p className="mt-1 text-xs text-kumo-subtle">{summary}</p>
+        {pendingReach ? <p className="mt-1 text-xs text-kumo-subtle">Its team changed since the last save. Save to apply its connectors in Cloudflare.</p> : null}
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        <label className="flex min-h-9 cursor-pointer items-center gap-2 text-sm text-kumo-strong">
+          <Checkbox checked={agent.enabled} disabled={disabled} aria-label={`Allow ${agent.name} to connect`} onChange={(event) => {
+            if (!disabled) updateAgent({ ...agent, enabled: event.target.checked })
+          }} />
+          {agent.enabled ? 'On' : 'Off'}
+        </label>
+        {!recorded ? <AgentDialog agent={agent} agents={agentDraft} sources={team?.sources ?? []} teams={teamDraft} disabled={disabled} onSave={(next) => {
+          if (!disabled) updateAgent(next)
+        }} /> : null}
+        {!recorded ? <Button type="button" variant="secondary" disabled={disabled} className="size-9 justify-center p-0" aria-label={`Remove ${agent.name}`} onClick={() => setAgentDraft(current => current.filter(entry => entry.id !== agent.id))}><Trash size={16} aria-hidden="true" /></Button> : null}
+      </div>
+    </div>
+  }
+
   return (
     <div>
       <PageHeader title="Team" />
@@ -328,6 +401,7 @@ export function TeamPage() {
           {tokenMissing && team.editingDisabledReason === 'management_credential_missing' ? <p role="status" className="mt-4 text-sm leading-6 text-kumo-subtle">Until your gateway has the token, you can still inspect the saved access configuration and shared tools.</p> : null}
           {!team.editingEnabled && team.editingDisabledReason !== 'management_credential_missing' && team.editingDisabledReason !== 'managed_in_cloudflare' ? <p role="status" className="notice-banner notice-warning mt-6">{team.editingDisabledReason === 'lifecycle_action_pending' ? 'Another connector, update, teardown, or management token action is in progress. Finish or safely cancel that action, then refresh.' : 'Team access changes are disabled until this gateway release is reviewed and approved.'} You can still inspect the saved access configuration and shared tools.</p> : null}
           {sources && sources.installationEnabled !== true && sources.applyMode !== 'account_token' ? <p role="status" className="notice-banner notice-warning mt-6">{SOURCE_ADDITION_PAUSED_MESSAGE} {team.editingEnabled ? 'You can grant or revoke access to the installed connectors below.' : 'This restriction does not change saved access.'}</p> : null}
+          {team.agentDrift ? <p role="alert" className="notice-banner notice-warning mt-6">{agentDriftMessage(team)}</p> : null}
           {needsRefresh ? <p role="status" className="notice-banner notice-warning mt-6">Editing is paused until the recorded state can be checked. Trying again reloads the saved configuration and discards unsaved selections; it does not resubmit a change.</p> : null}
           <section className="mt-7" aria-label="Team members">
             <div className="flex flex-wrap items-center justify-between gap-3">
@@ -378,6 +452,22 @@ export function TeamPage() {
               </section>
             })}
 
+            <section className="mt-9" aria-labelledby="agents-title">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <h2 id="agents-title" className="text-base font-semibold text-subheading">Agents ({displayedAgents.length})</h2>
+                  <p className="mt-1 text-xs leading-5 text-kumo-subtle">Hosted agents that connect with their own Cloudflare Access service token instead of a person’s sign-in. They never reach Gateway Management or this dashboard.</p>
+                </div>
+                {!recorded ? <AgentDialog agent={null} agents={agentDraft} sources={team.sources} teams={teamDraft} disabled={disabled} onSave={(next) => {
+                  if (!disabled) updateAgent(next)
+                }} /> : null}
+              </div>
+              <div className="mt-4 border-t border-kumo-line">
+                {displayedAgents.map(agent => renderAgent(agent))}
+                {displayedAgents.length === 0 ? <p className="py-4 text-sm text-kumo-subtle">No agents.</p> : null}
+              </div>
+            </section>
+
             {installed.length === 0 ? <p className="mt-3 text-sm text-kumo-subtle">{sources?.installationEnabled === true ? 'Install a connector before granting connector access.' : 'No installed connectors are available to assign. New-connector installation is paused.'}</p> : null}
 
             <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-kumo-line pt-5">
@@ -385,7 +475,7 @@ export function TeamPage() {
                 {action?.status === 'recovery_required' ? 'Resume recorded change' : recorded ? 'Save recorded change' : 'Save'}
               </Button>
               {canCancel ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving || loading || needsRefresh || callbackId !== null} onClick={() => void cancelRecordedChange()}><X size={16} /> Cancel recorded change</Button> : null}
-              {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving} onClick={() => { setDraft(effectiveMembers); setTeamDraft(effectiveTeams) }}>Discard unsaved changes</Button> : null}
+              {!recorded && changed ? <Button variant="secondary" className="pressable inline-flex items-center gap-2" disabled={isBusy || saving} onClick={() => { setDraft(effectiveMembers); setTeamDraft(effectiveTeams); setAgentDraft(effectiveAgents) }}>Discard unsaved changes</Button> : null}
             </div>
           </section>
         </>

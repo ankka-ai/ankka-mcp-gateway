@@ -8,9 +8,12 @@ allowlists and independent upstream enforcement. Connected MCP servers can expos
 explicitly selected edit tools; see [source capabilities](SOURCE_CAPABILITIES.md).
 
 For the current founding-team dogfood deployment, one Access group and manual
-health/catalogue checks are sufficient. Multiple visibility partitions,
-scheduled machine identities, and exact actor correlation are deferred until a
-present product need justifies them. Read and edit tools use the existing source
+health/catalogue checks are sufficient. Multiple visibility partitions and
+exact actor correlation are deferred until a present product need justifies
+them. A hosted reports agent was that need for machine identities: [agents](AGENT_ACCESS.md)
+use the Portal with their own service token, through one receipt-owned Service
+Auth policy per application. That is not a general machine-identity policy
+editor. Read and edit tools use the existing source
 assignments and exact tool selection rather than a new permissions system.
 
 ## Readiness summary
@@ -81,7 +84,8 @@ content. The same operation must be safe to repeat.
 
 The scheduled runner should live in the team's account or monitoring
 system and use a dedicated machine identity. Its Portal and every target source
-need matching least-privilege Access Service Auth policies. The gateway
+need matching least-privilege Access Service Auth policies. A runner can be
+an [agent](AGENT_ACCESS.md) with exactly the sources it checks; the gateway
 does not expose general machine-identity policy configuration. The separate
 [operator disposable canary](CANARY_PROFILES.md) can create exact Service Auth
 policies only for its fixed synthetic source; it is not this gateway monitoring

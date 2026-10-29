@@ -104,6 +104,27 @@ edits, using the connected upstream identity. There is no separate per-person
 read/edit role or per-call approval layer. See [source capabilities](SOURCE_CAPABILITIES.md)
 for the operation risks, rollout boundary, and read-only connector exceptions.
 
+<a id="agent-access"></a>
+
+[Agents](AGENT_ACCESS.md) are hosted MCP clients that use the Portal with
+their own Cloudflare Access service token. This is MCP client access, kept
+apart from management authority: an agent reaches only the Portal and the
+connectors chosen for it, never Gateway Management or the dashboard, and the
+deployment's management service identity cannot be registered as an agent.
+The gateway stores only each token's client ID and token ID. On the Portal
+application and each chosen connector's application it keeps one receipt-owned
+Service Auth policy beside the people's policy, naming exactly the enabled
+agents' tokens. Cloudflare enforces it, and hides connectors whose
+application does not admit the token. Only connectors the Portal reaches with
+its own shared credential (`on_behalf: false`) can take an agent; the gateway
+never converts a connector's authentication for that. Agent policies are
+written through the Team journal with the management token, read back after
+each write, and never imported from Cloudflare: a changed, deleted or copied
+agent policy is drift that blocks Team writes. Only a person with dashboard
+access can change agents. Removing an agent or switching it off removes its
+token from every policy and revokes nothing in Cloudflare; the service token
+itself is the customer's to delete.
+
 The optional [Gateway Management source](GATEWAY_MANAGEMENT_MCP.md) is an explicit
 management capability. Its ordinary source assignment grants fixed management
 operations; no separate MCP administrator role is required. The Worker validates
@@ -172,9 +193,11 @@ as just read and only when the read matches the receipts. It proves both
 permissions in at most seven provider calls and changes nothing.
 
 The Team page reads receipt-owned policies live and records an observation time.
+Agent policies are compared with the policies last applied; a mismatch leaves
+the read unverified and names the application.
 A changed live audience advances the local revision before a new proposal can
-be saved. Writes verify the exact owned application, sole policy, audience and
-Portal mapping, then persist a send journal before each provider write. An
+be saved. Writes verify the exact owned application, the receipt-owned policy by
+its ID, its audience and the Portal mapping, then persist a send journal before each provider write. An
 ambiguous response retains the exact proposal for recovery; it is not a rollback.
 An unavailable or unrecognized live policy graph is never labeled verified.
 Policy membership does not guarantee effective access or immediate revocation
@@ -214,6 +237,8 @@ and expected ownership markers.
 The receipt and journal preserve recovery authority after interruptions. A
 missing, corrupt, conflicting, or ambiguous record stops automatic mutation.
 Only receipt-owned resources are removed, in reverse dependency order.
+Gateway removal and the removal of a connector wait until no agent policy is
+left on the applications they delete; Team removes agent policies first.
 
 ### Recovery of an interrupted dependency removal
 

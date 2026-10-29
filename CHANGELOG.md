@@ -4,6 +4,18 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let a hosted agent use your MCP Portal with its own Cloudflare Access
+  service token instead of a person's sign-in. Add it under **Team → Agents**
+  with the token's client ID and token ID, never its secret, and either a list
+  of connectors or a team to follow. Your gateway keeps one Service Auth policy
+  beside the people's policy on the Portal and on each connector the agent
+  reaches, and verifies it like the people's policies. Team edits keep agent
+  access; switching an agent off or removing it takes its token off every
+  policy and leaves people's access and the token itself alone. Agents never
+  reach Gateway Management, the dashboard, or a connector with individual
+  sign-in. Removing a connector an agent uses, or the gateway, waits until the
+  agent policies are gone. See [Agent access](docs/AGENT_ACCESS.md).
+
 - Connect a source behind your own Cloudflare Access application with an
   Access service token, so it no longer depends on one person's sign-in that
   Access ends after 14 days. The option appears only when a self-hosted Access
