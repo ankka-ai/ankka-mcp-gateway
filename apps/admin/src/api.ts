@@ -365,12 +365,34 @@ const agentGrantSchema = v.strictObject({
   enabled: v.boolean(),
   teamId: v.optional(v.pipe(v.string(), v.regex(/^team-[a-f0-9]{16}$/u))),
   sourceIds: v.optional(v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES))),
+  // The tools it may call through the agent entrance, by connector and exact upstream name.
+  tools: v.optional(v.pipe(v.array(v.strictObject({
+    name: v.pipe(v.string(), v.minLength(1), v.maxLength(128)),
+    sourceId: teamSourceIdSchema,
+  })), v.maxLength(500))),
 })
 const agentGrantsSchema = v.pipe(v.array(agentGrantSchema), v.maxLength(16))
 // As saved: `appliedSourceIds` are the sources whose Cloudflare policy names this agent's token right now.
 const teamAgentSchema = v.strictObject({
   ...agentGrantSchema.entries,
   appliedSourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
+  lastUsedAt: v.optional(v.nullable(v.string()), null),
+})
+// One line per tool call through the agent entrance: never a header, an argument or a result.
+const agentCallSchema = v.strictObject({
+  agentId: v.pipe(v.string(), v.regex(/^agent-[a-f0-9]{16}$/u)),
+  at: v.string(),
+  tool: v.pipe(v.string(), v.minLength(1), v.maxLength(256)),
+  outcome: v.picklist(['ok', 'tool_error', 'rpc_error', 'refused', 'portal_denied', 'portal_error', 'failed', 'too_large', 'cancelled']),
+  durationMs: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  responseBytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
+})
+const agentEntranceSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  status: v.picklist(['off', 'attaching', 'on', 'detaching']),
+  hostname: v.nullable(v.string()),
+  url: v.nullable(v.string()),
+  suggestedHostname: v.nullable(v.string()),
 })
 const managementCredentialStatusSchema = v.strictObject({
   schemaVersion: v.literal(1),
@@ -399,6 +421,8 @@ const teamSchema = v.strictObject({
     status: sourceStatusSchema,
     // Whether an agent's service token can reach this installed connector: only through the Portal's shared sign-in.
     agentAccess: v.optional(v.picklist(['available', 'individual_sign_in', 'management'])),
+    // Agents see the connector's tools as `<prefix>__<tool>` through the agent entrance.
+    agentToolPrefix: v.optional(v.pipe(v.string(), v.regex(/^[a-z0-9]+(?:_[a-z0-9]+)*$/u), v.maxLength(32))),
   })), v.maxLength(TEAM_MAX_SOURCES)),
   teams: v.optional(teamGrantsSchema, []),
   agents: v.optional(v.pipe(v.array(teamAgentSchema), v.maxLength(16)), []),
@@ -408,6 +432,8 @@ const teamSchema = v.strictObject({
     policyKind: v.picklist(['portal_agents', 'source_agents']),
     sourceId: v.optional(teamSourceIdSchema),
   })), null),
+  agentCalls: v.optional(v.pipe(v.array(agentCallSchema), v.maxLength(200)), []),
+  agentEntrance: v.optional(v.nullable(agentEntranceSchema), null),
   pendingAction: v.nullable(teamActionSchema),
   proposedMembers: v.nullable(teamMembersSchema),
   proposedTeams: v.optional(v.nullable(teamGrantsSchema), null),
@@ -475,6 +501,8 @@ export type TeamMember = v.InferOutput<typeof teamMemberSchema>
 export type TeamGrant = v.InferOutput<typeof teamGrantSchema>
 export type AgentGrant = v.InferOutput<typeof agentGrantSchema>
 export type TeamAgent = v.InferOutput<typeof teamAgentSchema>
+export type AgentCall = v.InferOutput<typeof agentCallSchema>
+export type AgentEntrance = v.InferOutput<typeof agentEntranceSchema>
 export type Team = v.InferOutput<typeof teamSchema>
 export type TeamAction = v.InferOutput<typeof teamActionSchema>
 export type TeamActionResult = v.InferOutput<typeof teamActionResultSchema>
@@ -494,6 +522,9 @@ export interface GatewayAdminApi {
   prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
+  /** Turns the agent entrance on at a hostname under this gateway's zone, or off. */
+  setAgentEntrance(hostname: string): Promise<AgentEntrance>
+  removeAgentEntrance(): Promise<AgentEntrance>
   getUpdate(): Promise<RuntimeUpdate>
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
@@ -576,6 +607,18 @@ const ERROR_MESSAGES = new Map([
   ['team_access_invalid_state', 'The saved access configuration could not be verified. Refresh before making changes.'],
   ['team_access_invalid_target', 'The owned access policies could not be verified. No new change can be prepared.'],
   ['team_agent_source_unsupported', 'An agent can use only connectors your Portal reaches with its own shared sign-in. Gateway Management and connectors with individual sign-in are not available to agents.'],
+  ['agent_entrance_invalid', 'Enter one hostname directly under your gateway’s zone, such as agents.example.com.'],
+  ['agent_entrance_hostname_invalid', 'Choose one name directly under your gateway’s zone that is not its dashboard or Portal hostname.'],
+  ['agent_entrance_hostname_unavailable', 'That hostname is already in use in Cloudflare. Choose another, or remove what uses it.'],
+  ['agent_entrance_admin_required', 'Only a dashboard administrator can turn the agent entrance on or off.'],
+  ['agent_entrance_credential_required', 'Add your management token in Settings before turning on the agent entrance.'],
+  ['agent_entrance_permission_missing', 'The management token cannot attach a custom domain to your gateway Worker. Give it Workers Scripts Edit (Workers Editor in the template link), then try again.'],
+  ['agent_entrance_busy', 'Finish the unfinished connector, Team, update or removal change first, then try again.'],
+  ['agent_entrance_present', 'The agent entrance is already on at another hostname. Turn it off first.'],
+  ['agent_entrance_unconfirmed', 'Cloudflare did not confirm the agent entrance hostname. Nothing was changed; try again.'],
+  ['agent_entrance_recovery_required', 'Cloudflare did not confirm the change to the agent entrance hostname. Try again to finish it.'],
+  ['agent_entrance_drift', 'The agent entrance hostname no longer matches what your gateway recorded in Cloudflare. Review it there before trying again.'],
+  ['agent_entrance_unavailable', 'Your gateway could not read its agent entrance. Try again in a moment.'],
   ['team_agent_team_missing', 'An agent follows a team that no longer exists. Choose its connectors or another team before saving.'],
   ['team_action_recovery_required', 'Some access policies may already have changed. Resume the recorded change before editing access again.'],
   ['team_policy_drift', 'Cloudflare access policies no longer match the saved configuration. Review the Cloudflare policies before trying again. This page will not reset them automatically.'],
@@ -785,6 +828,16 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
     return this.#request(`/api/team-actions/${encodeURIComponent(actionId)}`, teamActionSchema, {
       method: 'DELETE', body: '{}',
     })
+  }
+
+  setAgentEntrance(hostname: string): Promise<AgentEntrance> {
+    return this.#request('/api/agent-entrance', agentEntranceSchema, {
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, hostname }),
+    })
+  }
+
+  removeAgentEntrance(): Promise<AgentEntrance> {
+    return this.#request('/api/agent-entrance', agentEntranceSchema, { method: 'DELETE', body: '{}' })
   }
   getUpdate(): Promise<RuntimeUpdate> { return this.#request('/api/update', runtimeUpdateSchema) }
 

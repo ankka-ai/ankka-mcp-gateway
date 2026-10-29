@@ -4,6 +4,19 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add the agent entrance, for hosted agents that can send only
+  `Authorization: Bearer`, such as Claude Managed Agents. Turn it on in
+  **Team → Agents** at a hostname under your zone; your gateway attaches it to
+  its own Worker. Agents connect to `https://<hostname>/api/agents/mcp` with a
+  bearer built from their service token (`ankka_agent_v1_` and base64url of
+  `client-id:client-secret`). The entrance admits only enabled agents, forwards
+  to your Portal in direct mode with Cloudflare's service-token headers, allows
+  only the MCP methods an agent needs, and shows each agent only the tools you
+  chose for it, as `<connector>__<tool>`. Read-only tools are preselected for
+  you to confirm. It keeps one line per tool call and each agent's last use,
+  never a header, argument or result. See
+  [Agent access](docs/AGENT_ACCESS.md#agent-entrance).
+
 - Let a hosted agent use your MCP Portal with its own Cloudflare Access
   service token instead of a person's sign-in. Add it under **Team → Agents**
   with the token's client ID and token ID, never its secret, and either a list

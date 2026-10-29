@@ -7,7 +7,7 @@ import * as v from 'valibot';
 
 import { APPROVED_CLOUDFLARE_CONTRACT } from '../apps/installer/scripts/sign-gateway-release.mjs';
 import { HttpGatewayAdminApi } from '../apps/admin/src/api.ts';
-import worker, { AdminState, planTeamAccessChange, prepareCurrentGatewayTeardown, verifyAccess } from '../payload/worker/index.js';
+import worker, { AdminState, agentBearer, planTeamAccessChange, prepareCurrentGatewayTeardown, verifyAccess } from '../payload/worker/index.js';
 import { addHistoricalInstalledSource } from './historical-source-fixture.mjs';
 import {
   ACCOUNT_ID,
@@ -52,6 +52,10 @@ function teamProvider() {
   let groupSerial = 0;
   let dropCreate = false;
   const groupRoot = `/client/v4/accounts/${ACCOUNT_ID}/access/groups`;
+  // Workers custom domains, as the agent entrance attaches its hostname.
+  const domains = new Map();
+  let domainSerial = 0;
+  const domainRoot = `/client/v4/accounts/${ACCOUNT_ID}/workers/domains`;
   const storeGroup = (id, body) => {
     const stored = {
       id, account_id: ACCOUNT_ID, name: body.name,
@@ -87,6 +91,27 @@ function teamProvider() {
           }
         }
       }
+      if (record.pathname === domainRoot) {
+        if (record.method === 'GET') {
+          const hostname = new URLSearchParams(record.search).get('hostname');
+          return envelope([...domains.values()].filter((domain) => hostname === null || domain.hostname === hostname));
+        }
+        if (record.method === 'PUT') {
+          const existing = [...domains.values()].find((domain) => domain.hostname === record.body.hostname);
+          if (existing && existing.service !== record.body.service) {
+            return Response.json({ success: false, errors: [{ code: 100117, message: 'Hostname already in use' }] }, { status: 409 });
+          }
+          const stored = existing ?? { id: `synthetic-domain-${domainSerial += 1}`, hostname: record.body.hostname,
+            service: record.body.service, zone_id: record.body.zone_id, zone_name: 'example.com', environment: record.body.environment };
+          domains.set(stored.id, stored);
+          return envelope(stored);
+        }
+      }
+      if (record.pathname.startsWith(`${domainRoot}/`)) {
+        const domainId = decodeURIComponent(record.pathname.slice(domainRoot.length + 1));
+        if (record.method === 'GET') return domains.has(domainId) ? envelope(domains.get(domainId)) : envelope(null, 404);
+        if (record.method === 'DELETE') return domains.delete(domainId) ? envelope(null) : envelope(null, 404);
+      }
       if (record.pathname === `/client/v4/accounts/${ACCOUNT_ID}/tokens/verify`) return envelope({ status: 'active' });
       if (record.method === 'POST' && record.pathname.endsWith('/access/apps')) {
         const destinations = record.body.destinations ?? [];
@@ -112,6 +137,7 @@ function teamProvider() {
   return {
     ...provider,
     groups,
+    domains,
     hook(next) { hook = next; },
     dropNextGroupCreate() { dropCreate = true; },
     puts() { return provider.requests.filter(({ method }) => method === 'PUT'); },
@@ -276,7 +302,10 @@ async function fixture(run, claimInput) {
   }
   const managementStorage = gateway.objects.get('v1:management').storage;
   let sourceRequestHook;
+  let networkHook;
   const network = async (request) => {
+    const hooked = await networkHook?.(request);
+    if (hooked instanceof Response) return hooked;
     if (request.url === `${gateway.env.CF_ACCESS_ISSUER}/cdn-cgi/access/certs`) {
       return Response.json({ keys: [{ ...jwk, kid, alg: 'RS256', use: 'sig' }] });
     }
@@ -300,6 +329,7 @@ async function fixture(run, claimInput) {
   return withProviderFetch(network, () => run({ ...gateway, api, serviceApi, view, draft, apply, teardown, currentTeardown,
     headers, managementStorage, adminRequests,
     onSourceRequest(hook) { sourceRequestHook = hook; },
+    onNetwork(hook) { networkHook = hook; },
     reloadManagement() { instances.delete('v1:management'); },
   }));
 }
@@ -421,7 +451,7 @@ async function historicalPreparedTeam(gateway, input) {
   const portal = policy(gateway, 'mcp_portal');
   const plan = planTeamAccessChange(input, {
     revision: view.revision, adminEmails: view.adminEmails, currentMembers: view.members,
-    sources: view.sources.map(({ status, agentAccess: _agentAccess, ...source }) => ({ ...source, installed: status === 'installed' })),
+    sources: view.sources.map(({ status, agentAccess: _agentAccess, agentToolPrefix: _prefix, ...source }) => ({ ...source, installed: status === 'installed' })),
     portalTarget: target(app(gateway, 'mcp_portal').id, portal.id),
     sourceTargets: control.sourceOwnership.map(({ sourceId, resources }) => ({ sourceId,
       ...target(resources[2].provider.parentId, resources[2].provider.id) })),
@@ -7512,7 +7542,7 @@ test('an agent gets its own Service Auth policy on the Portal and its sources, b
   assertAgentPolicy(gateway, portal, [AGENT_TOKEN]);
   assertAgentPolicy(gateway, source, [AGENT_TOKEN]);
   assert.deepEqual([portal, source].map((id) => peoplePolicies(gateway, id)), people);
-  assert.deepEqual(after.agents, [{ ...agent({ sourceIds: [sourceId] }), appliedSourceIds: [sourceId] }]);
+  assert.deepEqual(after.agents, [{ ...agent({ sourceIds: [sourceId] }), appliedSourceIds: [sourceId], lastUsedAt: null }]);
   assert.deepEqual(after.members, view.members);
   const state = gateway.managementStorage.snapshot(TEAM_KEY);
   assert.deepEqual(state.agentPolicies.map(({ applicationId, tokenIds, sourceId: id }) => ({ applicationId, tokenIds, sourceId: id })), [
@@ -7742,4 +7772,272 @@ test('verify management access still proves both permissions with agent policies
   assert.equal(result.status, 'verified');
   assert.equal(result.accessPolicies, 'verified');
   assert.deepEqual(agentPolicies(gateway, portal), before);
+}));
+
+// The agent entrance: an MCP endpoint on its own hostname for agents that can
+// send only a bearer. The synthetic Portal below stands in for Cloudflare's.
+const ENTRANCE_HOST = 'agents.example.com';
+const ENTRANCE = `https://${ENTRANCE_HOST}/api/agents/mcp`;
+const PORTAL_MCP = 'https://mcp.example.com/mcp?codemode=off';
+const AGENT_SECRET = 'synthetic-agent-secret-never-store-0123456789abcdef';
+
+function serverIdOf(gateway, sourceId) {
+  return gateway.managementStorage.snapshot('ankka-mcp-gateway/management-control/v1')
+    .sourceOwnership.find((entry) => entry.sourceId === sourceId).resources[0].provider.id;
+}
+
+function portalAnswer(serverId) {
+  return (body) => {
+    if (body?.method === 'initialize') return Response.json({ jsonrpc: '2.0', id: body.id, result: {
+      protocolVersion: '2025-06-18', capabilities: { tools: { listChanged: true }, prompts: {}, resources: {} },
+      serverInfo: { name: 'Synthetic Portal', version: '1' }, instructions: 'Synthetic instructions.',
+    } }, { headers: { 'mcp-session-id': 'synthetic-session', 'set-cookie': 'CF_Authorization=synthetic' } });
+    if (body?.method === 'tools/list') return Response.json({ jsonrpc: '2.0', id: body.id, result: { tools: [
+      { name: `${serverId}_company_search`, description: 'Search.', inputSchema: { type: 'object' } },
+      { name: `${serverId}_company_prepare`, description: 'Prepare.', inputSchema: { type: 'object' } },
+      { name: 'portal_list_servers', description: 'Portal servers.', inputSchema: { type: 'object' } },
+    ], nextCursor: 'page-2' } });
+    if (body?.method === 'tools/call') return Response.json({ jsonrpc: '2.0', id: body.id, result: {
+      content: [{ type: 'text', text: 'synthetic result' }], isError: false } });
+    if (body?.method === 'ping') return Response.json({ jsonrpc: '2.0', id: body.id, result: {} });
+    return new Response(null, { status: 202 });
+  };
+}
+
+function syntheticPortal(gateway, respond) {
+  const calls = [];
+  gateway.onNetwork(async (request) => {
+    if (!request.url.startsWith('https://mcp.example.com/')) return undefined;
+    const body = request.method === 'POST' ? await request.json() : null;
+    calls.push({ url: request.url, method: request.method, redirect: request.redirect, headers: Object.fromEntries(request.headers), body });
+    return respond(body, request);
+  });
+  return calls;
+}
+
+function entranceClient(gateway) {
+  const pending = [];
+  const ctx = { waitUntil(promise) { pending.push(promise); } };
+  return {
+    async send(body, { bearer = agentBearer(AGENT_CLIENT, AGENT_SECRET), method = 'POST', headers = {}, url = ENTRANCE } = {}) {
+      const init = { method, headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers } };
+      if (bearer !== null) init.headers.authorization = `Bearer ${bearer}`;
+      if (body !== undefined) init.body = JSON.stringify(body);
+      return worker.fetch(new Request(url, init), gateway.env, ctx);
+    },
+    async settled() { await Promise.all(pending.splice(0)); },
+  };
+}
+
+async function agentBehindEntrance(gateway, overrides = {}) {
+  const view = await gateway.view();
+  const sourceId = installedSourceId(view);
+  const saved = await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId], tools: [{ name: 'company_search', sourceId }], ...overrides })] });
+  const attached = await gateway.api('/api/agent-entrance', { method: 'POST', body: { schemaVersion: 1, hostname: ENTRANCE_HOST } });
+  assert.equal(attached.status, 200, await attached.clone().text());
+  return { view: saved, sourceId, serverId: serverIdOf(gateway, sourceId) };
+}
+
+test('the agent entrance attaches one hostname to the gateway Worker and serves only its MCP route there', () => fixture(async (gateway) => {
+  const { view } = await agentBehindEntrance(gateway);
+  assert.deepEqual([...gateway.provider.domains.values()].map(({ hostname, service, zone_id: zone, environment }) => ({ hostname, service, zone, environment })),
+    [{ hostname: ENTRANCE_HOST, service: 'ankka-gateway-test', zone: ZONE_ID, environment: 'production' }]);
+  const after = await gateway.view();
+  assert.deepEqual(after.agentEntrance, { schemaVersion: 1, status: 'on', hostname: ENTRANCE_HOST, url: ENTRANCE, suggestedHostname: ENTRANCE_HOST });
+  assert.equal(after.revision, view.revision);
+  const calls = syntheticPortal(gateway, () => new Response(null, { status: 500 }));
+  const client = entranceClient(gateway);
+  for (const path of ['/', '/mcp', '/api/mcp', '/api/team', '/api/status', '/api/team-actions', '/__ankka/operation',
+    '/api/feedback/mcp', '/api/agents/mcp/', '/api/agents/mcp/x', '/api/agent-entrance']) {
+    const response = await worker.fetch(new Request(`https://${ENTRANCE_HOST}${path}`, { headers: await gateway.headers() }), gateway.env);
+    assert.equal(response.status, 404, path);
+  }
+  const posted = await worker.fetch(new Request(`https://${ENTRANCE_HOST}/api/team-actions`, { method: 'POST',
+    headers: await gateway.headers(), body: canonicalJson(changedRequest(after)) }), gateway.env);
+  assert.equal(posted.status, 404);
+  assert.equal((await client.send(undefined, { method: 'GET' })).status, 405);
+  assert.equal((await client.send({ jsonrpc: '2.0', id: 1, method: 'ping' }, { url: `${ENTRANCE}?codemode=on` })).status, 404);
+  assert.deepEqual(calls, []);
+  // A management state change is not an entrance change: the revision did not move.
+  assert.equal((await gateway.view()).revision, view.revision);
+}));
+
+test('a malformed, unknown or switched-off bearer gets 401 and the Portal is never contacted', () => fixture(async (gateway) => {
+  const { view, sourceId } = await agentBehindEntrance(gateway);
+  const calls = syntheticPortal(gateway, () => new Response(null, { status: 500 }));
+  const client = entranceClient(gateway);
+  const ping = { jsonrpc: '2.0', id: 1, method: 'ping' };
+  const encode = (text) => Buffer.from(text).toString('base64url');
+  for (const bearer of [null, 'ankka_agent_v1_', 'not-an-agent', `ankka_agent_v1_${encode('no-colon-here')}`,
+    `ankka_agent_v1_${encode(`${AGENT_CLIENT}:short`)}`, `ankka_agent_v1_${encode(`${AGENT_CLIENT}:${AGENT_SECRET}`)}=`,
+    agentBearer(SECOND_AGENT_CLIENT, AGENT_SECRET)]) {
+    const response = await client.send(ping, { bearer });
+    assert.equal(response.status, 401, String(bearer));
+    assert.match(response.headers.get('www-authenticate'), /^Bearer error="invalid_token"$/u);
+  }
+  const basic = await client.send(ping, { bearer: null, headers: { authorization: `Basic ${encode(`${AGENT_CLIENT}:${AGENT_SECRET}`)}` } });
+  assert.equal(basic.status, 401);
+  await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId], tools: [{ name: 'company_search', sourceId }], enabled: false })] });
+  assert.equal((await client.send(ping)).status, 401);
+  assert.deepEqual(calls, []);
+}));
+
+test('an admitted agent reaches the Portal in direct mode with its own token and sees only its tools, under stable names', () => fixture(async (gateway) => {
+  const { serverId } = await agentBehindEntrance(gateway);
+  const calls = syntheticPortal(gateway, portalAnswer(serverId));
+  const client = entranceClient(gateway);
+  const initialized = await client.send({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+    protocolVersion: '2025-06-18', capabilities: { sampling: {}, roots: { listChanged: true } }, clientInfo: { name: 'agent', version: '1' } } },
+  { headers: { 'mcp-protocol-version': '2025-06-18' } });
+  assert.equal(initialized.status, 200);
+  assert.equal(initialized.headers.get('mcp-session-id'), 'synthetic-session');
+  assert.equal(initialized.headers.get('set-cookie'), null);
+  const init = await initialized.json();
+  assert.deepEqual(init.result.capabilities, { tools: { listChanged: true } });
+  assert.equal(init.result.instructions, 'Synthetic instructions.');
+  const [first] = calls;
+  assert.equal(first.url, PORTAL_MCP);
+  assert.equal(first.redirect, 'manual');
+  assert.equal(first.headers['cf-access-client-id'], AGENT_CLIENT);
+  assert.equal(first.headers['cf-access-client-secret'], AGENT_SECRET);
+  assert.equal(first.headers['mcp-protocol-version'], '2025-06-18');
+  assert.equal(first.headers.authorization, undefined);
+  assert.deepEqual(first.body.params.capabilities, {});
+  const session = { 'mcp-session-id': 'synthetic-session' };
+  const listed = await (await client.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, { headers: session })).json();
+  assert.deepEqual(listed.result.tools.map(({ name }) => name), ['company_context__company_search']);
+  assert.equal(listed.result.nextCursor, 'page-2');
+  assert.equal(calls[1].headers['mcp-session-id'], 'synthetic-session');
+  const args = { query: 'synthetic', nested: { b: 2, a: 1 } };
+  const called = await client.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'company_context__company_search', arguments: args } }, { headers: session });
+  assert.equal(called.status, 200);
+  assert.equal((await called.json()).result.content[0].text, 'synthetic result');
+  assert.deepEqual(calls[2].body, { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: `${serverId}_company_search`, arguments: args } });
+  const portalCount = calls.length;
+  for (const name of ['company_context__company_prepare', `${serverId}_company_search`, 'portal_list_servers']) {
+    const refused = await (await client.send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name } })).json();
+    assert.deepEqual(refused, { jsonrpc: '2.0', id: 4, error: { code: -32602, message: 'Unknown tool' } });
+  }
+  for (const method of ['resources/list', 'prompts/list', 'sampling/createMessage', 'logging/setLevel']) {
+    const refused = await (await client.send({ jsonrpc: '2.0', id: 5, method })).json();
+    assert.deepEqual(refused.error, { code: -32601, message: 'Method not found' });
+  }
+  assert.equal((await client.send({ jsonrpc: '2.0', method: 'notifications/roots/list_changed' })).status, 202);
+  assert.equal((await client.send([{ jsonrpc: '2.0', id: 6, method: 'ping' }])).status, 400);
+  assert.equal(calls.length, portalCount);
+  assert.equal((await client.send({ jsonrpc: '2.0', method: 'notifications/initialized' })).status, 202);
+  assert.equal(calls.length, portalCount + 1);
+  await client.settled();
+  const view = await gateway.view();
+  assert.ok(view.agents[0].lastUsedAt);
+  assert.deepEqual(view.agentCalls.map(({ tool, outcome }) => [tool, outcome]), [
+    ['portal_list_servers', 'refused'], [`${serverId}_company_search`, 'refused'],
+    ['company_context__company_prepare', 'refused'], ['company_context__company_search', 'ok'],
+  ]);
+  assert.ok(view.agentCalls[3].responseBytes > 0);
+  // Neither the secret nor the call's arguments or result are kept anywhere.
+  const stored = JSON.stringify([...gateway.objects.values()].map(({ storage }) => storage.snapshot()));
+  for (const value of [AGENT_SECRET, 'synthetic result', 'nested']) assert.ok(!stored.includes(value), value);
+}));
+
+test('the entrance filters a tools list sent as server-sent events and passes a streamed call through', () => fixture(async (gateway) => {
+  const { serverId } = await agentBehindEntrance(gateway);
+  const sse = (events) => new Response(events.map((event) => `event: message\ndata: ${JSON.stringify(event)}\n\n`).join(''),
+    { headers: { 'content-type': 'text/event-stream' } });
+  syntheticPortal(gateway, (body) => body.method === 'tools/list'
+    ? sse([{ jsonrpc: '2.0', method: 'notifications/message', params: { level: 'info' } }, { jsonrpc: '2.0', id: body.id, result: { tools: [
+      { name: `${serverId}_company_search`, inputSchema: { type: 'object' } }, { name: `${serverId}_company_prepare`, inputSchema: { type: 'object' } },
+    ] } }])
+    : sse([{ jsonrpc: '2.0', method: 'notifications/progress', params: { progress: 1 } },
+      { jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'streamed' }], isError: true } }]));
+  const client = entranceClient(gateway);
+  const listed = await client.send({ jsonrpc: '2.0', id: 'list', method: 'tools/list' });
+  assert.match(listed.headers.get('content-type'), /^text\/event-stream/u);
+  const events = (await listed.text()).trim().split('\n\n').map((block) => JSON.parse(block.split('\n').find((line) => line.startsWith('data: ')).slice(6)));
+  assert.equal(events[0].method, 'notifications/message');
+  assert.deepEqual(events[1].result.tools.map(({ name }) => name), ['company_context__company_search']);
+  const called = await client.send({ jsonrpc: '2.0', id: 'call', method: 'tools/call', params: { name: 'company_context__company_search', arguments: {} } });
+  assert.match(await called.text(), /"streamed"/u);
+  await client.settled();
+  assert.equal((await gateway.view()).agentCalls[0].outcome, 'tool_error');
+}));
+
+for (const answer of ['redirect', 'forbidden']) {
+  test(`a Portal ${answer} is never followed or shown to the agent`, () => fixture(async (gateway) => {
+    await agentBehindEntrance(gateway);
+    const calls = syntheticPortal(gateway, () => answer === 'redirect'
+      ? new Response(null, { status: 302, headers: { location: 'https://example.cloudflareaccess.com/cdn-cgi/access/login' } })
+      : new Response('<html>Forbidden</html>', { status: 403, headers: { 'content-type': 'text/html' } }));
+    const client = entranceClient(gateway);
+    const response = await client.send({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'company_context__company_search' } });
+    assert.equal(response.status, 403);
+    assert.deepEqual(await response.json(), { schemaVersion: 1, error: 'portal_denied' });
+    assert.equal(response.headers.get('location'), null);
+    assert.equal(calls.length, 1);
+    await client.settled();
+    assert.equal((await gateway.view()).agentCalls[0].outcome, 'portal_denied');
+  }));
+}
+
+test('each agent is rate limited before its request reaches the Portal', () => fixture(async (gateway) => {
+  const { serverId } = await agentBehindEntrance(gateway);
+  const calls = syntheticPortal(gateway, portalAnswer(serverId));
+  const client = entranceClient(gateway);
+  for (let index = 0; index < 120; index += 1) {
+    assert.equal((await client.send({ jsonrpc: '2.0', id: index, method: 'ping' })).status, 200);
+  }
+  const limited = await client.send({ jsonrpc: '2.0', id: 120, method: 'ping' });
+  assert.equal(limited.status, 429);
+  assert.match(limited.headers.get('retry-after'), /^[1-9][0-9]*$/u);
+  assert.equal(calls.length, 120);
+}));
+
+test('turning the entrance off detaches its hostname, and gateway removal waits for it', () => fixture(async (gateway) => {
+  const { view, sourceId } = await agentBehindEntrance(gateway);
+  // Without agent policies, the entrance alone still holds removal.
+  await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId], enabled: false })] });
+  const refused = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, currentTeardown: true });
+  assert.deepEqual(await refused.json(), { schemaVersion: 1, error: 'teardown_agents_present' });
+  const off = await gateway.api('/api/agent-entrance', { method: 'DELETE', body: {} });
+  assert.equal(off.status, 200, await off.clone().text());
+  assert.equal((await off.json()).status, 'off');
+  assert.equal(gateway.provider.domains.size, 0);
+  assert.equal((await entranceClient(gateway).send({ jsonrpc: '2.0', id: 1, method: 'ping' })).status, 404);
+  const retried = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, currentTeardown: true });
+  assert.notEqual((await retried.json()).error, 'teardown_agents_present');
+}));
+
+test('only a person with dashboard access turns the entrance on, at one name directly under the zone', () => fixture(async (gateway) => {
+  gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+  const baseline = gateway.provider.requests.length;
+  const service = await gateway.serviceApi('/api/agent-entrance', { method: 'POST', body: { schemaVersion: 1, hostname: ENTRANCE_HOST } });
+  assert.equal(service.status, 403);
+  assert.deepEqual(await service.json(), { schemaVersion: 1, error: 'service_operation_denied' });
+  for (const hostname of ['manage.example.com', 'mcp.example.com', 'agents.other.test', 'a.b.example.com', 'AGENTS.example.com', 'example.com']) {
+    const response = await gateway.api('/api/agent-entrance', { method: 'POST', body: { schemaVersion: 1, hostname } });
+    assert.equal(response.status, 400, hostname);
+  }
+  const outside = await worker.fetch(new Request(`https://${ENTRANCE_HOST}/api/agent-entrance`, { method: 'POST',
+    headers: await gateway.headers(), body: canonicalJson({ schemaVersion: 1, hostname: ENTRANCE_HOST }) }), gateway.env);
+  assert.equal(outside.status, 404);
+  assertNoMutation(gateway.provider, baseline);
+}));
+
+test('a lost answer to attaching the hostname is resolved by listing it, never attached twice', () => fixture(async (gateway) => {
+  let dropped = false;
+  gateway.provider.hook(({ record }) => {
+    if (dropped || record.method !== 'PUT' || !record.pathname.endsWith('/workers/domains')) return undefined;
+    dropped = true;
+    gateway.provider.domains.set('synthetic-lost-domain', { id: 'synthetic-lost-domain', hostname: record.body.hostname,
+      service: record.body.service, zone_id: record.body.zone_id, zone_name: 'example.com', environment: 'production' });
+    return Response.json({ success: false, errors: [], messages: [], result: null }, { status: 500 });
+  });
+  const lost = await gateway.api('/api/agent-entrance', { method: 'POST', body: { schemaVersion: 1, hostname: ENTRANCE_HOST } });
+  assert.equal(lost.status, 502);
+  assert.equal((await gateway.view()).agentEntrance.status, 'attaching');
+  const resumed = await gateway.api('/api/agent-entrance', { method: 'POST', body: { schemaVersion: 1, hostname: ENTRANCE_HOST } });
+  assert.equal(resumed.status, 200, await resumed.clone().text());
+  assert.equal((await resumed.json()).status, 'on');
+  assert.equal(gateway.provider.requests.filter(({ method, pathname }) => method === 'PUT' && pathname.endsWith('/workers/domains')).length, 1);
+  assert.deepEqual([...gateway.provider.domains.keys()], ['synthetic-lost-domain']);
 }));

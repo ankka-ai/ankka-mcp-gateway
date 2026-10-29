@@ -1,5 +1,6 @@
 import { GatewayApiError } from './api'
 import type {
+  AgentEntrance,
   AgentGrant,
   GatewayAdminApi,
   InstalledSourceTools,
@@ -213,6 +214,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       teams: [],
       agents: [],
       agentDrift: null,
+      agentCalls: [],
+      agentEntrance: { schemaVersion: 1, status: 'off', hostname: null, url: null, suggestedHostname: 'agents.example.com' },
       pendingAction: null,
       proposedMembers: null,
       proposedTeams: null,
@@ -286,7 +289,8 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const available = new Set(this.#teamSources().filter(source => source.agentAccess === 'available').map(source => source.id))
     return agents.map(agent => {
       const reached = agent.teamId !== undefined ? teams.find(team => team.id === agent.teamId)?.sourceIds ?? [] : agent.sourceIds ?? []
-      return { ...agent, appliedSourceIds: agent.enabled ? reached.filter(id => available.has(id)).sort() : [] }
+      const lastUsedAt = this.#team.agents?.find(saved => saved.id === agent.id)?.lastUsedAt ?? null
+      return { ...agent, appliedSourceIds: agent.enabled ? reached.filter(id => available.has(id)).sort() : [], lastUsedAt }
     })
   }
 
@@ -303,7 +307,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     const action: TeamActionResult['action'] = { schemaVersion: 1, actionId: ACTION_ID, status: 'succeeded', expiresAt, failureCode: null, canCancel: false }
     this.#team.members = structuredClone(members)
     if (teams !== undefined) this.#team.teams = structuredClone(teams)
-    const savedAgents = agents ?? this.#team.agents.map(({ appliedSourceIds: _applied, ...agent }) => agent)
+    const savedAgents = agents ?? this.#team.agents.map(({ appliedSourceIds: _applied, lastUsedAt: _used, ...agent }) => agent)
     this.#team.agents = this.#appliedAgents(structuredClone(savedAgents), this.#team.teams)
     this.#team.revision += 1
     this.#team.proposedMembers = null
@@ -325,6 +329,18 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     this.#team.proposedMembers = null
     return structuredClone(this.#team.pendingAction)
   }
+  async setAgentEntrance(hostname: string): Promise<AgentEntrance> {
+    if (!this.#team.editingEnabled) throw new GatewayApiError(409, 'agent_entrance_busy')
+    if (!/^[a-z0-9-]{1,63}\.example\.com$/u.test(hostname)) throw new GatewayApiError(400, 'agent_entrance_hostname_invalid')
+    this.#team.agentEntrance = { schemaVersion: 1, status: 'on', hostname, url: `https://${hostname}/mcp`, suggestedHostname: 'agents.example.com' }
+    return structuredClone(this.#team.agentEntrance)
+  }
+
+  async removeAgentEntrance(): Promise<AgentEntrance> {
+    this.#team.agentEntrance = { schemaVersion: 1, status: 'off', hostname: null, url: null, suggestedHostname: 'agents.example.com' }
+    return structuredClone(this.#team.agentEntrance)
+  }
+
   async getUpdate(): Promise<RuntimeUpdate> { return update(this.#scenario.startsWith('update')) }
 
   async discoverSource(url: string): Promise<SourceDiscovery> {

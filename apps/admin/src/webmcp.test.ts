@@ -71,7 +71,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     schemaVersion: 1, revision: 7, editingEnabled: false, editingDisabledReason: 'managed_in_cloudflare',
     managementCredentialConfigured: false, members, adminEmails: ['operator@example.com'],
     sources: [{ id: sourceId, label: 'Example connector', enabledTools: ['search'], status: 'installed' }],
-    pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null,
+    pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null, agentCalls: [], agentEntrance: null,
   }
   const teamAction: TeamAction = {
     schemaVersion: 1, actionId, status: 'authorization_required', expiresAt,
@@ -127,7 +127,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     prepareRuntimeAction: vi.fn<GatewayAdminApi['prepareRuntimeAction']>(async (operation) => ({ ...prepared, operation })),
     getRuntimeAction: vi.fn(async (_actionId: string) => runtimeAction),
     prepareTeardownAction: vi.fn(async () => prepared),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
     getTeardownAction: vi.fn(async (_actionId: string) => teardownAction),
   } satisfies GatewayAdminApi
   const tools = createGatewayWebMcpTools(api, installationEnabled, onStateChange)
