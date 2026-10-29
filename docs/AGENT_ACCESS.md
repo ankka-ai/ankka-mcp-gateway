@@ -1,0 +1,150 @@
+# Agent access
+
+An agent is a hosted MCP client, such as a scheduled reports agent, that uses
+your gateway's MCP Portal without a person present. It signs in with its own
+Cloudflare Access service token instead of a person's sign-in, so it keeps
+working when that person's session ends.
+
+Agents are listed in **Team → Agents**. Each one names a service token you
+created in your Cloudflare account, the connectors it may use, and an on/off
+switch. Your gateway keeps only two non-secret references for each token: its
+**client ID** and its **token ID**. The client secret stays in Cloudflare and in
+the agent's own credential store. The gateway never asks for it, receives it,
+stores it or logs it.
+
+## How access works
+
+Cloudflare authorizes a service-token session twice, as its
+[MCP portal documentation](https://developers.cloudflare.com/cloudflare-one/access-controls/ai-controls/mcp-portals/#connect-with-a-service-token)
+describes. The Portal's Access application must admit the token, and each
+connected server's Access application must admit it too, or that server's
+tools stay hidden from the agent.
+
+Your gateway therefore keeps one Service Auth policy (`decision: non_identity`)
+on the Portal application and on the application of each connector an agent
+reaches. Each names exactly the tokens of the enabled agents that reach that
+application, one `service_token` rule per token, and nothing else: no email,
+no group, no "any valid service token" rule. It sits beside the policy for
+people and never replaces or changes it. Every agent policy carries the same
+name, `ankka-<installation id>-agents`, on its own application.
+
+These policies are receipt-owned like the people's policies. A Team save
+plans them, records each write before sending it, reads each one back, and
+remembers what it applied. Agent policies are never imported from Cloudflare.
+
+- Saving a change to people or teams keeps every agent policy as it is.
+- Removing an agent, or switching it off, takes its token off every policy
+  and deletes a policy no enabled agent needs. People's access does not change.
+- An agent that reaches no connector is on no policy, not even the Portal's.
+- The gateway never creates, rotates, revokes or deletes a service token.
+  Delete the token in Cloudflare when you no longer need it.
+
+## Which connectors an agent can use
+
+An agent can use a connector only when the Portal reaches it with its own
+shared credential: Cloudflare excludes servers with **Require user auth**
+(`on_behalf: true`) from service-token sessions, and service tokens do not
+support per-user OAuth with upstream servers.
+
+| Connector | For agents |
+| --- | --- |
+| Public, operator-connected OAuth, or Access service-token connector | Available |
+| Connector with individual sign-in, including the gateway's Feedback, Start here and API sources | Not available: each person signs in for themselves |
+| Gateway Management | Never available |
+| This dashboard | Never reachable: it is not a Portal connector |
+
+The Team page shows each connector's state. A save that names an unavailable
+connector for an agent is refused with `team_agent_source_unsupported`. The
+gateway does not change a connector's authentication to make it available.
+
+An agent's connectors are either an explicit list, or **Follow** a named team.
+A following agent gets that team's connectors as of each save, except the
+ones agents cannot use. If the team gains a connector later, for example
+through **All MCPs**, the agent gets it at your next Team save; the agent's row
+says so in the meantime. A team an agent follows cannot be deleted from under
+it (`team_agent_team_missing`).
+
+The tools an agent sees on a connector are that connector's allowed tools in
+the Portal, the same list people see.
+
+## Set up an agent
+
+1. **Create a service token** in Cloudflare Zero Trust under **Access
+   controls → Service credentials → Service Tokens → Create Service Token**.
+   Name it after the agent and choose a finite duration. Cloudflare shows the
+   **Client ID** and **Client Secret** once: put the secret straight into the
+   agent's credential store, never into the gateway, a repository or a chat.
+   Creating a token needs **Access: Service Tokens Edit** in your account. See
+   Cloudflare's [service token guide](https://developers.cloudflare.com/cloudflare-one/access-controls/service-credentials/service-tokens/).
+2. **Find the token ID**. It is the token's own `id`, a UUID, not its client
+   ID. Creating the token through the API returns it as `id`. For a token
+   created in the dashboard, list your tokens with
+   `GET /accounts/{account_id}/access/service_tokens` (Access: Service Tokens
+   Read) and take the `id` of the entry whose `client_id` matches.
+3. **Add the agent** on the Team page: **Agents → Add agent**, with its name,
+   client ID, token ID and connectors. Then **Save**. Your gateway writes the
+   agent policies with its management token and verifies them.
+4. **Connect the agent** to the Portal URL `https://<portal hostname>/mcp`,
+   sending `CF-Access-Client-Id` and `CF-Access-Client-Secret` on every
+   request. On a Portal whose Code Mode is on by default, add `?codemode=off`
+   to see each connector's tools directly.
+
+Only a person with dashboard access can add, change or remove an agent. The
+gateway's own service identity cannot, Gateway Management's Team tool leaves
+agents as they are, and the service token the gateway's deployment opted into
+for management can never be registered as an agent.
+
+## Turn an agent off, or remove it
+
+Switch the agent **Off** and save. Its token leaves every agent policy, so
+Cloudflare refuses its next request. Remove the agent to forget it as well.
+Neither revokes the service token: delete or revoke it in Cloudflare.
+
+Removing a connector that an agent uses is refused with
+`source_removal_agents_assigned`. Take the connector off the agent, or off the
+team it follows, and save first. Removing the gateway is refused with
+`teardown_agents_present` until no agent policy is left: switch your agents
+off or remove them first.
+
+## Drift
+
+A Team read compares every agent policy in Cloudflare with what was last
+applied. When one no longer matches, the read stays unverified and names it:
+`team_agent_policy_missing` or `team_agent_policy_changed`, with `policyKind`
+(`portal_agents` or `source_agents`) and, for a connector, its `sourceId`.
+A copy that uses the agent policy name counts as changed. People's assignments
+still load. Every Team save is refused with `team_policy_drift` until the
+policy matches again:
+
+- **Changed**: restore its name and token list in Cloudflare exactly as saved,
+  or delete the copy that uses its name, then refresh.
+- **Deleted**: switch off or remove the agents that used it and save. Switch
+  them on again afterwards to create a new policy.
+
+Other Service Auth policies on the same applications, with other names, are
+neither read nor changed, and do not count as agents.
+
+## Permissions
+
+The management token's existing **Access: Apps and Policies Edit** covers
+every agent policy write: create, replace and delete an attached policy on the
+Portal and connector applications. The gateway needs no service-token
+permission because it never touches a token. See
+[Management token](MANAGEMENT_TOKEN.md#setup-and-verified-endpoint-permissions).
+
+## Limits and qualification
+
+- Anyone who holds an agent's client ID and secret can use the Portal as that
+  agent, within its connectors and their allowed tools. Treat the secret like
+  any other credential, give the token a finite duration, and switch the
+  agent off if the secret may have leaked.
+- Tool names and descriptions are not an authorization boundary. Each
+  upstream must still enforce what its credential may do.
+- Cloudflare evaluates Service Auth policies before Block and Allow policies.
+  A connector whose only people's policy is the default deny-everyone policy
+  has not been qualified with an agent policy beside it. Qualify that case on a
+  disposable deployment before relying on it.
+- These changes are covered by synthetic tests against a simulated Cloudflare
+  API. The supported flow still needs a live check on a disposable deployment:
+  an agent token lists and calls a selected connector's tools, cannot see an
+  unselected one, and is refused after it is switched off.

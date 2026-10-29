@@ -5,7 +5,8 @@ displays its observation time. Routine reads and saves select each policy by
 its receipt-owned ID. Additional policies on the same application are neither
 displayed nor edited, and their audiences do not become Team assignments.
 Missing or duplicated managed policy IDs and unsupported policy shapes still
-block verification.
+block verification. The one other policy the gateway owns there is the
+[agent policy](#agents), which it plans and verifies by its recorded ID.
 Application removal retains its stricter checks so it cannot delete an
 application carrying additional policies.
 
@@ -267,6 +268,39 @@ with `teardown_teams_present` before anything is recorded or deleted.
 A membership change still does not end an existing Portal session by itself.
 Use [Session and acceptance limits](#revocation-and-acceptance) when someone
 must lose access immediately.
+
+<a id="agents"></a>
+
+## Agents
+
+**Team → Agents** lists hosted MCP clients that connect with their own
+Cloudflare Access service token instead of a person's sign-in. Each agent
+names the token by its client ID and token ID, never its secret, and either
+an explicit list of connectors or a named team to follow. See
+[Agent access](AGENT_ACCESS.md) for setup and connection.
+
+Agents are saved with the rest of Team, in the same revision-bound change and
+write journal. On the Portal application and on each connector application an
+enabled agent reaches, the gateway keeps one Service Auth policy beside the
+people's policy, named `ankka-<installation id>-agents`, with exactly those
+agents' tokens. It records each policy's ID and token list as applied:
+
+- A change to people or teams keeps every agent policy as it is. Only a
+  followed team's connectors carry over to its agents, at the same save.
+- Removing an agent or switching it off removes only its token. People's
+  policies do not change, and no service token is revoked.
+- An agent never reaches Gateway Management or the dashboard, and a connector
+  with individual sign-in never takes an agent.
+- A changed, deleted or copied agent policy is drift. The read stays
+  unverified and names the application (`agentDrift`); every save is refused
+  until it matches again, except a save that switches off the agents of a
+  deleted policy.
+
+Only a person with dashboard access can change agents. Gateway Management's
+Team tool and the service identity leave them as they are. A connector an
+agent uses cannot be removed, and the gateway cannot be removed while any
+agent policy exists. Storing agents raises the minimum runtime release, so a
+rollback cannot reach a release that cannot read them.
 
 <a id="recovery-and-lifecycle-limits"></a>
 

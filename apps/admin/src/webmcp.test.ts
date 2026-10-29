@@ -71,7 +71,7 @@ function fixture(installationEnabled = true, onStateChange?: () => Promise<void>
     schemaVersion: 1, revision: 7, editingEnabled: false, editingDisabledReason: 'managed_in_cloudflare',
     managementCredentialConfigured: false, members, adminEmails: ['operator@example.com'],
     sources: [{ id: sourceId, label: 'Example connector', enabledTools: ['search'], status: 'installed' }],
-    pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null,
+    pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null,
   }
   const teamAction: TeamAction = {
     schemaVersion: 1, actionId, status: 'authorization_required', expiresAt,
