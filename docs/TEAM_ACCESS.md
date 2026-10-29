@@ -296,6 +296,12 @@ agents' tokens. It records each policy's ID and token list as applied:
   until it matches again, except a save that switches off the agents of a
   deleted policy.
 
+Each agent also has a tool list for the
+[agent entrance](AGENT_ACCESS.md#agent-entrance), saved with Team like the
+rest of the agent; it changes no Cloudflare policy. The entrance itself, its
+hostname and the agents' last use and recent calls are shown in the same
+section.
+
 Only a person with dashboard access can change agents. Gateway Management's
 Team tool and the service identity leave them as they are. A connector an
 agent uses cannot be removed, and the gateway cannot be removed while any

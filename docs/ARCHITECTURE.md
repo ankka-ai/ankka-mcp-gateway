@@ -33,6 +33,11 @@ The gateway deployment contains:
   runtime state; and
 - Cloudflare-managed upstream source credentials and connections.
 
+Optionally, it also contains [agent](AGENT_ACCESS.md) Service Auth policies
+beside the people's policies, and the agent entrance hostname: a custom domain
+of the management Worker that serves only the entrance route for agents that
+can send only a bearer token.
+
 The initial installation creates an empty Portal. Administrators add sources
 later from the gateway dashboard. Each added source has an exact tool
 allowlist and may add an MCP server plus its Access resources before updating

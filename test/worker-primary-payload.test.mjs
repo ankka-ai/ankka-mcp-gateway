@@ -863,7 +863,8 @@ test('team inspection requires an administrator and V1 rejects policy preparatio
     }), { ...env, TEAM_ACCESS_ENABLED: 'true' });
     assert.equal(save.status, 409);
     assert.equal((await save.json()).error, 'team_action_conflict');
-    assert.equal((await worker.fetch(new Request('https://other.example.com/api/team', { headers }), env)).status, 503);
+    // Any hostname but the management one serves only the agent entrance.
+    assert.equal((await worker.fetch(new Request('https://other.example.com/api/team', { headers }), env)).status, 404);
     assert.equal((await worker.fetch(new Request('https://manage.example.com/api/team', { method: 'DELETE', headers }), env)).status, 405);
     assert.equal((await worker.fetch(new Request(`https://manage.example.com/api/team-actions/action_${'A'.repeat(32)}`, { headers }), env)).status, 404);
     assert.equal(snapshot(), beforeRejectedWrites, 'rejected writes leave every stored record untouched');

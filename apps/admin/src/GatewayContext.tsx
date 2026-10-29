@@ -30,6 +30,7 @@ import {
   type TeamActionResult,
   type TeamGrant,
   type AgentGrant,
+  type AgentEntrance,
   type TeamMember,
   type TeardownAction,
   validHandoffUrl,
@@ -77,6 +78,8 @@ interface GatewayContextValue {
   getManagementCredentialStatus(): Promise<ManagementCredentialStatus>
   getTeam(): Promise<Team>
   prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]): Promise<TeamActionResult>
+  setAgentEntrance(hostname: string): Promise<AgentEntrance>
+  removeAgentEntrance(): Promise<AgentEntrance>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
 }
@@ -532,6 +535,14 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
       } catch (cause) {
         throw cause instanceof GatewayApiError ? cause : new GatewayApiError(502, 'team_prepare_failed')
       }
+    }),
+    setAgentEntrance: (hostname) => runBusy(async () => {
+      try { return await apiRef.current.setAgentEntrance(hostname) }
+      catch (cause) { throw cause instanceof GatewayApiError ? cause : new GatewayApiError(502, 'agent_entrance_unconfirmed') }
+    }),
+    removeAgentEntrance: () => runBusy(async () => {
+      try { return await apiRef.current.removeAgentEntrance() }
+      catch (cause) { throw cause instanceof GatewayApiError ? cause : new GatewayApiError(502, 'agent_entrance_unconfirmed') }
     }),
     cancelTeamAction: (actionId) => runBusy(async () => {
       try { return await apiRef.current.cancelTeamAction(actionId) }

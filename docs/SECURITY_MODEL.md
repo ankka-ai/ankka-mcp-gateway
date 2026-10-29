@@ -125,6 +125,27 @@ access can change agents. Removing an agent or switching it off removes its
 token from every policy and revokes nothing in Cloudflare; the service token
 itself is the customer's to delete.
 
+The optional [agent entrance](AGENT_ACCESS.md#agent-entrance) serves agents
+that can send only a bearer. It runs in the gateway Worker on its own
+hostname, outside Access: every hostname other than the management hostname
+(and the temporary `workers.dev` address an installation uses) reaches only
+the entrance route, `/api/agents/mcp`, before any other routing in either
+entry layer, and every other path there answers 404. The bearer carries the
+agent's own service token; the entrance holds it only for that request,
+admits only an enabled agent on the Portal's agent policy, and forwards only
+to the gateway's own Portal URL in direct-tool mode, with Cloudflare's two
+service-token headers, no `Authorization` or cookie, and redirects never
+followed. It forwards only `initialize`, `ping`, `tools/list`, `tools/call`
+and two notifications, strips the client's capabilities from `initialize`,
+and lets an agent see and call only the tools chosen for it. That list narrows
+the entrance, not the Portal: Cloudflare and each upstream remain the
+boundary for a leaked token. It keeps one line per tool call (agent, tool,
+outcome, duration, size) and never a header, argument or result. Turning it
+on attaches one custom domain to the gateway's own Worker with the management
+token; gateway removal waits until it is off. Cloudflare's static-asset layer
+answers browser page requests on that hostname with the public dashboard page
+before the Worker runs; it carries no data.
+
 The optional [Gateway Management source](GATEWAY_MANAGEMENT_MCP.md) is an explicit
 management capability. Its ordinary source assignment grants fixed management
 operations; no separate MCP administrator role is required. The Worker validates

@@ -31,6 +31,8 @@ const team: Team = {
   agents: [],
   proposedAgents: null,
   agentDrift: null,
+  agentCalls: [],
+  agentEntrance: null,
 }
 
 function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
@@ -40,7 +42,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     getTeam: vi.fn(async () => structuredClone(team)), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
     ...overrides,
   }
 }
@@ -759,13 +761,61 @@ describe('TeamPage', () => {
     if (!knowledge || !catalogue) throw new Error('expected the fixture connectors')
     const saved: Team = { ...team, teams: [finance], sources: [{ ...knowledge, agentAccess: 'available' }, catalogue],
       agents: [{ id: 'agent-0000000000000001', name: 'Weekly reports', clientId: `${'a'.repeat(32)}.access`,
-        tokenId: '11111111-2222-4333-8444-555555555555', enabled: true, teamId: finance.id, appliedSourceIds: [sourceId] }] }
+        tokenId: '11111111-2222-4333-8444-555555555555', enabled: true, teamId: finance.id, appliedSourceIds: [sourceId], lastUsedAt: null }] }
     renderTeam(api({ getTeam: vi.fn(async () => structuredClone(saved)), prepareTeamAction }))
     const row = await screen.findByRole('group', { name: 'Weekly reports' })
     expect(row).toHaveTextContent('Follows Finance: 1 connector')
     await toggleAccess(user, screen.getByRole('group', { name: 'analyst@example.com' }), /Company knowledge/)
     await user.click(screen.getByRole('button', { name: 'Save' }))
     expect(prepareTeamAction.mock.calls[0]?.[3]).toBeUndefined()
+  })
+
+  it('preselects only read tools for an agent, keeps what the operator chose and saves exact tool references', async () => {
+    const user = userEvent.setup()
+    const prepareTeamAction = vi.fn<(revision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]) => Promise<never>>(() => new Promise(() => {}))
+    const [knowledge] = team.sources
+    if (!knowledge) throw new Error('expected the fixture connector')
+    const saved: Team = { ...team, sources: [{ ...knowledge, agentAccess: 'available', agentToolPrefix: 'company_knowledge' }],
+      agents: [{ id: 'agent-0000000000000001', name: 'Weekly reports', clientId: `${'a'.repeat(32)}.access`,
+        tokenId: '11111111-2222-4333-8444-555555555555', enabled: true, sourceIds: [sourceId], appliedSourceIds: [sourceId],
+        lastUsedAt: '2026-10-29T08:00:00.000Z' }],
+      agentCalls: [{ agentId: 'agent-0000000000000001', at: '2026-10-29T08:00:00.000Z', tool: 'company_knowledge__search',
+        outcome: 'refused', durationMs: 0, responseBytes: 0 }] }
+    const getInstalledSourceTools = vi.fn(async () => ({ schemaVersion: 1 as const, sourceId, revision: 3, state: 'ready' as const,
+      enabledTools: ['fetch_document', 'search'], pendingTools: null, tools: [
+        { name: 'fetch_document', readOnlyHint: true }, { name: 'search', readOnlyHint: false }, { name: 'delete_document', readOnlyHint: true },
+      ] }))
+    renderTeam(api({ getTeam: vi.fn(async () => structuredClone(saved)), prepareTeamAction, getInstalledSourceTools }))
+    const row = await screen.findByRole('group', { name: 'Weekly reports' })
+    expect(row).toHaveTextContent('Last used')
+    expect(screen.getByText('Recent agent calls (1)')).toBeInTheDocument()
+    await user.click(within(row).getByRole('button', { name: 'Tools for Weekly reports' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Tools for Weekly reports' })
+    expect(within(dialog).getByText(/is not a permission/)).toBeVisible()
+    expect(await within(dialog).findByText('company_knowledge__tool_name')).toBeVisible()
+    // Only the connector's allowed tools are offered; of those, only the read-only ones start selected.
+    expect(within(dialog).queryByRole('checkbox', { name: /delete_document/ })).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('checkbox', { name: /fetch_document/ })).toBeChecked()
+    expect(within(dialog).getByRole('checkbox', { name: /^search/ })).not.toBeChecked()
+    await user.click(within(dialog).getByRole('checkbox', { name: /^search/ }))
+    await user.click(within(dialog).getByRole('button', { name: 'Use these tools' }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(prepareTeamAction.mock.calls[0]?.[3]).toEqual([{ id: 'agent-0000000000000001', name: 'Weekly reports',
+      clientId: `${'a'.repeat(32)}.access`, tokenId: '11111111-2222-4333-8444-555555555555', enabled: true, sourceIds: [sourceId],
+      tools: [{ name: 'fetch_document', sourceId }, { name: 'search', sourceId }] }])
+  })
+
+  it('turns the agent entrance on at the suggested hostname and shows its address', async () => {
+    const user = userEvent.setup()
+    const entrance = { schemaVersion: 1 as const, status: 'off' as const, hostname: null, url: null, suggestedHostname: 'agents.example.com' }
+    const setAgentEntrance = vi.fn(async (hostname: string) => ({ ...entrance, status: 'on' as const, hostname,
+      url: `https://${hostname}/api/agents/mcp` }))
+    renderTeam(api({ getTeam: vi.fn(async () => structuredClone({ ...team, agentEntrance: entrance })), setAgentEntrance }))
+    const panel = await screen.findByRole('region', { name: 'Agent entrance' })
+    await user.click(within(panel).getByRole('button', { name: 'Turn on' }))
+    expect(setAgentEntrance).toHaveBeenCalledWith('agents.example.com')
+    expect(await within(panel).findByText('https://agents.example.com/api/agents/mcp')).toBeVisible()
+    expect(within(panel).getByText(/ankka_agent_v1_/)).toBeVisible()
   })
 
   it.each(['team', 'member'])('saves persistent all-MCP consent for a %s and can return to selected connectors', async mode => {

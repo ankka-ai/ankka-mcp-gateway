@@ -331,6 +331,7 @@ belongs to the disposable-account qualification below.
 | GET account token verification | The account token itself; no token-management permission requested |
 | GET account/zone Access apps, exact app and attached policies; POST source app/policy; PUT attached Team policy; POST, PUT and DELETE of the attached agent policy | Access: Apps and Policies Write |
 | GET/POST MCP servers; GET/PUT the exact owned Portal | MCP Portals Write |
+| GET/PUT/DELETE one Workers custom domain on the gateway's own Worker, the [agent entrance](AGENT_ACCESS.md#agent-entrance) hostname | Workers Scripts Write (the template's Workers: Editor) |
 
 Named teams add Cloudflare Access group create, update, and delete. Cloudflare's
 group create and update methods list **Access: Organizations, Identity
@@ -368,6 +369,11 @@ qualification or proof that every narrower permission combination fails.
   create answer is resolved by listing that one application's policies. No
   service token is ever created, read, rotated or revoked, so the token needs
   no service-token permission. See [Agent access](AGENT_ACCESS.md).
+- Agent entrance: attach or detach one custom domain, the entrance hostname
+  directly under the gateway's zone, on the gateway's own Worker. The write is
+  recorded before it is sent and read back after it; a lost answer is resolved
+  by listing that hostname's domains. Cloudflare creates and deletes its DNS
+  record. Nothing else of the Worker changes.
 - Administrator identity and same-origin checks apply to every management
   mutation. There is no caller-selected Cloudflare URL or credential forwarding.
 - Managed BigQuery provisioning requires broader Worker authority and retains
