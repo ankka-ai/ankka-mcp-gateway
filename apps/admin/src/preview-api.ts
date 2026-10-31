@@ -238,7 +238,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
       // A synthetic agent: preview identifiers only, never a real service token.
       this.#team.agents = this.#appliedAgents([{
         id: 'agent-0123456789abcdef', name: 'Weekly reports', clientId: `${'0'.repeat(32)}.access`,
-        tokenId: '00000000-0000-4000-8000-000000000000', enabled: true, teamId: 'team-0123456789abcdef',
+        tokenId: `${'0'.repeat(8)}-0000-4000-8000-${'0'.repeat(12)}`, enabled: true, teamId: 'team-0123456789abcdef',
       }], this.#team.teams)
     }
     if (scenario === 'team-recovery' || scenario === 'team-legacy') {
