@@ -53,13 +53,21 @@ token, and its tools are listed once the token works.
 
 Cloudflare never returns `auth_credentials` once written.
 
+Cloudflare refuses a bearer record created without `auth_credentials`, so the
+gateway creates it with the fixed, public value `ankka-pending-customer-credential`.
+It is not a credential, and the gateway sends it only when it creates the record.
+Your write replaces it. Until then Access refuses Cloudflare's requests to the
+origin, so the record reports an error or waits and never reads Ready, and the
+gateway keeps waiting for your token.
+
 ## Adding a new connector
 
 1. Inspect the endpoint, choose the service token, name the connector and save
    the draft. It has no tools yet.
 2. Install it. The gateway creates the connector's Cloudflare server record with
-   `auth_type: "bearer"`, its ownership marker and no credentials, with nothing
-   enabled and nobody assigned, and does not attach it to the Portal. It then
+   `auth_type: "bearer"`, its ownership marker and the placeholder below instead
+   of credentials, with nothing enabled and nobody assigned, and does not attach
+   it to the Portal. It then
    pauses with **Write the service token**, showing the server ID and the command.
 3. Write the token, then resume. The gateway asks Cloudflare to sync that one
    record and reads it back. It continues only when the record still has the
@@ -80,7 +88,7 @@ Cloudflare cannot change a server record's type, so the switch creates a second
 record:
 
 1. The gateway creates the new bearer record with the connector's current tool
-   allowlist and no credentials, then pauses. Your team keeps using the shared
+   allowlist and the placeholder below instead of credentials, then pauses. Your team keeps using the shared
    sign-in meanwhile.
 2. You write the token into the new record and choose **Continue**. The gateway
    checks the record's shape, including that its tool overrides are unchanged,
@@ -123,27 +131,34 @@ gateway removal wait. Finish or roll back the switch first.
   and secret stay the same. To rotate it, rotate in Cloudflare with a grace
   period and write the new secret into the record with the same command.
 
-## Unverified Cloudflare behaviour
+## Cloudflare behaviour observed live
 
-This mode was built and tested against a synthetic Cloudflare, not a live
-account. It relies on behaviour Cloudflare's API reference describes but that
-has not been observed here:
+Checked on a live account on 2026-10-31 with throwaway server records, deleted
+afterwards:
 
 1. A server record created with `auth_type: "bearer"` and no `auth_credentials`
-   is accepted, and becomes usable once credentials are written into it.
-2. An update that carries only `auth_credentials` leaves every other field of
-   the record unchanged, including its tool overrides (`updated_tools`).
-3. Updating an MCP Access application with its existing policies named by ID
-   keeps them attached.
+   is refused: HTTP 400, code 7001, `auth_credentials is required for auth_type
+   "bearer"`. With a placeholder string in `auth_credentials` and two tool
+   overrides it is accepted with status `waiting` and its overrides stored.
+   gateway-v0.2.45 created the record without credentials, so its switch always
+   stopped at the first step; the gateway now sends the placeholder.
+2. An update that carries only `auth_credentials`, in the format of the command
+   above, leaves the name, hostname, description, `secure_web_gateway` and tool
+   overrides (`updated_tools`) unchanged. With dummy values the record went to
+   `error`, and no read returns `auth_credentials`.
+3. Updating an MCP Access application that names its existing policy by ID, plus
+   one new policy, keeps the existing policy attached.
 
-The gateway does not trust these. It reads the record back after every step and
-continues only from an exact, recognised state, so a difference stops the
-switch before the connector is moved, or before it is attached for a new
-connector:
+Still not observed live: a record moving from the placeholder to Ready after a
+real token is written, and a name-only update (a connector rename) on a bearer
+record. The gateway does not rely on any of this. It reads the record back after
+every step and continues only from an exact, recognised state, so a difference
+stops the switch before the connector is moved, or before it is attached for a
+new connector:
 
-- If Cloudflare refuses a bearer record without credentials, starting the
-  switch stops with **source_switch_recovery_required** and nothing else has
-  changed. **Cancel switch** deletes whatever was created.
+- If Cloudflare refuses to create the bearer record, starting the switch stops
+  with **source_switch_recovery_required** and nothing else has changed.
+  **Roll back** or **Cancel switch** deletes whatever was created.
 - If the record never reports Ready after the token is written, the switch
   keeps waiting. Nothing has moved; **Cancel switch** deletes the new record.
 - If the credential write changed the record's tool overrides or any other
@@ -164,7 +179,7 @@ Take one rarely used, read-only connector through the switch first:
    `auth_type: "bearer"`, for example with `cf mcp servers list`.
 3. Create the token and its Service Auth policy, write the token with the
    command, and choose **Continue**. Before anything moves, the gateway checks
-   assumptions 1 and 2 against the live record.
+   that the record is Ready with its tools and that its overrides are unchanged.
 4. After the switch, have an assigned person call one of the connector's tools,
    check that a person who is not assigned does not see it, and check the Access
    log for a service-token request to the origin.

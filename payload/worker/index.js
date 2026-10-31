@@ -703,9 +703,13 @@ const SOURCE_LABEL_EDIT_KEY = 'ankka-mcp-gateway/source-label-edit/v1';
 const SOURCE_AUTH_SWITCH_KEY = 'ankka-mcp-gateway/source-token-switch/v1';
 // A source behind a self-hosted Access application in this gateway's account,
 // reached with an Access service token the customer writes into Cloudflare.
-// The gateway creates its bearer server record without credentials and never
-// asks for, receives, stores or logs the token.
+// The gateway never asks for, receives, stores or logs the token.
 const ACCESS_SERVICE_MODE = 'access_service_token';
+// Cloudflare refuses a bearer server record created without `auth_credentials`
+// (400, code 7001). The gateway creates it with this fixed, public value, which
+// is not a credential; the customer replaces it with their token in Cloudflare.
+// A record still on it never syncs behind Access, so it reads as credential missing.
+const PENDING_BEARER_PLACEHOLDER = 'ankka-pending-customer-credential';
 const SOURCE_AUTH_MODES = Object.freeze(['none', 'oauth', ACCESS_SERVICE_MODE]);
 const INTERNAL_SOURCE_REMOVAL_PATH = '/source-removal';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
@@ -2604,7 +2608,7 @@ async function createResource(state, kind, token) {
   } else if (kind === 'mcp_server') {
     const oauth = desired.desired.authentication.mode === 'oauth';
     path = `/accounts/${account}/access/ai-controls/mcp/servers`;
-    // A bearer record is created without `auth_credentials`: the customer
+    // A bearer record is created with the public placeholder only: the customer
     // writes the service token into Cloudflare, never through this gateway.
     body = {
       id: desired.key,
@@ -2614,6 +2618,7 @@ async function createResource(state, kind, token) {
       secure_web_gateway: false,
       description: marker(state.installationId, desired.key),
     };
+    if (body.auth_type === 'bearer') body.auth_credentials = PENDING_BEARER_PLACEHOLDER;
     // A sign-in source is created before its tools can be chosen. It carries
     // no override then; the Portal mapping alone enables tools, later.
     if (desired.desired.toolPolicy.allowedTools.length > 0 && !nativeSourceId(state.source?.id)) {

@@ -722,7 +722,7 @@ export function SourcesPage({ catalog = SOURCE_CATALOG }: SourcesPageProps) {
                   <div className="mt-5 max-w-[80ch] text-xs leading-5 text-kumo-subtle" aria-label="What happens next">
                     <p className="text-sm font-medium text-kumo-default">Write the token before choosing tools. What happens next:</p>
                     <ol className="mt-2 list-decimal space-y-1.5 pl-5">
-                      <li>Save this draft and install it. The gateway creates the connector’s server record without credentials, with nothing enabled and nobody assigned, and does not attach it to your Portal.</li>
+                      <li>Save this draft and install it. The gateway creates the connector’s server record with a placeholder instead of credentials, with nothing enabled and nobody assigned, and does not attach it to your Portal.</li>
                       <li>Create a service token in Cloudflare and write it into that record from your own shell. This page shows the exact command. The token stays in your Cloudflare account.</li>
                       <li>Come back to this page. It lists the connector’s real tools and you choose which to allow. Only those are attached.</li>
                     </ol>

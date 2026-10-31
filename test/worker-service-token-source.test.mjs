@@ -4,8 +4,8 @@ import worker, { AdminState } from '../payload/worker/index.js';
 import { ACCOUNT_ID, ZONE_ID, canonicalJson, cloudflareProvider, installReadyGateway, withProviderFetch } from './payload-lifecycle.mjs';
 
 // Sources reached with a Cloudflare Access service token. Every provider is
-// synthetic. The customer's credential write is modelled directly on the fake
-// Cloudflare state: the gateway itself must never send `auth_credentials`.
+// synthetic. The gateway sends `auth_credentials` only once, as the public
+// placeholder on create; the customer's own credential write is a separate PUT.
 const ADMIN = 'admin@example.com';
 const MEMBER = 'member@example.com';
 const ORIGIN = 'https://manage.example.com';
@@ -16,25 +16,45 @@ const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
 const SWITCH_KEY = 'ankka-mcp-gateway/source-token-switch/v1';
 const SERVERS = `/client/v4/accounts/${ACCOUNT_ID}/access/ai-controls/mcp/servers`;
 const TOOLS = [{ name: 'warehouse_read' }, { name: 'warehouse_write' }];
+const PLACEHOLDER = 'ankka-pending-customer-credential';
 const envelope = (result, status = 200) => Response.json({ success: status < 300, errors: [], messages: [], result }, { status });
 
 /** The real Worker over the fake provider, extended with what Cloudflare does for these flows. */
 async function fixture(run) {
   let hook;
+  // What Cloudflare stores privately per bearer record; a read never returns it.
+  const credentials = new Map();
   const provider = cloudflareProvider({ async onRequest(context) {
     const intercepted = await hook?.(context);
     if (intercepted instanceof Response) return intercepted;
     const { record, state } = context;
     if (record.pathname === `/client/v4/accounts/${ACCOUNT_ID}/tokens/verify`) return envelope({ status: 'active' });
-    // A bearer record without credentials cannot sync: Access refuses Cloudflare before the origin.
+    // As measured live: a bearer record created with the placeholder starts `waiting`, keeps
+    // its credential private, and cannot sync because Access refuses Cloudflare before the origin.
     if (record.method === 'POST' && record.pathname === SERVERS && record.body.auth_type === 'bearer') {
-      const server = { ...record.body, status: 'error', error: 'synthetic-private-detail', error_details: { status_code: 401 }, tools: [] };
+      const { auth_credentials: credential, ...body } = record.body;
+      const server = { ...body, status: 'waiting', tools: [] };
       state.servers.set(server.id, server);
+      credentials.set(server.id, credential);
       return envelope(server);
     }
     if (record.pathname.startsWith(`${SERVERS}/`) && record.pathname.endsWith('/sync') && record.method === 'POST') {
-      const server = state.servers.get(decodeURIComponent(record.pathname.slice(SERVERS.length + 1, -'/sync'.length)));
+      const id = decodeURIComponent(record.pathname.slice(SERVERS.length + 1, -'/sync'.length));
+      const server = state.servers.get(id);
+      if (server && credentials.get(id) === PLACEHOLDER) {
+        Object.assign(server, { status: 'error', error: 'synthetic-private-detail', error_details: { status_code: 401 }, tools: [] });
+      }
       return server ? envelope(server) : envelope(null, 404);
+    }
+    // The customer's step-3.2 write: only `auth_credentials`, and every other field stays.
+    if (record.method === 'PUT' && record.pathname.startsWith(`${SERVERS}/`) && Object.keys(record.body ?? {}).join() === 'auth_credentials') {
+      const id = decodeURIComponent(record.pathname.slice(SERVERS.length + 1));
+      const server = state.servers.get(id);
+      if (!server) return envelope(null, 404);
+      credentials.set(id, record.body.auth_credentials);
+      Object.assign(server, { status: 'ready', authentication_status: 'not_required', tools: structuredClone(TOOLS),
+        error: undefined, error_details: undefined });
+      return envelope(server);
     }
     // A Team policy edit and a Team application retarget, both on an existing target.
     for (const base of [`/client/v4/zones/${ZONE_ID}/access/apps`, `/client/v4/accounts/${ACCOUNT_ID}/access/apps`]) {
@@ -107,9 +127,13 @@ async function install(gateway, sourceId, actionId = null) {
     { method: 'POST', body: { schemaVersion: 1, revision, sourceId } });
 }
 
-function customerWritesToken(gateway, serverId, tools = TOOLS) {
-  Object.assign(gateway.provider.state.servers.get(serverId), { status: 'ready', authentication_status: 'not_required', tools,
-    error: undefined, error_details: undefined });
+/** The customer's own step-3.2 request to Cloudflare, with synthetic values; it never passes through the gateway. */
+async function customerWritesToken(gateway, serverId) {
+  const credential = JSON.stringify({ headers: { 'cf-access-client-id': 'synthetic-client.access', 'cf-access-client-secret': 'synthetic-value' } });
+  const response = await gateway.provider.fetch(new Request(`https://api.cloudflare.com${SERVERS}/${encodeURIComponent(serverId)}`, {
+    method: 'PUT', redirect: 'manual', headers: { authorization: 'Bearer synthetic-customer-api-token', 'content-type': 'application/json' },
+    body: JSON.stringify({ auth_credentials: credential }) }));
+  assert.equal(response.status, 200);
 }
 
 async function installedOauthSource(gateway) {
@@ -148,7 +172,7 @@ test('a service-token source needs a self-hosted Access application in this acco
   assert.equal(own.status, 400);
 }));
 
-test('a service-token source installs a bearer record without credentials and waits for the customer token', async () => fixture(async (gateway) => {
+test('a service-token source installs a bearer record with only the placeholder and waits for the customer token', async () => fixture(async (gateway) => {
   gateway.coverOrigin();
   const saved = await saveDraft(gateway, 'access_service_token');
   const source = (await saved.json()).sources.find((entry) => entry.url === SOURCE_URL);
@@ -158,7 +182,8 @@ test('a service-token source installs a bearer record without credentials and wa
   assert.equal((await paused.json()).error, 'source_credential_required');
   const created = gateway.provider.requests.find((entry) => entry.method === 'POST' && entry.pathname === SERVERS && entry.body.hostname === SOURCE_URL);
   assert.equal(created.body.auth_type, 'bearer');
-  assert.equal(Object.hasOwn(created.body, 'auth_credentials'), false);
+  // Cloudflare refuses a bearer create without credentials; the gateway sends only the public placeholder.
+  assert.equal(created.body.auth_credentials, PLACEHOLDER);
   assert.equal(Object.hasOwn(created.body, 'is_shared_oauth_callback_enabled'), false);
   assert.match(created.body.id, /^mcp-source-[a-f0-9]{12}-[a-f0-9]{8}$/u);
   assert.equal(gateway.provider.requests.some((entry) => entry.method === 'PUT' && entry.pathname.startsWith(`${SERVERS}/`)), false);
@@ -172,7 +197,7 @@ test('a service-token source installs a bearer record without credentials and wa
   const rejected = await install(gateway, source.id, snapshot.actionId);
   assert.equal((await rejected.json()).error, 'source_credential_required');
   assert.ok(gateway.provider.requests.some((entry) => entry.method === 'POST' && entry.pathname === `${SERVERS}/${created.body.id}/sync`));
-  customerWritesToken(gateway, created.body.id);
+  await customerWritesToken(gateway, created.body.id);
   const tools = await install(gateway, source.id, snapshot.actionId);
   assert.equal((await tools.json()).error, 'source_tools_required');
   const { revision } = await (await gateway.api('/api/sources')).json();
@@ -238,18 +263,26 @@ test('switching a shared sign-in source to its token keeps tools and Team assign
   assert.equal(tokenId.slice(0, 23), oauthId.slice(0, 23), 'the tool-name prefix keeps the source identity');
   const created = gateway.provider.state.servers.get(tokenId);
   assert.equal(created.auth_type, 'bearer');
-  assert.equal(Object.hasOwn(created, 'auth_credentials'), false);
+  assert.equal(Object.hasOwn(created, 'auth_credentials'), false, 'a read never returns the credential');
+  const createRequest = gateway.provider.requests.find((entry) => entry.method === 'POST' && entry.pathname === SERVERS && entry.body.id === tokenId);
+  assert.equal(createRequest.body.auth_credentials, PLACEHOLDER);
   assert.deepEqual(created.updated_tools, [{ name: 'warehouse_read', enabled: true }]);
   assert.ok(gateway.provider.state.portal.servers.some((entry) => entry.server_id === oauthId), 'the source keeps working meanwhile');
   // Anything else waits while the switch is open.
   const { revision } = await (await gateway.api('/api/sources')).json();
   const edit = await gateway.api(`/api/sources/${source.id}/tools`, { method: 'PUT', body: { schemaVersion: 1, revision, enabledTools: ['warehouse_read', 'warehouse_write'] } });
   assert.equal(edit.status, 409);
-  // Until the token works, continuing only waits.
+  // While the placeholder is in place, continuing only waits: a sync cannot pass Access, so it never reads Ready.
   const waiting = await switchTo(gateway, source.id, 'continue');
   assert.equal((await waiting.json()).tokenSwitch.reason, 'source_credential_required');
+  assert.equal(gateway.provider.state.servers.get(tokenId).status, 'error');
+  assert.ok(gateway.provider.requests.some((entry) => entry.method === 'POST' && entry.pathname === `${SERVERS}/${tokenId}/sync`));
+  const again = await switchTo(gateway, source.id, 'continue');
+  assert.equal((await again.json()).tokenSwitch.phase, 'credential');
+  assert.equal(gateway.provider.requests.filter((entry) => entry.method === 'POST' && entry.pathname === SERVERS && entry.body.id === tokenId).length, 1,
+    'the record is created once; waiting never writes the placeholder again');
   // A credential write that changed the tool overrides is drift, not a token.
-  customerWritesToken(gateway, tokenId);
+  await customerWritesToken(gateway, tokenId);
   gateway.provider.state.servers.get(tokenId).updated_tools = [];
   const drift = await switchTo(gateway, source.id, 'continue');
   assert.equal((await drift.json()).error, 'source_switch_drift');
@@ -291,7 +324,7 @@ test('a failed move rolls back to the sign-in record while it exists', async () 
   const before = controlBefore.sourceOwnership.find((entry) => entry.sourceId === source.id).resources;
   const started = await (await switchTo(gateway, source.id, 'start')).json();
   const tokenId = started.tokenSwitch.credentialTarget.serverId;
-  customerWritesToken(gateway, tokenId);
+  await customerWritesToken(gateway, tokenId);
   // The Portal refuses the mapping onto the new record after the source was unmapped and the application moved.
   gateway.hook(({ record }) => record.method === 'PUT' && record.pathname.includes('/mcp/portals/') &&
     record.body.servers.some((entry) => entry.server_id === tokenId) ? envelope(null, 500) : undefined);
