@@ -12,7 +12,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/server": "2.3.0",
     "jose": "6.2.10",
     "zod": "4.5.4"
   },
