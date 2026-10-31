@@ -17,6 +17,14 @@ Notable public product and repository changes are recorded here.
   the release that turned it on. See
   [Team connect pages](docs/TEAM_CONNECT_PAGES.md).
 
+- Record a gateway update as finished about three seconds after the upload
+  instead of about five minutes. Cloudflare keeps the gateway's management
+  object on the previous code for about five minutes after an upload, so the
+  action stayed `applying` and could briefly read `recovery_required`. The
+  object now resets itself once the update pass has revoked its grant and
+  recorded its end, and restarts on the new code. Takes effect for updates and
+  rollbacks from this release on.
+
 - Connect a source behind your own Cloudflare Access application with an
   Access service token, so it no longer depends on one person's sign-in that
   Access ends after 14 days. The option appears only when a self-hosted Access
