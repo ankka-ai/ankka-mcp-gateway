@@ -93,12 +93,16 @@ An update starts in the gateway dashboard and runs on the gateway itself:
    until the two are equal on two answers in a row. It waits at most sixty
    seconds; past that it hands over anyway and says that the dashboard may
    need a reload. An attempt that was not applied hands over at once.
-5. The page hands the browser to Settings, which polls the action. The new
-   version's alarm finds itself running the target release and completes the
-   journal with `finalize`; if the old version still runs after five minutes,
-   it marks the action as needing recovery instead. A read of the action that
-   the management object answers on the target release completes it the same
-   way.
+5. Once the grant is revoked and the attempt's end is recorded, the
+   management object re-arms its alarm for now, waits for its writes to reach
+   disk, and resets itself (`ctx.abort()`). Cloudflare runs the interrupted
+   alarm again on a fresh instance, which loads the active version, finds
+   itself running the target release and completes the journal with
+   `finalize`, about three seconds after the upload. If the object still runs
+   the old version after five minutes, the alarm marks the action as needing
+   recovery instead. A read of the action that the management object answers
+   on the target release completes it the same way. The page hands the
+   browser to Settings, which polls the action.
 
 The serving release is the stateless entrypoint's own `ANKKA_GATEWAY_RELEASE`,
 which it names on the progress request it forwards to the management object.
@@ -112,12 +116,24 @@ the version that ran it was replaced before it could record its end.
 
 The object can also be the one behind. Cloudflare documents that a request can
 reach the new Worker version and then a Durable Object that still runs the old
-code, typically for seconds to minutes. Until that object restarts on the
-target, its alarm finds the old release and waits, and the action stays
-`applying` at its last recorded stage, usually `assets_uploaded`, although the
-target already serves. In the first unattended update on a production gateway
-on 2026-10-10, the entrypoint served the target at least 100 seconds before the
-journal recorded `succeeded`. Each action read through the gateway entrypoint
+code, typically for seconds to minutes. A synthetic Worker with one SQLite
+Durable Object, measured on 2026-10-22, showed the pattern: a running object
+kept the old code for 296 to 302 seconds after each of five uploads, while an
+object reset right after the upload started on the new code within four
+seconds in each of seventeen runs, and no instance started after an upload
+ran the old code. The reset in step 5 relies on that. The release that runs
+the update performs it, so it applies to every update and rollback from a
+release that carries it.
+
+Without the reset, the object's alarm finds the old release and waits until
+Cloudflare restarts the object, and the action stays `applying` at its last
+recorded stage, usually `assets_uploaded`, although the target already serves.
+That restart comes about five minutes after the upload, close to the handover
+deadline, so such an update can also read `recovery_required` with
+`runtime_update_unconfirmed` until the first read on the target reconciles it.
+In the first unattended update on a production gateway on 2026-10-10, the
+entrypoint served the target at least 100 seconds before the journal recorded
+`succeeded`. Each action read through the gateway entrypoint
 (`GET /api/update-actions/<actionId>` and `get_gateway_runtime_action`)
 therefore also returns:
 
@@ -172,8 +188,10 @@ reason while the browser handoff remains available.
 
 `apply_gateway_update` answers `running` before the upload starts; poll
 `get_gateway_runtime_action` until the action reads `succeeded`. Expect
-`journalPending: true` for a while after the upload: the new release already
-serves and the gateway has not recorded it yet. `review_gateway_update` can
+`journalPending: true` for a few seconds after the upload, or about five
+minutes when the release being replaced does not reset its management object
+(see [Update sequence](#update-sequence)): the new release already serves and
+the gateway has not recorded it yet. `review_gateway_update` can
 report the target as current during that time, since it answers from the
 entrypoint's release; the action record is what confirms the update.
 

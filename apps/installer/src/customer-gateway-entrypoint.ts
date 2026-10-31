@@ -286,6 +286,28 @@ export async function customerRuntimeHandoverArmed(
   return parsed.success && parsed.output.actionId === actionId && now < parsed.output.actionExpiresAt;
 }
 
+/**
+ * Ends the pass whose upload replaced this Worker. Cloudflare keeps a running
+ * object on the code it started with for about five minutes after an upload,
+ * while an instance that starts after the upload loads the active version.
+ * The alarm is re-armed for now, so Cloudflare retries it on the fresh
+ * instance about three seconds later and the handover finishes there. The
+ * reset drops writes that have not reached disk, so it waits for them; if
+ * that fails, the restart is left to Cloudflare.
+ */
+export async function restartOnActiveVersion(state: {
+  readonly storage: Pick<DurableObjectStorage, 'setAlarm' | 'sync'>;
+  abort(reason: string): void;
+}, now = Date.now()): Promise<void> {
+  try {
+    await state.storage.setAlarm(now);
+    await state.storage.sync();
+  } catch {
+    return;
+  }
+  state.abort('runtime_update_uploaded');
+}
+
 /** Finish the journal on the running target, retaining transient failures for the next alarm. */
 export async function finishCustomerRuntimeHandover(
   storage: Pick<DurableObjectStorage, 'get' | 'delete' | 'setAlarm'>,
@@ -345,6 +367,8 @@ export class AdminState extends RuntimeAdminState {
   private teardown: CustomerTeardownRemovalDriver | null = null;
   /** Grant and action key of a running update, in memory only, until its upload replaces this version. */
   private update: CustomerRuntimeUpdateDriver | null = null;
+  /** Set once an update armed its handover: the upload that follows replaces this version's code. */
+  private uploadArmed = false;
 
   constructor(
     private readonly finalState: FinalDurableObjectState,
@@ -614,6 +638,7 @@ export class AdminState extends RuntimeAdminState {
           };
           await this.finalState.storage.put(RUNTIME_HANDOVER_KEY, handover);
           await this.finalState.storage.setAlarm(armedAt + RUNTIME_HANDOVER_ALARM_DELAY_MS);
+          this.uploadArmed = true;
         },
       });
       return 'applied';
@@ -825,6 +850,9 @@ export class AdminState extends RuntimeAdminState {
     } catch {
       // An object without an operational gateway holds no update; the record and the dashboard say what happened.
     }
+    // The pass has revoked its grant and recorded its end. Restart now rather than when Cloudflare's
+    // rollout reaches this object, so the retried alarm finds the target and finishes the journal.
+    if (this.uploadArmed) await restartOnActiveVersion(this.finalState);
   }
 
   private installationObject(): DurableObjectStub {
