@@ -516,6 +516,15 @@ const SOURCE_REMOVAL_KEY = 'ankka-mcp-gateway/source-removal/v1';
 const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
 // One installed-source rename. It exists only between the Access policy writes and the name commit.
 const SOURCE_LABEL_EDIT_KEY = 'ankka-mcp-gateway/source-label-edit/v1';
+// One installed source moving from its shared sign-in to an Access service
+// token: from creating the new server record until the record it left is deleted.
+const SOURCE_AUTH_SWITCH_KEY = 'ankka-mcp-gateway/source-token-switch/v1';
+// A source behind a self-hosted Access application in this gateway's account,
+// reached with an Access service token the customer writes into Cloudflare.
+// The gateway creates its bearer server record without credentials and never
+// asks for, receives, stores or logs the token.
+const ACCESS_SERVICE_MODE = 'access_service_token';
+const SOURCE_AUTH_MODES = Object.freeze(['none', 'oauth', ACCESS_SERVICE_MODE]);
 const INTERNAL_SOURCE_REMOVAL_PATH = '/source-removal';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
 const CONTROL_KEY = 'ankka-mcp-gateway/management-control/v1';
@@ -1733,7 +1742,11 @@ async function buildDesiredResources(settings, installationId, sourceDefaultDeny
     identitiesRef: 'team.sourceMembers', identityType: 'email', identityCount: 0,
     identitiesHash: await sha256({ emails: [] }),
   } : emailAllowPolicy;
-  const mcpKey = source === null ? null : await stableResourceKey('mcp', installationId, source.id);
+  // A service-token source has its own server record: Cloudflare cannot change
+  // an existing record's type, so switching creates a second one beside it.
+  // Its key keeps the visible `mcp-source-<id>` prefix and differs in the digest.
+  const mcpKey = source === null ? null : await stableResourceKey('mcp', installationId,
+    source.authentication.mode === ACCESS_SERVICE_MODE ? `${source.id}:${ACCESS_SERVICE_MODE}` : source.id);
   const sourceApplicationKey = source === null ? null : await stableResourceKey('source-app', installationId, source.id);
   const sourceAccessKey = source === null ? null : await stableResourceKey('source-access', installationId, source.id);
   const portalKey = await stableResourceKey('portal', installationId, settings.connect.hostname);
@@ -2112,8 +2125,13 @@ function mcpServerHostname(endpoint) {
   return endpoint === KLAVIYO_MCP_URL ? KLAVIYO_SERVER_URL : endpoint;
 }
 
+/** The Cloudflare server record type for a source mode: a bearer record exists only for the service-token mode. */
+function mcpAuthType(mode) {
+  return mode === 'oauth' ? 'oauth' : mode === ACCESS_SERVICE_MODE ? 'bearer' : 'unauthenticated';
+}
+
 function mcpMatches(value, desired) {
-  const oauth = desired.desired.authentication.mode === 'oauth';
+  const mode = desired.desired.authentication.mode;
   const endpoint = desired.desired.endpoint;
   // A Klaviyo server created before the options were added keeps the plain URL.
   // It still matches, so it can be removed and added again.
@@ -2121,8 +2139,8 @@ function mcpMatches(value, desired) {
     (endpoint === KLAVIYO_MCP_URL && value.hostname === endpoint));
   return hostname && value.id === desired.key &&
     value.description === marker(desired.desired.metadata.installationId, desired.key) &&
-    value.auth_type === (oauth ? 'oauth' : 'unauthenticated') && value.secure_web_gateway === false &&
-    (!oauth || value.is_shared_oauth_callback_enabled === true);
+    value.auth_type === mcpAuthType(mode) && value.secure_web_gateway === false &&
+    (mode !== 'oauth' || value.is_shared_oauth_callback_enabled === true);
 }
 
 function portalMatches(value, desired, serverId) {
@@ -2404,11 +2422,13 @@ async function createResource(state, kind, token) {
   } else if (kind === 'mcp_server') {
     const oauth = desired.desired.authentication.mode === 'oauth';
     path = `/accounts/${account}/access/ai-controls/mcp/servers`;
+    // A bearer record is created without `auth_credentials`: the customer
+    // writes the service token into Cloudflare, never through this gateway.
     body = {
       id: desired.key,
       name: state.source?.company ? sourceDisplayName(state.source) : desired.desired.name,
       hostname: mcpServerHostname(desired.desired.endpoint),
-      auth_type: oauth ? 'oauth' : 'unauthenticated',
+      auth_type: mcpAuthType(desired.desired.authentication.mode),
       secure_web_gateway: false,
       description: marker(state.installationId, desired.key),
     };
@@ -3089,19 +3109,19 @@ function safeManagedSource(value) {
       !validSourceLabel(value.label) || !publicMcpUrl(value.url) ||
       (value.status !== 'installed' && value.status !== 'draft')) return null;
   const authMode = legacyPublic ? 'none' : value.authMode;
-  if (authMode !== 'none' && authMode !== 'oauth') return null;
+  if (!SOURCE_AUTH_MODES.includes(authMode) || (authMode === ACCESS_SERVICE_MODE && (!current || nativeSourceId(value.id)))) return null;
   const onBehalfOfUser = current ? value.onBehalfOfUser : authMode === 'oauth';
-  if (!isBoolean(onBehalfOfUser) || (authMode === 'none' && onBehalfOfUser !== false)) return null;
+  if (!isBoolean(onBehalfOfUser) || (authMode !== 'oauth' && onBehalfOfUser !== false)) return null;
   if (API_SOURCE_ID.test(value.id) && (authMode !== 'oauth' || onBehalfOfUser !== true || !API_SOURCE_PATH.test(new URL(value.url).pathname))) return null;
   if (value.id === FEEDBACK_SOURCE_ID && (authMode !== 'oauth' || onBehalfOfUser !== true || new URL(value.url).pathname !== FEEDBACK_MCP_PATH)) return null;
   if (value.id === GUIDE_SOURCE_ID && (authMode !== 'oauth' || onBehalfOfUser !== true || new URL(value.url).pathname !== GUIDE_MCP_PATH)) return null;
-  // A sign-in source is saved before its tools can be listed. Only such a
-  // draft may have none; an installed source without tools is invalid state.
+  // A sign-in or service-token source is saved before its tools can be listed.
+  // Only such a draft may have none; an installed source without tools is invalid state.
   const enabledTools = exactSortedUniqueStrings(
     value.enabledTools,
     toolName,
     MAX_ENABLED_TOOLS_PER_SOURCE,
-    authMode === 'oauth' && value.status === 'draft' ? 0 : 1,
+    authMode !== 'none' && value.status === 'draft' ? 0 : 1,
   );
   if (!enabledTools || (value.id === MANAGEMENT_SOURCE_ID &&
       (normalizedEmail(value.initialManager) !== value.initialManager || authMode !== 'oauth'))) return null;
@@ -3207,15 +3227,15 @@ export function parseSourceSave(value) {
       (Object.hasOwn(value.source, 'company') && !validSourceCompany(value.source.company))) return null;
   const url = publicMcpUrl(value.source.url);
   const authMode = value.source.authMode;
-  // Only a sign-in source may be saved without tools: its real list exists
-  // after the operator connects it. A public source names at least one.
+  // Only a sign-in or service-token source may be saved without tools: its
+  // real list exists after it is connected. A public source names at least one.
   const enabledTools = exactSortedUniqueStrings(
     value.source.enabledTools,
     toolName,
     MAX_ENABLED_TOOLS_PER_SOURCE,
-    authMode === 'oauth' ? 0 : 1,
+    authMode === 'none' ? 1 : 0,
   );
-  if (!url || !enabledTools || (authMode !== 'none' && authMode !== 'oauth')) return null;
+  if (!url || !enabledTools || !SOURCE_AUTH_MODES.includes(authMode)) return null;
   const source = { label: value.source.label, url, authMode, enabledTools };
   if (value.source.allTools === true) source.allTools = true;
   if (Object.hasOwn(value.source, 'company')) source.company = value.source.company;
@@ -3406,9 +3426,11 @@ function sourceActionCanRenew(action, actorEmail, now) {
 // The fixed reasons an installation waits before the Portal with all source
 // receipts and no write outstanding. `source_tools_required`: connected and
 // synced, nothing chosen yet. `source_tools_chosen`: a choice is saved.
+// `source_credential_required`: a service-token source's record has no
+// working token yet; the customer writes it into Cloudflare themselves.
 const SOURCE_CONNECTION_PAUSES = Object.freeze([
   'source_connection_required', 'source_sync_required', 'source_tools_mismatch',
-  'source_tools_required', 'source_tools_chosen',
+  'source_tools_required', 'source_tools_chosen', 'source_credential_required',
 ]);
 
 function sourceActionConnectionPaused(action) {
@@ -3501,6 +3523,10 @@ async function sourceActionSnapshot(storage, actorEmail, now) {
     if (control && sourceActionConnectionPaused(action)) {
       summary.connectionUrl = `https://dash.cloudflare.com/${encodeURIComponent(control.accountId)}` +
         '/one/access-controls/ai-controls/mcp-server/edit/' + encodeURIComponent(action.resources[0].provider.id);
+      // Where the customer writes the token: identifiers only, never a credential.
+      if (action.failureCode === 'source_credential_required') {
+        summary.credentialTarget = { accountId: control.accountId, serverId: action.resources[0].provider.id };
+      }
     }
     return summary;
   }), blockingAction };
@@ -3531,7 +3557,7 @@ function parseSourceActionPrepare(value) {
 
 async function prepareSourceAction(storage, input, env) {
   if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
-  if (await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage)) return sourceActionConflict('lifecycle_pending');
+  if (await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage) || await sourceTokenSwitchBlocks(storage)) return sourceActionConflict('lifecycle_pending');
   const parsed = parseSourceActionPrepare(input);
   let sources = safeManagementSources(await storage.get(SOURCES_KEY));
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
@@ -3973,7 +3999,19 @@ function portalStaticMatches(value, control) {
     value.code_mode === 'default_on' && value.secure_web_gateway === false;
 }
 
+/**
+ * Whether a bearer record lacks a working service token. Cloudflare never
+ * returns the credential; a record that is not Ready, or reports an error, has
+ * a missing, wrong or expired token as far as this gateway can tell. A wrong
+ * token therefore reads as an error, never as an empty tool list.
+ */
+function serviceTokenMissing(server) {
+  return !isRecord(server) || server.status !== 'ready' || Boolean(server.error) || Boolean(server.error_details) ||
+    ['required', 'stale'].includes(server.authentication_status);
+}
+
 function sourceConnectionFailure(server, source) {
+  if (source.authMode === ACCESS_SERVICE_MODE && serviceTokenMissing(server)) return 'source_credential_required';
   if (!isRecord(server)) return 'source_sync_required';
   if (['required', 'stale'].includes(server.authentication_status)) return 'source_connection_required';
   if (server.status !== 'ready' || !Array.isArray(server.tools) ||
@@ -3994,6 +4032,8 @@ function sourceConnectionFailure(server, source) {
 function syncedSourceCatalogue(server) {
   const state = (value, tools = []) => Object.freeze({ state: value, tools: Object.freeze(tools) });
   if (!isRecord(server)) return state('sync_required');
+  // Only the service-token mode creates bearer records; its shape is checked by the caller.
+  if (server.auth_type === 'bearer' && serviceTokenMissing(server)) return state('service_auth_required');
   if (['required', 'stale'].includes(server.authentication_status)) return state('connection_required');
   if (server.status !== 'ready' || !Array.isArray(server.tools)) return state('sync_required');
   if (server.tools.length > MCP_MAX_TOOLS) return state('unsupported');
@@ -4151,6 +4191,21 @@ async function finalizeSourceAction(storage, action, env) {
   return completed;
 }
 
+/**
+ * One read of an installation's own server record. A service-token record
+ * whose token the customer has just written may not have synced yet: after
+ * checking its shape, one sync of that record is requested and it is read
+ * again. The credential is never read; Cloudflare does not return it.
+ */
+async function readActionServer(path, token, desiredState) {
+  const server = await providerCall(path, token);
+  if (desiredState.source.authMode !== ACCESS_SERVICE_MODE || server.status !== 'ok' ||
+      !mcpMatches(server.result, desiredState.desiredResources[0]) || !serviceTokenMissing(server.result)) return server;
+  // Read back even after an uncertain answer; Cloudflare may have accepted it.
+  await providerCall(`${path}/sync`, token, { method: 'POST' });
+  return providerCall(path, token);
+}
+
 async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   if (await teamActionBlocksLifecycle(storage)) return actionRecovery('team_action_conflict');
   const parsed = await parseSourceActionRequest(request, env, storage, nowMs);
@@ -4263,7 +4318,8 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
   action = refreshed.action;
   const source = refreshed.sources.sources.find((entry) => entry.id === action.sourceId);
   if (source?.company && !source.companyDescriptions) {
-    const server = await providerCall(`/accounts/${encodeURIComponent(refreshed.control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(action.resources[0].provider.id)}`, parsed.claim.cloudflareAccessToken);
+    const server = await readActionServer(`/accounts/${encodeURIComponent(refreshed.control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(action.resources[0].provider.id)}`,
+      parsed.claim.cloudflareAccessToken, desiredState);
     if (server.status !== 'ok' || !mcpMatches(server.result, desiredState.desiredResources[0])) return failSourceAction(storage, action, 'source_action_recovery_required');
     const failure = sourceConnectionFailure(server.result, source);
     if (failure) return failSourceAction(storage, action, failure);
@@ -4311,8 +4367,9 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     // sources need an operator connection before this Portal write can work.
     const serverPath = `/accounts/${encodeURIComponent(refreshed.control.accountId)}` +
       `/access/ai-controls/mcp/servers/${encodeURIComponent(action.resources[0].provider.id)}`;
-    const server = await providerCall(serverPath, parsed.claim.cloudflareAccessToken);
-    if (server.status !== 'ok' || server.result?.id !== action.resources[0].provider.id) {
+    const server = await readActionServer(serverPath, parsed.claim.cloudflareAccessToken, desiredState);
+    if (server.status !== 'ok' || server.result?.id !== action.resources[0].provider.id ||
+        (desiredState.source.authMode === ACCESS_SERVICE_MODE && !mcpMatches(server.result, desiredState.desiredResources[0]))) {
       return failSourceAction(storage, action, 'source_action_recovery_required', false,
         providerDetail('mcp_server', 'connection', server));
     }
@@ -4396,6 +4453,7 @@ const SOURCE_CONNECTION_CHECK_TIMEOUT_MS = 20_000;
 const SOURCE_CONNECTION_CHECK_CONCURRENCY = 8;
 const SOURCE_CATALOGUE_REFUSALS = Object.freeze({
   connection_required: 'source_connection_required',
+  service_auth_required: 'source_credential_required',
   sync_required: 'source_sync_required',
   unsupported: 'source_tools_unsupported',
 });
@@ -4428,7 +4486,7 @@ async function sourceToolChoiceContext(context, env, actorEmail) {
   const source = context.sources.sources.find((candidate) => candidate.id === action.sourceId);
   if (!sourceActionConnectionPaused(action) || action.actorEmail !== normalizedActor(actorEmail) ||
       action.initialPolicyVersion !== SOURCE_INITIAL_POLICY_VERSION || action.bigquerySetupStarted === true ||
-      !source || source.status !== 'draft' || source.authMode !== 'oauth') {
+      !source || source.status !== 'draft' || source.authMode === 'none') {
     return sourceToolsRefusal(409, 'source_tools_unavailable');
   }
   if (await managedSourceHash(source) !== action.sourceHash) return sourceActionConflict('draft_changed');
@@ -4769,10 +4827,13 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (loaded instanceof Response) return loaded;
   const { sources, control, source } = loaded;
   if (source.status !== 'installed') return sourceToolsRefusal(409, 'source_tools_unavailable');
-  let reconnectUrl;
+  let reconnectUrl, credentialTarget;
   const view = (state, reason = null, checkedAt = null) => {
     const result = { schemaVersion: 1, sourceId, state, reason, checkedAt };
     if (state === 'authorization_required' && reconnectUrl) result.reconnectUrl = reconnectUrl;
+    // A service-token source is never reconnected here: its token is the
+    // customer's to write into this record, identified without any credential.
+    if (credentialTarget) result.credentialTarget = credentialTarget;
     return fixedJson(200, result);
   };
   // An administrator's successful sync cannot prove another user's OAuth session.
@@ -4807,12 +4868,14 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (portal.status === 'auth') return view('unknown', 'management_credential_required');
   if (portal.status !== 'ok') return view('unknown', 'check_failed');
   if (!mappings || !portalWithinToolApproval(portal.result, control, mappings)) return view('unknown', 'configuration_changed');
+  const serviceToken = source.authMode === ACCESS_SERVICE_MODE;
   if (source.authMode === 'oauth') {
     reconnectUrl = `https://dash.cloudflare.com/${encodeURIComponent(control.accountId)}` +
       `/one/access-controls/ai-controls/mcp-server/edit/${encodeURIComponent(serverId)}`;
   }
+  if (serviceToken) credentialTarget = { accountId: control.accountId, serverId };
   if (['required', 'stale'].includes(server.result.authentication_status)) {
-    return view('authorization_required', null, new Date().toISOString());
+    return view(serviceToken ? 'service_auth_required' : 'authorization_required', null, new Date().toISOString());
   }
   const synced = await providerCall(`${path}/sync`, token, { method: 'POST', signal });
   // A failed management request says nothing about the upstream connection.
@@ -4820,6 +4883,12 @@ async function checkInstalledSourceConnection(storage, env, sourceId, actorEmail
   if (synced.status !== 'ok' || !isRecord(synced.result)) return view('unknown', 'check_failed');
   const checkedAt = new Date().toISOString();
   const result = synced.result;
+  // Access refuses a missing, wrong or expired service token before the
+  // origin: a refusal or a sign-in redirect is the token, not an outage.
+  const refusal = result.error_details?.status_code;
+  if (serviceToken && Number.isInteger(refusal) && (refusal === 401 || refusal === 403 || (refusal >= 300 && refusal < 400))) {
+    return view('service_auth_required', null, checkedAt);
+  }
   if (result.error_details?.status_code === 401) return view('authorization_required', null, checkedAt);
   if (result.error_details?.status_code === 403) return view('forbidden', null, checkedAt);
   if (result.status === 'error' || result.error || result.error_details) return view('unavailable', null, checkedAt);
@@ -5192,6 +5261,416 @@ async function updateInstalledSourceLabel(storage, env, sourceId, input, actorEm
   return fixedJson(200, nextSources);
 }
 
+// Switching an installed shared sign-in source to an Access service token.
+//
+// Cloudflare cannot change a server record's type, so the switch creates a
+// second, bearer record without credentials, waits until the customer has
+// written the token into it, then moves the Portal mapping and the source's
+// Team application to it and deletes the record it left. Allowed tools and
+// Team assignments carry over: the mapping keeps the same allowlist, and the
+// Team application (with its policy) is the same one, retargeted.
+//
+// The move never leaves a mapped record without its Team application: the
+// source is unmapped first, the application retargeted, then mapped again.
+// Each step reads Cloudflare and acts only from an exact, recognised state, so
+// a lost response is settled by reading, not by sending again. The journal
+// names the phase; `committed` says whether the saved source and ownership
+// already point at the token record. Rolling back reverses the same steps and
+// is possible for as long as the sign-in record exists.
+const TOKEN_SWITCH_PHASES = Object.freeze(['create_armed', 'credential', 'moving', 'returning', 'retiring']);
+
+function safeSourceTokenSwitch(value) {
+  if (value === undefined || value === null) return null;
+  if (!exactKeys(value, ['schemaVersion', 'sourceId', 'actorEmail', 'startedAt', 'phase', 'committed', 'retire',
+    'oauthResources', 'tokenServerId', 'reason']) || value.schemaVersion !== 1 ||
+      !isText(value.sourceId) || !SOURCE_ID.test(value.sourceId) || nativeSourceId(value.sourceId) ||
+      normalizedActor(value.actorEmail) !== value.actorEmail || !Number.isSafeInteger(value.startedAt) ||
+      !TOKEN_SWITCH_PHASES.includes(value.phase) || !isBoolean(value.committed) ||
+      ![null, 'oauth', 'token'].includes(value.retire) || (value.phase === 'retiring') !== (value.retire !== null) ||
+      (['create_armed', 'credential', 'moving'].includes(value.phase) && value.committed) ||
+      (value.phase === 'retiring' && value.committed !== (value.retire === 'oauth')) ||
+      !isText(value.tokenServerId) || !RESOURCE_KEY.test(value.tokenServerId) ||
+      (value.reason !== null && (!isText(value.reason) || !/^[a-z][a-z0-9_]{0,63}$/u.test(value.reason))) ||
+      !Array.isArray(value.oauthResources) || value.oauthResources.length !== SOURCE_ACTION_RESOURCE_ORDER.length) return false;
+  const oauthResources = value.oauthResources.map(safeSourceActionResource);
+  if (oauthResources.some((entry) => entry === null) || oauthResources[0].provider.id === value.tokenServerId ||
+      oauthResources[2].provider.parentId !== oauthResources[1].provider.id) return false;
+  return Object.freeze({ ...value, oauthResources: Object.freeze(oauthResources) });
+}
+
+/** True when a switch is corrupt or belongs to another source. A null source blocks every switch. */
+async function sourceTokenSwitchBlocks(storage, sourceId = null) {
+  const pending = safeSourceTokenSwitch(await storage.get(SOURCE_AUTH_SWITCH_KEY));
+  if (pending === false) return true;
+  return pending !== null && pending.sourceId !== sourceId;
+}
+
+/** What the dashboard shows of a switch: phase, a fixed reason and where the token goes. No credential exists here. */
+function publicTokenSwitch(pending, control) {
+  return pending ? Object.freeze({
+    sourceId: pending.sourceId, phase: pending.phase, reason: pending.reason,
+    credentialTarget: { accountId: control.accountId, serverId: pending.tokenServerId },
+    canRollback: pending.phase !== 'retiring' || pending.retire === 'oauth',
+  }) : null;
+}
+
+/** The receipt-derived resources of one installed source in one mode. Only the server record and its application move. */
+async function tokenSwitchState(control, source, ownership, mode) {
+  const modeSource = Object.freeze({ ...source, authMode: mode });
+  const settings = teardownSettings(control, modeSource, source.id);
+  const emptyAudience = ownership.resources[2].identityHash === await sha256({ emails: [] });
+  const desiredResources = (await buildDesiredResources(settings, control.installationId, emptyAudience))
+    .slice(0, SOURCE_ACTION_RESOURCE_ORDER.length);
+  return Object.freeze({
+    installationId: control.installationId, target: Object.freeze({ accountId: control.accountId, zoneId: control.zoneId }),
+    settings, accessPolicy: Object.freeze({ identitiesHash: ownership.resources[2].identityHash }),
+    desiredResources: Object.freeze(desiredResources), resources: Object.freeze([]), source: modeSource,
+  });
+}
+
+function tokenSwitchRefusal(error, status = 409) {
+  return sourceToolsRefusal(status, error);
+}
+
+async function tokenSwitchContext(storage, env, sourceId, actorEmail, pending) {
+  const loaded = await loadInstalledSource(storage, env, sourceId, actorEmail);
+  if (loaded instanceof Response) return loaded;
+  const { sources, control, source } = loaded;
+  const token = managementCredential(env);
+  if (!token) return tokenSwitchRefusal('management_credential_required');
+  if (source.status !== 'installed' || nativeSourceId(source.id) || source.onBehalfOfUser !== false) {
+    return tokenSwitchRefusal('source_switch_unavailable');
+  }
+  const environment = parseManagementEnvironment(env);
+  const evidence = environment && await rootTeardownAuthority(storage, environment, control.installationId, env);
+  const root = evidence && {
+    schemaVersion: 1, status: 'ready', installationId: control.installationId, receipt: evidence.root.receipt, teardown: null,
+  };
+  const layout = root && teardownResources(root, control.sourceOwnership, false, control.removedInitialSource ?? null);
+  const ownership = control.sourceOwnership.find((entry) => entry.sourceId === source.id);
+  // The source in the immutable installation receipt keeps the record it was installed with.
+  if (!environment || !layout || !ownership || layout.receiptSourceOwner === source.id) {
+    return tokenSwitchRefusal('source_switch_unavailable');
+  }
+  const oauth = await tokenSwitchState(control, source, ownership, 'oauth');
+  const serviceToken = await tokenSwitchState(control, source, ownership, ACCESS_SERVICE_MODE);
+  const tokenResources = [
+    receiptResource(serviceToken, serviceToken.desiredResources[0], Object.freeze({ id: serviceToken.desiredResources[0].key })),
+    Object.freeze({ ...ownership.resources[1], desiredHash: serviceToken.desiredResources[1].desiredHash }),
+    ownership.resources[2],
+  ];
+  const oauthResources = pending ? pending.oauthResources : ownership.resources;
+  // Saved state is exactly the sign-in source before the commit, or exactly the token source after it.
+  const committed = pending?.committed === true;
+  const expectedMode = committed ? ACCESS_SERVICE_MODE : 'oauth';
+  if (source.authMode !== expectedMode ||
+      canonicalJson(ownership.resources) !== canonicalJson(committed ? tokenResources : oauthResources) ||
+      oauthResources[0].key !== oauth.desiredResources[0].key || oauthResources[0].desiredHash !== oauth.desiredResources[0].desiredHash ||
+      oauthResources[1].desiredHash !== oauth.desiredResources[1].desiredHash ||
+      (pending && pending.tokenServerId !== serviceToken.desiredResources[0].key)) {
+    return tokenSwitchRefusal(pending ? 'source_switch_recovery_required' : 'source_switch_unavailable');
+  }
+  return Object.freeze({ sources, control, source, ownership, environment, root, token, oauth, serviceToken,
+    oauthResources: Object.freeze(oauthResources), tokenResources: Object.freeze(tokenResources) });
+}
+
+function tokenSwitchServerPath(control, serverId) {
+  return `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/servers/${encodeURIComponent(serverId)}`;
+}
+
+/** Exact tool overrides the gateway created the record with. A credential write must leave them unchanged. */
+function tokenServerOverridesMatch(server, state) {
+  const expected = state.desiredResources[0].desired.toolPolicy.allowedTools;
+  if (expected.length === 0) return !Array.isArray(server.updated_tools) || server.updated_tools.length === 0;
+  if (!Array.isArray(server.updated_tools)) return false;
+  const observed = server.updated_tools.map((tool) => isRecord(tool) ? `${tool.name}\u0000${tool.enabled}` : null).sort(compareText);
+  return canonicalJson(observed) === canonicalJson(expected.map((name) => `${name}\u0000true`).sort(compareText));
+}
+
+async function persistTokenSwitch(storage, pending) {
+  const parsed = safeSourceTokenSwitch(pending);
+  if (!parsed) return null;
+  await storage.put(SOURCE_AUTH_SWITCH_KEY, parsed);
+  return parsed;
+}
+
+async function stopTokenSwitch(storage, pending, reason, status = 409) {
+  await persistTokenSwitch(storage, { ...pending, reason });
+  return tokenSwitchRefusal(reason, status);
+}
+
+/**
+ * Where the Portal and the Team application point, as one of the recognised
+ * states: both at the sign-in record, unmapped while the application points at
+ * either record, or both at the token record. Anything else is drift.
+ */
+async function tokenSwitchPlacement(context, pending) {
+  const { control, sources, token, ownership } = context;
+  const oauthId = context.oauthResources[0].provider.id, tokenId = pending.tokenServerId;
+  const current = installedPortalMappings(control, sources);
+  const sourceMapping = current?.find((mapping) => mapping.server_id === ownership.resources[0].provider.id);
+  if (!current || !sourceMapping) return null;
+  const others = current.filter((mapping) => mapping !== sourceMapping);
+  const variants = {
+    oauth: [...others, Object.freeze({ ...sourceMapping, server_id: oauthId })],
+    none: others,
+    token: [...others, Object.freeze({ ...sourceMapping, server_id: tokenId })],
+  };
+  const portalPath = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`;
+  const appPath = `/zones/${encodeURIComponent(control.zoneId)}/access/apps/${encodeURIComponent(ownership.resources[1].provider.id)}`;
+  const [portal, app] = await Promise.all([providerCall(portalPath, token), providerCall(appPath, token)]);
+  if (portal.status !== 'ok' || app.status !== 'ok') return Object.freeze({ unavailable: true });
+  const portalAt = Object.keys(variants).filter((name) => portalExact(portal.result, control, variants[name]));
+  const value = app.result;
+  const policies = isRecord(value) && Array.isArray(value.policies) ? value.policies : null;
+  const appOwned = isRecord(value) && value.id === ownership.resources[1].provider.id && value.type === 'mcp' &&
+    value.name === ownership.resources[1].marker && (value.domain === undefined || value.domain === null) &&
+    policies !== null && policies.every((policy) => isRecord(policy) && safeProviderId(policy.id)) &&
+    policies.some((policy) => policy.id === ownership.resources[2].provider.id);
+  const appAt = !appOwned ? null
+    : exactDestination(value, { type: 'via_mcp_server_portal', mcp_server_id: oauthId }) ? 'oauth'
+      : exactDestination(value, { type: 'via_mcp_server_portal', mcp_server_id: tokenId }) ? 'token' : null;
+  return Object.freeze({ portal: portal.result, portalAt: portalAt.length === 1 ? portalAt[0] : null, appAt, variants,
+    portalPath, appPath, appName: ownership.resources[1].marker, policies });
+}
+
+/** One read of a switch record; for the token record, one sync is requested when it has no working token yet. */
+async function readTokenSwitchServer(context, state, serverId, sync = false) {
+  const path = tokenSwitchServerPath(context.control, serverId);
+  let server = await providerCall(path, context.token);
+  if (server.status === 'ok' && !mcpMatches(server.result, state.desiredResources[0])) return Object.freeze({ status: 'conflict' });
+  if (sync && server.status === 'ok' && serviceTokenMissing(server.result)) {
+    // Read back even after an uncertain answer; Cloudflare may have accepted it.
+    await providerCall(`${path}/sync`, context.token, { method: 'POST' });
+    server = await providerCall(path, context.token);
+    if (server.status === 'ok' && !mcpMatches(server.result, state.desiredResources[0])) return Object.freeze({ status: 'conflict' });
+  }
+  return server;
+}
+
+/**
+ * Moves the Portal and the Team application from one record to the other,
+ * one verified step at a time, then commits the saved source and ownership.
+ * Returns the next journal, or a refusal.
+ */
+async function moveTokenSwitch(storage, env, context, pending, forward) {
+  const from = forward ? 'oauth' : 'token', to = forward ? 'token' : 'oauth';
+  let previous = null;
+  for (let step = 0; step < 4; step += 1) {
+    const placement = await tokenSwitchPlacement(context, pending);
+    if (!placement) return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+    if (placement.unavailable) return stopTokenSwitch(storage, pending, 'source_switch_provider_unavailable', 502);
+    const { portalAt, appAt } = placement;
+    // A write that reads back unchanged is not repeated: the outcome is unknown.
+    if (previous === `${portalAt}:${appAt}`) return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+    previous = `${portalAt}:${appAt}`;
+    let write = null;
+    if (portalAt === to && appAt === to) {
+      // The destination record must still be the exact, working record before anything is committed.
+      const state = forward ? context.serviceToken : context.oauth;
+      const serverId = forward ? pending.tokenServerId : context.oauthResources[0].provider.id;
+      const server = await readTokenSwitchServer(context, state, serverId);
+      if (server.status !== 'ok' || (forward && serviceTokenMissing(server.result))) {
+        return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+      }
+      return commitTokenSwitch(storage, env, context, pending, forward);
+    }
+    if (portalAt === from && appAt === from) write = 'unmap';
+    else if (portalAt === 'none' && appAt === from) write = 'application';
+    else if (portalAt === 'none' && appAt === to) write = 'map';
+    else return stopTokenSwitch(storage, pending, 'source_switch_drift');
+    let written;
+    if (write === 'application') {
+      // Retargets the existing application. Every policy it has, the Team policy and any other, is named
+      // again in its order, so the write keeps them or is refused; read-back checks the Team policy.
+      written = await providerCall(placement.appPath, context.token, { method: 'PUT', body: canonicalJson({
+        name: placement.appName, type: 'mcp',
+        destinations: [{ type: 'via_mcp_server_portal', mcp_server_id: to === 'token' ? pending.tokenServerId : context.oauthResources[0].provider.id }],
+        policies: placement.policies.map((policy, index) => ({
+          id: policy.id, precedence: Number.isSafeInteger(policy.precedence) ? policy.precedence : index + 1 })),
+      }) });
+    } else {
+      const mappings = placement.variants[write === 'unmap' ? 'none' : to];
+      written = await providerCall(placement.portalPath, context.token, { method: 'PUT', body: canonicalJson({
+        name: context.control.portal.name, hostname: context.control.portal.hostname, description: context.control.portal.marker,
+        code_mode: 'default_on', secure_web_gateway: false,
+        servers: availablePortalMappings(placement.portal, mappings).map((mapping) => ({ ...mapping, id: mapping.server_id })),
+      }) });
+    }
+    if (written.status !== 'ok') return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+  }
+  return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+}
+
+async function commitTokenSwitch(storage, env, context, pending, forward) {
+  const { sources, control, source, root, environment } = context;
+  const resources = forward ? context.tokenResources : context.oauthResources;
+  const nextSources = safeManagementSources({
+    ...sources, revision: sources.revision + 1,
+    sources: sources.sources.map((candidate) => candidate.id === source.id
+      ? { ...candidate, authMode: forward ? ACCESS_SERVICE_MODE : 'oauth' } : candidate),
+  });
+  const nextControl = safeManagementControl({
+    ...control,
+    sourceOwnership: control.sourceOwnership.map((entry) => entry.sourceId === source.id ? { sourceId: entry.sourceId, resources } : entry),
+  });
+  if (!nextSources || !nextControl || !managementSourcesInstallProjectionFits(nextSources) ||
+      !await teardownAuthorityState(root, nextControl, nextSources, environment)) {
+    return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+  }
+  const next = safeSourceTokenSwitch({ ...pending, phase: 'retiring', retire: forward ? 'oauth' : 'token', committed: forward, reason: null });
+  if (!next) return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+  // One atomic write: the source, its ownership and the journal move together.
+  await storage.put({ [SOURCES_KEY]: nextSources, [CONTROL_KEY]: nextControl, [SOURCE_AUTH_SWITCH_KEY]: next });
+  return retireTokenSwitch(storage, env, { ...context, sources: nextSources, control: nextControl }, next);
+}
+
+/** Deletes the record the source no longer uses, once nothing maps it, and closes the journal. */
+async function retireTokenSwitch(storage, env, context, pending) {
+  const serverId = pending.retire === 'oauth' ? context.oauthResources[0].provider.id : pending.tokenServerId;
+  const state = pending.retire === 'oauth' ? context.oauth : context.serviceToken;
+  const path = tokenSwitchServerPath(context.control, serverId);
+  const portal = await providerCall(`/accounts/${encodeURIComponent(context.control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(context.control.portal.id)}`, context.token);
+  const mapped = normalizedPortalMappings(portal.result);
+  if (portal.status !== 'ok' || !mapped || mapped.some((mapping) => mapping.server_id === serverId)) {
+    return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+  }
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const server = await readTokenSwitchServer(context, state, serverId);
+    if (server.status === 'absent') {
+      await storage.delete(SOURCE_AUTH_SWITCH_KEY);
+      return fixedJson(200, context.sources);
+    }
+    if (server.status !== 'ok' || attempt === 1) return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+    const removed = await providerCall(path, context.token, { method: 'DELETE' });
+    if (removed.status !== 'ok' && removed.status !== 'absent') return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+  }
+  return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+}
+
+/** The credential pause: continue only once the customer's token works and every allowed tool is synced. */
+async function awaitTokenSwitchCredential(storage, env, context, pending) {
+  const server = await readTokenSwitchServer(context, context.serviceToken, pending.tokenServerId, true);
+  if (server.status === 'conflict') return stopTokenSwitch(storage, pending, 'source_switch_drift');
+  if (server.status !== 'ok') return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+  // The credential write may carry only `auth_credentials`; anything else changed is drift.
+  if (!tokenServerOverridesMatch(server.result, context.serviceToken)) return stopTokenSwitch(storage, pending, 'source_switch_drift');
+  if (serviceTokenMissing(server.result)) {
+    await persistTokenSwitch(storage, { ...pending, reason: 'source_credential_required' });
+    return fixedJson(200, context.sources);
+  }
+  const catalogue = syncedSourceCatalogue(server.result);
+  if (catalogue.state !== 'ready' || !context.source.enabledTools.every((name) => catalogue.tools.some((tool) => tool.name === name))) {
+    await persistTokenSwitch(storage, { ...pending, reason: 'source_tools_mismatch' });
+    return fixedJson(200, context.sources);
+  }
+  const moving = await persistTokenSwitch(storage, { ...pending, phase: 'moving', reason: null });
+  return moving ? moveTokenSwitch(storage, env, context, moving, true) : tokenSwitchRefusal('source_switch_recovery_required');
+}
+
+async function advanceTokenSwitch(storage, env, context, pending) {
+  if (pending.phase === 'create_armed') {
+    const server = await readTokenSwitchServer(context, context.serviceToken, pending.tokenServerId);
+    if (server.status === 'absent') {
+      const created = await createResource(context.serviceToken, 'mcp_server', context.token);
+      if (created.status !== 'submitted') return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+      const verified = await readTokenSwitchServer(context, context.serviceToken, pending.tokenServerId);
+      if (verified.status !== 'ok') return stopTokenSwitch(storage, pending, 'source_switch_recovery_required');
+    } else if (server.status !== 'ok') {
+      return stopTokenSwitch(storage, pending, server.status === 'conflict' ? 'source_resource_collision' : 'source_switch_recovery_required');
+    }
+    const next = await persistTokenSwitch(storage, { ...pending, phase: 'credential', reason: 'source_credential_required' });
+    return next ? awaitTokenSwitchCredential(storage, env, context, next) : tokenSwitchRefusal('source_switch_recovery_required');
+  }
+  if (pending.phase === 'credential') return awaitTokenSwitchCredential(storage, env, context, pending);
+  if (pending.phase === 'moving' || pending.phase === 'returning') return moveTokenSwitch(storage, env, context, pending, pending.phase === 'moving');
+  return retireTokenSwitch(storage, env, context, pending);
+}
+
+/**
+ * `start` creates the token record and pauses for the credential; `continue`
+ * resumes whatever the journal names; `rollback` returns to the sign-in
+ * record while it exists. Each runs in this object's mutation queue.
+ */
+async function updateSourceTokenSwitch(storage, env, sourceId, input, actorEmail) {
+  if (!exactKeys(input, ['schemaVersion', 'revision', 'operation']) || input.schemaVersion !== 1 ||
+      !Number.isSafeInteger(input.revision) || input.revision < 1 || !['start', 'continue', 'rollback'].includes(input.operation)) {
+    return tokenSwitchRefusal('source_switch_invalid', 400);
+  }
+  const pending = safeSourceTokenSwitch(await storage.get(SOURCE_AUTH_SWITCH_KEY));
+  if (pending === false) return tokenSwitchRefusal('source_switch_recovery_required');
+  if (pending && pending.sourceId !== sourceId) return sourceActionConflict('lifecycle_pending');
+  if ((input.operation === 'start') === Boolean(pending)) {
+    return tokenSwitchRefusal(pending ? 'source_switch_pending' : 'source_switch_not_found');
+  }
+  if (await recordedLifecycleBlocks(storage, Date.now(), null, true, null, null, null, sourceId) ||
+      await teamActionBlocksLifecycle(storage)) return sourceActionConflict('lifecycle_pending');
+  const context = await tokenSwitchContext(storage, env, sourceId, actorEmail, pending);
+  if (context instanceof Response) return context;
+  if (input.revision !== context.sources.revision) {
+    return fixedJson(409, { schemaVersion: 1, error: 'source_conflict', revision: context.sources.revision });
+  }
+  if (input.operation === 'start') {
+    try {
+      await verifyServiceTokenSource(context.serviceToken.source, env);
+    } catch (error) {
+      return sourceErrorResponse(error);
+    }
+    const baseline = await readTokenSwitchServer(context, context.serviceToken, context.serviceToken.desiredResources[0].key);
+    if (baseline.status !== 'absent') {
+      return tokenSwitchRefusal(baseline.status === 'auth' ? 'management_credential_required' : 'source_resource_collision');
+    }
+    // Older runtimes cannot read the journal or a service-token source.
+    if (!await armSourceCompatibility(storage, env)) return tokenSwitchRefusal('source_switch_unavailable');
+    const armed = await persistTokenSwitch(storage, {
+      schemaVersion: 1, sourceId, actorEmail: normalizedActor(actorEmail), startedAt: Date.now(), phase: 'create_armed',
+      committed: false, retire: null, oauthResources: context.ownership.resources,
+      tokenServerId: context.serviceToken.desiredResources[0].key, reason: null,
+    });
+    return armed ? advanceTokenSwitch(storage, env, context, armed) : tokenSwitchRefusal('source_switch_unavailable');
+  }
+  if (input.operation === 'rollback') {
+    let next;
+    if (['create_armed', 'credential'].includes(pending.phase)) {
+      next = { ...pending, phase: 'retiring', retire: 'token', reason: null };
+    } else if (pending.phase === 'moving' || (pending.phase === 'retiring' && pending.retire === 'oauth')) {
+      const oauthServer = await readTokenSwitchServer(context, context.oauth, context.oauthResources[0].provider.id);
+      if (oauthServer.status !== 'ok') return tokenSwitchRefusal('source_switch_rollback_unavailable');
+      next = { ...pending, phase: 'returning', retire: null, reason: null };
+    } else {
+      next = pending;
+    }
+    const persisted = await persistTokenSwitch(storage, next);
+    return persisted ? advanceTokenSwitch(storage, env, context, persisted) : tokenSwitchRefusal('source_switch_recovery_required');
+  }
+  return advanceTokenSwitch(storage, env, context, pending);
+}
+
+async function handleSourceTokenSwitch(request, env) {
+  if (request.method !== 'POST') return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'POST' });
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  if (access.actor.kind !== 'human' || !sameOriginMutation(request) ||
+      request.headers.get('content-type')?.split(';')[0] !== 'application/json') return sourceToolsRefusal(403, 'origin_required');
+  const sourceId = new URL(request.url).pathname.split('/').at(-2);
+  if (!SOURCE_ID.test(sourceId)) return sourceToolsRefusal(404, 'not_found');
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return sourceToolsRefusal(503, 'sources_unavailable');
+  const body = await readJsonInput(request, 1_024);
+  if (!body) return tokenSwitchRefusal('source_switch_invalid', 400);
+  try {
+    const response = await stub.fetch(new Request(`https://admin-state.invalid/sources/${sourceId}/service-token`, {
+      method: 'POST', headers: { 'content-type': 'application/json', 'x-ankka-actor-email': access.actorEmail },
+      body: canonicalJson(body),
+    }));
+    if (response.status !== 200) return response;
+    const sources = safeManagementSources(await response.json());
+    return sources ? fixedJson(200, await publicSources(sources, stub, env)) : sourceToolsRefusal(503, 'sources_unavailable');
+  } catch {
+    return tokenSwitchRefusal('source_switch_recovery_required');
+  }
+}
+
 async function handleInstalledSourceLabel(request, env, authorizedAccess = null) {
   if (request.method !== 'PUT') {
     return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'PUT' });
@@ -5510,6 +5989,56 @@ function sourceOauthCookie(value, maxAge) {
   return `${SOURCE_OAUTH_COOKIE}=${value}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=${maxAge}`;
 }
 
+/** Every public route of one Access application, as `host[/path]` text. */
+function accessApplicationRoutes(app) {
+  const routes = [app.domain, ...(Array.isArray(app.self_hosted_domains) ? app.self_hosted_domains : []),
+    ...(Array.isArray(app.destinations) ? app.destinations.filter(item => item?.type === 'public').map(item => item.uri) : [])];
+  return [...new Set(routes.filter(isText))];
+}
+
+/**
+ * Whether one route certainly covers a source URL. Only a leading `*.` host
+ * wildcard and a trailing `*` path wildcard are read; any other pattern is
+ * not treated as coverage rather than guessing how Cloudflare would match it.
+ */
+function accessRouteCovers(route, source) {
+  const slash = route.indexOf('/');
+  const host = (slash < 0 ? route : route.slice(0, slash)).toLowerCase();
+  const path = slash < 0 ? '/' : route.slice(slash);
+  const hostCovers = !host.includes('*') ? host === source.host
+    : host.startsWith('*.') && !host.slice(1).includes('*') && source.host.endsWith(host.slice(1)) &&
+      source.host.length > host.length - 1;
+  if (!hostCovers) return false;
+  const star = path.indexOf('*');
+  if (star >= 0) return star === path.length - 1 && source.pathname.startsWith(path.slice(0, -1));
+  return source.pathname === path || source.pathname.startsWith(path.endsWith('/') ? path : `${path}/`);
+}
+
+/**
+ * A service-token source must sit behind a self-hosted Access application in
+ * this gateway's own account, so its credential can only be an Access service
+ * token for an Access-protected origin there. This is the mode's boundary, not
+ * a general bearer-token feature. The gateway's own hostnames never qualify.
+ */
+async function verifyServiceTokenSource(source, env) {
+  const environment = parseManagementEnvironment(env);
+  if (!environment) throw new SourceDiscoveryError(503, 'sources_unavailable');
+  const url = new URL(source.url);
+  if (source.onBehalfOfUser === true || [environment.managementHostname,
+    `${environment.workerName}.${environment.workersSubdomain}.workers.dev`].includes(url.host)) {
+    throw new SourceDiscoveryError(400, 'source_invalid');
+  }
+  const token = managementCredential(env);
+  if (!token) throw new SourceDiscoveryError(409, 'management_credential_required');
+  const listed = await providerList(`/accounts/${encodeURIComponent(environment.accountId)}/access/apps`,
+    token, {}, AbortSignal.timeout(SOURCE_TOOLS_READ_TIMEOUT_MS));
+  if (listed.status === 'auth') throw new SourceDiscoveryError(409, 'management_credential_required');
+  if (listed.status !== 'ok' || !Array.isArray(listed.result)) throw new SourceDiscoveryError(502, 'source_access_unavailable');
+  const covered = listed.result.some((app) => isRecord(app) && app.type === 'self_hosted' &&
+    accessApplicationRoutes(app).some((route) => accessRouteCovers(route, url)));
+  if (!covered) throw new SourceDiscoveryError(409, 'source_access_application_required');
+}
+
 // Diagnose only configurations we can read in this gateway's Cloudflare account.
 // External providers, unreadable apps and ambiguous wildcard configurations still
 // use normal OAuth. This is a preflight hint, never an authorization boundary or
@@ -5524,9 +6053,7 @@ async function checkSourceOauthCallback(context, env, config, redirectUri) {
   let match = null, specificity = -1, ambiguous = false;
   for (const app of listed.result) {
     if (!isRecord(app) || app.type !== 'self_hosted') continue;
-    const routes = [app.domain, ...(Array.isArray(app.self_hosted_domains) ? app.self_hosted_domains : []),
-      ...(Array.isArray(app.destinations) ? app.destinations.filter(item => item?.type === 'public').map(item => item.uri) : [])];
-    for (const route of new Set(routes.filter(isText))) {
+    for (const route of accessApplicationRoutes(app)) {
       const slash = route.indexOf('/');
       const host = slash < 0 ? route : route.slice(0, slash);
       const path = slash < 0 ? '/' : route.slice(slash);
@@ -5873,7 +6400,8 @@ async function saveRuntimeUpdates(storage, state) {
 }
 
 async function prepareRuntimeAction(storage, environment, input) {
-  if (await sourceRemovalBlocks(storage) || await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage) || await currentTeardownLocksRuntime(storage, Date.now())) return null;
+  if (await sourceRemovalBlocks(storage) || await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage) ||
+      await sourceTokenSwitchBlocks(storage) || await currentTeardownLocksRuntime(storage, Date.now())) return null;
   // A token change gives this Worker a new version; an update must not read its bindings around that write.
   if (await credentialActionBlocksLifecycle(storage, Date.now())) return null;
   if (await teamActionBlocksLifecycle(storage) || !await teamRuntimeReleaseAllowed(storage, input?.to?.release)) return null;
@@ -6881,7 +7409,8 @@ async function rootTeardownAuthority(storage, environment, installationId, env, 
 }
 
 async function prepareTeardownAction(storage, environment, input, env, currentPolicies = false, managed = null) {
-  if (await credentialActionBlocksLifecycle(storage, Date.now()) || await sourceToolEditBlocks(storage) || await sourceLabelEditBlocks(storage)) return null;
+  if (await credentialActionBlocksLifecycle(storage, Date.now()) || await sourceToolEditBlocks(storage) ||
+      await sourceLabelEditBlocks(storage) || await sourceTokenSwitchBlocks(storage)) return null;
   const currentState = currentPolicies ? await currentTeardownState(storage, env, managed) : null;
   if (currentPolicies ? currentState === null : await teamTeardownBlocked(storage)) return null;
   if (!exactKeys(input, [
@@ -7699,7 +8228,8 @@ export class AdminState {
       }
       if (url.pathname === INTERNAL_SOURCES_PATH && request.method === 'PUT') {
         if (await sourceRemovalBlocks(this.state.storage)) return sourceRemovalRefusal('source_removal_pending');
-        if (await sourceToolEditBlocks(this.state.storage) || await sourceLabelEditBlocks(this.state.storage)) return sourceActionConflict('lifecycle_pending');
+        if (await sourceToolEditBlocks(this.state.storage) || await sourceLabelEditBlocks(this.state.storage) ||
+            await sourceTokenSwitchBlocks(this.state.storage)) return sourceActionConflict('lifecycle_pending');
         if (SOURCE_ADDITION_PAUSED) return sourceAdditionPaused();
         if (await teamActionBlocksLifecycle(this.state.storage)) return fixedJson(409, {
           schemaVersion: 1, error: 'team_action_conflict',
@@ -7744,12 +8274,19 @@ export class AdminState {
         });
         // Older runtimes cannot read an empty tool selection or the built-in
         // source identity. Company also needs the current parser. Arm compatibility before saving.
-        if ((builtin || apiSource || reservedId || input.source.allTools || input.source.company || input.source.enabledTools.length === 0) &&
+        if ((builtin || apiSource || reservedId || input.source.allTools || input.source.company || input.source.enabledTools.length === 0 ||
+            input.source.authMode === ACCESS_SERVICE_MODE) &&
             !await armSourceCompatibility(this.state.storage, this.env)) {
           return fixedJson(503, { schemaVersion: 1, error: 'sources_unavailable' });
         }
         await this.state.storage.put(SOURCES_KEY, updated);
         return fixedJson(200, updated);
+      }
+      const tokenSwitch = /^\/sources\/(source-[a-f0-9]{16})\/service-token$/u.exec(url.pathname);
+      if (tokenSwitch && request.method === 'POST') {
+        const actorEmail = normalizedActor(request.headers.get('x-ankka-actor-email'));
+        if (!actorEmail) return sourceToolsRefusal(403, 'access_required');
+        return updateSourceTokenSwitch(this.state.storage, this.env, tokenSwitch[1], await readJsonInput(request, 1_024), actorEmail);
       }
       const installedLabel = /^\/sources\/(source-[a-f0-9]{16})\/label$/u.exec(url.pathname);
       if (installedLabel && request.method === 'PUT') {
@@ -7806,8 +8343,11 @@ export class AdminState {
     }
     if (url.pathname === INTERNAL_SOURCE_REMOVAL_PATH) {
       const removal = safeSourceRemoval(await this.state.storage.get(SOURCE_REMOVAL_KEY));
-      return removal === false ? sourceRemovalRefusal('source_removal_unavailable')
-        : fixedJson(200, { pendingRemoval: removal ? { sourceId: removal.sourceId } : null });
+      const tokenSwitch = safeSourceTokenSwitch(await this.state.storage.get(SOURCE_AUTH_SWITCH_KEY));
+      const control = tokenSwitch ? safeManagementControl(await this.state.storage.get(CONTROL_KEY)) : null;
+      return removal === false || tokenSwitch === false || (tokenSwitch && !control) ? sourceRemovalRefusal('source_removal_unavailable')
+        : fixedJson(200, { pendingRemoval: removal ? { sourceId: removal.sourceId } : null,
+          tokenSwitch: publicTokenSwitch(tokenSwitch, control) });
     }
     if (url.pathname === INTERNAL_STATUS_PATH) {
       const status = safePublicStatus(await this.state.storage.get(STATUS_KEY));
@@ -8274,15 +8814,35 @@ async function handleSourceDiscovery(request, env, authorizedAccess = null) {
   if (!sameOriginMutation(request)) return fixedJson(403, { schemaVersion: 1, error: 'origin_required' });
   const input = await readJsonInput(request);
   if (!exactKeys(input, ['url'])) return fixedJson(400, { schemaVersion: 1, error: 'source_url_invalid' });
+  // Whether the URL sits behind a self-hosted Access application in this
+  // account, so it can be reached with an Access service token instead.
+  const tokenCovered = async () => {
+    const url = publicMcpUrl(input.url);
+    if (!url || [managementSourceUrl(env), feedbackSourceUrl(env), guideSourceUrl(env)].includes(url) ||
+        apiConnectionKey(url, env) !== null) return false;
+    try {
+      await verifyServiceTokenSource({ url, onBehalfOfUser: false }, env);
+      return true;
+    } catch { return false; }
+  };
   try {
     const gatewayTools = input.url === managementSourceUrl(env) ? managementToolDefinitions(env)
       : input.url === feedbackSourceUrl(env) ? feedbackToolDefinitions()
       : input.url === guideSourceUrl(env) ? guideToolDefinitions() : null;
-    const discovered = gatewayTools
-      ? { endpoint: input.url, protocolVersion: '2025-06-18', authMode: 'oauth',
-        tools: gatewayTools.map((tool) => ({ name: tool.name, description: tool.description,
-          readOnlyHint: tool.annotations.readOnlyHint, destructiveHint: tool.annotations.destructiveHint, defaultSelected: true })) }
-      : await inspectMcpSource(input.url);
+    let discovered;
+    try {
+      discovered = gatewayTools
+        ? { endpoint: input.url, protocolVersion: '2025-06-18', authMode: 'oauth',
+          tools: gatewayTools.map((tool) => ({ name: tool.name, description: tool.description,
+            readOnlyHint: tool.annotations.readOnlyHint, destructiveHint: tool.annotations.destructiveHint, defaultSelected: true })) }
+        : await inspectMcpSource(input.url);
+    } catch (error) {
+      // An Access application without Managed OAuth sends visitors to a sign-in
+      // page; only its service token can reach the origin. Tools come after.
+      if (gatewayTools || !await tokenCovered()) throw error;
+      return fixedJson(200, { schemaVersion: 1, status: 'service_token_required', endpoint: publicMcpUrl(input.url),
+        protocolVersion: null, authentication: ACCESS_SERVICE_MODE, tools: [] });
+    }
     const result = {
       schemaVersion: 1,
       status: discovered.authMode === 'oauth' ? 'authorization_required' : 'discovered',
@@ -8292,6 +8852,9 @@ async function handleSourceDiscovery(request, env, authorizedAccess = null) {
       tools: discovered.tools,
     };
     if (discovered.connectionBlock) result.connectionBlock = discovered.connectionBlock;
+    if (!gatewayTools && discovered.authMode === 'oauth' && !discovered.connectionBlock && await tokenCovered()) {
+      result.serviceTokenAvailable = true;
+    }
     return fixedJson(200, result);
   } catch (error) {
     return sourceErrorResponse(error);
@@ -8527,7 +9090,7 @@ async function publicSources(sources, stub, env) {
   }
   const response = await stub.fetch(new Request(`https://admin-state.invalid${INTERNAL_SOURCE_REMOVAL_PATH}`));
   if (response.status !== 200) throw new Error('source_removal_unavailable');
-  const { pendingRemoval } = await response.json();
+  const { pendingRemoval, tokenSwitch } = await response.json();
   // Ownership metadata belongs to durable state, not the public source contract.
   const publicEntries = sources.sources.map((source) => {
     const entry = {
@@ -8540,7 +9103,8 @@ async function publicSources(sources, stub, env) {
     return entry;
   });
   return { ...sources, sources: publicEntries, applyMode: 'account_token', installationEnabled, installEndsRollbackTo,
-    removalEnabled: true, removalCredentialConfigured: managementCredential(env) !== null, pendingRemoval };
+    removalEnabled: true, removalCredentialConfigured: managementCredential(env) !== null, pendingRemoval,
+    tokenSwitch: tokenSwitch ?? null };
 }
 
 function teamSources(sources) {
@@ -8663,9 +9227,10 @@ async function otherLifecycleBlocksSource(storage, now, currentActionId, current
 }
 
 /** An unfinished source installation, update or removal, as their own journals record it. */
-async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true, currentSourceActionId = currentActionId, allowToolEditSourceId = null, allowLabelEditSourceId = null) {
+async function recordedLifecycleBlocks(storage, now, currentActionId, includeSources = true, currentSourceActionId = currentActionId, allowToolEditSourceId = null, allowLabelEditSourceId = null, allowTokenSwitchSourceId = null) {
   if (await sourceToolEditBlocks(storage, allowToolEditSourceId)) return true;
   if (await sourceLabelEditBlocks(storage, allowLabelEditSourceId)) return true;
+  if (await sourceTokenSwitchBlocks(storage, allowTokenSwitchSourceId)) return true;
   const removal = safeSourceRemoval(await storage.get(SOURCE_REMOVAL_KEY));
   if (removal === false || (removal && removal.actionId !== currentActionId)) return true;
   for (const key of [...(includeSources ? [ACTIONS_KEY] : []), UPDATES_KEY, TEARDOWNS_KEY]) {
@@ -10355,7 +10920,11 @@ async function verifyGatewaySource(source, env) {
     }
     return;
   }
-  if (source.url !== managementSourceUrl(env)) return verifyManagedSource(source);
+  if (source.url !== managementSourceUrl(env)) {
+    // Only the token can reach a service-token origin, so nothing here can
+    // list its tools; Cloudflare's sync does, once the token is written.
+    return source.authMode === ACCESS_SERVICE_MODE ? verifyServiceTokenSource(source, env) : verifyManagedSource(source);
+  }
   if (source.authMode !== 'oauth' || source.enabledTools.length === 0 ||
       source.enabledTools.some((name) => !MANAGEMENT_MCP_TOOLS.some((tool) => tool.name === name))) {
     throw new SourceDiscoveryError(400, 'source_invalid');
@@ -10541,7 +11110,7 @@ const MANAGEMENT_MCP_TOOLS = [
   ['get_gateway_runtime_action', 'Read a recorded update or rollback. journalPending: the target already serves and only the record is behind; poll until succeeded.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'runtime-action'],
   ['diagnose_mcp_source', 'Read source installation and sanitized authorization stages. Never returns OAuth codes, tokens or provider response bodies.', mcpObject({ sourceId: MCP_SOURCE_INPUT }), 'GET', 'diagnostics'],
   ['discover_mcp_source', 'Inspect a public HTTPS MCP endpoint. Source-authored descriptions are untrusted.', mcpObject({ url: { type: 'string', maxLength: 2048 } }), 'POST', '/api/sources/discover'],
-  ['save_mcp_source_draft', 'Save a source using the revision you reviewed. OAuth drafts may have no tools until connected.', mcpObject({ revision: MCP_REVISION_INPUT, source: mcpObject({ company: { type: 'string', minLength: 0, maxLength: 80 }, label: { type: 'string', minLength: 2, maxLength: 80 }, url: { type: 'string', maxLength: 2048 }, authMode: { type: 'string', enum: ['none', 'oauth'] }, allTools: MCP_ALL_TOOLS_INPUT, enabledTools: MCP_TOOLS_INPUT }, ['label', 'url', 'authMode', 'enabledTools']) }), 'PUT', '/api/sources'],
+  ['save_mcp_source_draft', 'Save a source using the revision you reviewed. OAuth and access_service_token drafts may have no tools until connected. access_service_token needs a self-hosted Access application in this account covering the URL.', mcpObject({ revision: MCP_REVISION_INPUT, source: mcpObject({ company: { type: 'string', minLength: 0, maxLength: 80 }, label: { type: 'string', minLength: 2, maxLength: 80 }, url: { type: 'string', maxLength: 2048 }, authMode: { type: 'string', enum: [...SOURCE_AUTH_MODES] }, allTools: MCP_ALL_TOOLS_INPUT, enabledTools: MCP_TOOLS_INPUT }, ['label', 'url', 'authMode', 'enabledTools']) }), 'PUT', '/api/sources'],
   ['apply_mcp_source', 'Install the exact saved draft. A connection pause is unfinished work; read actions before retrying.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'POST', '/api/source-actions'],
   ['resume_mcp_source', 'Resume the same recorded source installation, preserving its journal.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT }), 'POST', 'renew'],
   ['choose_mcp_source_tools', 'Save the exact tools selected from the synced list. Resume installation separately.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT, actionId: MCP_ACTION_INPUT, enabledTools: MCP_TOOLS_INPUT, allTools: MCP_ALL_TOOLS_INPUT }, ['revision', 'sourceId', 'actionId', 'enabledTools']), 'POST', 'tools'],
@@ -11017,12 +11586,16 @@ async function handleManagementMcp(request, env) {
   return rpc({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, isError: !result.ok });
 }
 
-function managementMcpPage(title, content) {
-  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>
+function htmlAttribute(value) {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+function managementMcpPage(title, content, { head = '', headers = {} } = {}) {
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>${head}<style>
   :root{color-scheme:dark;font-family:system-ui,sans-serif;background:#141414;color:#eee}body{margin:0;padding:clamp(2rem,10vw,6rem) 1.5rem}header{max-width:48rem;margin:0 auto 3rem}.wordmark{display:block;width:100%;height:auto;mask-image:linear-gradient(#000,transparent)}main{max-width:34rem;margin:auto}h1{font-size:1.6rem;font-weight:500}p{line-height:1.6;color:#bbb}button{font:inherit;border:1px solid #555;border-radius:.5rem;padding:.75rem 1rem;background:#eee;color:#141414;cursor:pointer}button:focus-visible{outline:3px solid #9ac6ff;outline-offset:4px}
   </style></head><body><header aria-label="Ankka"><svg class="wordmark" viewBox="0 0 175 19" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
           <path fill="currentColor" d="M0 18.2697V5.97501C0 4.32038 0.517065 2.96069 1.5512 1.89591C2.63896 0.785177 4.0561 0.229808 5.80263 0.229808C7.51852 0.229808 8.93567 0.785177 10.0541 1.89591C11.0882 2.92238 11.6053 4.28208 11.6053 5.97501V17.2356L9.42209 18.2697H9.3072V10.1805H2.29807V17.2356L0.114903 18.2697H0ZM2.29807 8.08922H9.3072V5.97501C9.3072 4.94852 9.03143 4.11739 8.47988 3.48158C7.79812 2.69258 6.90572 2.29808 5.80263 2.29808C4.69958 2.29808 3.80714 2.69258 3.12538 3.48158C2.57384 4.11739 2.29807 4.94852 2.29807 5.97501V8.08922ZM40.9103 18.2697V5.97501C40.9103 4.32038 41.4274 2.96069 42.4615 1.89591C43.5493 0.785177 44.9664 0.229808 46.713 0.229808C48.4365 0.229808 49.8538 0.785177 50.9645 1.89591C51.9986 2.92238 52.5156 4.28208 52.5156 5.97501V17.2356L50.3326 18.2697H50.2177V5.97501C50.2177 4.94852 49.9418 4.11739 49.3905 3.48158C48.7085 2.69258 47.8161 2.29808 46.713 2.29808C45.6099 2.29808 44.7175 2.69258 44.0357 3.48158C43.4842 4.11739 43.2084 4.94852 43.2084 5.97501V17.2356L41.0252 18.2697H40.9103ZM81.8206 18.2697V1.03413L84.0037 0H84.1185V8.65226L90.3579 0H90.4727L92.4951 0.953699L87.3704 7.779C89.1324 7.81728 90.5189 8.3305 91.5302 9.3187C92.5643 10.3298 93.0813 11.6896 93.0813 13.3978V17.2356L90.8983 18.2697H90.7829V13.3978C90.7829 12.3713 90.5075 11.5402 89.9557 10.9044C89.274 10.1153 88.4393 9.72085 87.451 9.72085C86.4472 9.72085 85.6125 10.1153 84.9458 10.9044C84.3944 11.5555 84.1185 12.3866 84.1185 13.3978V17.2356L81.9355 18.2697H81.8206ZM122.157 18.2697V1.03413L124.34 0H124.455V8.65226L130.694 0H130.809L132.831 0.953699L127.706 7.779C129.468 7.81728 130.854 8.3305 131.866 9.3187C132.9 10.3298 133.417 11.6896 133.417 13.3978V17.2356L131.234 18.2697H131.119V13.3978C131.119 12.3713 130.843 11.5402 130.292 10.9044C129.61 10.1153 128.775 9.72085 127.787 9.72085C126.783 9.72085 125.948 10.1153 125.282 10.9044C124.73 11.5555 124.455 12.3866 124.455 13.3978V17.2356L122.271 18.2697H122.157ZM162.492 18.2697V5.97501C162.492 4.32038 163.009 2.96069 164.043 1.89591C165.131 0.785177 166.548 0.229808 168.295 0.229808C170.011 0.229808 171.428 0.785177 172.546 1.89591C173.58 2.92238 174.097 4.28208 174.097 5.97501V17.2356L171.914 18.2697H171.799V10.1805H164.791V17.2356L162.607 18.2697H162.492ZM164.791 8.08922H171.799V5.97501C171.799 4.94852 171.524 4.11739 170.972 3.48158C170.291 2.69258 169.398 2.29808 168.295 2.29808C167.192 2.29808 166.299 2.69258 165.618 3.48158C165.066 4.11739 164.791 4.94852 164.791 5.97501V8.08922Z" />
-        </svg></header><main><h1>${title}</h1>${content}</main></body></html>`, { headers: { ...PUBLIC_HEADERS,
+        </svg></header><main><h1>${title}</h1>${content}</main></body></html>`, { headers: { ...PUBLIC_HEADERS, ...headers,
     // A form posted from a no-referrer page carries `Origin: null`, which the same-origin
     // check below would refuse. Same-origin keeps the origin on the post and sends nothing elsewhere.
     'referrer-policy': 'same-origin',
@@ -11058,8 +11631,16 @@ async function managementMcpBrowser(request, env) {
       sourceId: source.id, revision: sources.revision, actorEmail: access.actorEmail, remote: true }) }));
   if (!response.ok) return response;
   const body = await response.json();
-  return new Response(null, { status: 303, headers: { ...PUBLIC_HEADERS, location: body.authorizationUrl,
-    'set-cookie': response.headers.get('set-cookie') } });
+  // Browsers apply this page's `form-action 'self'` to a redirect that answers its form, so a 303 to the
+  // provider is dropped silently. Answer with a page that continues on its own; a refresh or link is not a form.
+  let authorization = null;
+  try { authorization = new URL(body.authorizationUrl); } catch { /* refused below */ }
+  if (authorization?.protocol !== 'https:') return sourceToolsRefusal(502, 'source_oauth_unavailable');
+  const target = htmlAttribute(authorization.href);
+  const cookie = response.headers.get('set-cookie');
+  return managementMcpPage('Opening your provider',
+    `<p>If your provider does not open, continue below. Then return to your agent to finish setup.</p><p><a href="${target}" rel="noreferrer">Continue to provider</a></p>`,
+    { head: `<meta http-equiv="refresh" content="0;url=${target}">`, headers: cookie ? { 'set-cookie': cookie } : {} });
 }
 
 
@@ -11084,6 +11665,7 @@ export default {
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/icon$/u.test(url.pathname)) return handleSourceIcon(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/connection$/u.test(url.pathname)) return handleSourceConnection(request, env);
     if (/^\/api\/sources\/source-[a-f0-9]{16}\/authorize$/u.test(url.pathname)) return handleSourceReconnect(request, env);
+    if (/^\/api\/sources\/source-[a-f0-9]{16}\/service-token$/u.test(url.pathname)) return handleSourceTokenSwitch(request, env);
     if (url.pathname === '/api/sources') return handleSources(request, env);
     if (url.pathname === '/api/team' || url.pathname === '/api/team-actions' || url.pathname.startsWith('/api/team-actions/')) {
       return handleTeam(request, env);

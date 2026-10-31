@@ -4870,8 +4870,19 @@ test('management MCP hands provider consent to the browser and reads sanitized r
   assert.equal(JSON.stringify(diagnostic.body).includes('synthetic-provider-detail-never-reflected'), false);
   gateway.oauthHook(undefined);
   const started = await worker.fetch(new Request(handoff.authorizationUrl, { method: 'POST', headers }), gateway.env);
-  assert.equal(started.status, 303, await started.clone().text());
-  const authorization = new URL(started.headers.get('location'));
+  // Browsers apply the page's form-action to a redirect that answers its form, so a 303 straight to the
+  // provider is dropped and "Continue to provider" appears to do nothing. The answer must be a page that
+  // continues on its own, under the same strict policy.
+  assert.match(page.headers.get('content-security-policy'), /form-action 'self'/u);
+  assert.equal(started.status, 200, await started.clone().text());
+  assert.equal(started.headers.get('content-security-policy'), page.headers.get('content-security-policy'));
+  const continuation = await started.text();
+  const refresh = /<meta http-equiv="refresh" content="0;url=([^"]+)">/u.exec(continuation)?.[1];
+  const link = /<a href="([^"]+)" rel="noreferrer">Continue to provider<\/a>/u.exec(continuation)?.[1];
+  assert.ok(refresh, continuation);
+  assert.equal(link, refresh);
+  const authorization = new URL(refresh.replaceAll('&quot;', '"').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'));
+  assert.equal(authorization.origin, OAUTH_ISSUER);
   assert.equal(authorization.searchParams.get('redirect_uri'), `${MANAGEMENT_ORIGIN}/api/mcp/oauth/callback`);
   const callback = new URL(`${MANAGEMENT_ORIGIN}/api/mcp/oauth/callback`);
   callback.search = new URLSearchParams({ state: authorization.searchParams.get('state'), code: 'synthetic-authorization-code', iss: OAUTH_ISSUER });

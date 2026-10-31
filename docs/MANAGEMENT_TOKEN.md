@@ -255,11 +255,12 @@ verified Cloudflare server link reach the browser; provider error text and
 credentials are neither returned nor persisted. Results are held in the current
 page, with no background polling.
 The time of the check and recovery guidance appear in the connector details.
-An operator OAuth connector requiring authorization also shows **Reconnect in
-Cloudflare** beside its badge. This opens the exact verified server's Cloudflare
-page in a new tab. Complete authorization there, keep **Require user auth** off
-for the shared connection, then return and select **Check connections**. Opening
-the page does not change credentials or tool permissions.
+An operator OAuth connector requiring authorization also shows **Reconnect**
+beside its badge; a working one shows **Sign in again** there to renew its
+shared sign-in early. Both open the same sign-in dialog, which also links to the
+exact verified server's Cloudflare page as a manual fallback. Keep **Require
+user auth** off for the shared connection, then return and select **Check
+connections**. Opening the page does not change credentials or tool permissions.
 Connectors using per-user OAuth show **Individual sign-in** without a sync:
 an administrator check cannot establish the health of each user's session.
 A successful connection check does not guarantee every tool's permissions or

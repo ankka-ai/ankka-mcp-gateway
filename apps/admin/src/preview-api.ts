@@ -466,6 +466,10 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     throw new GatewayApiError(409, 'source_oauth_unavailable')
   }
 
+  async switchSourceToServiceToken(): Promise<ManagedSources> {
+    throw new GatewayApiError(409, 'source_switch_unavailable')
+  }
+
   async authorizeSource(): Promise<SourceAuthorization> {
     throw new GatewayApiError(409, 'source_oauth_unavailable')
   }

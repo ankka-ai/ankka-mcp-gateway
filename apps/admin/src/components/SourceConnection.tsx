@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as v from 'valibot'
 import { Button } from './Button'
+import { ServiceTokenInstructions } from './ServiceToken'
 import { sourceConnectionSchema, type SourceConnection } from '../api'
 
 export type ConnectionCheck = SourceConnection | { state: 'waiting' | 'checking'; checkedAt: null; reason: null }
@@ -106,6 +107,7 @@ export function connectionLabel(result?: ConnectionCheck) {
     case 'checking': return 'Checking…'
     case 'connected': return 'Connected'
     case 'authorization_required': return 'Reconnect required'
+    case 'service_auth_required': return 'Service token rejected'
     case 'forbidden': return 'Access denied'
     case 'unavailable': return 'Connection failed'
     case 'user_managed': return 'Individual sign-in'
@@ -115,11 +117,14 @@ export function connectionLabel(result?: ConnectionCheck) {
 
 export function ConnectionStatus({ result, label, onReconnect, disabled }: { result: ConnectionCheck | undefined; label: string; onReconnect?: (() => void) | undefined; disabled?: boolean }) {
   const color = result?.state === 'connected' ? 'bg-success/10 text-success-strong'
-    : ['authorization_required', 'forbidden', 'unavailable'].includes(result?.state ?? '') ? 'bg-warning/10 text-warning-strong'
+    : ['authorization_required', 'service_auth_required', 'forbidden', 'unavailable'].includes(result?.state ?? '') ? 'bg-warning/10 text-warning-strong'
       : 'bg-kumo-tint text-kumo-subtle'
   return <div className="flex flex-wrap items-center gap-2">
     <span role="status" className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${color}`}>{connectionLabel(result)}</span>
-    {result?.state === 'authorization_required' && onReconnect ? <Button variant="primary" disabled={disabled} onClick={onReconnect} aria-label={`Reconnect ${label}`}>Reconnect</Button> : null}
+    {!onReconnect ? null : result?.state === 'authorization_required'
+      ? <Button variant="primary" disabled={disabled} onClick={onReconnect} aria-label={`Reconnect ${label}`}>Reconnect</Button>
+      // A shared sign-in can expire on the provider's schedule; let operators renew it before it breaks.
+      : <Button variant="secondary" disabled={disabled} onClick={onReconnect} aria-label={`Sign in again to ${label}`}>Sign in again</Button>}
   </div>
 }
 
@@ -128,6 +133,7 @@ export function ConnectionDetails({ result }: { result: ConnectionCheck | undefi
     : result?.state === 'authorization_required' ? result.reconnectUrl
       ? 'Choose Reconnect to sign in again. The reconnect dialog also has an Open in Cloudflare link for manual setup. Keep Require user auth off for this shared connection.'
       : 'The connector needs authorization. Reconnect it in Cloudflare → MCP Portals → MCP servers, then check again.'
+      : result?.state === 'service_auth_required' ? 'Cloudflare Access did not admit this connector’s service token: it is missing, wrong or expired. Write a valid token into its server record as shown below, then check again. There is no sign-in to renew.'
       : result?.state === 'forbidden' ? 'The server denied access. Review the connected account’s permissions in Cloudflare and the provider.'
         : result?.state === 'unavailable' ? 'Cloudflare could not connect to this server. Check the provider and try again.'
           : result?.state === 'user_managed' ? 'Each user connects with their own login in the MCP client. This page cannot verify their individual sessions.'
@@ -140,6 +146,7 @@ export function ConnectionDetails({ result }: { result: ConnectionCheck | undefi
                         : 'The connection could not be verified. Check again to get its current status.'
   return <div className="mt-3 text-xs leading-5 text-kumo-subtle">
     <p>{message}</p>
+    {result?.state === 'service_auth_required' && result.credentialTarget ? <ServiceTokenInstructions target={result.credentialTarget} /> : null}
     {result?.checkedAt ? <p>Checked <time dateTime={result.checkedAt}>{new Date(result.checkedAt).toLocaleString()}</time></p> : null}
   </div>
 }

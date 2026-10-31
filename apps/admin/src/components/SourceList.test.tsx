@@ -214,6 +214,19 @@ describe('SourceList', () => {
     expect(screen.getByRole('button', { name: 'Knowledge' })).toBeVisible()
   })
 
+  it('lets operators sign in again to a healthy shared connection, and only to shared sign-in connectors', async () => {
+    const user = userEvent.setup()
+    const onReconnect = vi.fn()
+    const individual = { ...sources[0], id: 'source-3333333333333333', label: 'Personal', onBehalfOfUser: true }
+    render(<SourceList sources={[...sources, individual]} onCheckConnection={checkConnection} onReconnect={onReconnect}
+      installationEnabled isBusy={false} onAuthorize={vi.fn()} />)
+    await waitFor(() => expect(screen.getAllByRole('status')[0]).toHaveTextContent('Connected'))
+    expect(screen.queryByRole('button', { name: 'Reconnect Knowledge' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Sign in again to Knowledge' }))
+    expect(onReconnect).toHaveBeenCalledExactlyOnceWith(sources[0].id, undefined)
+    expect(screen.queryByRole('button', { name: /Sign in again to (Catalogue|Personal)/ })).not.toBeInTheDocument()
+  })
+
   it('explains when an unfinished gateway change pauses a connection check', async () => {
     const user = userEvent.setup()
     const check = vi.fn().mockResolvedValue({ schemaVersion: 1, sourceId: sources[0].id,

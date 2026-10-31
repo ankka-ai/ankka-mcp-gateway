@@ -35,6 +35,7 @@ export function syncedHintSummary(tools: DiscoveredTool[]): string {
 
 const WAITING = {
   connection_required: 'This connector needs authorization before its tools can be listed. After authorizing, check again. Nothing is enabled until you choose.',
+  service_auth_required: 'This connector’s server record has no working service token yet. Write the token into it as shown above, then check again. Nothing is enabled until you choose.',
   sync_required: 'Cloudflare has not finished syncing the tools of this connector. In Cloudflare, use Sync capabilities and resolve any connection error, then check again.',
   unsupported: 'Cloudflare’s synced list for this connector cannot be offered here: it has more than 500 tools, a repeated name, or a name the gateway does not accept. Nothing is enabled.',
 } satisfies Record<Exclude<SourceActionTools['state'], 'ready'>, string>

@@ -50,3 +50,5 @@ when there is one.
 - [Timeouts that only appear when several local gates run at once](test-failures/load-only-timeouts-from-parallel-local-gates.md)
 - [An update reads applying after its target release already serves](runtime-errors/update-stays-applying-after-target-serves.md)
 - [Cloudflare cannot sync a very large tool list](integration-issues/cloudflare-sync-fails-on-very-large-tool-lists.md)
+- [The authorize page's redirect to the provider is blocked by form-action](integration-issues/authorize-handoff-redirect-blocked-by-form-action.md)
+- [A constant named after a token or credential makes the release candidate unsignable](test-failures/release-secret-scan-flags-token-named-constants.md)
