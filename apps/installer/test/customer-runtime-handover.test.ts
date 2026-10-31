@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { customerRuntimeHandoverArmed, finishCustomerRuntimeHandover } from '../src/customer-gateway-entrypoint';
+import { customerRuntimeHandoverArmed, finishCustomerRuntimeHandover, restartOnActiveVersion } from '../src/customer-gateway-entrypoint';
 import { sealOperationSecret } from '../src/customer-operation-secrets';
 
 const KEY = 'ankka-mcp-gateway/customer-runtime-handover/v1';
@@ -92,5 +92,29 @@ describe('runtime handover visibility', () => {
     expect(state.setAlarm).not.toHaveBeenCalled();
     state.entries.delete(KEY);
     expect(await customerRuntimeHandoverArmed(state.storage, state.record.actionId, NOW)).toBe(false);
+  });
+});
+
+describe('the restart after an update upload', () => {
+  it('re-arms the alarm for now and resets the object only once its writes reached disk', async () => {
+    const order: string[] = [];
+    await restartOnActiveVersion({
+      storage: {
+        setAlarm: async (at) => { order.push(`alarm:${Number(at)}`); },
+        sync: async () => { await Promise.resolve(); order.push('synced'); },
+      },
+      abort: (reason) => { order.push(`abort:${reason}`); },
+    }, NOW);
+    expect(order).toEqual([`alarm:${NOW}`, 'synced', 'abort:runtime_update_uploaded']);
+  });
+
+  it.each(['alarm', 'flush'])('leaves the restart to Cloudflare when the %s write cannot be confirmed', async (failing) => {
+    const abort = vi.fn();
+    const refuse = async () => { throw new Error('storage unavailable'); };
+    await restartOnActiveVersion({
+      storage: { setAlarm: failing === 'alarm' ? refuse : async () => undefined, sync: failing === 'flush' ? refuse : async () => undefined },
+      abort,
+    }, NOW);
+    expect(abort).not.toHaveBeenCalled();
   });
 });
