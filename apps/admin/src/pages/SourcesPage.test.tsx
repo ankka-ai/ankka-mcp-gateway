@@ -37,7 +37,7 @@ function actionApi(snapshot: SourceActions): GatewayAdminApi {
     getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => snapshot), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
   }
 }
 
@@ -404,7 +404,7 @@ describe('SourcesPage', () => {
       getTeam: vi.fn(), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
       discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     expect(await screen.findByText(`${SOURCE_ADDITION_PAUSED_MESSAGE} Saved drafts are retained but cannot be applied.`)).toBeInTheDocument()
@@ -521,7 +521,7 @@ describe('SourcesPage', () => {
       })),
       prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft, prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
     await screen.findByText('No connectors yet')
@@ -572,7 +572,7 @@ describe('SourcesPage', () => {
       getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage catalog={SYNTHETIC_SOURCE_CATALOG} /></GatewayProvider>)
@@ -638,7 +638,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage catalog={SYNTHETIC_SOURCE_CATALOG} /></GatewayProvider>)
@@ -671,7 +671,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -720,7 +720,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -788,7 +788,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)
@@ -851,7 +851,7 @@ describe('SourcesPage', () => {
       prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
       prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
       prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     }
 
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)

@@ -265,6 +265,10 @@ members. Delete your teams on the Team page first; that removes their groups
 from each policy and then deletes the groups. Until then, removal is refused
 with `teardown_teams_present` before anything is recorded or deleted.
 
+Each team can also get a [connect page](TEAM_CONNECT_PAGES.md): one link
+that shows how to connect an assistant and example questions the team's
+connectors can answer. It reads the saved Team and never changes it.
+
 A membership change still does not end an existing Portal session by itself.
 Use [Session and acceptance limits](#revocation-and-acceptance) when someone
 must lose access immediately.

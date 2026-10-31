@@ -48,7 +48,7 @@ function fixtureApi(): GatewayAdminApi {
     getSourceActions: vi.fn<GatewayAdminApi['getSourceActions']>(async () => ({ schemaVersion: 1, actions: [], blockingAction: null })),
     getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(), prepareRuntimeAction: vi.fn(),
     getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
   }
 }
 
@@ -128,7 +128,7 @@ describe('WebMcpTools', () => {
       prepareRuntimeAction: vi.fn(),
       getRuntimeAction: vi.fn(),
       prepareTeardownAction,
-      getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
+      getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
       getTeardownAction: vi.fn(),
     }
     const tools: WebMcpTool[] = []

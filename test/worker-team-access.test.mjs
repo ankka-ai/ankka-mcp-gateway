@@ -5615,6 +5615,47 @@ test('the built-in Start here source serves the generated map until operators wr
   assert.equal(result(await managementRpc(gateway, 'tools/call', { name: 'get_gateway_guide', arguments: {} })).result.text, text);
 }));
 
+test('Gateway Management reads and replaces connect page examples with the same checks as the dashboard', () => fixture(async (gateway) => {
+  const { source } = await installManagementSource(gateway, ['get_connect_examples', 'set_connect_examples']);
+  const result = (reply) => reply.body.result.structuredContent;
+  const tools = (await managementRpc(gateway, 'tools/list', {})).body.result.tools;
+  const reader = tools.find((tool) => tool.name === 'get_connect_examples');
+  assert.equal(reader.annotations.readOnlyHint, true);
+  assert.equal(tools.find((tool) => tool.name === 'set_connect_examples').annotations.readOnlyHint, false);
+
+  const read = result(await managementRpc(gateway, 'tools/call', { name: 'get_connect_examples', arguments: {} }));
+  assert.equal(read.ok, true, JSON.stringify(read));
+  assert.equal(read.result.revision, 0);
+  assert.deepEqual(read.result.examples, []);
+  assert.equal(read.result.page.status, 'off');
+  assert.equal(read.result.pageUrl, `${MANAGEMENT_ORIGIN}/__ankka/connect`);
+  assert.ok(read.result.sources.some((item) => item.id === source.id && item.name === 'Gateway Management'));
+  assert.deepEqual(read.result.teams, []);
+
+  const examples = [
+    { id: 'example-0a0a0a0a0a0a', prompt: 'Which sources can I use?', answer: 'A list of your sources and what each is for.', sourceIds: [source.id] },
+    { id: 'example-0b0b0b0b0b0b', prompt: 'What can you help me with?', sourceIds: [] },
+  ];
+  const written = await managementRpc(gateway, 'tools/call', { name: 'set_connect_examples', arguments: { expectedRevision: 0, examples } });
+  assert.equal(written.body.result.isError, false, JSON.stringify(written.body));
+  assert.equal(result(written).result.revision, 1);
+  assert.equal(result(written).result.updatedBy, ADMIN);
+  assert.deepEqual(result(written).result.examples, examples);
+
+  const stale = await managementRpc(gateway, 'tools/call', { name: 'set_connect_examples', arguments: { expectedRevision: 0, examples } });
+  assert.deepEqual(result(stale), { ok: false, error: { code: 'connect_examples_revision_conflict' } });
+  const unknown = await managementRpc(gateway, 'tools/call', { name: 'set_connect_examples', arguments: { expectedRevision: 1,
+    examples: [{ ...examples[0], sourceIds: ['source-0000000000000000'] }] } });
+  assert.deepEqual(result(unknown), { ok: false, error: { code: 'connect_examples_invalid' } });
+  for (const invalid of [{ ...examples[0], id: 'example-1' }, { ...examples[0], answer: 'x'.repeat(301) }, { ...examples[0], extra: true }]) {
+    const refused = await managementRpc(gateway, 'tools/call', { name: 'set_connect_examples', arguments: { expectedRevision: 1, examples: [invalid] } });
+    assert.equal(refused.body.error.code, -32602);
+  }
+  const dashboard = await (await gateway.api('/api/connect')).json();
+  assert.equal(dashboard.revision, 1);
+  assert.deepEqual(dashboard.examples, examples);
+}));
+
 const SOURCE_TOOL_EDIT_KEY = 'ankka-mcp-gateway/source-tool-edit/v1';
 
 async function installAdditionalSource(gateway, extra = {}) {

@@ -1,4 +1,4 @@
-import { ArrowUpRight, Database, GearSix, Users, WarningCircle, X } from '@phosphor-icons/react'
+import { ArrowUpRight, Database, GearSix, PlugsConnected, Users, WarningCircle, X } from '@phosphor-icons/react'
 import { Link, Outlet, useLocation } from '@tanstack/react-router'
 import { LifecycleScreen } from './LifecycleScreen'
 import type { ComponentType } from 'react'
@@ -7,7 +7,7 @@ import { BrandMark } from './BrandMark'
 import { Button } from './Button'
 import { DashboardSkeleton } from './DashboardSkeleton'
 
-type AppPath = '/sources' | '/team' | '/settings'
+type AppPath = '/sources' | '/team' | '/connect' | '/settings'
 
 interface NavItem {
   to: AppPath
@@ -18,6 +18,7 @@ interface NavItem {
 const navigation: NavItem[] = [
   { to: '/sources', label: 'Connectors', icon: Database },
   { to: '/team', label: 'Team', icon: Users },
+  { to: '/connect', label: 'Connect pages', icon: PlugsConnected },
   { to: '/settings', label: 'Settings', icon: GearSix },
 ]
 
