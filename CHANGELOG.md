@@ -4,6 +4,16 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Fix starting a service-token source or **Switch to service token** on a live
+  account. Cloudflare refuses a bearer server record created without
+  `auth_credentials` (400, code 7001), so the switch stopped with
+  `source_switch_recovery_required` before anything else changed. The gateway
+  now creates the record with the fixed, public placeholder
+  `ankka-pending-customer-credential`, which is not a credential. The record
+  waits for your token as before: a record still on the placeholder never reads
+  Ready, and writing your token with the documented command replaces it. See
+  [Access service-token sources](docs/SERVICE_TOKEN_SOURCES.md).
+
 - Add the agent entrance, for hosted agents that can send only
   `Authorization: Bearer`, such as Claude Managed Agents. Turn it on in
   **Team → Agents** at a hostname under your zone; your gateway attaches it to

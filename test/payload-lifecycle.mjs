@@ -536,13 +536,21 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
     const record = { method, pathname: url.pathname, search: url.search, body: null };
     if (method === 'POST' || method === 'PUT') record.body = await readJson(request.clone());
     state.requests.push(record);
+    // Measured live 2026-10-31: Cloudflare refuses a bearer record created without credentials.
+    if (url.pathname === SERVERS && method === 'POST' && record.body?.auth_type === 'bearer' &&
+        !v.is(v.pipe(v.string(), v.minLength(1)), record.body.auth_credentials)) {
+      return Response.json({ success: false, result: null, errors: [{ code: 7001,
+        message: 'auth_credentials is required for auth_type "bearer"' }] }, { status: 400 });
+    }
     const intercepted = await hooks.onRequest?.({ request, state, record });
     if (intercepted instanceof Response) return intercepted;
     const { pathname } = url;
 
     // MCP server
     if (pathname === SERVERS && method === 'POST') {
-      const created = { ...record.body, status: 'ready', authentication_status: 'not_required',
+      // Cloudflare stores credentials but never returns them.
+      const { auth_credentials: _stored, ...body } = record.body;
+      const created = { ...body, status: 'ready', authentication_status: 'not_required',
         tools: (record.body.updated_tools ?? []).map(({ name }) => ({ name, inputSchema: { type: 'object' } })),
       };
       state.servers.set(created.id, created);

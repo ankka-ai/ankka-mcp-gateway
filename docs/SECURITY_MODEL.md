@@ -27,9 +27,11 @@ account. Ankka does not ask for, store, relay, or log them.
 A source behind a self-hosted Access application in the gateway's own account
 can use an Access service token instead of a shared operator sign-in. The
 customer creates that token in Cloudflare and writes it into the source's
-Cloudflare server record from their own shell. The gateway, which creates that
-bearer record without credentials, never asks for, receives, stores or logs
-the token, and never reads it back: Cloudflare does not return it. The gateway
+Cloudflare server record from their own shell. The gateway creates that bearer
+record with a fixed, public placeholder (`ankka-pending-customer-credential`),
+because Cloudflare refuses a bearer record without credentials. It never asks
+for, receives, stores or logs the token, and never reads it back: Cloudflare
+does not return it. The gateway
 offers the mode only for a URL covered by such an application, so the
 credential is limited to an Access service token for an Access-protected origin
 in that account. See [Access service-token sources](SERVICE_TOKEN_SOURCES.md).
