@@ -4,6 +4,16 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Connect clients to Gateway Feedback, Start here, Gateway Management and API
+  sources faster and more reliably. Every request to these gateway-served
+  sources read the source's Access application, policies and Team groups live
+  from Cloudflare, about a second each. A client's connection sends several
+  requests, and any read that timed out or was rate-limited answered as if
+  sign-in were needed, so the connection page showed Retry. Discovery requests
+  now reuse a check verified in the last minute against unchanged saved state.
+  Tool calls still check live. A failed Cloudflare read now answers `503
+  access_check_unavailable` instead of `401`.
+
 - Fix starting a service-token source or **Switch to service token** on a live
   account. Cloudflare refuses a bearer server record created without
   `auth_credentials` (400, code 7001), so the switch stopped with

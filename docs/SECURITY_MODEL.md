@@ -164,6 +164,18 @@ Every provider write is preceded by an intent record. A successful result
 requires fresh read-back of the expected resource shape. Unknown outcomes
 remain pending and are not replayed blindly.
 
+Sources the gateway serves itself (Gateway Management, Gateway Feedback, Start
+here and agent-authored API sources) check each request's Access assertion
+against the source's own Access application and its Team policy, read live
+from Cloudflare. A tool call always reads them live. A discovery request
+(`initialize`, a notification, `ping` or `tools/list`) may reuse what was
+verified in the last 60 seconds, as long as the saved sources, ownership,
+actions and Team state are unchanged. Discovery returns only the tool catalogue.
+So a change made through the gateway applies at once, and a change made only in
+Cloudflare reaches discovery within a minute. The assertion itself is verified
+on every request. If Cloudflare cannot be read, the source answers `503
+access_check_unavailable`, so the client retries instead of asking to sign in again.
+
 ## Gateway dashboard
 
 <a id="customer-dashboard"></a>
