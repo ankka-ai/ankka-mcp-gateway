@@ -413,6 +413,44 @@ const teamSchema = v.strictObject({
   proposedTeams: v.optional(v.nullable(teamGrantsSchema), null),
   proposedAgents: v.optional(v.nullable(agentGrantsSchema), null),
 })
+/** The gateway's own page that shows a team how to connect, at this path on the dashboard host. */
+export const CONNECT_PAGE_PATH = '/__ankka/connect'
+export const CONNECT_EXAMPLES_MAX = 60
+export const CONNECT_PROMPT_MAX = 600
+export const CONNECT_ANSWER_MAX = 300
+export const CONNECT_EXAMPLE_SOURCES_MAX = 4
+const connectExampleSchema = v.strictObject({
+  id: v.pipe(v.string(), v.regex(/^example-[a-f0-9]{12}$/u)),
+  prompt: v.pipe(v.string(), v.minLength(1), v.maxLength(CONNECT_PROMPT_MAX)),
+  // What the answer shows, so people know what kind of response to expect.
+  answer: v.optional(v.pipe(v.string(), v.minLength(1), v.maxLength(CONNECT_ANSWER_MAX))),
+  sourceIds: v.pipe(v.array(v.pipe(v.string(), v.regex(/^source-[a-f0-9]{16}$/u))), v.maxLength(CONNECT_EXAMPLE_SOURCES_MAX)),
+})
+const connectFailureSchema = v.picklist(['connect_page_permission_missing', 'connect_page_conflict', 'connect_page_drift',
+  'connect_page_unconfirmed', 'connect_page_removal_pending'])
+const connectStateSchema = v.strictObject({
+  schemaVersion: v.literal(1),
+  revision: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  examples: v.pipe(v.array(connectExampleSchema), v.maxLength(CONNECT_EXAMPLES_MAX)),
+  updatedAt: v.nullable(v.string()),
+  updatedBy: v.nullable(v.string()),
+  page: v.strictObject({
+    status: v.picklist(['off', 'enabling', 'on', 'disabling']),
+    failureCode: v.nullable(connectFailureSchema),
+  }),
+  managementCredentialConfigured: v.boolean(),
+})
+export type ConnectExample = v.InferOutput<typeof connectExampleSchema>
+export type ConnectState = v.InferOutput<typeof connectStateSchema>
+export type ConnectFailure = v.InferOutput<typeof connectFailureSchema>
+/** Why turning the connect page on or off stopped. The page state is saved; repeating the action continues it. */
+export const CONNECT_FAILURE_MESSAGES = {
+  connect_page_permission_missing: 'Cloudflare refused the management token. It needs Access: Apps and Policies Edit. Verify management access in Settings, then try again.',
+  connect_page_conflict: 'Another Cloudflare Access application already covers this page’s address. Review it in Cloudflare; the gateway will not adopt or delete it.',
+  connect_page_drift: 'The page’s Access application or its policy was changed in Cloudflare. Restore it, or delete the application there, then try again.',
+  connect_page_unconfirmed: 'Cloudflare did not confirm the change. Try again; the gateway continues from what it saved.',
+  connect_page_removal_pending: 'Cloudflare accepted the removal but has not finished it. Try again in a moment.',
+} satisfies Record<ConnectFailure, string>
 const managementPermissionSchema = v.picklist(['verified', 'permission_missing', 'drift', 'unconfirmed', 'not_checked'])
 /**
  * What the installed management token can do, as fixed words. `portals` stands for MCP Portals Edit and
@@ -494,6 +532,12 @@ export interface GatewayAdminApi {
   prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
+  /** Saved example questions and whether the connect page's Access application is on. */
+  getConnect(): Promise<ConnectState>
+  /** Replaces every example question at once; refused when another tab saved first. */
+  saveConnectExamples(expectedRevision: number, examples: ConnectExample[]): Promise<ConnectState>
+  /** Creates or removes the page's Access application with the gateway's management token. */
+  setConnectPage(enabled: boolean): Promise<ConnectState>
   getUpdate(): Promise<RuntimeUpdate>
   discoverSource(url: string): Promise<SourceDiscovery>
   saveSourceDraft(revision: number, source: SourceDraftInput): Promise<ManagedSources>
@@ -658,6 +702,13 @@ const ERROR_MESSAGES = new Map([
   ['teardown_action_conflict', 'Finish or cancel any unfinished connector installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.'],
   ['teardown_teams_present', 'Delete your teams on the Team page first. Removal does not delete their Cloudflare Access groups.'],
   ['teardown_agents_present', 'Remove or turn off your agents on the Team page first. Removal does not delete their Cloudflare Access policies.'],
+  ['teardown_connect_page_present', 'Turn off team connect pages first. Removal does not delete their Cloudflare Access application.'],
+  ['connect_unavailable', 'The connect page settings could not be read. Refresh and try again.'],
+  ['connect_examples_invalid', 'Each question needs 1–600 characters and each answer description up to 300, and an example can name at most four installed connectors.'],
+  ['connect_examples_revision_conflict', 'The examples changed in another tab. Refresh before saving again.'],
+  ['connect_page_invalid', 'The request was rejected. Reload this page before trying again.'],
+  ['connect_management_credential_missing', 'Add your management token in Settings, then turn on connect pages.'],
+  ['connect_lifecycle_pending', 'Finish the Team change or gateway removal in progress, then try again.'],
   ['teardown_action_invalid', 'The teardown request was rejected. Reload the management page before trying again.'],
   ['teardown_actions_unavailable', 'Receipt-authorized teardown is not available from this gateway release.'],
   ['update_channel_unavailable', 'The signed release channel is temporarily unavailable.'],
@@ -784,6 +835,19 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   cancelTeamAction(actionId: string): Promise<TeamAction> {
     return this.#request(`/api/team-actions/${encodeURIComponent(actionId)}`, teamActionSchema, {
       method: 'DELETE', body: '{}',
+    })
+  }
+  getConnect(): Promise<ConnectState> { return this.#request('/api/connect', connectStateSchema) }
+
+  saveConnectExamples(expectedRevision: number, examples: ConnectExample[]): Promise<ConnectState> {
+    return this.#request('/api/connect/examples', connectStateSchema, {
+      method: 'PUT', body: JSON.stringify({ schemaVersion: 1, expectedRevision, examples }),
+    })
+  }
+
+  setConnectPage(enabled: boolean): Promise<ConnectState> {
+    return this.#request('/api/connect/page', connectStateSchema, {
+      method: 'POST', body: JSON.stringify({ schemaVersion: 1, enabled }),
     })
   }
   getUpdate(): Promise<RuntimeUpdate> { return this.#request('/api/update', runtimeUpdateSchema) }

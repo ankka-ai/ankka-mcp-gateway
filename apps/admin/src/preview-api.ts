@@ -1,6 +1,8 @@
 import { GatewayApiError } from './api'
 import type {
   AgentGrant,
+  ConnectExample,
+  ConnectState,
   GatewayAdminApi,
   InstalledSourceTools,
   GatewayStatus,
@@ -152,6 +154,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   #team: Team
   #sourceActions: SourceActionSummary[] = []
   #firstToolRead: number | null = null
+  #connect: ConnectState | null = null
   readonly #scenario: PreviewScenario
 
   constructor(scenario: PreviewScenario) {
@@ -325,6 +328,41 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
     this.#team.proposedMembers = null
     return structuredClone(this.#team.pendingAction)
   }
+  // Sample examples name this scenario's first installed connector, so none of them looks removed.
+  #connectState(): ConnectState {
+    const first = this.#sources.sources.find(source => source.status === 'installed')?.id
+    this.#connect ??= {
+      schemaVersion: 1, revision: 1, updatedAt: '2026-10-20T09:30:00.000Z', updatedBy: 'admin@example.com',
+      examples: [
+        { id: 'example-0a0a0a0a0a0a', prompt: 'Find our onboarding checklist for new hires and summarize the first week.', answer: 'The checklist’s first-week steps in order, with who owns each one.', sourceIds: first ? [first] : [] },
+        { id: 'example-0b0b0b0b0b0b', prompt: 'What can you help me with using our gateway?', sourceIds: [] },
+      ],
+      page: { status: 'off', failureCode: null },
+      managementCredentialConfigured: true,
+    }
+    return this.#connect
+  }
+
+  async getConnect(): Promise<ConnectState> {
+    if (this.#scenario === 'error') throw new Error('Synthetic preview error: connect pages could not be loaded.')
+    return structuredClone({ ...this.#connectState(), managementCredentialConfigured: this.#team.managementCredentialConfigured })
+  }
+
+  async saveConnectExamples(expectedRevision: number, examples: ConnectExample[]): Promise<ConnectState> {
+    if (expectedRevision !== this.#connectState().revision) throw new GatewayApiError(409, 'connect_examples_revision_conflict')
+    const installed = new Set(this.#sources.sources.filter(source => source.status === 'installed').map(source => source.id))
+    if (examples.some(example => example.sourceIds.some(id => !installed.has(id)))) throw new GatewayApiError(400, 'connect_examples_invalid')
+    this.#connect = { ...this.#connectState(), revision: expectedRevision + 1, examples: structuredClone(examples),
+      updatedAt: new Date().toISOString(), updatedBy: 'admin@example.com' }
+    return this.getConnect()
+  }
+
+  async setConnectPage(enabled: boolean): Promise<ConnectState> {
+    if (!this.#team.managementCredentialConfigured) throw new GatewayApiError(409, 'connect_management_credential_missing')
+    this.#connect = { ...this.#connectState(), page: { status: enabled ? 'on' : 'off', failureCode: null } }
+    return this.getConnect()
+  }
+
   async getUpdate(): Promise<RuntimeUpdate> { return update(this.#scenario.startsWith('update')) }
 
   async discoverSource(url: string): Promise<SourceDiscovery> {

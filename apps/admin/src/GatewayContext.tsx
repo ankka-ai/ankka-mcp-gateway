@@ -11,6 +11,8 @@ import {
 import * as v from 'valibot'
 import {
   GatewayApiError,
+  type ConnectExample,
+  type ConnectState,
   type GatewayAdminApi,
   type GatewayStatus,
   HttpGatewayAdminApi,
@@ -79,6 +81,9 @@ interface GatewayContextValue {
   prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
+  getConnect(): Promise<ConnectState>
+  saveConnectExamples(expectedRevision: number, examples: ConnectExample[]): Promise<ConnectState>
+  setConnectPage(enabled: boolean): Promise<ConnectState>
 }
 
 interface GatewayProviderProps extends PropsWithChildren {
@@ -215,6 +220,11 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   // Not a busy action: the page that asks shows its own progress, and a failed check is an answer, not a page error.
   const verifyManagementAccess = useCallback(() => apiRef.current.verifyManagementAccess(), [])
   const getTeamAction = useCallback((actionId: string) => apiRef.current.getTeamAction(actionId), [])
+  // The connect page shows its own progress and errors; none of these is a page-wide busy action.
+  const getConnect = useCallback(() => apiRef.current.getConnect(), [])
+  const saveConnectExamples = useCallback((expectedRevision: number, examples: ConnectExample[]) =>
+    apiRef.current.saveConnectExamples(expectedRevision, examples), [])
+  const setConnectPage = useCallback((enabled: boolean) => apiRef.current.setConnectPage(enabled), [])
 
   const refreshUpdate = useCallback(async () => {
     try {
@@ -522,6 +532,9 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
     getManagementCredentialStatus,
     getTeam,
     getTeamAction,
+    getConnect,
+    saveConnectExamples,
+    setConnectPage,
     prepareTeamAction: (expectedRevision, members, teams, agents) => runBusy(async () => {
       try {
         return await (agents !== undefined
@@ -542,6 +555,7 @@ export function GatewayProvider({ children, api }: GatewayProviderProps) {
   }), [
     busyCount, error, hasLoaded, isLoading, refreshSources, refreshUpdate, reload, runBusy,
     sourceNotice, sources, status, update, updateNotice, getManagementCredentialStatus, getTeam, getTeamAction, verifyManagementAccess,
+    getConnect, saveConnectExamples, setConnectPage,
     externalChangeVersion, refreshAfterExternalChange,
     sourceActions, sourceActionsError, isCheckingSourceActions, sourceActionsPollingPaused,
     refreshSourceActions, cancelSourceApply, removal,
