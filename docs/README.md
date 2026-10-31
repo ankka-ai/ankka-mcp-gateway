@@ -25,6 +25,8 @@ installed release; a document or fixture is not a compatibility certification.
   acceptance required before enabling the workflow.
 - [Team access](TEAM_ACCESS.md): V1 Cloudflare-managed membership, legacy
   recovery, future editor options, and session-propagation limits.
+- [Agent access](AGENT_ACCESS.md): let a hosted agent use your Portal with its
+  own Cloudflare Access service token instead of a person's sign-in.
 - [Team connect pages](TEAM_CONNECT_PAGES.md): one link per team that shows
   how to connect an assistant and example questions the team's connectors can
   answer; who can open it and how it is turned on and off.

@@ -4,6 +4,18 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let a hosted agent use your MCP Portal with its own Cloudflare Access
+  service token instead of a person's sign-in. Add it under **Team → Agents**
+  with the token's client ID and token ID, never its secret, and either a list
+  of connectors or a team to follow. Your gateway keeps one Service Auth policy
+  beside the people's policy on the Portal and on each connector the agent
+  reaches, and verifies it like the people's policies. Team edits keep agent
+  access; switching an agent off or removing it takes its token off every
+  policy and leaves people's access and the token itself alone. Agents never
+  reach Gateway Management, the dashboard, or a connector with individual
+  sign-in. Removing a connector an agent uses, or the gateway, waits until the
+  agent policies are gone. See [Agent access](docs/AGENT_ACCESS.md).
+
 - Add team connect pages. Turn them on under **Connect pages** to get one link
   for each team, and one for everyone. The page shows how to connect Claude,
   ChatGPT, Claude Code, Cursor or another MCP client to the gateway, then

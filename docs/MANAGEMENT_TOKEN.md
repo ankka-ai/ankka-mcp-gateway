@@ -214,7 +214,8 @@ provider authority of a stolen token.
 
 Individual [source removal](SOURCE_REMOVAL.md) uses the same account-owned
 token for a fixed, receipt-checked Portal update and deletion of that source's
-MCP server, Access policy and Access application. Editing the tools of an
+MCP server, Access policy and Access application. It is refused while an
+[agent policy](AGENT_ACCESS.md) is on that application. Editing the tools of an
 installed connector uses it the same way: one read of Cloudflare’s synced
 catalogue, then one receipt-checked Portal update for that connector’s
 allowlist. Renaming an installed connector uses the token to read and update
@@ -298,7 +299,7 @@ resources the gateway owns, without changing them:
 | --- | --- | --- |
 | Account token verification | 1 read | The token is active for this account |
 | The gateway's own MCP Portal: read, written back unchanged, read again | 2 reads, 1 write | **MCP Portals Edit** |
-| The Portal's own Access application and its one policy: read, policy written back as read | 2 reads, 1 write | **Access: Apps and Policies Edit** |
+| The Portal's own Access application and its receipt-owned people's policy, selected by ID: read, policy written back as read | 2 reads, 1 write | **Access: Apps and Policies Edit** |
 
 That is at most **seven** Cloudflare API calls per verification. After the
 token check succeeds, the two permission checks run concurrently; the Access
@@ -328,7 +329,7 @@ belongs to the disposable-account qualification below.
 | Fixed operations | Verified permission set |
 | --- | --- |
 | GET account token verification | The account token itself; no token-management permission requested |
-| GET account/zone Access apps, exact app and attached policies; POST source app/policy; PUT attached Team policy | Access: Apps and Policies Write |
+| GET account/zone Access apps, exact app and attached policies; POST source app/policy; PUT attached Team policy; POST, PUT and DELETE of the attached agent policy | Access: Apps and Policies Write |
 | POST and DELETE the connect page's own app, POST its one policy ([Team connect pages](TEAM_CONNECT_PAGES.md)) | Access: Apps and Policies Write |
 | GET/POST MCP servers; GET/PUT the exact owned Portal | MCP Portals Write |
 
@@ -361,6 +362,13 @@ qualification or proof that every narrower permission combination fails.
   save only a revision-bound batch. Validate resource ownership before writes;
   retain ambiguous writes for explicit recovery. Policy membership is not a
   claim about effective access or immediate session revocation.
+- Agents: in the same Team batch, create, replace or delete the one
+  receipt-owned Service Auth policy on the Portal application and on each
+  connector application an enabled agent reaches. Each write is journaled,
+  checked against the recorded policy before it is sent, and read back. A lost
+  create answer is resolved by listing that one application's policies. No
+  service token is ever created, read, rotated or revoked, so the token needs
+  no service-token permission. See [Agent access](AGENT_ACCESS.md).
 - Administrator identity and same-origin checks apply to every management
   mutation. There is no caller-selected Cloudflare URL or credential forwarding.
 - Managed BigQuery provisioning requires broader Worker authority and retains

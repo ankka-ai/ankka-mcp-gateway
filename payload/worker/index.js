@@ -33,12 +33,22 @@ const TEAM_ID = /^team-[a-f0-9]{16}$/u;
 const TEAM_MAX_TEAMS = 16;
 const TEAM_PROVIDER_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u;
 const TEAM_TOOL = /^[A-Za-z0-9_.:/-]{1,128}$/u;
+// An agent is a hosted MCP client that signs in with its own Cloudflare Access
+// service token. The gateway keeps only the token's two non-secret references:
+// the client id an Access JWT names in `common_name`, and the resource id a
+// Service Auth policy names.
+const AGENT_ID = /^agent-[a-f0-9]{16}$/u;
+const AGENT_CLIENT_ID = /^[a-f0-9]{32}\.access$/u;
+const AGENT_TOKEN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
+const TEAM_MAX_AGENTS = 16;
 const TEAM_ERROR_CODES = Object.freeze([
   'team_access_invalid_request',
   'team_access_revision_conflict',
   'team_access_admin_required',
   'team_access_invalid_state',
   'team_access_invalid_target',
+  'team_agent_source_unsupported',
+  'team_agent_team_missing',
 ]);
 
 export class TeamAccessError extends Error {
@@ -245,10 +255,106 @@ function publicTeam(team) {
   return result;
 }
 
+/**
+ * Agents, each with exactly one source choice: an explicit list of installed
+ * sources, or `teamId`, which follows that named team's sources. Which of those
+ * sources an agent can reach is decided by the planner, not here, so a stored
+ * agent stays readable after a source changes.
+ */
+function teamAgents(values, context) {
+  if (!Array.isArray(values) || values.length > TEAM_MAX_AGENTS) teamFail();
+  const ids = new Set();
+  const clients = new Set();
+  const tokens = new Set();
+  const agents = [];
+  for (const value of values) {
+    const follows = teamRecord(value) && Object.hasOwn(value, 'teamId');
+    if (!teamKeys(value, ['id', 'name', 'clientId', 'tokenId', 'enabled', follows ? 'teamId' : 'sourceIds']) ||
+        !teamText(value.id) || !AGENT_ID.test(value.id) || ids.has(value.id) || !teamName(value.name, 80) ||
+        !teamText(value.clientId) || !AGENT_CLIENT_ID.test(value.clientId) || clients.has(value.clientId) ||
+        !teamText(value.tokenId) || !AGENT_TOKEN_ID.test(value.tokenId) || tokens.has(value.tokenId) ||
+        !isBoolean(value.enabled) || (follows && (!teamText(value.teamId) || !TEAM_ID.test(value.teamId)))) teamFail();
+    // MCP client access stays separate from management authority: the
+    // gateway's own service identity is never also an agent.
+    if (context.serviceActor === `service:${value.clientId}`) teamFail();
+    ids.add(value.id);
+    clients.add(value.clientId);
+    tokens.add(value.tokenId);
+    const agent = { id: value.id, name: value.name, clientId: value.clientId, tokenId: value.tokenId, enabled: value.enabled };
+    if (follows) agent.teamId = value.teamId;
+    else agent.sourceIds = teamSourceIds(value.sourceIds, context);
+    agents.push(agent);
+  }
+  return agents.sort((left, right) => teamCompare(left.id, right.id));
+}
+
+/**
+ * The receipt-owned Service Auth policy on one Access application: exactly the
+ * enabled agents' service tokens that reach it, and no identity.
+ */
+export function agentPolicy(tokenIds, name) {
+  if (!teamName(name) || !Array.isArray(tokenIds) || tokenIds.length === 0 || tokenIds.length > TEAM_MAX_AGENTS ||
+      tokenIds.some((id) => !teamText(id) || !AGENT_TOKEN_ID.test(id)) || new Set(tokenIds).size !== tokenIds.length) {
+    teamFail('team_access_invalid_target');
+  }
+  return teamFreeze({
+    name,
+    decision: 'non_identity',
+    include: [...tokenIds].sort(teamCompare).map((id) => ({ service_token: { token_id: id } })),
+    exclude: [],
+    require: [],
+  });
+}
+
+function agentPolicyTokens(policy) {
+  if (!teamRecord(policy) || policy.decision !== 'non_identity' || !Array.isArray(policy.include) ||
+      policy.include.length === 0 || !Array.isArray(policy.exclude) || policy.exclude.length !== 0 ||
+      !Array.isArray(policy.require) || policy.require.length !== 0) return null;
+  const tokens = [];
+  for (const rule of policy.include) {
+    if (!teamKeys(rule, ['service_token']) || !teamKeys(rule.service_token, ['token_id']) ||
+        !teamText(rule.service_token.token_id) || !AGENT_TOKEN_ID.test(rule.service_token.token_id)) return null;
+    tokens.push(rule.service_token.token_id);
+  }
+  return new Set(tokens).size === tokens.length ? tokens.sort(teamCompare) : null;
+}
+
+/** A live policy is the expected agent policy: its id, name, decision and exact token set, with neutral metadata. */
+export function agentPolicyMatches(observed, expected, policyId) {
+  try {
+    if (!teamText(policyId) || !TEAM_PROVIDER_ID.test(policyId) || !teamRecord(observed) || !teamRecord(expected) ||
+        observed.id !== policyId || observed.name !== expected.name || !teamNeutralPolicyFields(observed)) return false;
+    const observedTokens = agentPolicyTokens(observed);
+    const expectedTokens = agentPolicyTokens(expected);
+    return observedTokens !== null && expectedTokens !== null &&
+      JSON.stringify(observedTokens) === JSON.stringify(expectedTokens);
+  } catch {
+    return false;
+  }
+}
+
+function previousAgentState(context, current) {
+  const agents = context.currentAgents ?? [];
+  const records = context.currentAgentPolicies ?? [];
+  if (!Array.isArray(records) || records.length > TEAM_MAX_SOURCES + 1) teamFail('team_access_invalid_state');
+  try {
+    const parsed = teamAgents(agents, { ...current, serviceActor: context.serviceActor ?? null });
+    for (const record of records) {
+      if (!teamKeys(record, ['applicationId', 'policyId', 'tokenIds', ...(Object.hasOwn(record ?? {}, 'sourceId') ? ['sourceId'] : [])]) ||
+          !teamText(record.applicationId) || !TEAM_PROVIDER_ID.test(record.applicationId) ||
+          !teamText(record.policyId) || !TEAM_PROVIDER_ID.test(record.policyId) ||
+          (Object.hasOwn(record, 'sourceId') && (!teamText(record.sourceId) || !TEAM_SOURCE_ID.test(record.sourceId)))) teamFail();
+      agentPolicy(record.tokenIds, 'ankka-agents');
+    }
+    return { agents: parsed, records };
+  } catch { teamFail('team_access_invalid_state'); }
+}
+
 export function normalizeTeamAccessRequest(value, context) {
   const current = teamContext(context);
   const requestKeys = ['expectedRevision', 'members', 'schemaVersion'];
   if (teamRecord(value) && Object.hasOwn(value, 'teams')) requestKeys.push('teams');
+  if (teamRecord(value) && Object.hasOwn(value, 'agents')) requestKeys.push('agents');
   if (!teamKeys(value, requestKeys) ||
       value.schemaVersion !== 1 || !Number.isSafeInteger(value.expectedRevision) ||
       value.expectedRevision < 0) teamFail();
@@ -262,6 +368,7 @@ export function normalizeTeamAccessRequest(value, context) {
         ? { ...member, dashboardAccess: true } : member) : value.members, current),
   };
   if (Object.hasOwn(value, 'teams')) normalized.teams = teamDefinitions(value.teams, current);
+  if (Object.hasOwn(value, 'agents')) normalized.agents = teamAgents(value.agents, { ...current, serviceActor: context.serviceActor ?? null });
   return teamFreeze(normalized);
 }
 
@@ -442,10 +549,57 @@ export function planTeamAccessChange(value, context) {
   }
   const policyChanges = policies.filter((policy) => JSON.stringify(policy.before) !== JSON.stringify(policy.after) ||
     policy.unresolvedTeamIds);
+  // Agents reach the Portal and each source through one receipt-owned Service
+  // Auth policy per Access application, beside the people's policy and never
+  // instead of it. `before` is the policy as last applied and recorded;
+  // `after` follows from the agents as they will be saved. An installation
+  // that widens a followed team therefore changes nothing until the next save.
+  const priorAgents = previousAgentState(context, current);
+  const nextAgents = Object.hasOwn(input, 'agents') ? input.agents : priorAgents.agents;
+  const agentPolicies = [];
+  if (nextAgents.length > 0 || priorAgents.records.length > 0) {
+    const name = context.agentPolicyName;
+    if (!teamName(name)) teamFail('team_access_invalid_target');
+    // Only sources the Portal reaches with its own shared credential can admit
+    // a service token; the runtime context names them. Gateway Management never does.
+    const eligible = new Set((Array.isArray(context.agentSourceIds) ? context.agentSourceIds : [])
+      .filter((id) => installedIds.includes(id)));
+    // Submitted agents are checked; saved ones keep loading if a connector stopped admitting them.
+    const submitted = Object.hasOwn(input, 'agents');
+    const reach = (agent) => {
+      if (agent.teamId === undefined) {
+        if (submitted && agent.sourceIds.some((id) => !eligible.has(id))) teamFail('team_agent_source_unsupported');
+        return agent.sourceIds.filter((id) => eligible.has(id));
+      }
+      const team = nextTeams.find((entry) => entry.id === agent.teamId);
+      if (!team) teamFail('team_agent_team_missing');
+      return team.sourceIds.filter((id) => eligible.has(id));
+    };
+    // A disabled agent, or one that reaches no source, is on no policy, not even the Portal's.
+    const reached = nextAgents.map((agent) => ({ agent, sourceIds: reach(agent) }))
+      .filter(({ agent, sourceIds }) => agent.enabled && sourceIds.length > 0);
+    for (const record of priorAgents.records) {
+      const target = targets.find((entry) => entry.applicationId === record.applicationId);
+      if (!target || target.sourceId !== record.sourceId) teamFail('team_access_invalid_state');
+    }
+    for (const target of targets) {
+      const record = priorAgents.records.find((entry) => entry.applicationId === target.applicationId) ?? null;
+      const tokens = reached.filter(({ sourceIds }) => target.sourceId === undefined || sourceIds.includes(target.sourceId))
+        .map(({ agent }) => agent.tokenId);
+      const before = record ? agentPolicy(record.tokenIds, name) : null;
+      const after = tokens.length > 0 ? agentPolicy(tokens, name) : null;
+      if (!before && !after) continue;
+      const entry = { kind: target.sourceId === undefined ? 'portal_agents' : 'source_agents',
+        applicationId: target.applicationId, policyId: record?.policyId ?? null, before, after };
+      if (target.sourceId !== undefined) entry.sourceId = target.sourceId;
+      agentPolicies.push(entry);
+    }
+  }
   const oldEmails = new Set(previous.map((member) => member.email));
   const newEmails = new Set(input.members.map((member) => member.email));
   const nextState = { schemaVersion: 1, revision: current.revision + 1, members: nextMembers };
   if (nextTeams.length > 0 || (Object.hasOwn(input, 'teams') && priorTeams.length > 0)) nextState.teams = nextTeams;
+  if (nextAgents.length > 0 || priorAgents.agents.length > 0 || priorAgents.records.length > 0) nextState.agents = nextAgents;
   const plan = {
     nextState,
     policies,
@@ -457,6 +611,11 @@ export function planTeamAccessChange(value, context) {
     },
   };
   if (groupChanges.length > 0) plan.groupChanges = groupChanges;
+  // Absent without agents, so the plan and its hash stay exactly as before.
+  if (agentPolicies.length > 0) {
+    plan.agentPolicies = agentPolicies;
+    plan.agentPolicyChanges = agentPolicies.filter((policy) => JSON.stringify(policy.before) !== JSON.stringify(policy.after));
+  }
   return teamFreeze(plan);
 }
 
@@ -7686,6 +7845,12 @@ async function finishSourceRemoval(storage, env, source, control, sources, initi
     members: team.members.map((member) => ({ ...member, sourceIds: member.sourceIds.filter((id) => id !== source.id) })),
     sourceBaselines: team.sourceBaselines.filter((id) => id !== source.id),
   };
+  // Removal was refused while this source carried an agent policy; an agent
+  // that listed it, disabled or not, just stops listing it.
+  if (team.agents) {
+    nextTeamRecord.agents = team.agents.map((agent) => agent.sourceIds
+      ? { ...agent, sourceIds: agent.sourceIds.filter((id) => id !== source.id) } : agent);
+  }
   if (team.teams) {
     nextTeamRecord.teams = team.teams.map((entry) => ({
       ...entry, sourceIds: entry.sourceIds.filter((id) => id !== source.id),
@@ -7746,6 +7911,11 @@ async function removeManagedSource(storage, env, input) {
   }
   if (actions.actions.some((action) => action.sourceId === source.id && action.bigquerySetupStarted)) {
     return sourceRemovalRefusal('source_removal_managed_bigquery');
+  }
+  // Removal deletes only the application's receipt policy. An agent policy on
+  // it leaves first, through Team, where its record is kept.
+  if ((await readTeamState(storage, env))?.agentPolicies?.some((record) => record.sourceId === source.id)) {
+    return sourceRemovalRefusal('source_removal_agents_assigned');
   }
   const token = managementCredential(env);
   if (!token) return sourceRemovalRefusal('source_removal_credential_required');
@@ -8097,8 +8267,14 @@ export class AdminState {
       // hosted handoffs cannot opt into the new receipt-owned policy matcher.
       if (url.pathname === `${INTERNAL_TEARDOWNS_PATH}/prepare-current` && request.method === 'POST') {
         // Removal deletes the policies that name a team's Access group, not the group itself.
-        if (teamGroupOwners(await readTeamState(this.state.storage, this.env)).size > 0) {
+        const teamState = await readTeamState(this.state.storage, this.env);
+        if (teamGroupOwners(teamState).size > 0) {
           return fixedJson(409, { schemaVersion: 1, error: 'teardown_teams_present' });
+        }
+        // Removal accepts only the policies its receipts name. Agent policies
+        // leave first, from Team, so a service token never outlives its record.
+        if ((teamState?.agentPolicies?.length ?? 0) > 0) {
+          return fixedJson(409, { schemaVersion: 1, error: 'teardown_agents_present' });
         }
         // Removal does not know the connect page's Access application; turning the page off deletes it.
         if (await this.state.storage.get(CONNECT_PAGE_KEY) !== undefined) {
@@ -8226,8 +8402,8 @@ export class AdminState {
           return applied || fixedJson(409, { schemaVersion: 1, error: 'team_action_conflict' });
         } catch (error) {
           const code = error instanceof TeamAccessError ? error.code : 'team_action_conflict';
-          return fixedJson(code === 'team_access_invalid_request' || code === 'team_access_admin_required' ? 400 : 409,
-            { schemaVersion: 1, error: code });
+          return fixedJson(['team_access_invalid_request', 'team_access_admin_required', 'team_agent_source_unsupported',
+            'team_agent_team_missing'].includes(code) ? 400 : 409, { schemaVersion: 1, error: code });
         }
       }
       if (url.pathname.startsWith(`${INTERNAL_TEAM_ACTIONS_PATH}/`) && ['GET', 'DELETE'].includes(request.method)) {
@@ -9149,18 +9325,26 @@ function safeTeamAction(value, context) {
       !HASH.test(value.actionKeyHash) || !Number.isSafeInteger(value.sourceRevision) || value.sourceRevision < 1 ||
       !HASH.test(value.planHash) || !['authorization_required', 'applying', 'succeeded', 'failed', 'recovery_required'].includes(value.status) ||
       (value.failureCode !== null && !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureCode)) ||
-      !Array.isArray(value.journal) || value.journal.length > 96) return null;
+      !Array.isArray(value.journal) || value.journal.length > 160) return null;
   try {
     normalizeTeamAccessRequest(value.request, { ...context,
       revision: value.status === 'succeeded' ? context.revision - 1 : context.revision });
   } catch { return null; }
   const policyIds = new Set();
   const teamIds = new Set();
+  const agentApplicationIds = new Set();
   for (const entry of value.journal) {
     if (exactKeys(entry, ['policyId', 'phase'])) {
       if (!safeProviderId(entry.policyId) || !['send_armed', 'verified'].includes(entry.phase) ||
           policyIds.has(entry.policyId)) return null;
       policyIds.add(entry.policyId);
+      continue;
+    }
+    // An agent policy write, keyed by its application: a create is armed before Cloudflare names the policy.
+    if (exactKeys(entry, ['agentApplicationId', 'phase', 'policyId'])) {
+      if (!safeProviderId(entry.agentApplicationId) || !(entry.policyId === null || safeProviderId(entry.policyId)) ||
+          !['send_armed', 'verified'].includes(entry.phase) || agentApplicationIds.has(entry.agentApplicationId)) return null;
+      agentApplicationIds.add(entry.agentApplicationId);
       continue;
     }
     if (!exactKeys(entry, ['groupId', 'phase', 'teamId']) || !isText(entry.teamId) || !TEAM_ID.test(entry.teamId) ||
@@ -9175,6 +9359,9 @@ function safeTeamAction(value, context) {
 function safeTeamState(value, control, sources, admins, serviceActor = null) {
   const keys = ['members', 'minimumRuntimeRelease', 'pendingAction', 'revision', 'schemaVersion', 'sourceBaselines', 'teardownDisabled'];
   if (isRecord(value) && Object.hasOwn(value, 'teams')) keys.push('teams');
+  // Agents and the agent policies last applied are stored together, or not at all.
+  const hasAgents = isRecord(value) && (Object.hasOwn(value, 'agents') || Object.hasOwn(value, 'agentPolicies'));
+  if (hasAgents) keys.push('agents', 'agentPolicies');
   if (!exactKeys(value, keys) ||
       value.schemaVersion !== 1 || !isBoolean(value.teardownDisabled) ||
       (value.minimumRuntimeRelease !== null && !updateSemver(value.minimumRuntimeRelease)) ||
@@ -9182,17 +9369,55 @@ function safeTeamState(value, control, sources, admins, serviceActor = null) {
   const context = { revision: value.revision, adminEmails: admins, serviceActor, sources: teamSources(sources) };
   let normalized;
   let teams;
+  let agents;
   try {
     normalized = normalizeTeamAccessRequest({ schemaVersion: 1, expectedRevision: value.revision, members: value.members }, context);
     if (Object.hasOwn(value, 'teams')) teams = storedTeamRecords(value.teams, teamContext(context));
+    if (hasAgents) agents = teamAgents(value.agents, { ...teamContext(context), serviceActor });
   } catch { return null; }
+  const agentPolicies = hasAgents ? storedAgentPolicies(value.agentPolicies, agents, control) : null;
   const baselines = exactSortedUniqueStrings(value.sourceBaselines, (id) =>
     SOURCE_ID.test(id) && control.sourceOwnership.some((source) => source.sourceId === id) ? id : null, 32, 0);
   const pendingAction = value.pendingAction === null ? null : safeTeamAction(value.pendingAction, context);
-  if (!baselines || (value.pendingAction !== null && !pendingAction)) return null;
+  if (!baselines || (value.pendingAction !== null && !pendingAction) || (hasAgents && !agentPolicies)) return null;
+  // Agent policies exist only for the release that understands them.
+  if (hasAgents && agentPolicies.length > 0 && value.minimumRuntimeRelease === null) return null;
   const state = { ...value, members: normalized.members, sourceBaselines: baselines, pendingAction };
   if (teams) state.teams = teams;
+  if (hasAgents) Object.assign(state, { agents, agentPolicies });
   return Object.freeze(state);
+}
+
+/**
+ * The agent policies as last applied: one per Access application, on the
+ * Portal's (no source) or an installed source's, naming only enabled agents.
+ * The Portal application's identity is checked against the receipt where the
+ * plan is built; here each source record must name its own receipt's application.
+ */
+function storedAgentPolicies(values, agents, control) {
+  if (!Array.isArray(values) || values.length > TEAM_MAX_SOURCES + 1) return null;
+  const enabled = new Set(agents.filter((agent) => agent.enabled).map((agent) => agent.tokenId));
+  const applications = new Set();
+  let portal = false;
+  const records = [];
+  for (const value of values) {
+    const source = isRecord(value) && Object.hasOwn(value, 'sourceId');
+    if (!exactKeys(value, ['applicationId', 'policyId', 'tokenIds', ...(source ? ['sourceId'] : [])]) ||
+        !safeProviderId(value.applicationId) || !safeProviderId(value.policyId) || applications.has(value.applicationId) ||
+        !Array.isArray(value.tokenIds) || value.tokenIds.length === 0 || value.tokenIds.length > TEAM_MAX_AGENTS ||
+        value.tokenIds.some((id) => !isText(id) || !AGENT_TOKEN_ID.test(id) || !enabled.has(id)) ||
+        canonicalJson(value.tokenIds) !== canonicalJson([...new Set(value.tokenIds)].sort(compareText))) return null;
+    if (source) {
+      const ownership = control.sourceOwnership.find((entry) => entry.sourceId === value.sourceId);
+      if (!ownership || nativeSourceId(value.sourceId) || ownership.resources[2]?.provider?.parentId !== value.applicationId) return null;
+    } else {
+      if (portal) return null;
+      portal = true;
+    }
+    applications.add(value.applicationId);
+    records.push(Object.freeze({ ...value, tokenIds: Object.freeze([...value.tokenIds]) }));
+  }
+  return Object.freeze(records.sort((left, right) => compareText(left.sourceId ?? '', right.sourceId ?? '')));
 }
 
 async function readTeamState(storage, env) {
@@ -9662,9 +9887,14 @@ function teamGroupBody(name, emails) {
   };
 }
 
+// A team policy is keyed by its id, a group by its team, and an agent policy by its application.
+function journalKey(entry) {
+  return entry.agentApplicationId !== undefined ? `agents:${entry.agentApplicationId}` : entry.policyId ?? entry.teamId;
+}
+
 function journalReplacing(journal, entry) {
-  const id = entry.policyId ?? entry.teamId;
-  return [...journal.filter((item) => (item.policyId ?? item.teamId) !== id), entry];
+  const id = journalKey(entry);
+  return [...journal.filter((item) => journalKey(item) !== id), entry];
 }
 
 function teamGroupBindings(journal) {
@@ -9785,6 +10015,13 @@ async function dashboardActorAllowed(storage, env, email) {
   return policy !== null && teamPolicySelectors(policy).emails.includes(email);
 }
 
+/** Saved agents, each with the sources its token is on as last applied. No secret is ever stored to show. */
+function publicAgents(state) {
+  return (state.agents ?? []).map((agent) => ({ ...agent,
+    appliedSourceIds: (state.agentPolicies ?? []).filter((record) => record.sourceId !== undefined &&
+      record.tokenIds.includes(agent.tokenId)).map((record) => record.sourceId).sort(compareText) }));
+}
+
 async function teamSnapshot(storage, env, diagnostic) {
   const fail = (reason) => { diagnostic.reason = reason; return null; };
   let state = await readTeamState(storage, env);
@@ -9795,6 +10032,7 @@ async function teamSnapshot(storage, env, diagnostic) {
   const configured = managementCredential(env) !== null;
   let members = state.members;
   let observedAt = null;
+  let agentDrift = null;
   if (configured) {
     const context = await teamRuntimeContext(storage, env);
     if (!context) return fail('team_ownership_unavailable');
@@ -9804,10 +10042,21 @@ async function teamSnapshot(storage, env, diagnostic) {
       members: state.members }, context.planner);
     const token = managementCredential(env);
     const teams = state.teams?.map((team) => ({ ...team }));
+    // Agent policies are never imported from Cloudflare: they must read exactly
+    // as last applied, or, while a recorded change is unfinished, as that
+    // change's own journal allows.
+    const unfinished = state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
+      ? state.pendingAction : null;
+    let agentCheck = null;
+    if (unfinished) {
+      try {
+        agentCheck = { entries: planGatewayTeamAccess(unfinished.request, context.planner).agentPolicies ?? [], journal: unfinished.journal };
+      } catch { agentCheck = null; }
+    }
     // Each owned group read needs only its stored id, so it runs alongside the
     // policy reads. Membership is accepted only after every read has settled.
     const [audiences, groupEmails] = await Promise.all([
-      verifyTeamPolicies(context, plan, token, [], null, true).catch(() => null),
+      verifyTeamPolicies(context, plan, token, [], null, true, agentCheck).catch(() => null),
       Promise.all((teams ?? []).map((team) => team.accessGroupId
         ? readOwnedTeamGroup(context, token, team).catch(() => null) : null)),
     ]);
@@ -9872,6 +10121,11 @@ async function teamSnapshot(storage, env, diagnostic) {
       });
       observedAt = new Date().toISOString();
     }
+    // An agent policy that drifted leaves the read unverified and names where.
+    if (context.agentDrift) {
+      agentDrift = context.agentDrift;
+      observedAt = null;
+    }
     const teamsChanged = teams && canonicalJson(teams.map(publicTeam)) !== canonicalJson((state.teams ?? []).map(publicTeam));
     if ((!state.pendingAction || ['succeeded', 'failed'].includes(state.pendingAction.status)) &&
         (canonicalJson(members) !== canonicalJson(state.members) || teamsChanged)) {
@@ -9880,18 +10134,25 @@ async function teamSnapshot(storage, env, diagnostic) {
       await storage.put(TEAM_KEY, state);
     }
   }
-  const proposedTeams = state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status) &&
-    Object.hasOwn(state.pendingAction.request, 'teams') ? state.pendingAction.request.teams : null;
+  const pendingRequest = state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
+    ? state.pendingAction.request : null;
+  const proposedTeams = pendingRequest && Object.hasOwn(pendingRequest, 'teams') ? pendingRequest.teams : null;
   return { schemaVersion: 1, revision: state.revision, members, adminEmails: admins,
     observedAt,
     dashboardAccessAvailable: (await dashboardTarget(env)) !== null,
-    sources: sources.sources.map((source) => ({ id: source.id, label: sourceDisplayName(source),
-      enabledTools: source.enabledTools, status: source.status })),
+    sources: sources.sources.map((source) => {
+      const entry = { id: source.id, label: sourceDisplayName(source), enabledTools: source.enabledTools, status: source.status };
+      const agentAccess = agentSourceAccess(source);
+      if (agentAccess) entry.agentAccess = agentAccess;
+      return entry;
+    }),
     teams: (state.teams ?? []).map(publicTeam),
+    agents: publicAgents(state),
+    agentDrift,
     pendingAction: state.pendingAction ? publicTeamAction(state.pendingAction) : null,
-    proposedMembers: state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
-      ? state.pendingAction.request.members : null,
+    proposedMembers: pendingRequest ? pendingRequest.members : null,
     proposedTeams,
+    proposedAgents: pendingRequest && Object.hasOwn(pendingRequest, 'agents') ? pendingRequest.agents : null,
     managementCredentialConfigured: configured,
     managementCredentialChoice: await managementCredentialChoice(storage),
     editingEnabled: configured && !blocked,
@@ -9948,7 +10209,30 @@ async function teamRuntimeContext(storage, env) {
   return { team, control, sources, environment, authority,
     planner: { revision: team.revision, adminEmails: admins, serviceActor: serviceActorOf(accessConfiguration(env)), sources: teamSources(sources),
       currentMembers: team.members, currentTeams: team.teams ?? [], portalTarget: portal, sourceTargets,
-      nativeTargets, dashboardTarget: await dashboardTarget(env), managementAuthenticationEmails: control.audienceEmails } };
+      nativeTargets, dashboardTarget: await dashboardTarget(env), managementAuthenticationEmails: control.audienceEmails,
+      currentAgents: team.agents ?? [], currentAgentPolicies: team.agentPolicies ?? [],
+      agentSourceIds: agentEligibleSourceIds(sources), agentPolicyName: agentPolicyName(control.installationId) } };
+}
+
+/**
+ * A service token reaches a source only through the Portal's own shared
+ * credential (`on_behalf: false`). Gateway Management, and the gateway's
+ * per-user sources (Feedback, Start here, API sources), never admit one.
+ */
+function agentSourceAccess(source) {
+  if (source.status !== 'installed') return null;
+  if (source.id === MANAGEMENT_SOURCE_ID) return 'management';
+  if (nativeSourceId(source.id) || source.onBehalfOfUser !== false) return 'individual_sign_in';
+  return 'available';
+}
+
+function agentEligibleSourceIds(sources) {
+  return sources.sources.filter((source) => agentSourceAccess(source) === 'available').map((source) => source.id).sort(compareText);
+}
+
+/** One stable name per gateway: a create whose answer was lost is found again by it, on its own application only. */
+function agentPolicyName(installationId) {
+  return isText(installationId) && TEAM_INSTALLATION_ID.test(installationId) ? `ankka-${installationId}-agents` : null;
 }
 
 async function prepareTeamAction(storage, env, input) {
@@ -9967,6 +10251,12 @@ async function prepareTeamAction(storage, env, input) {
   if (canonicalJson(dashboardEmails(plan.nextState.members, context.planner.adminEmails)) !==
       canonicalJson(dashboardEmails(context.team.members, context.planner.adminEmails)) &&
       (input.sharedConnection || !await dashboardActorAllowed(storage, env, input.actorEmail))) teamFail('team_access_admin_required');
+  // Agents are machine access: only a person with dashboard access adds,
+  // changes or removes one, never a management agent or the service identity.
+  const agentsChanged = canonicalJson(plan.nextState.agents ?? []) !== canonicalJson(context.team.agents ?? []);
+  if (agentsChanged && (input.sharedConnection || !await dashboardActorAllowed(storage, env, input.actorEmail))) {
+    teamFail('team_access_admin_required');
+  }
   const previous = context.team.pendingAction;
   const unfinished = previous && !['failed', 'succeeded'].includes(previous.status);
   // Resume only the exact retained proposal, including legacy OAuth proposals.
@@ -9976,12 +10266,14 @@ async function prepareTeamAction(storage, env, input) {
     const recordedTeams = Object.hasOwn(previous.request, 'teams') ? previous.request.teams : [];
     const proposedTeams = Object.hasOwn(plan.nextState, 'teams') ? plan.nextState.teams : [];
     if (canonicalJson(previous.request.members) !== canonicalJson(plan.nextState.members) ||
-        canonicalJson(recordedTeams) !== canonicalJson(proposedTeams)) return null;
+        canonicalJson(recordedTeams) !== canonicalJson(proposedTeams) ||
+        canonicalJson(previous.request.agents ?? null) !== canonicalJson(plan.nextState.agents ?? null)) return null;
   }
   const planHash = await sha256({ plan, sourceRevision: context.sources.revision });
   if (unfinished && previous.planHash !== planHash) return null;
   const request = { schemaVersion: 1, expectedRevision: context.team.revision, members: plan.nextState.members };
   if (Object.hasOwn(plan.nextState, 'teams')) request.teams = plan.nextState.teams;
+  if (Object.hasOwn(plan.nextState, 'agents')) request.agents = plan.nextState.agents;
   const action = safeTeamAction({ schemaVersion: 1, actionId: unfinished ? previous.actionId : input.actionId, actorEmail: input.actorEmail,
     actionKeyHash: input.actionKeyHash, issuedAt: input.issuedAt, expiresAt: input.expiresAt,
     status: 'authorization_required', failureCode: null, request,
@@ -9989,7 +10281,7 @@ async function prepareTeamAction(storage, env, input) {
   }, context.planner);
   if (!action) return null;
   const storesFutureConsent = plan.nextState.members.some(member => member.allSources) ||
-    plan.nextState.teams?.some(team => team.allSources);
+    plan.nextState.teams?.some(team => team.allSources) || (plan.nextState.agents?.length ?? 0) > 0;
   // Older runtimes cannot interpret persistent future-source consent, even
   // when enabling it leaves today's concrete policy audiences unchanged.
   const nextTeam = { ...context.team, pendingAction: action };
@@ -10003,7 +10295,7 @@ async function prepareTeamAction(storage, env, input) {
   return action;
 }
 
-async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy = null, readAudience = false) {
+async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy = null, readAudience = false, agents = null) {
   // Fixed diagnostics only: never copy a provider message, response body or
   // credential into the authenticated Team response.
   const fail = (reason, policy) => {
@@ -10101,7 +10393,83 @@ async function verifyTeamPolicies(context, plan, token, journal = [], onlyPolicy
   };
   await Promise.all(Array.from({ length: 2 }, readNext));
   if (failed) return null;
+  // Agent policies sit on the Portal and source applications just verified
+  // above, and are read from the same application list.
+  if (onlyPolicy === null) {
+    const entries = agents?.entries ?? plan.agentPolicies ?? [];
+    const agentJournal = agents?.journal ?? journal;
+    for (const entry of entries) {
+      const listed = applications.result.filter((value) => isRecord(value) && value.id === entry.applicationId);
+      if (listed.length !== 1) return fail('team_agent_application_missing', entry);
+      let policies = listed[0].policies;
+      if (!Array.isArray(policies)) {
+        const read = await providerList(`/accounts/${account}/access/apps/${encodeURIComponent(entry.applicationId)}/policies`,
+          token, {}, context.signal);
+        if (!teamProviderOk(context, read)) return fail('team_policies_unavailable', entry);
+        policies = read.result;
+      }
+      const state = agentPolicyState(policies, entry, agentJournal, context.planner.agentPolicyName, account);
+      if (!state) {
+        const reason = entry.policyId && !policies.some((policy) => isRecord(policy) && policy.id === entry.policyId)
+          ? 'team_agent_policy_missing' : 'team_agent_policy_changed';
+        // A Team read reports agent drift beside the people it verified, unverified, so a
+        // save that switches off the agents of a deleted policy can still repair it.
+        // Writes stop at any drift.
+        if (!readAudience) return null;
+        if (!context.agentDrift) {
+          context.agentDrift = { reason, policyKind: entry.kind };
+          if (entry.sourceId !== undefined) context.agentDrift.sourceId = entry.sourceId;
+        }
+        continue;
+      }
+      observed.set(`agents:${entry.applicationId}`, state);
+    }
+  }
   return observed;
+}
+
+/**
+ * Where one agent policy stands against its plan entry: `before` or `after`,
+ * with the live policy id, or null for drift. The recorded policy is selected
+ * by its id. Any other policy carrying the gateway's agent policy name is
+ * unrecognized: it blocks, and is never adopted or edited. The one exception is
+ * a create whose answer was lost: while its journal entry is armed, the single
+ * policy with that name and exactly the intended tokens is the one it created.
+ */
+function agentPolicyState(policies, entry, journal, name, account) {
+  if (!Array.isArray(policies) || !isText(name)) return null;
+  const armed = journal.find((value) => value.agentApplicationId === entry.applicationId);
+  const id = armed?.policyId ?? entry.policyId;
+  const named = policies.filter((policy) => isRecord(policy) && policy.name === name);
+  let live;
+  if (id) {
+    const byId = policies.filter((policy) => isRecord(policy) && policy.id === id);
+    if (byId.length > 1 || named.some((policy) => policy.id !== id)) return null;
+    live = byId[0] ?? null;
+  } else {
+    if (named.length > 1 || (named.length === 1 && armed?.phase !== 'send_armed')) return null;
+    live = named[0] ?? null;
+  }
+  if (live && (!safeProviderId(live.id) || (Object.hasOwn(live, 'account_id') && live.account_id !== account))) return null;
+  // A policy that is to go and is already gone needs nothing more, however it went.
+  if (entry.after === null && live === null) return { state: 'after', policyId: null };
+  const matches = (expected) => expected === null ? live === null : live !== null && agentPolicyMatches(live, expected, live.id);
+  const before = matches(entry.before);
+  const after = matches(entry.after);
+  if ((!armed && !before) || (armed?.phase === 'verified' && !after) ||
+      (armed?.phase === 'send_armed' && !before && !after)) return null;
+  return { state: after ? 'after' : 'before', policyId: live?.id ?? null };
+}
+
+/** The agent policies a completed change leaves, with the ids Cloudflare gave the ones it created. */
+function appliedAgentPolicies(plan, journal) {
+  return (plan.agentPolicies ?? []).filter((entry) => entry.after !== null).map((entry) => {
+    const record = { applicationId: entry.applicationId,
+      policyId: journal.find((value) => value.agentApplicationId === entry.applicationId)?.policyId ?? entry.policyId,
+      tokenIds: agentPolicyTokens(entry.after) };
+    if (entry.sourceId !== undefined) record.sourceId = entry.sourceId;
+    return record;
+  });
 }
 
 function teamProviderOk(context, response) {
@@ -10117,9 +10485,11 @@ async function processTeamAction(env, storage, prepared, nowMs) {
       await otherLifecycleBlocksTeam(storage, nowMs)) return null;
   const plan = planGatewayTeamAccess(action.request, context.planner);
   if (action.sourceRevision !== context.sources.revision || action.planHash !== await sha256({ plan, sourceRevision: context.sources.revision }) ||
-      action.journal.some((entry) => entry.teamId
-        ? !(plan.groupChanges ?? []).some((change) => change.teamId === entry.teamId)
-        : !plan.policyChanges.some((policy) => policy.policyId === entry.policyId))) return null;
+      action.journal.some((entry) => entry.agentApplicationId !== undefined
+        ? !(plan.agentPolicyChanges ?? []).some((change) => change.applicationId === entry.agentApplicationId)
+        : entry.teamId
+          ? !(plan.groupChanges ?? []).some((change) => change.teamId === entry.teamId)
+          : !plan.policyChanges.some((policy) => policy.policyId === entry.policyId))) return null;
   let teamState = context.team;
   const persist = async (next) => {
     action = { ...action, ...next };
@@ -10141,7 +10511,8 @@ async function processTeamAction(env, storage, prepared, nowMs) {
   context.signal = AbortSignal.timeout(Math.max(1, Math.min(60_000, action.expiresAt - Date.now())));
   await persist({ status: 'applying', failureCode: null });
   const groupChanges = plan.groupChanges ?? [];
-  const membershipOnly = plan.policyChanges.length === 0 && groupChanges.length > 0 &&
+  const agentChanges = plan.agentPolicyChanges ?? [];
+  const membershipOnly = plan.policyChanges.length === 0 && agentChanges.length === 0 && groupChanges.length > 0 &&
     groupChanges.every((change) => change.op === 'update');
   const account = context.environment.accountId;
   const groupCollection = `/accounts/${account}/access/groups`;
@@ -10228,6 +10599,60 @@ async function processTeamAction(env, storage, prepared, nowMs) {
     await persist({ journal: journalReplacing(action.journal, { teamId: change.teamId, groupId: null, phase: 'verified' }) });
     return true;
   };
+  // One agent policy change: create, replace or delete the receipt-owned
+  // Service Auth policy on one application. Each write is armed before it is
+  // sent and read back after it; the read before it must find exactly the
+  // recorded `before`, so a policy changed in Cloudflare is never overwritten.
+  const agentPoliciesPath = (change, policyId = null) =>
+    `/accounts/${account}/access/apps/${encodeURIComponent(change.applicationId)}/policies${policyId ? `/${encodeURIComponent(policyId)}` : ''}`;
+  const readAgentPolicy = async (change) => {
+    const read = await providerList(agentPoliciesPath(change), token, {}, context.signal);
+    if (!teamProviderOk(context, read)) return null;
+    return agentPolicyState(read.result, change, action.journal, context.planner.agentPolicyName, account);
+  };
+  const recordAgentPolicy = (change, policyId, phase) => persist({
+    journal: journalReplacing(action.journal, { agentApplicationId: change.applicationId, policyId, phase }),
+  });
+  const accountMatches = (result) => !Object.hasOwn(result ?? {}, 'account_id') || result.account_id === account;
+  const applyAgentPolicy = async (change) => {
+    if (Date.now() >= action.expiresAt || context.signal?.aborted) return null;
+    const current = await readAgentPolicy(change);
+    if (!current) return null;
+    if (current.state !== 'after') {
+      // Older runtimes cannot read agent state: keep them from serving it.
+      if (teamState.minimumRuntimeRelease === null || compareUpdateRelease(teamState.minimumRuntimeRelease, context.environment.release) === -1) {
+        teamState = { ...teamState, teardownDisabled: true, minimumRuntimeRelease: context.environment.release };
+      }
+      if (change.before === null) {
+        // Cloudflare names a new policy only in its answer. A retry first
+        // looked for the one policy that answer would have named, above.
+        await recordAgentPolicy(change, null, 'send_armed');
+        const created = await providerCall(agentPoliciesPath(change), token, {
+          method: 'POST', body: canonicalJson(change.after), signal: context.signal,
+        });
+        if (!teamProviderOk(context, created) || !safeProviderId(created.result?.id) || !accountMatches(created.result) ||
+            !agentPolicyMatches(created.result, change.after, created.result.id)) return null;
+        await recordAgentPolicy(change, created.result.id, 'send_armed');
+      } else if (change.after === null) {
+        await recordAgentPolicy(change, change.policyId, 'send_armed');
+        const removed = await providerCall(agentPoliciesPath(change, change.policyId), token, { method: 'DELETE', signal: context.signal });
+        if (removed.status !== 'absent' && (!teamProviderOk(context, removed) ||
+            (removed.result !== null && removed.result?.id !== change.policyId))) return null;
+      } else {
+        await recordAgentPolicy(change, change.policyId, 'send_armed');
+        const updated = await providerCall(agentPoliciesPath(change, change.policyId), token, {
+          method: 'PUT', body: canonicalJson(change.after), signal: context.signal,
+        });
+        if (!teamProviderOk(context, updated) || !accountMatches(updated.result) ||
+            !agentPolicyMatches(updated.result, change.after, change.policyId)) return null;
+      }
+      const verified = await readAgentPolicy(change);
+      if (verified?.state !== 'after') return null;
+      current.policyId = verified.policyId;
+    }
+    await recordAgentPolicy(change, current.policyId ?? change.policyId, 'verified');
+    return true;
+  };
   const pendingGroups = plan.policies.some((policy) => policy.unresolvedTeamIds?.length);
   // A retry whose groups already exist may have written policies that name them.
   // Check those against the recorded group ids; without every id, no policy was written.
@@ -10282,18 +10707,28 @@ async function processTeamAction(env, storage, prepared, nowMs) {
     await persist({ journal: [...action.journal.filter((entry) => entry.policyId !== policy.policyId),
       { policyId: policy.policyId, phase: 'verified' }] });
   }
+  // People's policies first, then the agents': the Portal before its sources.
+  for (const change of agentChanges) {
+    if (observed?.get(`agents:${change.applicationId}`)?.state === 'after' &&
+        action.journal.find((entry) => entry.agentApplicationId === change.applicationId)?.phase === 'verified') continue;
+    if (await applyAgentPolicy(change) == null) return fail('team_action_recovery_required');
+  }
   if (!membershipOnly) {
     for (const change of groupChanges.filter((change) => change.op === 'delete')) {
       if (await applyGroup(change) == null) return fail('team_action_recovery_required');
     }
     observed = await verifyTeamPolicies(context, executable, token, action.journal);
-    if (!observed || executable.policies.some((policy) => observed.get(policy.policyId) !== 'after')) return fail('team_action_recovery_required');
+    if (!observed || executable.policies.some((policy) => observed.get(policy.policyId) !== 'after') ||
+        (executable.agentPolicies ?? []).some((entry) => observed.get(`agents:${entry.applicationId}`)?.state !== 'after')) {
+      return fail('team_action_recovery_required');
+    }
   }
   const completed = { ...teamState, ...plan.nextState,
     pendingAction: { ...action, status: 'succeeded', failureCode: null } };
   if (Object.hasOwn(plan.nextState, 'teams')) {
     completed.teams = teamsWithGroupIds(plan.nextState.teams, teamState.teams, action.journal);
   }
+  if (Object.hasOwn(plan.nextState, 'agents')) completed.agentPolicies = appliedAgentPolicies(executable, action.journal);
   await storage.put(TEAM_KEY, completed);
   return fixedJson(200, { schemaVersion: 1, action: publicTeamAction(completed.pendingAction) });
 }
@@ -10839,7 +11274,7 @@ async function handleTeardownActions(request, env, currentPolicies = false) {
   if (!(prepared instanceof Response) || prepared.status !== 200) {
     const refusal = prepared instanceof Response ? await prepared.json().catch(() => null) : null;
     return fixedJson(409, { schemaVersion: 1,
-      error: ['teardown_teams_present', 'teardown_connect_page_present'].includes(refusal?.error) ? refusal.error : 'teardown_action_conflict' });
+      error: ['teardown_teams_present', 'teardown_agents_present', 'teardown_connect_page_present'].includes(refusal?.error) ? refusal.error : 'teardown_action_conflict' });
   }
   const claim = canonicalJson({
     schemaVersion: 3,

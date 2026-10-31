@@ -440,7 +440,7 @@ describe('SourcesPage', () => {
       getTeam: vi.fn(async () => ({
         schemaVersion: 1 as const, revision: 1, editingEnabled: false, editingDisabledReason: 'management_credential_missing' as const,
         managementCredentialConfigured: false, managementCredentialChoice: 'provided' as const, members: [], adminEmails: ['admin@example.com'],
-        sources: [], pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null,
+        sources: [], pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null,
       })),
       prepareManagementCredentialAction: vi.fn(async () => prepared),
     }
@@ -487,6 +487,7 @@ describe('SourcesPage', () => {
       getTeam: vi.fn(async () => ({
         schemaVersion: 1 as const, revision: 1, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
         members: [], adminEmails: ['admin@example.com'], sources: [], pendingAction: null, proposedMembers: null, teams: [], proposedTeams: null,
+        agents: [], proposedAgents: null, agentDrift: null,
       })),
     }
     render(<GatewayProvider api={api}><SourcesPage /></GatewayProvider>)

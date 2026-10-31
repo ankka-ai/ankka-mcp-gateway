@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { GatewayApiError, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type TeamActionResult, type RuntimeUpdate, type Team, type TeamAction, type TeamGrant, type TeamMember } from '../api'
+import { GatewayApiError, type AgentGrant, type GatewayAdminApi, type GatewayStatus, type ManagedSources, type TeamActionResult, type RuntimeUpdate, type Team, type TeamAction, type TeamGrant, type TeamMember } from '../api'
 import { GatewayProvider } from '../GatewayContext'
 import { createPreviewGatewayAdminApi } from '../preview-api'
 import { TeamPage } from './TeamPage'
@@ -28,6 +28,9 @@ const team: Team = {
   proposedMembers: null,
   teams: [],
   proposedTeams: null,
+  agents: [],
+  proposedAgents: null,
+  agentDrift: null,
 }
 
 function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
@@ -707,6 +710,62 @@ describe('TeamPage', () => {
       memberEmails: ['analyst@example.com'],
       sourceIds: [sourceId],
     }])
+  })
+
+  it('adds an agent with its service token references, explains unavailable connectors, and saves it switched off', async () => {
+    const user = userEvent.setup()
+    const prepareTeamAction = vi.fn<(revision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]) => Promise<never>>(() => new Promise(() => {}))
+    const [knowledge] = team.sources
+    if (!knowledge) throw new Error('expected the fixture connector')
+    const withAgentAccess: Team = { ...team, sources: [
+      { ...knowledge, agentAccess: 'available' },
+      { id: 'source-3333333333333333', label: 'Personal mailbox', enabledTools: ['read_mail'], status: 'installed', agentAccess: 'individual_sign_in' },
+      { id: 'source-616e6b6b616d6370', label: 'Gateway Management', enabledTools: ['get_gateway_status'], status: 'installed', agentAccess: 'management' },
+    ] }
+    renderTeam(api({ getTeam: vi.fn(async () => structuredClone(withAgentAccess)), prepareTeamAction }))
+    expect(await screen.findByRole('heading', { name: 'Agents (0)' })).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Add agent' }))
+    const dialog = screen.getByRole('dialog', { name: 'Add agent' })
+    expect(within(dialog).getByText(/never asks for or stores the secret/)).toBeVisible()
+    await user.type(within(dialog).getByLabelText('Name'), 'Weekly reports')
+    await user.type(within(dialog).getByLabelText('Client ID'), 'NOT-A-CLIENT-ID')
+    await user.type(within(dialog).getByLabelText('Token ID'), '11111111-2222-4333-8444-555555555555')
+    await user.click(within(dialog).getByRole('button', { name: 'Save agent' }))
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Client ID')
+    await user.clear(within(dialog).getByLabelText('Client ID'))
+    await user.type(within(dialog).getByLabelText('Client ID'), `${'A'.repeat(32)}.access`)
+    expect(within(dialog).getByRole('checkbox', { name: /Personal mailbox/ })).toBeDisabled()
+    expect(within(dialog).getByText(/agents can use only connectors your Portal signs in to itself/)).toBeVisible()
+    expect(within(dialog).getByRole('checkbox', { name: /Gateway Management/ })).toBeDisabled()
+    await user.click(within(dialog).getByRole('checkbox', { name: 'Company knowledge' }))
+    await user.click(within(dialog).getByRole('button', { name: 'Save agent' }))
+    const row = screen.getByRole('group', { name: 'Weekly reports' })
+    expect(row).toHaveTextContent('1 connector selected')
+    expect(row).toHaveTextContent(`${'a'.repeat(32)}.access`)
+    await user.click(within(row).getByRole('checkbox', { name: 'Allow Weekly reports to connect' }))
+    expect(row).toHaveTextContent('Off')
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(prepareTeamAction).toHaveBeenCalledOnce()
+    const [, , , agents] = prepareTeamAction.mock.calls[0] ?? []
+    expect(agents).toEqual([{ id: expect.stringMatching(/^agent-[a-f0-9]{16}$/u), name: 'Weekly reports', clientId: `${'a'.repeat(32)}.access`,
+      tokenId: '11111111-2222-4333-8444-555555555555', enabled: false, sourceIds: [sourceId] }])
+  })
+
+  it('sends no agents when only people change, and follows a team by its id', async () => {
+    const user = userEvent.setup()
+    const prepareTeamAction = vi.fn<(revision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]) => Promise<never>>(() => new Promise(() => {}))
+    const finance: TeamGrant = { id: 'team-00000000000000f1', name: 'Finance', memberEmails: [], sourceIds: [sourceId] }
+    const [knowledge, catalogue] = team.sources
+    if (!knowledge || !catalogue) throw new Error('expected the fixture connectors')
+    const saved: Team = { ...team, teams: [finance], sources: [{ ...knowledge, agentAccess: 'available' }, catalogue],
+      agents: [{ id: 'agent-0000000000000001', name: 'Weekly reports', clientId: `${'a'.repeat(32)}.access`,
+        tokenId: '11111111-2222-4333-8444-555555555555', enabled: true, teamId: finance.id, appliedSourceIds: [sourceId] }] }
+    renderTeam(api({ getTeam: vi.fn(async () => structuredClone(saved)), prepareTeamAction }))
+    const row = await screen.findByRole('group', { name: 'Weekly reports' })
+    expect(row).toHaveTextContent('Follows Finance: 1 connector')
+    await toggleAccess(user, screen.getByRole('group', { name: 'analyst@example.com' }), /Company knowledge/)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+    expect(prepareTeamAction.mock.calls[0]?.[3]).toBeUndefined()
   })
 
   it.each(['team', 'member'])('saves persistent all-MCP consent for a %s and can return to selected connectors', async mode => {

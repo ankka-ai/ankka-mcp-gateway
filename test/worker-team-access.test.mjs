@@ -421,7 +421,7 @@ async function historicalPreparedTeam(gateway, input) {
   const portal = policy(gateway, 'mcp_portal');
   const plan = planTeamAccessChange(input, {
     revision: view.revision, adminEmails: view.adminEmails, currentMembers: view.members,
-    sources: view.sources.map(({ status, ...source }) => ({ ...source, installed: status === 'installed' })),
+    sources: view.sources.map(({ status, agentAccess: _agentAccess, ...source }) => ({ ...source, installed: status === 'installed' })),
     portalTarget: target(app(gateway, 'mcp_portal').id, portal.id),
     sourceTargets: control.sourceOwnership.map(({ sourceId, resources }) => ({ sourceId,
       ...target(resources[2].provider.parentId, resources[2].provider.id) })),
@@ -7488,4 +7488,299 @@ test('a new public MCP stores All tools in its approved draft and Portal mapping
   assert.equal(portalMapping(gateway, installed.serverId).default_disabled, false);
   const saved = gateway.managementStorage.snapshot(SOURCES_KEY).sources.find(source => source.id === installed.source.id);
   assert.equal(saved.allTools, true);
+}));
+
+// Agents: hosted MCP clients with their own Cloudflare Access service token.
+// The gateway keeps one receipt-owned Service Auth policy per Access
+// application beside the people's policy, and stores only the token's client
+// id and token id.
+const AGENT_CLIENT = `${'a'.repeat(32)}.access`;
+const SECOND_AGENT_CLIENT = `${'b'.repeat(32)}.access`;
+const AGENT_TOKEN = '11111111-2222-4333-8444-555555555555';
+const SECOND_AGENT_TOKEN = '66666666-7777-4888-8999-aaaaaaaaaaaa';
+const AGENT_POLICY = `ankka-${'acg-361551cea347ce8d598c04f7'}-agents`;
+const AGENT_TEAM = 'team-00000000000000a1';
+const ACCOUNT_APP_POLICIES = (applicationId) => `/client/v4/accounts/${ACCOUNT_ID}/access/apps/${applicationId}/policies`;
+
+function agent(overrides = {}) {
+  const value = { id: 'agent-0000000000000001', name: 'Weekly reports', clientId: AGENT_CLIENT, tokenId: AGENT_TOKEN,
+    enabled: true, sourceIds: [], ...overrides };
+  if (Object.hasOwn(overrides, 'teamId')) delete value.sourceIds;
+  return value;
+}
+
+async function saveTeam(gateway, view, extra = {}) {
+  return gateway.api('/api/team-actions', { method: 'POST', body: {
+    schemaVersion: 1, expectedRevision: view.revision, members: view.members, ...extra,
+  } });
+}
+
+async function savedTeam(gateway, view, extra = {}) {
+  const response = await saveTeam(gateway, view, extra);
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).action.status, 'succeeded');
+  return gateway.view();
+}
+
+function agentPolicies(gateway, applicationId) {
+  return gateway.provider.state.policies.get(applicationId).filter(({ name }) => name === AGENT_POLICY);
+}
+
+function peoplePolicies(gateway, applicationId) {
+  return gateway.provider.state.policies.get(applicationId).filter(({ name }) => name !== AGENT_POLICY);
+}
+
+function assertAgentPolicy(gateway, applicationId, tokens) {
+  const policies = agentPolicies(gateway, applicationId);
+  if (tokens.length === 0) return assert.deepEqual(policies, []);
+  assert.equal(policies.length, 1);
+  const { id, ...body } = policies[0];
+  assert.match(id, /^[A-Za-z0-9]/u);
+  assert.deepEqual(body, { name: AGENT_POLICY, decision: 'non_identity',
+    include: [...tokens].sort().map((token_id) => ({ service_token: { token_id } })), exclude: [], require: [] });
+}
+
+test('an agent gets its own Service Auth policy on the Portal and its sources, beside the people\'s policies', () => fixture(async (gateway) => {
+  const view = await gateway.view();
+  const sourceId = installedSourceId(view);
+  assert.equal(view.sources.find(({ id }) => id === sourceId).agentAccess, 'available');
+  assert.deepEqual(view.agents, []);
+  assert.equal(view.proposedAgents, null);
+  const portal = app(gateway, 'mcp_portal').id;
+  const source = app(gateway, 'mcp').id;
+  const people = [portal, source].map((id) => structuredClone(peoplePolicies(gateway, id)));
+  const after = await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId] })] });
+  assertAgentPolicy(gateway, portal, [AGENT_TOKEN]);
+  assertAgentPolicy(gateway, source, [AGENT_TOKEN]);
+  assert.deepEqual([portal, source].map((id) => peoplePolicies(gateway, id)), people);
+  assert.deepEqual(after.agents, [{ ...agent({ sourceIds: [sourceId] }), appliedSourceIds: [sourceId] }]);
+  assert.deepEqual(after.members, view.members);
+  const state = gateway.managementStorage.snapshot(TEAM_KEY);
+  assert.deepEqual(state.agentPolicies.map(({ applicationId, tokenIds, sourceId: id }) => ({ applicationId, tokenIds, sourceId: id })), [
+    { applicationId: portal, tokenIds: [AGENT_TOKEN], sourceId: undefined },
+    { applicationId: source, tokenIds: [AGENT_TOKEN], sourceId },
+  ]);
+  // Older runtimes cannot read agents: rollback below this release is refused.
+  assert.equal(state.minimumRuntimeRelease, gateway.env.ANKKA_GATEWAY_RELEASE);
+  // Only the two non-secret references are kept.
+  assert.deepEqual(Object.keys(state.agents[0]).sort(), ['clientId', 'enabled', 'id', 'name', 'sourceIds', 'tokenId']);
+}));
+
+test('Team edits keep agent policies, and removing agents keeps people\'s access', () => fixture(async (gateway) => {
+  const view = await gateway.view();
+  const sourceId = installedSourceId(view);
+  const portal = app(gateway, 'mcp_portal').id;
+  const source = app(gateway, 'mcp').id;
+  const people = [portal, source].map((id) => structuredClone(peoplePolicies(gateway, id)));
+  const withAgent = await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId] })] });
+  const created = [portal, source].map((id) => structuredClone(agentPolicies(gateway, id)));
+  const agentIds = new Set(created.flat().map(({ id }) => id));
+  const baseline = gateway.provider.requests.length;
+  // A membership change names no agents: they stay exactly as applied.
+  const edited = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(withAgent) });
+  assert.equal(edited.status, 200, await edited.clone().text());
+  assert.deepEqual([portal, source].map((id) => agentPolicies(gateway, id)), created);
+  assert.ok(gateway.provider.requests.slice(baseline).filter(({ method }) => method !== 'GET')
+    .every(({ pathname }) => !agentIds.has(pathname.split('/').at(-1))));
+  const changed = await gateway.view();
+  assert.deepEqual(changed.agents, withAgent.agents);
+  assert.ok(changed.members.some(({ email }) => email === NEW_PERSON));
+  const peopleAfterEdit = [portal, source].map((id) => structuredClone(peoplePolicies(gateway, id)));
+  assert.notDeepEqual(peopleAfterEdit, people);
+  // Removing every agent deletes only the agent policies and revokes no service token.
+  const removalBaseline = gateway.provider.requests.length;
+  const removed = await savedTeam(gateway, changed, { agents: [] });
+  assert.deepEqual(removed.agents, []);
+  assert.deepEqual([portal, source].map((id) => agentPolicies(gateway, id)), [[], []]);
+  assert.deepEqual([portal, source].map((id) => peoplePolicies(gateway, id)), peopleAfterEdit);
+  const writes = gateway.provider.requests.slice(removalBaseline).filter(({ method }) => method !== 'GET');
+  assert.deepEqual(writes.map(({ method }) => method), ['DELETE', 'DELETE']);
+  assert.ok(gateway.provider.requests.every(({ pathname }) => !pathname.includes('service_tokens')));
+  assert.deepEqual(gateway.managementStorage.snapshot(TEAM_KEY).agentPolicies, []);
+}));
+
+test('switching an agent off takes its token off every policy, and the last one deletes them', () => fixture(async (gateway) => {
+  const view = await gateway.view();
+  const sourceId = installedSourceId(view);
+  const portal = app(gateway, 'mcp_portal').id;
+  const source = app(gateway, 'mcp').id;
+  const second = agent({ id: 'agent-0000000000000002', name: 'Analyst', clientId: SECOND_AGENT_CLIENT, tokenId: SECOND_AGENT_TOKEN, sourceIds: [sourceId] });
+  const both = await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId] }), second] });
+  assertAgentPolicy(gateway, portal, [AGENT_TOKEN, SECOND_AGENT_TOKEN]);
+  assertAgentPolicy(gateway, source, [AGENT_TOKEN, SECOND_AGENT_TOKEN]);
+  const ids = [portal, source].map((id) => agentPolicies(gateway, id)[0].id);
+  const baseline = gateway.provider.requests.length;
+  const one = await savedTeam(gateway, both, { agents: [agent({ sourceIds: [sourceId], enabled: false }), second] });
+  assertAgentPolicy(gateway, portal, [SECOND_AGENT_TOKEN]);
+  assertAgentPolicy(gateway, source, [SECOND_AGENT_TOKEN]);
+  // Replaced in place: the same policies, written once each.
+  assert.deepEqual([portal, source].map((id) => agentPolicies(gateway, id)[0].id), ids);
+  assert.deepEqual(gateway.provider.requests.slice(baseline).filter(({ method }) => method !== 'GET').map(({ method }) => method), ['PUT', 'PUT']);
+  assert.deepEqual(one.agents.map(({ enabled, appliedSourceIds }) => ({ enabled, appliedSourceIds })),
+    [{ enabled: false, appliedSourceIds: [] }, { enabled: true, appliedSourceIds: [sourceId] }]);
+  await savedTeam(gateway, one, { agents: [agent({ sourceIds: [sourceId], enabled: false }), { ...second, enabled: false }] });
+  assertAgentPolicy(gateway, portal, []);
+  assertAgentPolicy(gateway, source, []);
+}));
+
+test('an agent that follows a team gets that team\'s connectors at each save', () => fixture(async (gateway) => {
+  await addHistoricalInstalledSource(gateway);
+  const view = await gateway.view();
+  const [first, second] = view.sources.filter(({ status }) => status === 'installed').map(({ id }) => id).sort();
+  const applications = Object.fromEntries(gateway.managementStorage.snapshot('ankka-mcp-gateway/management-control/v1')
+    .sourceOwnership.map(({ sourceId, resources }) => [sourceId, resources[2].provider.parentId]));
+  const portal = app(gateway, 'mcp_portal').id;
+  const team = { id: AGENT_TEAM, name: 'All Access', memberEmails: [], sourceIds: [first, second] };
+  const following = await savedTeam(gateway, view, { teams: [team], agents: [agent({ teamId: AGENT_TEAM })] });
+  assertAgentPolicy(gateway, portal, [AGENT_TOKEN]);
+  assertAgentPolicy(gateway, applications[first], [AGENT_TOKEN]);
+  assertAgentPolicy(gateway, applications[second], [AGENT_TOKEN]);
+  assert.deepEqual(following.agents[0].appliedSourceIds, [first, second]);
+  // The team loses a connector: so does the agent, at the same save.
+  const narrowed = await savedTeam(gateway, following, { teams: [{ ...team, sourceIds: [first] }] });
+  assertAgentPolicy(gateway, applications[first], [AGENT_TOKEN]);
+  assertAgentPolicy(gateway, applications[second], []);
+  assert.deepEqual(narrowed.agents[0].appliedSourceIds, [first]);
+  // A team an agent follows cannot be deleted from under it.
+  const refused = await saveTeam(gateway, narrowed, { teams: [] });
+  assert.equal(refused.status, 400);
+  assert.deepEqual(await refused.json(), { schemaVersion: 1, error: 'team_agent_team_missing' });
+}));
+
+test('agent changes need a person with dashboard access, and the service identity is never an agent', () => fixture(async (gateway) => {
+  gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
+  const view = await gateway.view();
+  const sourceId = installedSourceId(view);
+  const body = { schemaVersion: 1, expectedRevision: view.revision, members: view.members, agents: [agent({ sourceIds: [sourceId] })] };
+  const service = await gateway.serviceApi('/api/team-actions', { method: 'POST', body });
+  assert.equal(service.status, 400);
+  assert.deepEqual(await service.json(), { schemaVersion: 1, error: 'team_access_admin_required' });
+  const reused = await saveTeam(gateway, view, { agents: [agent({ clientId: SERVICE_CLIENT, sourceIds: [sourceId] })] });
+  assert.equal(reused.status, 400);
+  for (const invalid of [
+    agent({ clientId: 'not-a-client-id', sourceIds: [sourceId] }),
+    agent({ tokenId: AGENT_CLIENT, sourceIds: [sourceId] }),
+    { ...agent({ sourceIds: [sourceId] }), clientSecret: 'never-accepted' },
+    { ...agent({ teamId: AGENT_TEAM }), sourceIds: [sourceId] },
+  ]) {
+    const response = await saveTeam(gateway, view, { agents: [invalid] });
+    assert.equal(response.status, 400, JSON.stringify(invalid));
+  }
+  const duplicate = await saveTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId] }),
+    agent({ id: 'agent-0000000000000002', clientId: SECOND_AGENT_CLIENT, sourceIds: [sourceId] })] });
+  assert.equal(duplicate.status, 400);
+  assert.deepEqual(agentPolicies(gateway, app(gateway, 'mcp_portal').id), []);
+}));
+
+for (const change of ['altered', 'missing', 'unrecognized']) {
+  test(`an ${change} agent policy is drift that names its application and blocks every write`, () => fixture(async (gateway) => {
+    const view = await gateway.view();
+    const sourceId = installedSourceId(view);
+    const applied = await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId] })] });
+    const source = app(gateway, 'mcp').id;
+    const policies = gateway.provider.state.policies.get(source);
+    const owned = agentPolicies(gateway, source)[0];
+    if (change === 'altered') owned.include.push({ service_token: { token_id: SECOND_AGENT_TOKEN } });
+    if (change === 'missing') policies.splice(policies.indexOf(owned), 1);
+    if (change === 'unrecognized') policies.push({ ...structuredClone(owned), id: 'synthetic-copied-agent-policy' });
+    const baseline = gateway.provider.requests.length;
+    // People still read as verified data; the read as a whole is unverified and names the agent policy.
+    const unverified = await gateway.view();
+    assert.equal(unverified.observedAt, null);
+    assert.deepEqual(unverified.members, applied.members);
+    assert.deepEqual(unverified.agentDrift, {
+      reason: change === 'missing' ? 'team_agent_policy_missing' : 'team_agent_policy_changed', policyKind: 'source_agents', sourceId });
+    const refused = await gateway.api('/api/team-actions', { method: 'POST', body: changedRequest(unverified) });
+    assert.equal(refused.status, 409);
+    assert.deepEqual(await refused.json(), { schemaVersion: 1, error: 'team_policy_drift' });
+    // Nothing was written, so the refused change can be cancelled before another.
+    const recorded = await gateway.view();
+    assert.equal(recorded.pendingAction.canCancel, true);
+    const cancelled = await gateway.api(`/api/team-actions/${recorded.pendingAction.actionId}`, { method: 'DELETE', body: {} });
+    assert.equal(cancelled.status, 200, await cancelled.clone().text());
+    // Switching the agent off cannot repair a changed policy or delete a copy: it stays put.
+    const off = await saveTeam(gateway, await gateway.view(), { agents: [agent({ sourceIds: [sourceId], enabled: false })] });
+    assert.equal(off.status, change === 'missing' ? 200 : 409, await off.clone().text());
+    if (change !== 'missing') assertNoMutation(gateway.provider, baseline);
+    else {
+      // A deleted policy is repaired by switching its agents off; switched on again, it is recreated.
+      assertAgentPolicy(gateway, source, []);
+      assertAgentPolicy(gateway, app(gateway, 'mcp_portal').id, []);
+      const repaired = await gateway.view();
+      assert.equal(repaired.agentDrift, null);
+      assert.ok(repaired.observedAt);
+      await savedTeam(gateway, repaired, { agents: [agent({ sourceIds: [sourceId] })] });
+      assertAgentPolicy(gateway, source, [AGENT_TOKEN]);
+    }
+  }));
+}
+
+test('a manual Service Auth policy beside the agent policy is never read, adopted or edited', () => fixture(async (gateway) => {
+  const view = await gateway.view();
+  const sourceId = installedSourceId(view);
+  const manual = addManualPolicies(gateway);
+  const baseline = gateway.provider.requests.length;
+  const applied = await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId] })] });
+  assertAgentPolicy(gateway, app(gateway, 'mcp').id, [AGENT_TOKEN]);
+  assertManualPoliciesUnchanged(gateway, manual, baseline);
+  assert.deepEqual(applied.agents[0].appliedSourceIds, [sourceId]);
+}));
+
+test('a lost answer to an agent policy create is adopted on resume, never created twice', () => fixture(async (gateway) => {
+  const view = await gateway.view();
+  const sourceId = installedSourceId(view);
+  const source = app(gateway, 'mcp').id;
+  let dropped = false;
+  gateway.provider.hook(({ record, state }) => {
+    if (dropped || record.method !== 'POST' || record.pathname !== ACCOUNT_APP_POLICIES(source)) return undefined;
+    dropped = true;
+    state.policies.get(source).push({ id: 'synthetic-lost-agent-policy', ...structuredClone(record.body) });
+    return Response.json({ success: false, errors: [], messages: [], result: null }, { status: 500 });
+  });
+  const request = { agents: [agent({ sourceIds: [sourceId] })] };
+  const interrupted = await saveTeam(gateway, view, request);
+  assert.equal(interrupted.status, 409);
+  assert.deepEqual(await interrupted.json(), { schemaVersion: 1, error: 'team_action_recovery_required' });
+  const recorded = await gateway.view();
+  assert.equal(recorded.pendingAction.status, 'recovery_required');
+  assert.equal(recorded.pendingAction.canCancel, false);
+  assert.deepEqual(recorded.proposedAgents, request.agents);
+  const resumed = await savedTeam(gateway, recorded, request);
+  assertAgentPolicy(gateway, source, [AGENT_TOKEN]);
+  assert.equal(agentPolicies(gateway, source)[0].id, 'synthetic-lost-agent-policy');
+  assert.equal(gateway.provider.requests.filter(({ method, pathname }) => method === 'POST' && pathname === ACCOUNT_APP_POLICIES(source)).length, 1);
+  assert.deepEqual(resumed.agents[0].appliedSourceIds, [sourceId]);
+  assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).agentPolicies.find((record) => record.sourceId === sourceId).policyId,
+    'synthetic-lost-agent-policy');
+}));
+
+test('source and gateway removal wait until no agent policy is left', () => fixture(async (gateway) => {
+  const view = await gateway.view();
+  const sourceId = installedSourceId(view);
+  const applied = await savedTeam(gateway, view, { agents: [agent({ sourceIds: [sourceId] })] });
+  const baseline = gateway.provider.requests.length;
+  const source = await removeSource(gateway, sourceId);
+  assert.equal(source.status, 409);
+  assert.deepEqual(await source.json(), { schemaVersion: 1, error: 'source_removal_agents_assigned' });
+  const teardown = await gateway.api('/api/teardown-actions', { method: 'POST', body: { schemaVersion: 1 }, currentTeardown: true });
+  assert.equal(teardown.status, 409);
+  assert.deepEqual(await teardown.json(), { schemaVersion: 1, error: 'teardown_agents_present' });
+  assertNoMutation(gateway.provider, baseline);
+  // Switched off, the agent stays saved but holds no policy: removal may go ahead.
+  await savedTeam(gateway, applied, { agents: [agent({ sourceIds: [sourceId], enabled: false })] });
+  const removed = await removeSource(gateway, sourceId);
+  assert.equal(removed.status, 200, await removed.clone().text());
+  const after = gateway.managementStorage.snapshot(TEAM_KEY);
+  assert.deepEqual(after.agents.map(({ sourceIds }) => sourceIds), [[]]);
+}));
+
+test('verify management access still proves both permissions with agent policies present', () => fixture(async (gateway) => {
+  const view = await gateway.view();
+  await savedTeam(gateway, view, { agents: [agent({ sourceIds: [installedSourceId(view)] })] });
+  const portal = app(gateway, 'mcp_portal').id;
+  const before = structuredClone(agentPolicies(gateway, portal));
+  const result = await verifyToken(gateway);
+  assert.equal(result.status, 'verified');
+  assert.equal(result.accessPolicies, 'verified');
+  assert.deepEqual(agentPolicies(gateway, portal), before);
 }));

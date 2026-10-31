@@ -42,7 +42,10 @@ optional `teams` list that replaces the [named teams](TEAM_ACCESS.md#named-teams
 as the dashboard's Save does. Each team keeps its `id`, `name`, `memberEmails`
 and `sourceIds`, plus `allSources` for every current and future connector, so an
 agent can assign a source to a team or remove it. Omitting `teams` keeps the
-current named teams unchanged.
+current named teams unchanged. It never changes [agents](AGENT_ACCESS.md):
+`get_gateway_team` shows them, and only a person with dashboard access edits
+them on the Team page. Changing the sources of a team an agent follows still
+changes that agent's sources at the same save.
 It has no arbitrary HTTP, Cloudflare API, shell, account-selection, or credential
 input tool. Connector-specific provisioning, including BigQuery setup, continues
 to use its existing dashboard workflow.

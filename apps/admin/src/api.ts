@@ -355,6 +355,23 @@ const teamGrantSchema = v.strictObject({
   allSources: v.optional(v.boolean()),
 })
 const teamGrantsSchema = v.pipe(v.array(teamGrantSchema), v.maxLength(16))
+// An agent signs in with its own Cloudflare Access service token. The gateway keeps only the token's client id
+// and token id, never its secret. Its sources are either an explicit list or `teamId`, which follows that team.
+const agentGrantSchema = v.strictObject({
+  id: v.pipe(v.string(), v.regex(/^agent-[a-f0-9]{16}$/u)),
+  name: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
+  clientId: v.pipe(v.string(), v.regex(/^[a-f0-9]{32}\.access$/u)),
+  tokenId: v.pipe(v.string(), v.regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u)),
+  enabled: v.boolean(),
+  teamId: v.optional(v.pipe(v.string(), v.regex(/^team-[a-f0-9]{16}$/u))),
+  sourceIds: v.optional(v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES))),
+})
+const agentGrantsSchema = v.pipe(v.array(agentGrantSchema), v.maxLength(16))
+// As saved: `appliedSourceIds` are the sources whose Cloudflare policy names this agent's token right now.
+const teamAgentSchema = v.strictObject({
+  ...agentGrantSchema.entries,
+  appliedSourceIds: v.pipe(v.array(teamSourceIdSchema), v.maxLength(TEAM_MAX_SOURCES)),
+})
 const managementCredentialStatusSchema = v.strictObject({
   schemaVersion: v.literal(1),
   managementCredentialConfigured: v.boolean(),
@@ -380,11 +397,21 @@ const teamSchema = v.strictObject({
     label: v.pipe(v.string(), v.minLength(1), v.maxLength(80)),
     enabledTools: v.pipe(v.array(v.pipe(v.string(), v.minLength(1), v.maxLength(128))), v.maxLength(500)),
     status: sourceStatusSchema,
+    // Whether an agent's service token can reach this installed connector: only through the Portal's shared sign-in.
+    agentAccess: v.optional(v.picklist(['available', 'individual_sign_in', 'management'])),
   })), v.maxLength(TEAM_MAX_SOURCES)),
   teams: v.optional(teamGrantsSchema, []),
+  agents: v.optional(v.pipe(v.array(teamAgentSchema), v.maxLength(16)), []),
+  // An agent policy in Cloudflare that no longer matches what was saved: where, in fixed words.
+  agentDrift: v.optional(v.nullable(v.strictObject({
+    reason: v.picklist(['team_agent_policy_missing', 'team_agent_policy_changed']),
+    policyKind: v.picklist(['portal_agents', 'source_agents']),
+    sourceId: v.optional(teamSourceIdSchema),
+  })), null),
   pendingAction: v.nullable(teamActionSchema),
   proposedMembers: v.nullable(teamMembersSchema),
   proposedTeams: v.optional(v.nullable(teamGrantsSchema), null),
+  proposedAgents: v.optional(v.nullable(agentGrantsSchema), null),
 })
 /** The gateway's own page that shows a team how to connect, at this path on the dashboard host. */
 export const CONNECT_PAGE_PATH = '/__ankka/connect'
@@ -484,6 +511,8 @@ export type RuntimeAction = v.InferOutput<typeof runtimeActionSchema>
 export type TeardownAction = v.InferOutput<typeof teardownActionSchema>
 export type TeamMember = v.InferOutput<typeof teamMemberSchema>
 export type TeamGrant = v.InferOutput<typeof teamGrantSchema>
+export type AgentGrant = v.InferOutput<typeof agentGrantSchema>
+export type TeamAgent = v.InferOutput<typeof teamAgentSchema>
 export type Team = v.InferOutput<typeof teamSchema>
 export type TeamAction = v.InferOutput<typeof teamActionSchema>
 export type TeamActionResult = v.InferOutput<typeof teamActionResultSchema>
@@ -500,7 +529,7 @@ export interface GatewayAdminApi {
   getSources(): Promise<ManagedSources>
   checkSourceConnection(sourceId: string, signal?: AbortSignal): Promise<SourceConnection>
   getTeam(): Promise<Team>
-  prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult>
+  prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]): Promise<TeamActionResult>
   getTeamAction(actionId: string): Promise<TeamAction>
   cancelTeamAction(actionId: string): Promise<TeamAction>
   /** Saved example questions and whether the connect page's Access application is on. */
@@ -590,6 +619,8 @@ const ERROR_MESSAGES = new Map([
   ['team_access_admin_required', 'Deployment administrators must remain in your team and keep dashboard access. Only dashboard administrators can change dashboard access.'],
   ['team_access_invalid_state', 'The saved access configuration could not be verified. Refresh before making changes.'],
   ['team_access_invalid_target', 'The owned access policies could not be verified. No new change can be prepared.'],
+  ['team_agent_source_unsupported', 'An agent can use only connectors your Portal reaches with its own shared sign-in. Gateway Management and connectors with individual sign-in are not available to agents.'],
+  ['team_agent_team_missing', 'An agent follows a team that no longer exists. Choose its connectors or another team before saving.'],
   ['team_action_recovery_required', 'Some access policies may already have changed. Resume the recorded change before editing access again.'],
   ['team_policy_drift', 'Cloudflare access policies no longer match the saved configuration. Review the Cloudflare policies before trying again. This page will not reset them automatically.'],
   ['team_release_review_required', 'Team access editing is not available in this gateway release.'],
@@ -619,6 +650,7 @@ const ERROR_MESSAGES = new Map([
   ['source_removal_unavailable', 'Connector removal could not read your gateway’s saved records. Refresh and try again.'],
   ['source_removal_pending', 'Finish the connector removal already in progress before changing another connector.'],
   ['source_removal_action_conflict', 'Finish or cancel the pending installation, Team change, update, gateway removal or management token change before removing this connector.'],
+  ['source_removal_agents_assigned', 'An agent still uses this connector. Remove it from your agents on the Team page, including agents that follow a team with it, then remove the connector.'],
   ['source_removal_ownership_conflict', 'Removal stopped because your gateway could not verify ownership or confirm that only this Portal uses the connector. Check its resources in Cloudflare, then try again.'],
   ['source_removal_recovery_required', 'Removal could not be confirmed. Check status, then continue removal; your gateway will check saved progress before making further changes.'],
   ['source_removal_managed_bigquery', 'Individual removal of managed BigQuery bridges is not available yet. Their Worker and stored key require separate Cloudflare authorization. You can revoke connector access in Team. Full gateway removal cleans up the bridge too.'],
@@ -669,6 +701,7 @@ const ERROR_MESSAGES = new Map([
   ['runtime_update_not_available', 'The installed runtime already matches its release channel.'],
   ['teardown_action_conflict', 'Finish or cancel any unfinished connector installation, update or Team change, or wait for an open removal authorization to expire, then try again; if nothing is unfinished, the installation record could not be verified.'],
   ['teardown_teams_present', 'Delete your teams on the Team page first. Removal does not delete their Cloudflare Access groups.'],
+  ['teardown_agents_present', 'Remove or turn off your agents on the Team page first. Removal does not delete their Cloudflare Access policies.'],
   ['teardown_connect_page_present', 'Turn off team connect pages first. Removal does not delete their Cloudflare Access application.'],
   ['connect_unavailable', 'The connect page settings could not be read. Refresh and try again.'],
   ['connect_examples_invalid', 'Each question needs 1–600 characters and each answer description up to 300, and an example can name at most four installed connectors.'],
@@ -777,15 +810,18 @@ export class HttpGatewayAdminApi implements GatewayAdminApi {
   }
   getTeam(): Promise<Team> { return this.#request('/api/team', teamSchema) }
 
-  prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[]): Promise<TeamActionResult> {
+  prepareTeamAction(expectedRevision: number, members: TeamMember[], teams?: TeamGrant[], agents?: AgentGrant[]): Promise<TeamActionResult> {
     type TeamActionRequest = {
       schemaVersion: 1
       expectedRevision: number
       members: TeamMember[]
       teams?: TeamGrant[]
+      agents?: AgentGrant[]
     }
     const body: TeamActionRequest = { schemaVersion: 1, expectedRevision, members }
     if (teams !== undefined) body.teams = teams
+    // Omitted agents stay exactly as saved.
+    if (agents !== undefined) body.agents = agents
     return this.#request('/api/team-actions', teamActionResultSchema, {
       method: 'POST',
       body: JSON.stringify(body),

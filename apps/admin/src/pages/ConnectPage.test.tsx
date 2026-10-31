@@ -20,7 +20,7 @@ const update: RuntimeUpdate = { schemaVersion: 1, channel: 'stable', status: 'up
 const team: Team = {
   schemaVersion: 1, revision: 3, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
   adminEmails: ['admin@example.com'], members: [{ email: 'admin@example.com', sourceIds: [] }, { email: 'analyst@example.com', sourceIds: [] }],
-  sources: [], pendingAction: null, proposedMembers: null, proposedTeams: null,
+  sources: [], pendingAction: null, proposedMembers: null, proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null,
   teams: [{ id: 'team-0123456789abcdef', name: 'Marketing', memberEmails: ['analyst@example.com'], sourceIds: [knowledge] }],
 }
 const examples: ConnectExample[] = [{ id: 'example-aaaaaaaaaaaa', prompt: 'Find the onboarding checklist.', sourceIds: [knowledge] }]

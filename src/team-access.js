@@ -1,4 +1,4 @@
 // The shipped Worker is the single canonical implementation.
 export {
-  TeamAccessError, normalizeTeamAccessRequest, planTeamAccessChange, teamPolicy, teamPolicyMatches,
+  TeamAccessError, agentPolicy, agentPolicyMatches, normalizeTeamAccessRequest, planTeamAccessChange, teamPolicy, teamPolicyMatches,
 } from '../payload/worker/index.js';
