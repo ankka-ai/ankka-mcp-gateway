@@ -22,7 +22,7 @@ const COMPONENTS = Object.freeze({
 });
 const TREE_SHA256 = Object.freeze({
   installer: '1bbdba824f0c3ee424bacd3f00e0d95dc13c31cf123f236db02d9990faa896a1',
-  worker: '9ac6059cc63fd506508c67a94d22c4174f4b21a59d6f5e55f6b82830fb03d58e',
+  worker: '8606c3f384c1ad029578f317425463bd23fee11cac0b460e6244e3ca237163d8',
   'worker-cleanup': '35b1d075e05285bd7a3cff7dc11afc7ebda258276f3380204a19510b3c1f8a9a',
   'worker-retirement': '757311596630d21599397caf0ef43e07c4c8d005148bff280ba8ee538d9d6c9f',
 });
@@ -110,11 +110,12 @@ test('release sources have one generated admin and four exact payload components
     const names = records.map(({ path: filePath }) => filePath.slice(`payload/${component}/`.length));
     if (expectedFiles === null) {
       assert.ok(names.includes('index.html'));
+      assert.ok(names.includes('team-connect.html'), 'the team connect page is the build\'s second page');
       assert.ok(names.includes('LICENSE.txt'));
       assert.ok(names.includes('THIRD_PARTY_LICENSES.txt'));
       assert.ok(names.length >= 5);
       for (const name of names.filter((entry) => ![
-        'index.html', 'LICENSE.txt', 'THIRD_PARTY_LICENSES.txt',
+        'index.html', 'team-connect.html', 'LICENSE.txt', 'THIRD_PARTY_LICENSES.txt',
       ].includes(entry))) {
         assert.match(name, /^assets\/admin-[a-f0-9]{8}\.(?:css|js|svg|png)$/u);
       }
@@ -176,8 +177,8 @@ test('generated admin distribution carries the project and complete production d
 });
 
 test('admin and installer HTML use external same-origin assets without inline execution surfaces', async () => {
-  for (const component of ['admin', 'installer']) {
-    const html = await readFile(componentUrl(component, 'index.html'), 'utf8');
+  for (const [component, page] of [['admin', 'index.html'], ['admin', 'team-connect.html'], ['installer', 'index.html']]) {
+    const html = await readFile(componentUrl(component, page), 'utf8');
     assert.match(html, /^<!doctype html>/u);
     assert.match(html, /<html lang="en">/u);
     assert.match(html, /<meta name="viewport" content="width=device-width, initial-scale=1"\s*\/?\s*>/u);

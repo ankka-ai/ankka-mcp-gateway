@@ -4,6 +4,19 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Add team connect pages. Turn them on under **Connect pages** to get one link
+  for each team, and one for everyone. The page shows how to connect Claude,
+  ChatGPT, Claude Code, Cursor or another MCP client to the gateway, then
+  example questions written by gateway administrators, each with an optional
+  description of what the answer shows. A person sees only the examples their
+  connectors can answer. Gateway Management gains `get_connect_examples` and
+  `set_connect_examples`, so an agent can write the examples. Turning it on creates one Cloudflare
+  Access application for `/__ankka/connect` that only requires a sign-in; the
+  gateway checks Team membership itself and grants no tool access. Gateway
+  removal waits until the page is turned off, and rollback stays at or above
+  the release that turned it on. See
+  [Team connect pages](docs/TEAM_CONNECT_PAGES.md).
+
 - Record a gateway update as finished about three seconds after the upload
   instead of about five minutes. Cloudflare keeps the gateway's management
   object on the previous code for about five minutes after an upload, so the
