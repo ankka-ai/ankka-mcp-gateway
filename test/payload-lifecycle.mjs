@@ -538,7 +538,7 @@ export function cloudflareProvider({ foreignApps = [], stripOauth = false, onReq
     state.requests.push(record);
     // Measured live 2026-10-31: Cloudflare refuses a bearer record created without credentials.
     if (url.pathname === SERVERS && method === 'POST' && record.body?.auth_type === 'bearer' &&
-        !(typeof record.body.auth_credentials === 'string' && record.body.auth_credentials.length > 0)) {
+        !v.is(v.pipe(v.string(), v.minLength(1)), record.body.auth_credentials)) {
       return Response.json({ success: false, result: null, errors: [{ code: 7001,
         message: 'auth_credentials is required for auth_type "bearer"' }] }, { status: 400 });
     }
