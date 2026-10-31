@@ -370,7 +370,7 @@ class PreviewGatewayAdminApi implements GatewayAdminApi {
   async setAgentEntrance(hostname: string): Promise<AgentEntrance> {
     if (!this.#team.editingEnabled) throw new GatewayApiError(409, 'agent_entrance_busy')
     if (!/^[a-z0-9-]{1,63}\.example\.com$/u.test(hostname)) throw new GatewayApiError(400, 'agent_entrance_hostname_invalid')
-    this.#team.agentEntrance = { schemaVersion: 1, status: 'on', hostname, url: `https://${hostname}/mcp`, suggestedHostname: 'agents.example.com' }
+    this.#team.agentEntrance = { schemaVersion: 1, status: 'on', hostname, url: `https://${hostname}/api/agents/mcp`, suggestedHostname: 'agents.example.com' }
     return structuredClone(this.#team.agentEntrance)
   }
 
