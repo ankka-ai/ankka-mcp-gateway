@@ -710,6 +710,10 @@ const ACCESS_SERVICE_MODE = 'access_service_token';
 // is not a credential; the customer replaces it with their token in Cloudflare.
 // A record still on it never syncs behind Access, so it reads as credential missing.
 const PENDING_BEARER_PLACEHOLDER = 'ankka-pending-customer-credential';
+// How long a discovery request to a gateway-served MCP source may reuse a verified access context.
+const ACCESS_CONTEXT_REUSE_MS = 60_000;
+// Cloudflare could not be read to check access: retry, rather than sign in again.
+const ACCESS_UNAVAILABLE = Object.freeze({ unavailable: true });
 const SOURCE_AUTH_MODES = Object.freeze(['none', 'oauth', ACCESS_SERVICE_MODE]);
 const INTERNAL_SOURCE_REMOVAL_PATH = '/source-removal';
 const SOURCES_KEY = 'ankka-mcp-gateway/management-sources/v1';
@@ -8060,6 +8064,29 @@ export class AdminState {
     // Per-agent request counts and last-use writes for the agent entrance. Memory only.
     this.agentRates = new Map();
     this.agentUsageWritten = new Map();
+    // Verified MCP access contexts, reused only by discovery requests. Memory only.
+    this.accessContexts = new Map();
+  }
+
+  /**
+   * The access context for one gateway-served MCP source. Every request reads
+   * Cloudflare Access live, except that a discovery request (initialize,
+   * notifications, tools/list) may reuse a context verified within the last
+   * ACCESS_CONTEXT_REUSE_MS against the same saved state. Any saved change to
+   * sources, ownership, actions or Team discards it; tools/call never reuses one.
+   */
+  async managementAccessContext(allowDraft, sourceId, reuse) {
+    const key = `${sourceId}:${allowDraft ? 'draft' : 'installed'}`;
+    const storage = this.state.storage;
+    const stamp = await sha256({ control: await storage.get(CONTROL_KEY) ?? null, sources: await storage.get(SOURCES_KEY) ?? null,
+      actions: await storage.get(ACTIONS_KEY) ?? null, team: await storage.get(TEAM_KEY) ?? null });
+    const cached = this.accessContexts.get(key);
+    if (reuse && cached?.stamp === stamp && cached.expiresAt > Date.now()) return { context: cached.context, unavailable: false };
+    const report = { unavailable: false };
+    const context = await managementSourceContext(storage, this.env, allowDraft, sourceId, report);
+    if (context) this.accessContexts.set(key, Object.freeze({ context, stamp, expiresAt: Date.now() + ACCESS_CONTEXT_REUSE_MS }));
+    else this.accessContexts.delete(key);
+    return { context, unavailable: !context && report.unavailable };
   }
 
   fetch(request) {
@@ -8075,8 +8102,10 @@ export class AdminState {
     // Source synchronization can call back while an OAuth mutation awaits Cloudflare.
     // This read must not wait for that mutation queue.
     if (request.method === 'GET' && requestUrl.pathname === '/management-mcp/access') {
-      return managementSourceContext(this.state.storage, this.env, requestUrl.searchParams.get('draft') === '1', requestUrl.searchParams.get('source') ?? MANAGEMENT_SOURCE_ID)
-        .then((context) => context ? fixedJson(200, context) : sourceToolsRefusal(403, 'management_source_unavailable'));
+      return this.managementAccessContext(requestUrl.searchParams.get('draft') === '1',
+        requestUrl.searchParams.get('source') ?? MANAGEMENT_SOURCE_ID, requestUrl.searchParams.get('reuse') === '1')
+        .then(({ context, unavailable }) => context ? fixedJson(200, context)
+          : sourceToolsRefusal(unavailable ? 503 : 403, unavailable ? 'management_source_provider_unavailable' : 'management_source_unavailable'));
     }
     // Status must remain available while a serialized mutation awaits the
     // provider. These reads neither authorize work nor change the journal.
@@ -10536,6 +10565,7 @@ function appliedAgentPolicies(plan, journal) {
 
 function teamProviderOk(context, response) {
   if (response.status === 'auth') context.credentialRejected = true;
+  if (response.status === 'unknown') context.providerUnavailable = true;
   return response.status === 'ok';
 }
 
@@ -11455,7 +11485,9 @@ async function verifyGatewaySource(source, env) {
 }
 
 /** Receipt-owned source identity and current operator or individual audiences. */
-async function managementSourceContext(storage, env, allowDraft = false, sourceId = MANAGEMENT_SOURCE_ID) {
+// `report.unavailable` is set when a Cloudflare read failed (timeout, rate limit or
+// server error) rather than answered something unexpected.
+async function managementSourceContext(storage, env, allowDraft = false, sourceId = MANAGEMENT_SOURCE_ID, report = null) {
   const environment = parseManagementEnvironment(env);
   const token = managementCredential(env);
   const control = safeManagementControl(await storage.get(CONTROL_KEY));
@@ -11486,6 +11518,7 @@ async function managementSourceContext(storage, env, allowDraft = false, sourceI
     const [application, policies] = await Promise.all([
       providerCall(path, token, { signal }), providerList(`${path}/policies`, token, {}, signal),
     ]);
+    if (report && [application, policies].some((response) => response.status === 'unknown')) report.unavailable = true;
     if (application.status !== 'ok' || application.result?.id !== receipt.provider.id ||
         !accessApplicationIdentityMatches(application.result, receipt.kind, desired) ||
         policies.status !== 'ok') return null;
@@ -11509,9 +11542,11 @@ async function managementSourceContext(storage, env, allowDraft = false, sourceI
   let members = [];
   if (portal.groupIds.length > 0) {
     const owners = teamGroupOwners(await readTeamState(storage, env));
+    const groupContext = { control, environment, signal };
     const groups = await Promise.all(portal.groupIds.map((groupId) => owners.has(groupId)
-      ? readOwnedTeamGroup({ control, environment, signal }, token, { id: owners.get(groupId), accessGroupId: groupId })
+      ? readOwnedTeamGroup(groupContext, token, { id: owners.get(groupId), accessGroupId: groupId })
       : null));
+    if (report && groupContext.providerUnavailable) report.unavailable = true;
     if (groups.some((emails) => emails === null)) return null;
     members = groups.flat();
   }
@@ -11528,13 +11563,21 @@ async function managementOperationActorAllowed(storage, env, actorEmail) {
   return context !== null && [...context.emails, ...(context.sharedEmails ?? [])].includes(actorEmail);
 }
 
-async function managementSourceAccess(request, env, allowDraft = false, nowMs = Date.now(), allowAdministratorConsent = false, sourceId = MANAGEMENT_SOURCE_ID) {
+/**
+ * The verified human actor for a gateway-served source, or null. With
+ * `reuse`, a discovery request may use a recently verified access context.
+ * With `reportUnavailable`, a failed Cloudflare read returns ACCESS_UNAVAILABLE
+ * instead of null, so an MCP endpoint can answer 503 rather than ask for sign-in.
+ */
+async function managementSourceAccess(request, env, allowDraft = false, nowMs = Date.now(), allowAdministratorConsent = false,
+  sourceId = MANAGEMENT_SOURCE_ID, { reuse = false, reportUnavailable = false } = {}) {
   const endpoint = managementSourceUrl(env);
   if (!endpoint || new URL(request.url).origin !== new URL(endpoint).origin) return null;
   const stub = adminStateStub(env, 'v1:management');
   if (!stub || !request.headers.has('cf-access-jwt-assertion')) return null;
   try {
-    const response = await stub.fetch(new Request(`https://admin-state.invalid/management-mcp/access?source=${sourceId}${allowDraft ? '&draft=1' : ''}`));
+    const response = await stub.fetch(new Request(`https://admin-state.invalid/management-mcp/access?source=${sourceId}${allowDraft ? '&draft=1' : ''}${reuse ? '&reuse=1' : ''}`));
+    if (response.status === 503 && reportUnavailable) return ACCESS_UNAVAILABLE;
     if (!response.ok) return null;
     const context = await response.json();
     if (sourceId !== MANAGEMENT_SOURCE_ID && context.endpoint !== request.url) return null;
@@ -11824,7 +11867,9 @@ async function handleApiSourceMcp(request, env) {
       Object.keys(message).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key))) return error(-32600, 'Invalid request');
   const sourceId = `source-a9${(await sha256Hex(request.url)).slice(0, 14)}`;
   const discovery = message.method !== 'tools/call';
-  const access = await managementSourceAccess(request, env, discovery, Date.now(), discovery, sourceId);
+  const access = await managementSourceAccess(request, env, discovery, Date.now(), discovery, sourceId,
+    { reuse: discovery, reportUnavailable: true });
+  if (access === ACCESS_UNAVAILABLE) return fixedJson(503, { error: 'access_check_unavailable' }, { 'retry-after': '2' });
   if (!access) return fixedJson(401, { error: 'access_required' }, { 'www-authenticate':
     `Bearer resource_metadata="${url.origin}/.well-known/cloudflare-access-protected-resource${url.pathname}"` });
   if (!Object.hasOwn(message, 'id')) return message.method === 'notifications/initialized'
@@ -12048,7 +12093,9 @@ async function handleNativeMcp(request, env, native) {
       Object.keys(message).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key))) return error(-32600, 'Invalid request');
   // Discovery describes the catalogue to the administrator for Portal synchronization; only tools/call needs an assignment.
   const discovery = message.method !== 'tools/call';
-  const access = await managementSourceAccess(request, env, discovery, Date.now(), discovery, native.sourceId);
+  const access = await managementSourceAccess(request, env, discovery, Date.now(), discovery, native.sourceId,
+    { reuse: discovery, reportUnavailable: true });
+  if (access === ACCESS_UNAVAILABLE) return fixedJson(503, { error: 'access_check_unavailable' }, { 'retry-after': '2' });
   if (!access) return fixedJson(401, { error: 'access_required' }, { 'www-authenticate':
     `Bearer resource_metadata="${url.origin}/.well-known/cloudflare-access-protected-resource${native.path}"` });
   if (!Object.hasOwn(message, 'id')) {
@@ -12095,7 +12142,10 @@ async function handleManagementMcp(request, env) {
   const error = (code, text) => fixedJson(200, { jsonrpc: '2.0', id, error: { code, message: text } });
   if (!isRecord(message) || message.jsonrpc !== '2.0' || !isText(message.method) ||
       Object.keys(message).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key))) return error(-32600, 'Invalid request');
-  const access = await managementSourceAccess(request, env, message.method !== 'tools/call');
+  const discovery = message.method !== 'tools/call';
+  const access = await managementSourceAccess(request, env, discovery, Date.now(), false, MANAGEMENT_SOURCE_ID,
+    { reuse: discovery, reportUnavailable: true });
+  if (access === ACCESS_UNAVAILABLE) return fixedJson(503, { error: 'access_check_unavailable' }, { 'retry-after': '2' });
   if (!access) return fixedJson(401, { error: 'access_required' }, { 'www-authenticate':
     `Bearer resource_metadata="${url.origin}/.well-known/cloudflare-access-protected-resource${MANAGEMENT_MCP_PATH}"` });
   if (!Object.hasOwn(message, 'id')) {

@@ -5467,6 +5467,36 @@ test('the built-in feedback source installs, records reports under the reporter 
   assert.equal(initialized.body.result.serverInfo.name, 'ankka-gateway-feedback');
   assert.match(initialized.body.result.instructions, /submit_gateway_feedback/u);
 
+  // A client's discovery requests reuse an access context verified within the last
+  // minute; tools/call always reads Access live, and the assertion is still checked.
+  const accessReads = () => gateway.provider.state.requests.filter((entry) => entry.method === 'GET' && entry.pathname.includes('/access/apps/')).length;
+  let reads = accessReads();
+  assert.equal((await rpc('tools/list')).status, 200);
+  assert.equal((await rpc('ping')).status, 200);
+  assert.equal(accessReads(), reads, 'repeated discovery requests read nothing from Cloudflare');
+  assert.equal((await rpc('tools/list', {}, NEW_PERSON)).status, 401, 'a reused context still admits only its people');
+  assert.equal((await call('list_gateway_feedback', {})).body.result.isError, false);
+  assert.ok(accessReads() > reads, 'a tool call reads Access live');
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 61_000;
+    reads = accessReads();
+    assert.equal((await rpc('tools/list')).status, 200);
+    assert.ok(accessReads() > reads, 'a context older than a minute is read again');
+    // A Cloudflare read that fails is a retryable 503, never a request to sign in again.
+    gateway.provider.hook(({ record }) => record.method === 'GET' && record.pathname.includes('/access/apps/')
+      ? Response.json({ success: false, errors: [], messages: [], result: null }, { status: 503 }) : undefined);
+    Date.now = () => realNow() + 122_000;
+    for (const reply of [await rpc('tools/list'), await call('list_gateway_feedback', {})]) {
+      assert.equal(reply.status, 503);
+      assert.equal(reply.body.error, 'access_check_unavailable');
+    }
+  } finally {
+    Date.now = realNow;
+    gateway.provider.hook(null);
+  }
+  assert.equal((await rpc('tools/list')).status, 200);
+
   const known = current.sources.find((item) => item.status === 'installed').id;
   const first = await call('submit_gateway_feedback', {
     message: 'Asked for last week\'s orders.\nThe search returned fulfilment tools first.', sourceId: known,
