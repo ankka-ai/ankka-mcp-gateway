@@ -41,7 +41,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     getSourceActions: vi.fn(async () => removalRecorded), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(),
     getManagementCredentialStatus: vi.fn(async () => ({ schemaVersion: 1 as const, managementCredentialConfigured: true, managementCredentialChoice: null })),
-    prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
+    prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     prepareTeardownAction: vi.fn(async () => ({ schemaVersion: 1 as const, actionId: `action_${'b'.repeat(32)}`, status: 'authorization_required' as const,
       expiresAt: '2030-01-01T00:00:00.000Z', handoffUrl: `${window.location.origin}${REMOVAL_PAGE}#${'h'.repeat(40)}` })),
     getTeardownAction: vi.fn(async () => recorded({ status: 'recovery_required', failureCode: 'fresh_authorization_required' })),

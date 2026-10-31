@@ -20,7 +20,7 @@ const update: RuntimeUpdate = { schemaVersion: 1, channel: 'stable', status: 'up
 const team: Team = {
   schemaVersion: 1, revision: 3, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
   adminEmails: ['admin@example.com'], members: [{ email: 'admin@example.com', sourceIds: [] }, { email: 'analyst@example.com', sourceIds: [] }],
-  sources: [], pendingAction: null, proposedMembers: null, proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null,
+  sources: [], pendingAction: null, proposedMembers: null, proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null, agentCalls: [], agentEntrance: null,
   teams: [{ id: 'team-0123456789abcdef', name: 'Marketing', memberEmails: ['analyst@example.com'], sourceIds: [knowledge] }],
 }
 const examples: ConnectExample[] = [{ id: 'example-aaaaaaaaaaaa', prompt: 'Find the onboarding checklist.', sourceIds: [knowledge] }]
@@ -36,7 +36,7 @@ function api(overrides: Partial<GatewayAdminApi> = {}): GatewayAdminApi {
     getTeam: vi.fn(async () => structuredClone(team)), prepareTeamAction: vi.fn(), getTeamAction: vi.fn(), cancelTeamAction: vi.fn(),
     discoverSource: vi.fn(), prepareBigQueryRemoval: vi.fn(), removeSourceDraft: vi.fn(), saveSourceDraft: vi.fn(), prepareSourceAction: vi.fn(), getSourceActions: vi.fn(async () => ({ schemaVersion: 1 as const, actions: [], blockingAction: null })), getSourceAction: vi.fn(), cancelSourceAction: vi.fn(), getSourceActionTools: vi.fn(), reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(),
     getConnect: vi.fn(async () => connect()), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
     ...overrides,
   }

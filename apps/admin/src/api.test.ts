@@ -373,7 +373,7 @@ describe('HttpGatewayAdminApi', () => {
     const source = { id: 'source-1111111111111111', label: 'Knowledge', enabledTools: ['search'], status: 'installed' }
     const validTeam = {
       schemaVersion: 1, revision: 4, editingEnabled: true, editingDisabledReason: null, managementCredentialConfigured: true,
-      members: [person], adminEmails: ['admin@example.com'], sources: [source], teams: [], pendingAction: null, proposedMembers: null, proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null,
+      members: [person], adminEmails: ['admin@example.com'], sources: [source], teams: [], pendingAction: null, proposedMembers: null, proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null, agentCalls: [], agentEntrance: null,
     }
     const members = Array.from({ length: 100 }, (_, index) => ({ email: `user${index}@example.com`, sourceIds: [] }))
     const largeTeam = { ...validTeam, members, proposedMembers: members, adminEmails: members.map(({ email }) => email) }
@@ -687,7 +687,7 @@ describe('the management token', () => {
   const actionId = `action_${'a'.repeat(32)}`
   const team = {
     schemaVersion: 1, revision: 4, editingEnabled: false, editingDisabledReason: 'management_credential_missing', managementCredentialConfigured: false,
-    members: [{ email: 'admin@example.com', sourceIds: [] }], adminEmails: ['admin@example.com'], sources: [], teams: [], pendingAction: null, proposedMembers: null, proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null,
+    members: [{ email: 'admin@example.com', sourceIds: [] }], adminEmails: ['admin@example.com'], sources: [], teams: [], pendingAction: null, proposedMembers: null, proposedTeams: null, agents: [], proposedAgents: null, agentDrift: null, agentCalls: [], agentEntrance: null,
   }
 
   it('accepts what setup recorded at its token step, absent, null or one of the two fixed words, and nothing looser', async () => {

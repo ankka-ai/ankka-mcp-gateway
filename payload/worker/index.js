@@ -41,6 +41,7 @@ const AGENT_ID = /^agent-[a-f0-9]{16}$/u;
 const AGENT_CLIENT_ID = /^[a-f0-9]{32}\.access$/u;
 const AGENT_TOKEN_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u;
 const TEAM_MAX_AGENTS = 16;
+const AGENT_MAX_TOOLS = 500;
 const TEAM_ERROR_CODES = Object.freeze([
   'team_access_invalid_request',
   'team_access_revision_conflict',
@@ -269,7 +270,8 @@ function teamAgents(values, context) {
   const agents = [];
   for (const value of values) {
     const follows = teamRecord(value) && Object.hasOwn(value, 'teamId');
-    if (!teamKeys(value, ['id', 'name', 'clientId', 'tokenId', 'enabled', follows ? 'teamId' : 'sourceIds']) ||
+    const listsTools = teamRecord(value) && Object.hasOwn(value, 'tools');
+    if (!teamKeys(value, ['id', 'name', 'clientId', 'tokenId', 'enabled', follows ? 'teamId' : 'sourceIds', ...(listsTools ? ['tools'] : [])]) ||
         !teamText(value.id) || !AGENT_ID.test(value.id) || ids.has(value.id) || !teamName(value.name, 80) ||
         !teamText(value.clientId) || !AGENT_CLIENT_ID.test(value.clientId) || clients.has(value.clientId) ||
         !teamText(value.tokenId) || !AGENT_TOKEN_ID.test(value.tokenId) || tokens.has(value.tokenId) ||
@@ -283,9 +285,30 @@ function teamAgents(values, context) {
     const agent = { id: value.id, name: value.name, clientId: value.clientId, tokenId: value.tokenId, enabled: value.enabled };
     if (follows) agent.teamId = value.teamId;
     else agent.sourceIds = teamSourceIds(value.sourceIds, context);
+    if (listsTools) agent.tools = agentTools(value.tools, context);
     agents.push(agent);
   }
   return agents.sort((left, right) => teamCompare(left.id, right.id));
+}
+
+/**
+ * The tools an agent may call through the agent entrance, each named by its
+ * installed source and its exact upstream name. A tool of a source the agent
+ * does not reach, or one its source no longer allows, is listed but inert.
+ */
+function agentTools(values, context) {
+  if (!Array.isArray(values) || values.length > AGENT_MAX_TOOLS) teamFail();
+  const seen = new Set();
+  const tools = [];
+  for (const value of values) {
+    if (!teamKeys(value, ['name', 'sourceId']) || !teamText(value.sourceId) ||
+        context.sources.get(value.sourceId)?.installed !== true || !teamText(value.name) || !TEAM_TOOL.test(value.name)) teamFail();
+    const key = `${value.sourceId}\n${value.name}`;
+    if (seen.has(key)) teamFail();
+    seen.add(key);
+    tools.push({ name: value.name, sourceId: value.sourceId });
+  }
+  return tools.sort((left, right) => teamCompare(left.sourceId, right.sourceId) || teamCompare(left.name, right.name));
 }
 
 /**
@@ -8029,6 +8052,9 @@ export class AdminState {
     this.checksAfter = null;
     this.activeChecks = 0;
     this.checkSlots = [];
+    // Per-agent request counts and last-use writes for the agent entrance. Memory only.
+    this.agentRates = new Map();
+    this.agentUsageWritten = new Map();
   }
 
   fetch(request) {
@@ -8058,6 +8084,23 @@ export class AdminState {
     if (sourceConnection && request.method === 'POST') {
       return this.checkSourceConnection(sourceConnection[1], request.headers.get('x-ankka-actor-email'));
     }
+    // The agent entrance must not wait behind a Team save: admission reads, and
+    // its audit line writes only its own key.
+    if (request.method === 'POST' && requestUrl.pathname === '/agent-entrance/admit') {
+      return readJsonInput(request, 1024).then((input) => admitAgent(this.state.storage, this.env, input,
+        this.agentRates, this.agentUsageWritten, Date.now())).catch(() => agentEntranceRefusal(503, 'agent_entrance_unavailable'));
+    }
+    if (request.method === 'POST' && requestUrl.pathname === '/agent-entrance/record') {
+      return readJsonInput(request, 2048).then((input) => recordAgentUse(this.state.storage, input, Date.now(), this.agentUsageWritten))
+        .then(() => new Response(null, { status: 204 }), () => new Response(null, { status: 204 }));
+    }
+    if (request.method === 'GET' && requestUrl.pathname === '/agent-entrance') {
+      return (async () => {
+        const record = safeAgentEntrance(await this.state.storage.get(AGENT_ENTRANCE_KEY));
+        return record === false ? agentEntranceRefusal(503, 'agent_entrance_unavailable')
+          : fixedJson(200, publicAgentEntrance(record, parseManagementEnvironment(this.env)));
+      })();
+    }
     // Reading feedback or the source map neither authorizes work nor changes the journal.
     if (request.method === 'POST' && requestUrl.pathname === '/feedback/list') {
       return readJsonInput(request, 4_096).then((input) => listFeedback(this.state.storage, input));
@@ -8080,6 +8123,12 @@ export class AdminState {
     }
     const operation = async () => {
       const url = new URL(request.url);
+      if (request.method === 'POST' && url.pathname === '/agent-entrance/attach') {
+        return attachAgentEntrance(this.state.storage, this.env, await readJsonInput(request, 1024));
+      }
+      if (request.method === 'POST' && url.pathname === '/agent-entrance/detach') {
+        return detachAgentEntrance(this.state.storage, this.env, await readJsonInput(request, 1024));
+      }
       if (url.pathname === '/guide/write' && request.method === 'POST') {
         return writeGuide(this.state.storage, await readJsonInput(request, 32_768), request.headers.get('x-ankka-actor-email'), Date.now());
       }
@@ -8273,7 +8322,7 @@ export class AdminState {
         }
         // Removal accepts only the policies its receipts name. Agent policies
         // leave first, from Team, so a service token never outlives its record.
-        if ((teamState?.agentPolicies?.length ?? 0) > 0) {
+        if ((teamState?.agentPolicies?.length ?? 0) > 0 || await this.state.storage.get(AGENT_ENTRANCE_KEY) !== undefined) {
           return fixedJson(409, { schemaVersion: 1, error: 'teardown_agents_present' });
         }
         // Removal does not know the connect page's Access application; turning the page off deletes it.
@@ -10015,11 +10064,12 @@ async function dashboardActorAllowed(storage, env, email) {
   return policy !== null && teamPolicySelectors(policy).emails.includes(email);
 }
 
-/** Saved agents, each with the sources its token is on as last applied. No secret is ever stored to show. */
-function publicAgents(state) {
+/** Saved agents, each with the sources its token is on as last applied and its last use. No secret is ever stored to show. */
+function publicAgents(state, usage = null) {
   return (state.agents ?? []).map((agent) => ({ ...agent,
     appliedSourceIds: (state.agentPolicies ?? []).filter((record) => record.sourceId !== undefined &&
-      record.tokenIds.includes(agent.tokenId)).map((record) => record.sourceId).sort(compareText) }));
+      record.tokenIds.includes(agent.tokenId)).map((record) => record.sourceId).sort(compareText),
+    lastUsedAt: usage?.agents.find((entry) => entry.agentId === agent.id)?.lastUsedAt ?? null }));
 }
 
 async function teamSnapshot(storage, env, diagnostic) {
@@ -10136,6 +10186,9 @@ async function teamSnapshot(storage, env, diagnostic) {
   }
   const pendingRequest = state.pendingAction && !['succeeded', 'failed'].includes(state.pendingAction.status)
     ? state.pendingAction.request : null;
+  const agentUsage = safeAgentUsage(await storage.get(AGENT_USAGE_KEY));
+  const agentSlugs = agentSourceSlugs(sources.sources);
+  const agentEntrance = safeAgentEntrance(await storage.get(AGENT_ENTRANCE_KEY));
   const proposedTeams = pendingRequest && Object.hasOwn(pendingRequest, 'teams') ? pendingRequest.teams : null;
   return { schemaVersion: 1, revision: state.revision, members, adminEmails: admins,
     observedAt,
@@ -10144,11 +10197,15 @@ async function teamSnapshot(storage, env, diagnostic) {
       const entry = { id: source.id, label: sourceDisplayName(source), enabledTools: source.enabledTools, status: source.status };
       const agentAccess = agentSourceAccess(source);
       if (agentAccess) entry.agentAccess = agentAccess;
+      // Agents see this connector's tools as `<prefix>__<tool>`.
+      if (agentAccess === 'available') entry.agentToolPrefix = agentSlugs.get(source.id);
       return entry;
     }),
     teams: (state.teams ?? []).map(publicTeam),
-    agents: publicAgents(state),
+    agents: publicAgents(state, agentUsage),
     agentDrift,
+    agentCalls: (agentUsage?.calls ?? []).slice(-50).reverse(),
+    agentEntrance: agentEntrance === false ? null : publicAgentEntrance(agentEntrance, parseManagementEnvironment(env)),
     pendingAction: state.pendingAction ? publicTeamAction(state.pendingAction) : null,
     proposedMembers: pendingRequest ? pendingRequest.members : null,
     proposedTeams,
@@ -12587,9 +12644,652 @@ async function managementMcpBrowser(request, env) {
 }
 
 
+// The agent entrance: one MCP endpoint on its own hostname, outside Access, for
+// agents that can send only `Authorization: Bearer <token>`. The bearer carries
+// the agent's own Access service token. The entrance admits only enabled
+// agents, splits the bearer into Cloudflare's two service-token headers and
+// forwards the request to this gateway's Portal in direct-tool mode, where
+// Cloudflare authenticates it. It never stores or records the secret, a
+// header, an argument or a result.
+const AGENT_ENTRANCE_KEY = 'ankka-mcp-gateway/agent-entrance/v1';
+const AGENT_USAGE_KEY = 'ankka-mcp-gateway/agent-usage/v1';
+// Under /api/, which the signed asset routing hands to this Worker first: on any
+// other path Cloudflare's static assets answer a POST before the Worker runs.
+const AGENT_ENTRANCE_PATH = '/api/agents/mcp';
+const PORTAL_MCP_PATH = '/mcp';
+const AGENT_ENTRANCE_SETTINGS_PATH = '/api/agent-entrance';
+const AGENT_BEARER_PREFIX = 'ankka_agent_v1_';
+// Visible ASCII only, so the value is a safe header; Cloudflare alone judges it.
+const AGENT_CLIENT_SECRET = /^[\x21-\x7e]{16,512}$/u;
+const AGENT_REQUEST_LIMIT_BYTES = 256 * 1024;
+const AGENT_LIST_LIMIT_BYTES = 8 * 1024 * 1024;
+const AGENT_CALL_LIMIT_BYTES = 16 * 1024 * 1024;
+const AGENT_OUTCOME_PEEK_BYTES = 1024 * 1024;
+const AGENT_PORTAL_TIMEOUT_MS = 100_000;
+const AGENT_RATE_WINDOW_MS = 60_000;
+const AGENT_RATE_LIMIT = 120;
+const AGENT_USAGE_CALLS = 200;
+const AGENT_LAST_USED_WRITE_MS = 60_000;
+// Everything an agent needs, and nothing else: no prompts, resources, sampling or logging.
+const AGENT_METHODS = Object.freeze(['initialize', 'ping', 'tools/list', 'tools/call']);
+const AGENT_NOTIFICATIONS = Object.freeze(['notifications/initialized', 'notifications/cancelled']);
+const AGENT_OUTCOMES = Object.freeze(['ok', 'tool_error', 'rpc_error', 'refused', 'portal_denied', 'portal_error',
+  'failed', 'too_large', 'cancelled']);
+const AGENT_HEADER_VALUE = /^[\x21-\x7e]{1,256}$/u;
+const AGENT_TOOL_NAME = /^[A-Za-z0-9_.:/-]{1,256}$/u;
+
+/**
+ * `ankka_agent_v1_` and then base64url, unpadded, of `<client id>:<client secret>`.
+ * Client ids contain dots and never a colon, so the first colon ends the id.
+ */
+export function parseAgentBearer(value) {
+  if (!isText(value) || value.length > 1024) return null;
+  const match = /^Bearer +([A-Za-z0-9_-]+)$/iu.exec(value);
+  if (!match || !match[1].startsWith(AGENT_BEARER_PREFIX)) return null;
+  const bytes = base64UrlDecode(match[1].slice(AGENT_BEARER_PREFIX.length));
+  if (!bytes) return null;
+  let decoded;
+  try { decoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return null; } finally { bytes.fill(0); }
+  const separator = decoded.indexOf(':');
+  const clientId = separator > 0 ? decoded.slice(0, separator) : '';
+  const clientSecret = separator > 0 ? decoded.slice(separator + 1) : '';
+  return AGENT_CLIENT_ID.test(clientId) && AGENT_CLIENT_SECRET.test(clientSecret)
+    ? Object.freeze({ clientId, clientSecret }) : null;
+}
+
+/** The bearer an agent's credential store holds. Only tests and documentation build one: the gateway never sees the secret. */
+export function agentBearer(clientId, clientSecret) {
+  return `${AGENT_BEARER_PREFIX}${base64UrlEncode(new TextEncoder().encode(`${clientId}:${clientSecret}`))}`;
+}
+
+/**
+ * A readable, stable prefix per installed source: its name in lower case,
+ * letters and digits joined by single underscores. Names that collide take
+ * `_2`, `_3` in source order. A slug never contains `__`, so `<slug>__<tool>`
+ * names are unique and do not change when the Portal's server record does.
+ */
+export function agentSourceSlugs(sources) {
+  const slugs = new Map();
+  const used = new Set();
+  for (const source of [...sources].sort((left, right) => compareText(left.id, right.id))) {
+    const base = source.label.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()
+      .replace(/[^a-z0-9]+/gu, '_').replace(/^_+|_+$/gu, '').slice(0, 24).replace(/_+$/u, '') || 'source';
+    let slug = base;
+    for (let suffix = 2; used.has(slug); suffix += 1) slug = `${base}_${suffix}`;
+    used.add(slug);
+    slugs.set(source.id, slug);
+  }
+  return slugs;
+}
+
+/**
+ * The agent's callable tools, as the Portal names them and as the agent sees
+ * them. Only tools of sources whose applied agent policy names this agent's
+ * token, and that the source itself still allows, are offered.
+ */
+function agentEntranceTools(agent, team, sources, control) {
+  const reached = new Set((team.agentPolicies ?? []).filter((record) => record.sourceId !== undefined &&
+    record.tokenIds.includes(agent.tokenId)).map((record) => record.sourceId));
+  const slugs = agentSourceSlugs(sources.sources);
+  const tools = [];
+  for (const tool of agent.tools ?? []) {
+    const source = sources.sources.find((entry) => entry.id === tool.sourceId && entry.status === 'installed');
+    const serverId = control.sourceOwnership.find((entry) => entry.sourceId === tool.sourceId)?.resources[0]?.provider?.id;
+    if (!reached.has(tool.sourceId) || !source || !safeProviderId(serverId) ||
+        (source.allTools !== true && !source.enabledTools.includes(tool.name))) continue;
+    // The Portal names a tool by its alias when the connector gives it one.
+    const exposed = source.toolMetadata?.find((entry) => entry.name === tool.name)?.alias ?? tool.name;
+    tools.push(Object.freeze({ name: `${slugs.get(source.id)}__${exposed}`, portal: `${serverId}_${exposed}` }));
+  }
+  return tools;
+}
+
+function safeAgentEntrance(value) {
+  if (value === undefined || value === null) return null;
+  if (!exactKeys(value, ['schemaVersion', 'hostname', 'domainId', 'status']) || value.schemaVersion !== 1 ||
+      !hostname(value.hostname) || !(value.domainId === null || safeProviderId(value.domainId)) ||
+      !['attach_armed', 'attached', 'detach_armed'].includes(value.status) ||
+      (value.status === 'attached' && value.domainId === null)) return false;
+  return Object.freeze({ ...value });
+}
+
+function publicAgentEntrance(record, environment) {
+  const status = record ? { attach_armed: 'attaching', attached: 'on', detach_armed: 'detaching' }[record.status] : 'off';
+  return { schemaVersion: 1, status, hostname: record?.hostname ?? null,
+    url: record?.status === 'attached' ? `https://${record.hostname}${AGENT_ENTRANCE_PATH}` : null,
+    suggestedHostname: environment ? `agents.${environment.zoneName}` : null };
+}
+
+function safeAgentUsage(value) {
+  if (value === undefined || value === null) return Object.freeze({ schemaVersion: 1, agents: [], calls: [] });
+  if (!exactKeys(value, ['schemaVersion', 'agents', 'calls']) || value.schemaVersion !== 1 ||
+      !Array.isArray(value.agents) || value.agents.length > 64 || !Array.isArray(value.calls) ||
+      value.calls.length > AGENT_USAGE_CALLS) return null;
+  for (const entry of value.agents) {
+    if (!exactKeys(entry, ['agentId', 'lastUsedAt']) || !isText(entry.agentId) || !AGENT_ID.test(entry.agentId) ||
+        !isoTime(entry.lastUsedAt)) return null;
+  }
+  for (const call of value.calls) {
+    if (!exactKeys(call, ['agentId', 'at', 'durationMs', 'outcome', 'responseBytes', 'tool']) ||
+        !isText(call.agentId) || !AGENT_ID.test(call.agentId) || !isoTime(call.at) ||
+        !Number.isSafeInteger(call.durationMs) || call.durationMs < 0 || !AGENT_OUTCOMES.includes(call.outcome) ||
+        !Number.isSafeInteger(call.responseBytes) || call.responseBytes < 0 ||
+        !isText(call.tool) || call.tool.length > 256) return null;
+  }
+  return Object.freeze(value);
+}
+
+/**
+ * Admission for one entrance request, in the management object and outside
+ * its mutation queue. The entrance must be on for this hostname, and the client
+ * id must be an enabled agent on the Portal's agent policy. An unfinished Team
+ * change that switches the agent off or removes it takes effect at once.
+ * Requests are counted per agent in this object's memory.
+ */
+async function admitAgent(storage, env, input, rates, written, nowMs) {
+  if (!exactKeys(input, ['clientId', 'hostname']) || !isText(input.clientId) || !AGENT_CLIENT_ID.test(input.clientId) ||
+      !hostname(input.hostname)) return fixedJson(400, { schemaVersion: 1, error: 'agent_invalid' });
+  const entrance = safeAgentEntrance(await storage.get(AGENT_ENTRANCE_KEY));
+  if (!entrance || entrance.status !== 'attached' || entrance.hostname !== input.hostname) {
+    return fixedJson(404, { schemaVersion: 1, error: 'not_found' });
+  }
+  const team = await readTeamState(storage, env);
+  const sources = safeManagementSources(await storage.get(SOURCES_KEY));
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  if (!team || !sources || !control) return fixedJson(503, { schemaVersion: 1, error: 'agent_entrance_unavailable' });
+  const agent = (team.agents ?? []).find((entry) => entry.clientId === input.clientId);
+  const pending = team.pendingAction && !['succeeded', 'failed'].includes(team.pendingAction.status) &&
+    Object.hasOwn(team.pendingAction.request, 'agents') ? team.pendingAction.request.agents : null;
+  if (!agent || !agent.enabled ||
+      !(team.agentPolicies ?? []).some((record) => record.sourceId === undefined && record.tokenIds.includes(agent.tokenId)) ||
+      (pending && !pending.some((entry) => entry.id === agent.id && entry.enabled && entry.clientId === agent.clientId))) {
+    return fixedJson(401, { schemaVersion: 1, error: 'agent_unknown' });
+  }
+  const rate = rates.get(agent.id);
+  if (!rate || nowMs - rate.start >= AGENT_RATE_WINDOW_MS) rates.set(agent.id, { start: nowMs, count: 1 });
+  else if (rate.count >= AGENT_RATE_LIMIT) {
+    return fixedJson(429, { schemaVersion: 1, error: 'agent_rate_limited' },
+      { 'retry-after': String(Math.max(1, Math.ceil((rate.start + AGENT_RATE_WINDOW_MS - nowMs) / 1000))) });
+  } else rate.count += 1;
+  await recordAgentUse(storage, { agentId: agent.id, call: null }, nowMs, written);
+  return fixedJson(200, { schemaVersion: 1, agentId: agent.id,
+    portalUrl: `https://${control.portal.hostname}${PORTAL_MCP_PATH}?codemode=off`,
+    tools: agentEntranceTools(agent, team, sources, control) });
+}
+
+/** One audit line per tool call, and the agent's last use; no header, argument or result. */
+async function recordAgentUse(storage, input, nowMs, written) {
+  if (!exactKeys(input, ['agentId', 'call']) || !isText(input.agentId) || !AGENT_ID.test(input.agentId)) return;
+  const call = input.call;
+  if (call !== null && (!exactKeys(call, ['durationMs', 'outcome', 'responseBytes', 'tool']) || !isText(call.tool) ||
+      call.tool.length > 256 || !AGENT_OUTCOMES.includes(call.outcome) || !Number.isSafeInteger(call.durationMs) ||
+      call.durationMs < 0 || !Number.isSafeInteger(call.responseBytes) || call.responseBytes < 0)) return;
+  // Without a tool call, the last use is written at most once a minute per agent.
+  if (call === null && nowMs - (written.get(input.agentId) ?? 0) < AGENT_LAST_USED_WRITE_MS) return;
+  const usage = safeAgentUsage(await storage.get(AGENT_USAGE_KEY)) ?? { schemaVersion: 1, agents: [], calls: [] };
+  const at = new Date(nowMs).toISOString();
+  const agents = [...usage.agents.filter((entry) => entry.agentId !== input.agentId), { agentId: input.agentId, lastUsedAt: at }].slice(-64);
+  const calls = call === null ? usage.calls : [...usage.calls, { agentId: input.agentId, at, ...call }].slice(-AGENT_USAGE_CALLS);
+  await storage.put(AGENT_USAGE_KEY, { schemaVersion: 1, agents, calls });
+  written.set(input.agentId, nowMs);
+}
+
+function agentEntranceRefusal(status, error) {
+  return fixedJson(status, { schemaVersion: 1, error });
+}
+
+/** An entrance hostname is one label directly under this gateway's zone, and none of its other hostnames. */
+function agentEntranceHostname(value, environment, control) {
+  if (!hostname(value) || !value.endsWith(`.${environment.zoneName}`)) return null;
+  const label = value.slice(0, -(environment.zoneName.length + 1));
+  return HOST_LABEL.test(label) && value !== environment.managementHostname && value !== control.portal.hostname ? value : null;
+}
+
+/**
+ * Turns the entrance on: attaches one custom domain, the entrance hostname,
+ * to this gateway's own Worker with the management token, and records it.
+ * Cloudflare creates its DNS record. The write is armed before it is sent; a
+ * lost answer is resolved by listing the domains for that hostname.
+ */
+async function attachAgentEntrance(storage, env, input) {
+  if (!exactKeys(input, ['actorEmail', 'hostname']) || !isText(input.hostname)) return agentEntranceRefusal(400, 'agent_entrance_invalid');
+  if (!await dashboardActorAllowed(storage, env, input.actorEmail)) return agentEntranceRefusal(403, 'agent_entrance_admin_required');
+  const environment = parseManagementEnvironment(env);
+  const control = safeManagementControl(await storage.get(CONTROL_KEY));
+  if (!environment || !control) return agentEntranceRefusal(503, 'agent_entrance_unavailable');
+  const host = agentEntranceHostname(input.hostname, environment, control);
+  if (!host) return agentEntranceRefusal(400, 'agent_entrance_hostname_invalid');
+  const token = managementCredential(env);
+  if (!token) return agentEntranceRefusal(409, 'agent_entrance_credential_required');
+  if (await otherLifecycleBlocksTeam(storage, Date.now()) || await teamActionBlocksLifecycle(storage)) {
+    return agentEntranceRefusal(409, 'agent_entrance_busy');
+  }
+  const record = safeAgentEntrance(await storage.get(AGENT_ENTRANCE_KEY));
+  if (record === false) return agentEntranceRefusal(503, 'agent_entrance_unavailable');
+  if (record && (record.hostname !== host || record.status === 'detach_armed')) return agentEntranceRefusal(409, 'agent_entrance_present');
+  // Older runtimes do not route this hostname to the entrance alone: keep them from serving it.
+  if (!await armSourceCompatibility(storage, env)) return agentEntranceRefusal(409, 'agent_entrance_busy');
+  const signal = AbortSignal.timeout(30_000);
+  const account = encodeURIComponent(environment.accountId);
+  const exact = (domain) => isRecord(domain) && safeProviderId(domain.id) && domain.hostname === host &&
+    domain.service === environment.workerName && domain.zone_id === environment.zoneId &&
+    (domain.environment === undefined || domain.environment === 'production');
+  let domainId = record?.domainId ?? null;
+  if (!domainId) {
+    const listed = await providerList(`/accounts/${account}/workers/domains`, token, { hostname: host }, signal);
+    if (listed.status === 'auth') return agentEntranceRefusal(403, 'agent_entrance_permission_missing');
+    if (listed.status !== 'ok') return agentEntranceRefusal(502, 'agent_entrance_unconfirmed');
+    const same = listed.result.filter((domain) => isRecord(domain) && domain.hostname === host);
+    if (same.length > 1 || same.some((domain) => !exact(domain))) return agentEntranceRefusal(409, 'agent_entrance_hostname_unavailable');
+    domainId = same[0]?.id ?? null;
+  }
+  if (!domainId) {
+    await storage.put(AGENT_ENTRANCE_KEY, { schemaVersion: 1, hostname: host, domainId: null, status: 'attach_armed' });
+    const written = await providerCall(`/accounts/${account}/workers/domains`, token, { method: 'PUT', signal,
+      body: canonicalJson({ environment: 'production', hostname: host, service: environment.workerName, zone_id: environment.zoneId }) });
+    // Cloudflare refuses a write it cannot authorize before changing anything.
+    if (written.status === 'auth') {
+      await storage.delete(AGENT_ENTRANCE_KEY);
+      return agentEntranceRefusal(403, 'agent_entrance_permission_missing');
+    }
+    if (written.status === 'blocked') {
+      await storage.delete(AGENT_ENTRANCE_KEY);
+      return agentEntranceRefusal(409, 'agent_entrance_hostname_unavailable');
+    }
+    if (written.status !== 'ok' || !exact(written.result)) return agentEntranceRefusal(502, 'agent_entrance_recovery_required');
+    domainId = written.result.id;
+  }
+  const read = await providerCall(`/accounts/${account}/workers/domains/${encodeURIComponent(domainId)}`, token, { signal });
+  if (read.status !== 'ok' || !exact(read.result)) return agentEntranceRefusal(502, 'agent_entrance_recovery_required');
+  const attached = { schemaVersion: 1, hostname: host, domainId, status: 'attached' };
+  await storage.put(AGENT_ENTRANCE_KEY, attached);
+  return fixedJson(200, publicAgentEntrance(attached, environment));
+}
+
+/** Turns the entrance off: detaches its custom domain, read back absent, then forgets it. */
+async function detachAgentEntrance(storage, env, input) {
+  if (!exactKeys(input, ['actorEmail'])) return agentEntranceRefusal(400, 'agent_entrance_invalid');
+  if (!await dashboardActorAllowed(storage, env, input.actorEmail)) return agentEntranceRefusal(403, 'agent_entrance_admin_required');
+  const environment = parseManagementEnvironment(env);
+  if (!environment) return agentEntranceRefusal(503, 'agent_entrance_unavailable');
+  const record = safeAgentEntrance(await storage.get(AGENT_ENTRANCE_KEY));
+  if (record === false) return agentEntranceRefusal(503, 'agent_entrance_unavailable');
+  if (!record) return fixedJson(200, publicAgentEntrance(null, environment));
+  const token = managementCredential(env);
+  if (!token) return agentEntranceRefusal(409, 'agent_entrance_credential_required');
+  if (await otherLifecycleBlocksTeam(storage, Date.now()) || await teamActionBlocksLifecycle(storage)) {
+    return agentEntranceRefusal(409, 'agent_entrance_busy');
+  }
+  const signal = AbortSignal.timeout(30_000);
+  const account = encodeURIComponent(environment.accountId);
+  const exact = (domain) => isRecord(domain) && domain.hostname === record.hostname &&
+    domain.service === environment.workerName && domain.zone_id === environment.zoneId &&
+    (domain.environment === undefined || domain.environment === 'production');
+  let domainId = record.domainId;
+  if (!domainId) {
+    // An attach whose answer was lost: the one exact domain for the hostname is ours, if it exists.
+    const listed = await providerList(`/accounts/${account}/workers/domains`, token, { hostname: record.hostname }, signal);
+    if (listed.status !== 'ok') return agentEntranceRefusal(listed.status === 'auth' ? 403 : 502,
+      listed.status === 'auth' ? 'agent_entrance_permission_missing' : 'agent_entrance_unconfirmed');
+    const same = listed.result.filter((domain) => isRecord(domain) && domain.hostname === record.hostname);
+    if (same.length > 1 || same.some((domain) => !exact(domain) || !safeProviderId(domain.id))) {
+      return agentEntranceRefusal(409, 'agent_entrance_drift');
+    }
+    domainId = same[0]?.id ?? null;
+  }
+  if (domainId) {
+    await storage.put(AGENT_ENTRANCE_KEY, { schemaVersion: 1, hostname: record.hostname, domainId, status: 'detach_armed' });
+    const path = `/accounts/${account}/workers/domains/${encodeURIComponent(domainId)}`;
+    const current = await providerCall(path, token, { signal });
+    if (current.status === 'ok') {
+      if (!exact(current.result) || current.result.id !== domainId) return agentEntranceRefusal(409, 'agent_entrance_drift');
+      const removed = await providerCall(path, token, { method: 'DELETE', signal });
+      if (removed.status === 'auth') return agentEntranceRefusal(403, 'agent_entrance_permission_missing');
+      if (!['ok', 'absent'].includes(removed.status)) return agentEntranceRefusal(502, 'agent_entrance_recovery_required');
+      const after = await providerCall(path, token, { signal });
+      if (after.status !== 'absent') return agentEntranceRefusal(502, 'agent_entrance_recovery_required');
+    } else if (current.status !== 'absent') {
+      return agentEntranceRefusal(current.status === 'auth' ? 403 : 502,
+        current.status === 'auth' ? 'agent_entrance_permission_missing' : 'agent_entrance_unconfirmed');
+    }
+  }
+  await storage.delete(AGENT_ENTRANCE_KEY);
+  return fixedJson(200, publicAgentEntrance(null, environment));
+}
+
+/** Settings for the entrance on the management hostname: administrators only, never the service identity. */
+async function handleAgentEntranceSettings(request, env) {
+  const access = await managementActor(request, env);
+  if (access.response) return access.response;
+  if (access.actor.kind !== 'human') return agentEntranceRefusal(403, 'service_operation_denied');
+  const environment = parseManagementEnvironment(env);
+  if (!environment || new URL(request.url).hostname !== environment.managementHostname) return agentEntranceRefusal(404, 'not_found');
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return agentEntranceRefusal(503, 'agent_entrance_unavailable');
+  if (request.method === 'GET') return stub.fetch(new Request('https://admin-state.invalid/agent-entrance'));
+  if (!['POST', 'DELETE'].includes(request.method)) {
+    return fixedJson(405, { schemaVersion: 1, error: 'method_not_allowed' }, { allow: 'GET, POST, DELETE' });
+  }
+  if (!sameOriginMutation(request)) return agentEntranceRefusal(403, 'origin_required');
+  let body = { actorEmail: access.actorEmail };
+  if (request.method === 'POST') {
+    const input = await readJsonInput(request, 1024);
+    if (!exactKeys(input, ['schemaVersion', 'hostname']) || input.schemaVersion !== 1 || !isText(input.hostname)) {
+      return agentEntranceRefusal(400, 'agent_entrance_invalid');
+    }
+    body = { ...body, hostname: input.hostname };
+  }
+  try {
+    return await stub.fetch(new Request(`https://admin-state.invalid/agent-entrance/${request.method === 'POST' ? 'attach' : 'detach'}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: canonicalJson(body),
+    }));
+  } catch { return agentEntranceRefusal(503, 'agent_entrance_unavailable'); }
+}
+
+function agentRpcError(id, code, message, status = 200) {
+  return new Response(canonicalJson({ jsonrpc: '2.0', id, error: { code, message } }), { status, headers: PUBLIC_HEADERS });
+}
+
+/** Response headers an agent receives: the MCP ones the Portal set, never a cookie or anything else of Cloudflare's. */
+function agentResponseHeaders(upstream, contentType = upstream.headers.get('content-type')) {
+  const headers = { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff', 'referrer-policy': 'no-referrer' };
+  if (isText(contentType) && /^[\x20-\x7e]{1,256}$/u.test(contentType)) headers['content-type'] = contentType;
+  for (const name of ['mcp-session-id', 'mcp-protocol-version']) {
+    const value = upstream.headers.get(name);
+    if (value !== null && AGENT_HEADER_VALUE.test(value)) headers[name] = value;
+  }
+  return headers;
+}
+
+async function readBoundedResponse(response, limit) {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) { await reader.cancel().catch(() => {}); return null; }
+      chunks.push(value);
+    }
+  } catch { return null; }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); } catch { return null; }
+}
+
+/** Server-sent events as fields, in order; comments dropped. Null when the stream cannot be read as events. */
+function parseSseEvents(text) {
+  const events = [];
+  for (const block of text.replaceAll('\r\n', '\n').split(/\n\n+/u)) {
+    if (!block.trim()) continue;
+    const event = { fields: [], data: [] };
+    for (const line of block.split('\n')) {
+      if (line.startsWith(':')) continue;
+      const colon = line.indexOf(':');
+      const name = colon < 0 ? line : line.slice(0, colon);
+      const value = colon < 0 ? '' : line.slice(colon + 1).replace(/^ /u, '');
+      if (name === 'data') event.data.push(value);
+      else if (['event', 'id', 'retry'].includes(name)) event.fields.push([name, value]);
+      else return null;
+    }
+    events.push(event);
+  }
+  return events;
+}
+
+function serializeSseEvents(events) {
+  return events.map((event) => [...event.fields.map(([name, value]) => `${name}: ${value}`),
+    ...event.data.map((line) => `data: ${line}`)].join('\n')).join('\n\n') + '\n\n';
+}
+
+/** The JSON-RPC answers in one Portal response body, JSON or server-sent events, and a way to write them back. */
+function portalMessages(text, contentType) {
+  if (/^text\/event-stream\b/iu.test(contentType ?? '')) {
+    const events = parseSseEvents(text);
+    if (!events) return null;
+    const messages = [];
+    for (const event of events) {
+      if (event.data.length === 0) { messages.push(null); continue; }
+      try { messages.push(JSON.parse(event.data.join('\n'))); } catch { return null; }
+    }
+    return { messages, write: (next) => serializeSseEvents(events.map((event, index) => next[index] === null ? event
+      : { fields: event.fields, data: [JSON.stringify(next[index])] })) };
+  }
+  try { return { messages: [JSON.parse(text)], write: (next) => JSON.stringify(next[0]) }; } catch { return null; }
+}
+
+/** Initialize and tools/list answers, rewritten: only tool capabilities, and only the agent's tools under its names. */
+function agentListTransform(method, id, tools) {
+  const byPortal = new Map(tools.map((tool) => [tool.portal, tool.name]));
+  return (message) => {
+    if (!isRecord(message) || message.id !== id || !isRecord(message.result)) return message;
+    const result = { ...message.result };
+    if (method === 'initialize') {
+      result.capabilities = isRecord(result.capabilities?.tools) ? { tools: result.capabilities.tools } : { tools: {} };
+    } else {
+      result.tools = (Array.isArray(result.tools) ? result.tools : []).filter((tool) => isRecord(tool) && byPortal.has(tool.name))
+        .map((tool) => ({ ...tool, name: byPortal.get(tool.name) }));
+    }
+    return { ...message, result };
+  };
+}
+
+/** The outcome of one tool call from its answer, when the whole answer was kept. */
+function agentCallOutcome(text, contentType, id) {
+  const parsed = text === null ? null : portalMessages(text, contentType);
+  const answer = parsed?.messages.findLast((message) => isRecord(message) && message.id === id);
+  if (!answer) return 'ok';
+  if (isRecord(answer.error)) return 'rpc_error';
+  return answer.result?.isError === true ? 'tool_error' : 'ok';
+}
+
+/** A response body passed through as it arrives, bounded and counted, with its end reported once. */
+function meteredBody(body, limit, done) {
+  const reader = body.getReader();
+  let bytes = 0;
+  let finished = false;
+  let kept = [];
+  let keptBytes = 0;
+  const finish = (end) => {
+    if (finished) return;
+    finished = true;
+    let text = null;
+    if (kept && end === 'complete') {
+      const all = new Uint8Array(keptBytes);
+      let offset = 0;
+      for (const chunk of kept) { all.set(chunk, offset); offset += chunk.byteLength; }
+      try { text = new TextDecoder('utf-8', { fatal: true }).decode(all); } catch { text = null; }
+    }
+    kept = null;
+    done(end, bytes, text);
+  };
+  return new ReadableStream({
+    async pull(controller) {
+      let next;
+      try { next = await reader.read(); } catch {
+        finish('failed');
+        controller.error(new Error('portal_stream_failed'));
+        return;
+      }
+      if (next.done) { finish('complete'); controller.close(); return; }
+      bytes += next.value.byteLength;
+      if (bytes > limit) {
+        finish('too_large');
+        await reader.cancel().catch(() => {});
+        controller.error(new Error('portal_response_too_large'));
+        return;
+      }
+      if (kept) {
+        if (keptBytes + next.value.byteLength > AGENT_OUTCOME_PEEK_BYTES) kept = null;
+        else { kept.push(next.value.slice()); keptBytes += next.value.byteLength; }
+      }
+      controller.enqueue(next.value);
+    },
+    async cancel() {
+      finish('cancelled');
+      await reader.cancel().catch(() => {});
+    },
+  });
+}
+
+/**
+ * One agent request: POST of one JSON-RPC message, or DELETE of a session.
+ * Bearer first, then admission, then the method and tool allowlists; only an
+ * admitted, allowed request reaches the Portal, with the agent's own token.
+ */
+async function handleAgentEntrance(request, env, ctx) {
+  const url = new URL(request.url);
+  if (url.pathname !== AGENT_ENTRANCE_PATH || url.search) return agentEntranceRefusal(404, 'not_found');
+  if (!['POST', 'DELETE'].includes(request.method)) {
+    return new Response(null, { status: 405, headers: { ...PUBLIC_HEADERS, allow: 'POST, DELETE' } });
+  }
+  const unauthorized = () => fixedJson(401, { schemaVersion: 1, error: 'invalid_token' },
+    { 'www-authenticate': 'Bearer error="invalid_token"' });
+  const credentials = parseAgentBearer(request.headers.get('authorization'));
+  if (!credentials) return unauthorized();
+  const stub = adminStateStub(env, 'v1:management');
+  if (!stub) return agentEntranceRefusal(503, 'agent_entrance_unavailable');
+  let admission;
+  try {
+    const response = await stub.fetch(new Request('https://admin-state.invalid/agent-entrance/admit', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ clientId: credentials.clientId, hostname: url.hostname }),
+    }));
+    if (response.status === 401) return unauthorized();
+    if (response.status === 404) return agentEntranceRefusal(404, 'not_found');
+    if (response.status === 429) return response;
+    admission = response.status === 200 ? await readJsonInput(response, AGENT_LIST_LIMIT_BYTES) : null;
+  } catch { admission = null; }
+  if (!isRecord(admission) || !isText(admission.agentId) || !isText(admission.portalUrl) || !Array.isArray(admission.tools)) {
+    return agentEntranceRefusal(503, 'agent_entrance_unavailable');
+  }
+  const started = Date.now();
+  const record = (call) => {
+    if (!AGENT_TOOL_NAME.test(call.tool)) call = { ...call, tool: '(invalid name)' };
+    const sent = stub.fetch(new Request('https://admin-state.invalid/agent-entrance/record', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: canonicalJson({ agentId: admission.agentId, call }),
+    })).catch(() => null);
+    if (isCallable(ctx?.waitUntil)) ctx.waitUntil(sent);
+    return sent;
+  };
+  const portalHeaders = new Headers({
+    'cf-access-client-id': credentials.clientId, 'cf-access-client-secret': credentials.clientSecret,
+  });
+  for (const name of ['mcp-session-id', 'mcp-protocol-version']) {
+    const value = request.headers.get(name);
+    if (value !== null && AGENT_HEADER_VALUE.test(value)) portalHeaders.set(name, value);
+  }
+  const forward = async (init) => {
+    try {
+      return await fetch(new Request(admission.portalUrl, { ...init, headers: portalHeaders, redirect: 'manual',
+        signal: AbortSignal.timeout(AGENT_PORTAL_TIMEOUT_MS) }));
+    } catch { return null; }
+  };
+  // Cloudflare's own refusal, or a redirect to a login page: never followed, never shown.
+  const denied = (response) => response.status === 401 || response.status === 403 || (response.status >= 300 && response.status < 400);
+  if (request.method === 'DELETE') {
+    const upstream = await forward({ method: 'DELETE' });
+    if (!upstream) return agentEntranceRefusal(502, 'portal_unavailable');
+    await upstream.body?.cancel().catch(() => {});
+    if (denied(upstream)) return agentEntranceRefusal(403, 'portal_denied');
+    return new Response(null, { status: upstream.status === 200 || upstream.status === 204 ? 204 : upstream.status,
+      headers: agentResponseHeaders(upstream, null) });
+  }
+  if (request.headers.get('content-type')?.split(';')[0].trim().toLowerCase() !== 'application/json') {
+    return agentEntranceRefusal(415, 'content_type_required');
+  }
+  const raw = await readBoundedText(request, AGENT_REQUEST_LIMIT_BYTES);
+  let message;
+  try { message = raw === null ? null : JSON.parse(raw); } catch { message = undefined; }
+  if (message === undefined) return agentRpcError(null, -32700, 'Parse error', 400);
+  const hasId = isRecord(message) && Object.hasOwn(message, 'id');
+  const id = hasId && ((isText(message.id) && message.id.length <= 256) || Number.isSafeInteger(message.id)) ? message.id : null;
+  // One message per request, as the current MCP transport sends it: no batches, and no answers to server requests.
+  if (!isRecord(message) || message.jsonrpc !== '2.0' || !isText(message.method) || (hasId && id === null) ||
+      Object.keys(message).some((key) => !['jsonrpc', 'id', 'method', 'params'].includes(key)) ||
+      (Object.hasOwn(message, 'params') && !isRecord(message.params))) {
+    return agentRpcError(id, -32600, 'Invalid request', 400);
+  }
+  portalHeaders.set('content-type', 'application/json');
+  portalHeaders.set('accept', 'application/json, text/event-stream');
+  if (!hasId) {
+    // A notification the Portal has no use for is accepted here and goes no further.
+    if (!AGENT_NOTIFICATIONS.includes(message.method)) return new Response(null, { status: 202, headers: PUBLIC_HEADERS });
+    const upstream = await forward({ method: 'POST', body: JSON.stringify(message) });
+    if (!upstream) return agentEntranceRefusal(502, 'portal_unavailable');
+    await upstream.body?.cancel().catch(() => {});
+    if (denied(upstream)) return agentEntranceRefusal(403, 'portal_denied');
+    return new Response(null, { status: upstream.status === 200 ? 202 : upstream.status, headers: agentResponseHeaders(upstream, null) });
+  }
+  if (!AGENT_METHODS.includes(message.method)) return agentRpcError(id, -32601, 'Method not found');
+  let tool = null;
+  let outgoing = message;
+  if (message.method === 'tools/call') {
+    const name = message.params?.name;
+    tool = isText(name) && name.length <= 256 ? admission.tools.find((entry) => entry.name === name) ?? null : null;
+    if (!tool) {
+      if (isText(name)) record({ durationMs: 0, outcome: 'refused', responseBytes: 0, tool: name.slice(0, 256) });
+      return agentRpcError(id, -32602, 'Unknown tool');
+    }
+    outgoing = { ...message, params: { ...message.params, name: tool.portal } };
+  }
+  // The agent declares no client capabilities upstream, so the Portal never sends it a request of its own.
+  if (message.method === 'initialize') outgoing = { ...message, params: { ...message.params, capabilities: {} } };
+  const upstream = await forward({ method: 'POST', body: JSON.stringify(outgoing) });
+  const finishCall = (outcome, bytes) => tool && record({ durationMs: Date.now() - started, outcome, responseBytes: bytes, tool: tool.name });
+  if (!upstream) {
+    finishCall('failed', 0);
+    return agentRpcError(id, -32603, 'Portal unavailable', 502);
+  }
+  if (denied(upstream)) {
+    await upstream.body?.cancel().catch(() => {});
+    finishCall('portal_denied', 0);
+    return agentEntranceRefusal(403, 'portal_denied');
+  }
+  const contentType = upstream.headers.get('content-type');
+  if (message.method === 'initialize' || message.method === 'tools/list') {
+    if (upstream.status !== 200) {
+      // An error answer is passed on when it is a small JSON body, and otherwise only by its status.
+      const status = upstream.status >= 400 && upstream.status < 600 ? upstream.status : 502;
+      const text = await readBoundedResponse(upstream, 64 * 1024);
+      let valid = false;
+      try { valid = text !== null && /^application\/json\b/iu.test(contentType ?? '') && isRecord(JSON.parse(text)); } catch { valid = false; }
+      return new Response(valid ? text : null, { status, headers: agentResponseHeaders(upstream, valid ? contentType : null) });
+    }
+    const text = await readBoundedResponse(upstream, AGENT_LIST_LIMIT_BYTES);
+    const parsed = text === null ? null : portalMessages(text, contentType);
+    if (!parsed) return agentRpcError(id, -32603, 'Portal answer unreadable', 502);
+    const transform = agentListTransform(message.method, id, admission.tools);
+    return new Response(parsed.write(parsed.messages.map((entry) => entry === null ? null : transform(entry))),
+      { status: 200, headers: agentResponseHeaders(upstream) });
+  }
+  if (!upstream.body) {
+    finishCall(upstream.ok ? 'ok' : 'portal_error', 0);
+    return new Response(null, { status: upstream.status, headers: agentResponseHeaders(upstream) });
+  }
+  const body = meteredBody(upstream.body, AGENT_CALL_LIMIT_BYTES, (end, bytes, text) => {
+    if (!tool) return;
+    const outcome = end !== 'complete' ? end : upstream.status !== 200 ? 'portal_error' : agentCallOutcome(text, contentType, id);
+    finishCall(outcome, bytes);
+  });
+  return new Response(body, { status: upstream.status, headers: agentResponseHeaders(upstream) });
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    // Every hostname but the management one (and the temporary workers.dev
+    // address an installation uses) is the agent entrance, and serves nothing else.
+    const environment = parseManagementEnvironment(env);
+    if (environment && url.hostname !== environment.managementHostname && !url.hostname.endsWith('.workers.dev')) {
+      return handleAgentEntrance(request, env, ctx);
+    }
+    if (url.pathname === AGENT_ENTRANCE_SETTINGS_PATH) return handleAgentEntranceSettings(request, env);
     if (API_SOURCE_PATH.test(url.pathname)) return handleApiSourceMcp(request, env);
     if (url.pathname === FEEDBACK_MCP_PATH) return handleFeedbackMcp(request, env);
     if (url.pathname === GUIDE_MCP_PATH) return handleGuideMcp(request, env);

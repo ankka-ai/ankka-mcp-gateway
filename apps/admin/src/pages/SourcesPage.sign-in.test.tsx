@@ -51,7 +51,7 @@ function pausedApi(action: SourceActionSummary | null, source: ManagedSource = s
     getSourceActionTools: vi.fn<GatewayAdminApi['getSourceActionTools']>(async () => tools),
     reconnectSource: vi.fn<GatewayAdminApi['reconnectSource']>(), switchSourceToServiceToken: vi.fn(), authorizeSource: vi.fn<GatewayAdminApi['authorizeSource']>(), chooseSourceActionTools: vi.fn<GatewayAdminApi['chooseSourceActionTools']>(), getInstalledSourceTools: vi.fn(), updateInstalledSourceTools: vi.fn(), renameInstalledSource: vi.fn(),
     prepareRuntimeAction: vi.fn(), getRuntimeAction: vi.fn(), prepareTeardownAction: vi.fn(), getTeardownAction: vi.fn(),
-    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
+    getManagementCredentialStatus: vi.fn(), prepareManagementCredentialAction: vi.fn(), setAgentEntrance: vi.fn(), removeAgentEntrance: vi.fn(), verifyManagementAccess: vi.fn(), getConnect: vi.fn(), saveConnectExamples: vi.fn(), setConnectPage: vi.fn(),
   } satisfies GatewayAdminApi
 }
 

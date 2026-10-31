@@ -998,6 +998,10 @@ export default {
     try {
       const config = parsedEnv(env);
       const url = new URL(request.url);
+      // The agent entrance's hostname reaches only the runtime's entrance, never an installer or operation route.
+      if (url.hostname !== config.ANKKA_MANAGEMENT_HOSTNAME && !url.hostname.endsWith('.workers.dev')) {
+        return gatewayRuntime.fetch(request, withApiRuntime(env), context);
+      }
       if (url.pathname === CUSTOMER_INSTALL_CONTINUE_PATH) return notFound();
       if (url.pathname.startsWith(CUSTOMER_INSTALL_ROOT_PATH) ||
           url.pathname.startsWith(CUSTOMER_OPERATION_ROOT_PATH) ||

@@ -3,6 +3,8 @@ import { AddUserDialog } from '../components/AddUserDialog'
 import { MemberAccessDialog } from '../components/MemberAccessDialog'
 import { TeamGrantDialog } from '../components/TeamGrantDialog'
 import { AgentDialog } from '../components/AgentDialog'
+import { AgentEntrancePanel } from '../components/AgentEntrancePanel'
+import { AgentToolsDialog } from '../components/AgentToolsDialog'
 import { Checkbox } from '../components/Checkbox'
 import { Trash, X } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -15,6 +17,10 @@ import { useGateway } from '../GatewayContext'
 import { isGatewayUiPreview } from '../preview-api'
 
 const ACTION_ID = /^action_[A-Za-z0-9_-]{32}$/u
+const AGENT_OUTCOME_WORDS = {
+  ok: 'Answered', tool_error: 'Tool error', rpc_error: 'Refused by the Portal', refused: 'Not on its tool list',
+  portal_denied: 'Denied by Cloudflare', portal_error: 'Portal error', failed: 'Failed', too_large: 'Answer too large', cancelled: 'Cancelled',
+} satisfies Record<Team['agentCalls'][number]['outcome'], string>
 
 function canonicalTeams(teams: TeamGrant[]): TeamGrant[] {
   return teams.map((team) => {
@@ -34,6 +40,8 @@ function canonicalAgents(agents: AgentGrant[]): AgentGrant[] {
     const normalized: AgentGrant = { id: agent.id, name: agent.name.trim(), clientId: agent.clientId, tokenId: agent.tokenId, enabled: agent.enabled }
     if (agent.teamId !== undefined) normalized.teamId = agent.teamId
     else normalized.sourceIds = [...new Set(agent.sourceIds ?? [])].sort()
+    if (agent.tools !== undefined) normalized.tools = [...agent.tools]
+      .sort((left, right) => left.sourceId.localeCompare(right.sourceId) || left.name.localeCompare(right.name))
     return normalized
   }).sort((left, right) => left.id.localeCompare(right.id))
 }
@@ -100,7 +108,7 @@ function actionMessage(action: TeamAction | null): string | null {
 
 export function TeamPage() {
   const preview = isGatewayUiPreview()
-  const { getTeam, getTeamAction, prepareTeamAction, cancelTeamAction, isBusy, sources, externalChangeVersion } = useGateway()
+  const { api, getTeam, getTeamAction, prepareTeamAction, cancelTeamAction, setAgentEntrance, removeAgentEntrance, isBusy, sources, externalChangeVersion } = useGateway()
   const [team, setTeam] = useState<Team | null>(null)
   const [draft, setDraft] = useState<TeamMember[]>([])
   const [teamDraft, setTeamDraft] = useState<TeamGrant[]>([])
@@ -360,14 +368,19 @@ export function TeamPage() {
         <p className="mt-1 break-all font-mono text-xs text-kumo-subtle">{agent.clientId}</p>
         <p className="mt-1 text-xs text-kumo-subtle">{summary}</p>
         {pendingReach ? <p className="mt-1 text-xs text-kumo-subtle">Its team changed since the last save. Save to apply its connectors in Cloudflare.</p> : null}
+        <p className="mt-1 text-xs text-kumo-subtle">{saved?.lastUsedAt ? `Last used ${new Date(saved.lastUsedAt).toLocaleString()}` : 'Not used yet'}</p>
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
         <label className="flex min-h-9 cursor-pointer items-center gap-2 text-sm text-kumo-strong">
           <Checkbox checked={agent.enabled} disabled={disabled} aria-label={`Allow ${agent.name} to connect`} onChange={(event) => {
             if (!disabled) updateAgent({ ...agent, enabled: event.target.checked })
           }} />
           {agent.enabled ? 'On' : 'Off'}
         </label>
+        {!recorded ? <AgentToolsDialog agent={agent} reach={reach} sources={team?.sources ?? []} disabled={disabled}
+          loadTools={(sourceId) => api.getInstalledSourceTools(sourceId)} onSave={(tools) => {
+            if (!disabled) updateAgent({ ...agent, tools })
+          }} /> : null}
         {!recorded ? <AgentDialog agent={agent} agents={agentDraft} sources={team?.sources ?? []} teams={teamDraft} disabled={disabled} onSave={(next) => {
           if (!disabled) updateAgent(next)
         }} /> : null}
@@ -462,10 +475,26 @@ export function TeamPage() {
                   if (!disabled) updateAgent(next)
                 }} /> : null}
               </div>
+              <AgentEntrancePanel entrance={team.agentEntrance} disabled={!team.editingEnabled || isBusy || saving}
+                onTurnOn={(hostname) => setAgentEntrance(hostname)} onTurnOff={() => removeAgentEntrance()} />
               <div className="mt-4 border-t border-kumo-line">
                 {displayedAgents.map(agent => renderAgent(agent))}
                 {displayedAgents.length === 0 ? <p className="py-4 text-sm text-kumo-subtle">No agents.</p> : null}
               </div>
+              {team.agentCalls.length > 0 ? <details className="mt-4">
+                <summary className="cursor-pointer text-sm font-medium text-kumo-strong">Recent agent calls ({team.agentCalls.length})</summary>
+                <p className="mt-2 text-xs text-kumo-subtle">One line per tool call through the agent entrance, newest first. No arguments or results are kept.</p>
+                <ul className="mt-2 divide-y divide-kumo-line/70 text-xs">
+                  {team.agentCalls.map((call, index) => <li key={`${call.at}-${index}`} className="flex flex-wrap gap-x-3 gap-y-1 py-2 text-kumo-subtle">
+                    <span>{new Date(call.at).toLocaleString()}</span>
+                    <span className="text-kumo-strong">{team.agents.find(entry => entry.id === call.agentId)?.name ?? 'Removed agent'}</span>
+                    <span className="break-all font-mono">{call.tool}</span>
+                    <span>{AGENT_OUTCOME_WORDS[call.outcome]}</span>
+                    <span>{call.durationMs} ms</span>
+                    <span>{call.responseBytes} bytes</span>
+                  </li>)}
+                </ul>
+              </details> : null}
             </section>
 
             {installed.length === 0 ? <p className="mt-3 text-sm text-kumo-subtle">{sources?.installationEnabled === true ? 'Install a connector before granting connector access.' : 'No installed connectors are available to assign. New-connector installation is paused.'}</p> : null}

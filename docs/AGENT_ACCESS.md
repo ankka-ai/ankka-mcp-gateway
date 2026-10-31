@@ -6,11 +6,12 @@ Cloudflare Access service token instead of a person's sign-in, so it keeps
 working when that person's session ends.
 
 Agents are listed in **Team → Agents**. Each one names a service token you
-created in your Cloudflare account, the connectors it may use, and an on/off
-switch. Your gateway keeps only two non-secret references for each token: its
-**client ID** and its **token ID**. The client secret stays in Cloudflare and in
-the agent's own credential store. The gateway never asks for it, receives it,
-stores it or logs it.
+created in your Cloudflare account, the connectors it may use, the tools it may
+call through the [agent entrance](#agent-entrance), and an on/off switch. Your
+gateway keeps only two non-secret references for each token: its **client ID**
+and its **token ID**. The client secret stays in Cloudflare and in the agent's
+own credential store. The gateway never asks for it and never stores or logs
+it; the agent entrance holds it only for the request that carries it.
 
 ## How access works
 
@@ -64,8 +65,9 @@ through **All MCPs**, the agent gets it at your next Team save; the agent's row
 says so in the meantime. A team an agent follows cannot be deleted from under
 it (`team_agent_team_missing`).
 
-The tools an agent sees on a connector are that connector's allowed tools in
-the Portal, the same list people see.
+Directly at the Portal, the tools an agent sees on a connector are that
+connector's allowed tools, the same list people see. Through the
+[agent entrance](#agent-entrance) it sees only the tools you choose for it.
 
 ## Set up an agent
 
@@ -84,27 +86,141 @@ the Portal, the same list people see.
 3. **Add the agent** on the Team page: **Agents → Add agent**, with its name,
    client ID, token ID and connectors. Then **Save**. Your gateway writes the
    agent policies with its management token and verifies them.
-4. **Connect the agent** to the Portal URL `https://<portal hostname>/mcp`,
-   sending `CF-Access-Client-Id` and `CF-Access-Client-Secret` on every
-   request. On a Portal whose Code Mode is on by default, add `?codemode=off`
-   to see each connector's tools directly.
+4. **Connect the agent**, in one of two ways:
+   - An agent that can send custom headers connects to the Portal URL
+     `https://<portal hostname>/mcp` with `CF-Access-Client-Id` and
+     `CF-Access-Client-Secret` on every request. On a Portal whose Code Mode is
+     on by default, add `?codemode=off` to see each connector's tools directly.
+   - An agent that can send only `Authorization: Bearer <token>`, such as a
+     Claude Managed Agent, connects through the [agent entrance](#agent-entrance).
 
 Only a person with dashboard access can add, change or remove an agent. The
 gateway's own service identity cannot, Gateway Management's Team tool leaves
 agents as they are, and the service token the gateway's deployment opted into
 for management can never be registered as an agent.
 
+<a id="agent-entrance"></a>
+
+## Agent entrance
+
+Some hosted agents can send only a bearer token. Cloudflare's own
+single-header option for service tokens expects raw JSON in the header it
+names, which collides with the Portal's OAuth bearer in `Authorization`. The
+agent entrance closes that gap: one MCP address on its own hostname, outside
+Access, that turns an agent's bearer back into Cloudflare's two service-token
+headers and forwards the request to your Portal. Cloudflare still does the
+authentication.
+
+### Turn it on
+
+In **Team → Agents → Agent entrance**, choose a hostname directly under your
+gateway's zone (`agents.<zone>` is suggested) and select **Turn on**. Your
+gateway attaches that hostname as a custom domain of its own Worker with the
+management token, reads it back and records it; Cloudflare creates the DNS
+record. This needs **Workers Scripts Edit**, which the
+[template's](MANAGEMENT_TOKEN.md#the-template-link) **Workers: Editor** covers.
+**Turn off** detaches and forgets it. The address is:
+
+```text
+https://<entrance hostname>/api/agents/mcp
+```
+
+The path sits under `/api/` because the gateway's signed asset routing hands
+only `/api/` and `/__ankka/` paths to the Worker first; on any other path
+Cloudflare's static assets answer before the Worker runs.
+
+### The bearer
+
+The bearer is the agent's service token: `ankka_agent_v1_` followed by
+base64url, without padding, of the client ID, a colon and the client secret.
+Client IDs contain dots but never a colon, so the first colon ends the ID.
+Build it on your own machine and copy it straight into the agent's credential
+store, for example on macOS:
+
+```sh
+read -r CLIENT_ID
+read -rs CLIENT_SECRET
+printf 'ankka_agent_v1_%s' "$(printf '%s:%s' "$CLIENT_ID" "$CLIENT_SECRET" | base64 | tr '+/' '-_' | tr -d '=\n')" | pbcopy
+unset CLIENT_SECRET
+```
+
+The bearer is as secret as the client secret. Never paste it into the
+gateway, a repository, a chat or a ticket.
+
+### What the entrance does
+
+For every request it:
+
+1. Serves only `POST` and `DELETE` on `/api/agents/mcp`. Every other path on
+   the entrance hostname, including every management route, answers 404.
+2. Reads the bearer. A malformed bearer, or a client ID that is not an
+   enabled agent on the Portal's agent policy, gets 401 without the Portal
+   being contacted. Switching an agent off takes effect on its next request,
+   from the moment the Team change is recorded.
+3. Counts the agent's requests: at most 120 per minute, then 429 with
+   `Retry-After`.
+4. Accepts one JSON-RPC message of at most 256 KiB, and only the methods an
+   agent needs: `initialize`, `ping`, `tools/list`, `tools/call`, and the
+   notifications `notifications/initialized` and `notifications/cancelled`.
+   Other methods get JSON-RPC error `-32601` without being forwarded; other
+   notifications are accepted and dropped. `initialize` is forwarded without
+   the client's own capabilities, so the Portal never sends the agent a
+   request of its own.
+5. Allows a `tools/call` only for a tool on the agent's list. Any other name
+   gets JSON-RPC error `-32602` without being forwarded.
+6. Forwards to `https://<portal hostname>/mcp?codemode=off` with
+   `CF-Access-Client-Id` and `CF-Access-Client-Secret` from the bearer, plus
+   the agent's `Mcp-Session-Id` and `Mcp-Protocol-Version`. Never its
+   `Authorization` or cookies. Redirects are never followed: a redirect, 401
+   or 403 from the Portal reaches the agent as 403 `portal_denied`.
+7. Filters `initialize` to the tools capability and `tools/list` to the
+   agent's tools, renamed, in JSON or server-sent events, page by page with
+   `nextCursor` intact (8 MiB per page). A `tools/call` answer streams through
+   as it arrives, up to 16 MiB, with a 100-second limit.
+
+The Portal's Code Mode hides individual calls inside JavaScript, so the
+entrance always uses direct mode: it can see and allow each call.
+
+### Tools and their names
+
+Each agent has its own tool list, chosen with **Tools** on its row from the
+connectors it reaches. A connector without a selection starts with the tools
+that describe themselves as read-only (`readOnlyHint`). That hint comes from
+the connector, so review each tool before saving: hints are not permissions.
+Gateway Management is never available to agents. A tool the connector no
+longer allows, or on a connector the agent no longer reaches, is not offered.
+
+The agent sees each tool as `<connector prefix>__<tool>`, for example
+`klaviyo__get_campaigns`, instead of the Portal's `{server_id}_{tool}`. The
+prefix comes from the connector's name, so it survives a change of its
+Cloudflare server record, such as a switch to a service token; renaming the
+connector renames its tools for agents. A tool alias set in **Edit tools**
+replaces the tool part. Claude limits tool names to 64 characters, so keep
+aliases short on connectors with long tool names.
+
+### Audit and last use
+
+Each `tools/call` through the entrance writes one line in your gateway: the
+agent, the tool, the outcome (`ok`, `tool_error`, `rpc_error`, `refused`,
+`portal_denied`, `portal_error`, `failed`, `too_large` or `cancelled`), its
+duration and the size of the answer. No header, argument or result is kept.
+The Team page shows each agent's last use and the most recent calls; the
+gateway keeps the last 200 lines. Cloudflare's own Portal logs record each
+call as well.
+
 ## Turn an agent off, or remove it
 
 Switch the agent **Off** and save. Its token leaves every agent policy, so
-Cloudflare refuses its next request. Remove the agent to forget it as well.
-Neither revokes the service token: delete or revoke it in Cloudflare.
+Cloudflare refuses its next request, and the agent entrance refuses it as soon
+as the change is recorded. Remove the agent to forget it as well. Neither
+revokes the service token: delete or revoke it in Cloudflare.
 
 Removing a connector that an agent uses is refused with
 `source_removal_agents_assigned`. Take the connector off the agent, or off the
 team it follows, and save first. Removing the gateway is refused with
-`teardown_agents_present` until no agent policy is left: switch your agents
-off or remove them first.
+`teardown_agents_present` until no agent policy is left and the agent
+entrance is off: switch your agents off or remove them, and turn the entrance
+off, first.
 
 ## Drift
 
@@ -128,16 +244,28 @@ neither read nor changed, and do not count as agents.
 
 The management token's existing **Access: Apps and Policies Edit** covers
 every agent policy write: create, replace and delete an attached policy on the
-Portal and connector applications. The gateway needs no service-token
-permission because it never touches a token. See
-[Management token](MANAGEMENT_TOKEN.md#setup-and-verified-endpoint-permissions).
+Portal and connector applications. Turning the agent entrance on or off
+attaches or detaches one custom domain of the gateway's own Worker, which
+needs **Workers Scripts Edit** (the template's **Workers: Editor**). The
+gateway needs no service-token permission because it never manages a token.
+See [Management token](MANAGEMENT_TOKEN.md#setup-and-verified-endpoint-permissions).
 
 ## Limits and qualification
 
 - Anyone who holds an agent's client ID and secret can use the Portal as that
-  agent, within its connectors and their allowed tools. Treat the secret like
-  any other credential, give the token a finite duration, and switch the
-  agent off if the secret may have leaked.
+  agent, within its connectors and their allowed tools. The entrance's tool
+  list narrows what the agent calls through the entrance; it does not stop a
+  leaked secret from being used at the Portal directly with every tool its
+  connectors allow. Treat the secret like any other credential, give the token
+  a finite duration, and switch the agent off if the secret may have leaked.
+- The entrance runs in the gateway Worker, which also serves the dashboard's
+  static files. On the entrance hostname, Cloudflare answers a browser's page
+  request with the dashboard's public, data-free page before the Worker runs;
+  every `/api/` and `/__ankka/` request there except the entrance gets 404.
+- The entrance hostname is outside Access, so anyone can reach it. Requests
+  without a valid agent bearer stop at 401 without reaching the Portal, but
+  each one still runs your Worker. Add a Cloudflare WAF rate-limiting rule for
+  the hostname if that matters to you.
 - Tool names and descriptions are not an authorization boundary. Each
   upstream must still enforce what its credential may do.
 - Cloudflare evaluates Service Auth policies before Block and Allow policies.
@@ -145,6 +273,9 @@ permission because it never touches a token. See
   has not been qualified with an agent policy beside it. Qualify that case on a
   disposable deployment before relying on it.
 - These changes are covered by synthetic tests against a simulated Cloudflare
-  API. The supported flow still needs a live check on a disposable deployment:
-  an agent token lists and calls a selected connector's tools, cannot see an
-  unselected one, and is refused after it is switched off.
+  API and Portal. The supported flow still needs a live check on a disposable
+  deployment: the entrance hostname attaches, an agent's bearer lists and calls
+  a selected connector's tools in direct mode, cannot see an unselected one,
+  and is refused after the agent is switched off. That check should also
+  confirm that a service-token session sees every server whose application
+  admits the token, without a per-session server selection.
