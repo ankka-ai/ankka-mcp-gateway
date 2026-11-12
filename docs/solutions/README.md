@@ -52,3 +52,4 @@ when there is one.
 - [Cloudflare cannot sync a very large tool list](integration-issues/cloudflare-sync-fails-on-very-large-tool-lists.md)
 - [The authorize page's redirect to the provider is blocked by form-action](integration-issues/authorize-handoff-redirect-blocked-by-form-action.md)
 - [A constant named after a token or credential makes the release candidate unsignable](test-failures/release-secret-scan-flags-token-named-constants.md)
+- [Every source reads Not verified after Cloudflare adds a field to the Portal's tool mappings](integration-issues/portal-read-new-tool-fields-read-as-drift.md)
