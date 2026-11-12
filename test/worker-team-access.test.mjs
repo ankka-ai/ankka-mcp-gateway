@@ -6757,6 +6757,7 @@ test('tool metadata resumes a lost write with Cloudflare response fields and kee
     state.portal = { id: state.portal.id, ...record.body, servers: record.body.servers.map((mapping) => ({
       ...mapping, server_id: mapping.id, updated_tools: mapping.updated_tools.map(({ name, enabled, alias, description }) => ({
         name, enabled, portal_alias: alias ?? null, portal_description: description ?? null, server_alias: null, server_description: null,
+        portal_enabled: enabled,
       })),
     })) };
     throw new Error('lost portal response');
@@ -7154,6 +7155,30 @@ test('source connection checks distinguish management failure from upstream auth
     assert.equal(body.state, 'unknown');
     assert.equal(body.reason, status === 401 ? 'management_credential_required' : 'check_failed');
   }
+}));
+
+test('a Portal read that says where each tool is switched on is not drift unless it contradicts the approval', () => fixture(async (gateway) => {
+  const installed = await installAdditionalSource(gateway);
+  const mapping = portalMapping(gateway, installed.serverId);
+  const approved = mapping.updated_tools;
+  assert.equal(approved.length > 0, true);
+  gateway.provider.hook(({ record }) => {
+    if (record.pathname === `${SERVERS_PATH}/${installed.serverId}/sync`) return envelope({ status: 'ready' });
+  });
+  const check = async (extra) => {
+    mapping.updated_tools = approved.map((tool) => ({ ...tool, ...extra }));
+    return (await gateway.api(connectionPath(installed.source.id), { method: 'POST' })).json();
+  };
+  for (const extra of [{ portal_enabled: true }, { portal_enabled: true, server_enabled: true }, { portal_enabled: true, server_enabled: false }]) {
+    const body = await check(extra);
+    assert.equal(body.state, 'connected', JSON.stringify([extra, body]));
+  }
+  const baseline = gateway.provider.requests.length;
+  for (const extra of [{ portal_enabled: false }, { portal_enabled: null }, { server_enabled: 'true' }, { tenant_enabled: true }]) {
+    const body = await check(extra);
+    assert.equal(body.reason, 'configuration_changed', JSON.stringify([extra, body]));
+  }
+  assertNoMutation(gateway.provider, baseline);
 }));
 
 test('source connection checks require the administrator and same origin and do not claim per-user health', () => fixture(async (gateway) => {

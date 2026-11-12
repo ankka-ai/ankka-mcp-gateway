@@ -4157,7 +4157,13 @@ function normalizedPortalMappings(value) {
     for (const tool of mapping.updated_tools) {
       if (!isRecord(tool) || Object.keys(tool).some((key) => ![
         'name', 'enabled', 'alias', 'description', 'portal_alias', 'portal_description', 'server_alias', 'server_description',
+        'portal_enabled', 'server_enabled',
       ].includes(key)) || !toolName(tool.name) || tool.enabled !== true) return null;
+      // Cloudflare also reports where a tool is switched on. `portal_enabled`
+      // repeats this mapping's own setting, so it must agree with the approval;
+      // `server_enabled` belongs to the server record, like `server_alias`.
+      if (Object.hasOwn(tool, 'portal_enabled') && tool.portal_enabled !== true) return null;
+      if (Object.hasOwn(tool, 'server_enabled') && !isBoolean(tool.server_enabled)) return null;
       const alias = tool.portal_alias ?? tool.alias;
       const description = tool.portal_description ?? tool.description;
       if (tool.portal_alias != null && tool.alias != null && tool.portal_alias !== tool.alias) return null;

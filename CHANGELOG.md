@@ -4,6 +4,14 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Fix every connector showing **Not verified** on the Sources page. Cloudflare's
+  Portal read now reports where each tool is switched on (`portal_enabled` and
+  `server_enabled`), and your gateway read those unfamiliar fields as a changed
+  configuration, so it tested no connection and could refuse Team and tool
+  edits. Your sources kept working throughout. The gateway now accepts both
+  fields, and still refuses a Portal whose `portal_enabled` contradicts your
+  approval or that carries any other unknown field.
+
 - Connect clients to Gateway Feedback, Start here, Gateway Management and API
   sources faster and more reliably. Every request to these gateway-served
   sources read the source's Access application, policies and Team groups live
