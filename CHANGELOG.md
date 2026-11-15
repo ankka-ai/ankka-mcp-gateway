@@ -4,6 +4,13 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let any gateway operator with management access resume a stuck connector
+  installation once its ten-minute window has ended, from the dashboard or with
+  Gateway Management's `resume_mcp_source`. Before, only the person who started
+  it could, so an installation started by someone else stayed at **recovery
+  required**. The resumed installation then records the operator who resumed
+  it. Before the window ends, only the person who started it can resume it.
+
 - Let Gateway Management change agents. `save_gateway_team` takes an optional
   `agents` list that replaces your agents as read from `get_gateway_team`, so a
   management agent can add an agent for an existing Access service token,

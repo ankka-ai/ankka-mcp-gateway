@@ -67,6 +67,11 @@ gateway URL. Opening it and selecting **Continue to provider** starts the existi
 PKCE flow. The code exchange and credential import run in the team's Worker and
 Cloudflare account. Agents then read the recorded action, select actual synced
 tools, and resume that action. A handoff is not successful authorization.
+Until an installation's ten-minute window ends, only the person who started it
+can resume it. After that, anyone with management access, including an agent
+through `resume_mcp_source`, can take the recorded installation over and resume
+it. It then carries their name. An installation whose Access application creation was never
+confirmed still cannot be resumed by anyone; review it in Cloudflare first.
 For Meta Ads, the browser handoff links to Connectors so you can enter your
 public Meta App ID and configure the displayed callback before consent.
 
