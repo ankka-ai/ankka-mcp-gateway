@@ -3606,7 +3606,12 @@ function sourceActionCanRenew(action, actorEmail, now) {
   // An unacknowledged hostname-less app creation has no authoritative locator:
   // the zone listing cannot prove it absent. Built-in management recovery
   // requires a successful account-wide listing before it can reconcile or retry.
-  return action.failureCode !== 'source_removal_required' && action.actorEmail === normalizedActor(actorEmail) && now >= action.issuedAt &&
+  // Before its window ends only the person who started it may renew; after
+  // that no key of theirs works, so anyone with management access may take
+  // the recorded installation over and resume it under their own name.
+  const actor = normalizedActor(actorEmail);
+  return action.failureCode !== 'source_removal_required' && actor !== null &&
+    (action.actorEmail === actor || action.expiresAt <= now) && now >= action.issuedAt &&
     (action.expiresAt <= now || sourceActionConnectionPaused(action) ||
       (action.bigquerySetupStarted === true && action.failureCode === 'bigquery_setup_required')) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
@@ -3831,7 +3836,7 @@ async function renewSourceAction(storage, input, env) {
   // Older runtimes cannot parse the renewed journal marker.
   if (!await armSourceCompatibility(storage, env)) return actionRecovery('source_action_state_unavailable');
   const renewed = await persistSourceAction(storage, {
-    ...action, status: 'authorization_required', actionKeyHash: parsed.actionKeyHash,
+    ...action, actorEmail: parsed.actorEmail, status: 'authorization_required', actionKeyHash: parsed.actionKeyHash,
     issuedAt: parsed.issuedAt, renewedAt: parsed.issuedAt, expiresAt: parsed.expiresAt,
   });
   return renewed ?? actionRecovery('source_action_state_unavailable');

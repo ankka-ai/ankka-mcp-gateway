@@ -1178,7 +1178,6 @@ for (const portalCommitted of [false, true]) {
     const before = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
     assert.equal(before.resources.length, 3);
     assert.equal((await (await gateway.api('/api/source-actions')).json()).actions.at(-1).canRenew, true);
-    assert.equal((await gateway.api(path, { ...options, email: OWNER })).status, 409);
     assert.equal((await gateway.api(path, { ...options, email: MEMBER })).status, 401);
     assert.equal((await gateway.api(path, { ...options, extraHeaders: { origin: 'https://other.example.com' } })).status, 403);
     assert.equal((await gateway.api(path, { ...options, body: { ...options.body, revision: 999 } })).status, 409);
@@ -1211,6 +1210,30 @@ for (const portalCommitted of [false, true]) {
     assert.equal(gateway.managementStorage.snapshot(TEAM_KEY).teardownDisabled, true);
   }));
 }
+
+test('after its window another management operator takes over a recorded installation and resumes it', async () => fixture(async (gateway) => {
+  const prepared = await prepareNewSource(gateway);
+  gateway.provider.hook(({ record }) => record.method === 'PUT' && record.pathname.includes('/mcp/portals/')
+    ? envelope(null, 503) : undefined);
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 409);
+  const path = `/api/source-actions/${prepared.claim.actionId}/renew`;
+  const options = { method: 'POST', email: OWNER, body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id } };
+  // While the starter's window is open, nobody else can renew it.
+  assert.equal((await (await gateway.api('/api/source-actions', { email: OWNER })).json()).actions.at(-1).canRenew, false);
+  assert.equal((await gateway.api(path, options)).status, 409);
+  await expireSourceAction(gateway, prepared.claim.actionId);
+  gateway.provider.hook(undefined);
+  assert.equal((await (await gateway.api('/api/source-actions', { email: OWNER })).json()).actions.at(-1).canRenew, true);
+  const before = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
+  const response = await gateway.api(path, options);
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.equal((await response.json()).status, 'succeeded');
+  const after = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
+  assert.equal(after.actionId, before.actionId);
+  assert.equal(after.actorEmail, OWNER);
+  assert.notEqual(before.actorEmail, OWNER);
+  assert.equal(after.status, 'succeeded');
+}));
 
 test('renewal refuses unknown Access application creation and leaves its evidence untouched', async () => fixture(async (gateway) => {
   const prepared = await prepareNewSource(gateway);
