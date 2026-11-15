@@ -1277,6 +1277,26 @@ for (const accountLookup of ['absent', 'unavailable', 'foreign']) {
   }));
 }
 
+test('Gateway Management passes on the fixed provider detail of a refused resume, never provider text', async () => fixture(async (gateway) => {
+  await installManagementSource(gateway, ['list_mcp_source_actions', 'list_mcp_sources', 'resume_mcp_source']);
+  const reject = () => gateway.provider.hook(({ record }) => record.method === 'POST' && record.pathname === API_APPS
+    ? Response.json({ success: false, messages: [], result: null,
+      errors: [{ code: 12130, message: 'destinations: synthetic-private-provider-text' }] }, { status: 400 })
+    : undefined);
+  reject();
+  const prepared = await prepareNewSource(gateway);
+  assert.equal((await gateway.apply(prepared, {}, null)).status, 409);
+  await expireSourceAction(gateway, prepared.claim.actionId);
+  const sources = (await managementRpc(gateway, 'tools/call', { name: 'list_mcp_sources', arguments: {} })).body.result.structuredContent.result;
+  const resumed = await managementRpc(gateway, 'tools/call', { name: 'resume_mcp_source', arguments: {
+    revision: sources.revision, sourceId: prepared.source.id, actionId: prepared.claim.actionId } });
+  const result = resumed.body.result.structuredContent;
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.error, { code: 'source_action_recovery_required',
+    detail: 'source_access_application_create_blocked_http_400_code_12130_field_destinations' });
+  assert.equal(JSON.stringify(resumed.body).includes('synthetic-private'), false);
+}));
+
 test('concurrent token renewals complete one action without exposing a handoff', async () => fixture(async (gateway) => {
   const prepared = await prepareNewSource(gateway);
   gateway.provider.hook(({ record }) => record.method === 'PUT' && record.pathname.includes('/mcp/portals/')
