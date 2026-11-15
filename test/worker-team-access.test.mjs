@@ -1235,24 +1235,47 @@ test('after its window another management operator takes over a recorded install
   assert.equal(after.status, 'succeeded');
 }));
 
-test('renewal refuses unknown Access application creation and leaves its evidence untouched', async () => fixture(async (gateway) => {
-  const prepared = await prepareNewSource(gateway);
-  gateway.provider.hook(({ record }) => record.method === 'POST' && record.pathname === API_APPS
-    ? envelope(null, 503) : undefined);
-  assert.equal((await gateway.apply(prepared, {}, null)).status, 409);
-  await expireSourceAction(gateway, prepared.claim.actionId);
-  const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
-  assert.deepEqual(retained.actions.at(-1).pending, { kind: 'source_access_application', phase: 'send_armed', provider: null });
-  const snapshot = await (await gateway.api('/api/source-actions')).json();
-  assert.equal(snapshot.actions.at(-1).canRenew, false);
-  const baseline = gateway.provider.requests.length;
-  const response = await gateway.api(`/api/source-actions/${prepared.claim.actionId}/renew`, {
-    method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id },
-  });
-  assert.equal(response.status, 409);
-  assert.deepEqual(gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY), retained);
-  assertNoMutation(gateway.provider, baseline);
-}));
+for (const accountLookup of ['absent', 'unavailable', 'foreign']) {
+  test(`an unconfirmed Access application creation resumes only after the account listing settles it (${accountLookup})`, async () => fixture(async (gateway) => {
+    const prepared = await prepareNewSource(gateway);
+    gateway.provider.hook(({ record }) => record.method === 'POST' && record.pathname === API_APPS
+      ? envelope(null, 503) : undefined);
+    assert.equal((await gateway.apply(prepared, {}, null)).status, 409);
+    await expireSourceAction(gateway, prepared.claim.actionId);
+    const retained = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY);
+    assert.deepEqual(retained.actions.at(-1).pending, { kind: 'source_access_application', phase: 'send_armed', provider: null });
+    // The zone listing cannot show a hostname-less application, so renewal is
+    // allowed and the resume itself must list the whole account first.
+    assert.equal((await (await gateway.api('/api/source-actions')).json()).actions.at(-1).canRenew, true);
+    const accountPath = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+    gateway.provider.hook(({ record }) => {
+      if (record.method !== 'GET' || record.pathname !== accountPath || accountLookup === 'absent') return undefined;
+      if (accountLookup === 'unavailable') return envelope(null, 403);
+      const attempt = gateway.provider.requests.findLast((entry) => entry.method === 'POST' && entry.pathname === API_APPS);
+      return envelope([{ ...attempt.body, id: 'synthetic-foreign-app', destinations: [] }]);
+    });
+    const baseline = gateway.provider.requests.length;
+    const response = await gateway.api(`/api/source-actions/${prepared.claim.actionId}/renew`, {
+      method: 'POST', body: { schemaVersion: 1, revision: prepared.sources.revision, sourceId: prepared.source.id },
+    });
+    const requests = gateway.provider.requests.slice(baseline);
+    const listed = requests.findIndex((entry) => entry.method === 'GET' && entry.pathname === accountPath);
+    assert.ok(listed >= 0, 'the account listing is read');
+    const action = gateway.managementStorage.snapshot(SOURCE_ACTIONS_KEY).actions.at(-1);
+    if (accountLookup === 'absent') {
+      assert.equal(response.status, 200, await response.clone().text());
+      const created = requests.findIndex((entry) => entry.method === 'POST' && entry.pathname === API_APPS);
+      assert.ok(created > listed, 'created only after the listing proved it absent');
+      assert.equal(action.status, 'succeeded');
+      assert.equal(action.resources.length, 3);
+    } else {
+      assert.equal(response.status, 409);
+      assertNoMutation(gateway.provider, baseline);
+      assert.deepEqual(action.pending, { kind: 'source_access_application', phase: 'send_armed', provider: null });
+      assert.equal(action.resources.length, retained.actions.at(-1).resources.length);
+    }
+  }));
+}
 
 test('concurrent token renewals complete one action without exposing a handoff', async () => fixture(async (gateway) => {
   const prepared = await prepareNewSource(gateway);

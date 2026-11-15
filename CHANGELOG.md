@@ -4,6 +4,14 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Fix a connector installation stuck at **recovery required** when Cloudflare
+  never confirmed its Access application. Nobody could resume it, from the
+  dashboard or Gateway Management, and it held back Team saves and other
+  connector changes. Resuming now lists every Access application in your
+  account first. It creates the application only if it is missing, and changes
+  nothing if the listing fails or finds an unexpected one. Gateway Management's
+  own connector already worked this way.
+
 - Let any gateway operator with management access resume a stuck connector
   installation once its ten-minute window has ended, from the dashboard or with
   Gateway Management's `resume_mcp_source`. Before, only the person who started
