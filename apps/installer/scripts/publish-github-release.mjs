@@ -609,7 +609,76 @@ async function defaultCommand(command, args) {
   }
 }
 
-export async function publishGitHubReleaseOutput(outputDirectory, command = defaultCommand) {
+// GitHub finishes an immutable release (its immutable flag, asset digests and
+// attestation) shortly after `gh release create` returns, so verification
+// right after creation can fail although the release is intact.
+const VERIFICATION_ATTEMPTS = 6;
+const VERIFICATION_DELAY_MS = 15_000;
+
+function defaultWait(milliseconds) {
+  return new Promise((resolve) => { setTimeout(resolve, milliseconds); });
+}
+
+/** The published release's URL when it is exactly the reviewed plan, otherwise null. */
+async function verifiedReleaseUrl(plan, root, command) {
+  const inspected = await command('gh', [
+    'api', `repos/${plan.repository}/releases/tags/${encodeURIComponent(plan.tag)}`,
+    '--header', 'X-GitHub-Api-Version: 2026-03-10',
+  ]);
+  let release;
+  try {
+    release = JSON.parse(inspected.stdout);
+  } catch {
+    return null;
+  }
+  const expectedAssets = new Map(plan.assets.map((asset) => [asset.name, asset]));
+  const seenAssets = new Set();
+  const assetsMatch = Array.isArray(release?.assets) && release.assets.length === expectedAssets.size &&
+    release.assets.every((asset) => {
+      const expected = expectedAssets.get(asset?.name);
+      if (!expected || seenAssets.has(asset.name)) return false;
+      seenAssets.add(asset.name);
+      return asset.size === expected.byteSize && asset.digest === `sha256:${expected.sha256}`;
+    });
+  if (
+    inspected.code !== 0 ||
+    release.tag_name !== plan.tag ||
+    release.target_commitish !== plan.sourceCommit ||
+    release.name !== plan.title ||
+    release.draft !== false ||
+    release.immutable !== true ||
+    release.prerelease !== plan.prerelease ||
+    !assetsMatch ||
+    !v.is(STRING_SCHEMA, release.html_url) || !release.html_url.startsWith(`https://github.com/${plan.repository}/releases/tag/`)
+  ) return null;
+
+  const releaseVerified = await command('gh', [
+    'release', 'verify', plan.tag, '--repo', plan.repository,
+  ]);
+  if (releaseVerified.code !== 0) return null;
+  for (const asset of plan.assets) {
+    const assetVerified = await command('gh', [
+      'release', 'verify-asset', plan.tag, path.join(root, asset.name),
+      '--repo', plan.repository,
+    ]);
+    if (assetVerified.code !== 0) return null;
+  }
+  return release.html_url;
+}
+
+function publishedResult(plan, url) {
+  return Object.freeze({
+    schemaVersion: 1,
+    status: 'published',
+    release: plan.release,
+    repository: plan.repository,
+    sourceCommit: plan.sourceCommit,
+    url,
+  });
+}
+
+export async function publishGitHubReleaseOutput(outputDirectory, command = defaultCommand,
+  { wait = defaultWait, attempts = VERIFICATION_ATTEMPTS, delayMs = VERIFICATION_DELAY_MS } = {}) {
   const verified = await loadGitHubReleaseOutput(outputDirectory);
   const { plan, root } = verified;
   const cliVersion = await command('gh', ['--version']);
@@ -632,7 +701,13 @@ export async function publishGitHubReleaseOutput(outputDirectory, command = defa
   const existing = await command('gh', [
     'release', 'view', plan.tag, '--repo', plan.repository, '--json', 'tagName',
   ]);
-  if (existing.code === 0) fail('github_release_exists');
+  if (existing.code === 0) {
+    // A rerun after a create whose verification did not finish: adopt the
+    // immutable release only when it is exactly this reviewed output.
+    const url = await verifiedReleaseUrl(plan, root, command);
+    if (url === null) fail('github_release_exists');
+    return publishedResult(plan, url);
+  }
   const existingTag = await command('gh', [
     'api', `repos/${plan.repository}/git/ref/tags/${encodeURIComponent(plan.tag)}`, '--jq', '.object.sha',
   ]);
@@ -655,56 +730,12 @@ export async function publishGitHubReleaseOutput(outputDirectory, command = defa
   const created = await command('gh', args);
   if (created.code !== 0) fail('github_release_create_failed');
 
-  const inspected = await command('gh', [
-    'api', `repos/${plan.repository}/releases/tags/${encodeURIComponent(plan.tag)}`,
-    '--header', 'X-GitHub-Api-Version: 2026-03-10',
-  ]);
-  let release;
-  try {
-    release = JSON.parse(inspected.stdout);
-  } catch {
-    fail('github_release_verification_failed');
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const url = await verifiedReleaseUrl(plan, root, command);
+    if (url !== null) return publishedResult(plan, url);
+    if (attempt < attempts) await wait(delayMs);
   }
-  const expectedAssets = new Map(plan.assets.map((asset) => [asset.name, asset]));
-  const seenAssets = new Set();
-  const assetsMatch = Array.isArray(release.assets) && release.assets.length === expectedAssets.size &&
-    release.assets.every((asset) => {
-      const expected = expectedAssets.get(asset?.name);
-      if (!expected || seenAssets.has(asset.name)) return false;
-      seenAssets.add(asset.name);
-      return asset.size === expected.byteSize && asset.digest === `sha256:${expected.sha256}`;
-    });
-  if (
-    inspected.code !== 0 ||
-    release.tag_name !== plan.tag ||
-    release.target_commitish !== plan.sourceCommit ||
-    release.name !== plan.title ||
-    release.draft !== false ||
-    release.immutable !== true ||
-    release.prerelease !== plan.prerelease ||
-    !assetsMatch ||
-    !v.is(STRING_SCHEMA, release.html_url) || !release.html_url.startsWith(`https://github.com/${plan.repository}/releases/tag/`)
-  ) fail('github_release_verification_failed');
-
-  const releaseVerified = await command('gh', [
-    'release', 'verify', plan.tag, '--repo', plan.repository,
-  ]);
-  if (releaseVerified.code !== 0) fail('github_release_verification_failed');
-  for (const asset of plan.assets) {
-    const assetVerified = await command('gh', [
-      'release', 'verify-asset', plan.tag, path.join(root, asset.name),
-      '--repo', plan.repository,
-    ]);
-    if (assetVerified.code !== 0) fail('github_release_verification_failed');
-  }
-  return Object.freeze({
-    schemaVersion: 1,
-    status: 'published',
-    release: plan.release,
-    repository: plan.repository,
-    sourceCommit: plan.sourceCommit,
-    url: release.html_url,
-  });
+  fail('github_release_verification_failed');
 }
 
 const HELP = `Usage:\n` +
