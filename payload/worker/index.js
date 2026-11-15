@@ -2169,6 +2169,8 @@ function providerUrl(path) {
 function providerValidationLabel(message) {
   if (!isText(message)) return null;
   for (const [pattern, label] of [
+    [/\bmcp_server_id\b/iu, 'field_mcp_server_id'],
+    [/\bdestinations?\b/iu, 'field_destinations'],
     [/\bserver_id\b/iu, 'field_server_id'],
     [/\bhostname\b/iu, 'field_hostname'],
     [/\bon_behalf\b/iu, 'field_on_behalf'],
@@ -12147,6 +12149,17 @@ async function handleNativeMcp(request, env, native) {
 function handleFeedbackMcp(request, env) { return handleNativeMcp(request, env, FEEDBACK_NATIVE); }
 function handleGuideMcp(request, env) { return handleNativeMcp(request, env, GUIDE_NATIVE); }
 
+/**
+ * A refused management call's fixed error code, and its fixed provider detail
+ * when there is one (the stopped step, HTTP status, numeric provider code and
+ * validation label from providerDetail). Never provider text or identifiers.
+ */
+function managementMcpError(value) {
+  const code = /^[a-z][a-z0-9_]{0,79}$/u.test(value?.error ?? '') ? value.error : 'request_failed';
+  return code !== 'request_failed' && isText(value?.detail) && /^[a-z][a-z0-9_]{0,159}$/u.test(value.detail)
+    ? { code, detail: value.detail } : { code };
+}
+
 async function handleManagementMcp(request, env) {
   const endpoint = managementSourceUrl(env);
   const url = new URL(request.url);
@@ -12192,8 +12205,7 @@ async function handleManagementMcp(request, env) {
   try {
     const response = await managementMcpCall(tool, params.arguments ?? {}, env, access);
     const value = await readJsonInput(response, 256 * 1024);
-    result = response.ok && isRecord(value) ? { ok: true, result: value } :
-      { ok: false, error: { code: /^[a-z][a-z0-9_]{0,79}$/u.test(value?.error ?? '') ? value.error : 'request_failed' } };
+    result = response.ok && isRecord(value) ? { ok: true, result: value } : { ok: false, error: managementMcpError(value) };
   } catch { result = { ok: false, error: { code: 'request_failed' } }; }
   return rpc({ content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result, isError: !result.ok });
 }

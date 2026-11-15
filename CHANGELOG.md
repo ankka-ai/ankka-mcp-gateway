@@ -4,6 +4,13 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Show why a refused Gateway Management call stopped. When a connector
+  installation stops at a Cloudflare step, the tool result now carries the
+  same fixed `detail` the dashboard receives: the step, Cloudflare's HTTP
+  status and error code, and a fixed field label, never Cloudflare's own text.
+  Access application rejections now also name the `destinations` and
+  `mcp_server_id` fields.
+
 - Fix a connector installation stuck at **recovery required** when Cloudflare
   never confirmed its Access application. Nobody could resume it, from the
   dashboard or Gateway Management, and it held back Team saves and other
