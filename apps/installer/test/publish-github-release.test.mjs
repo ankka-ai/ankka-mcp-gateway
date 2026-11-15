@@ -305,10 +305,12 @@ describe('reviewed GitHub Release publication', () => {
       path.join(fixture.root, 'github-release-integrity-failure-output'),
     );
     const releaseCalls = [];
+    const waits = [];
     await assert.rejects(
       publishGitHubReleaseOutput(
         releaseOutput,
         liveGitHubCommand(prepared, releaseCalls, (args) => args[1] === 'verify'),
+        { wait: async (milliseconds) => { waits.push(milliseconds); } },
       ),
       (error) => error instanceof GitHubReleasePublicationError &&
         error.code === 'github_release_verification_failed' &&
@@ -318,6 +320,10 @@ describe('reviewed GitHub Release publication', () => {
       releaseCalls.some(([, args]) => args[0] === 'release' && args[1] === 'verify-asset'),
       false,
     );
+    // Every attempt is bounded and waits between attempts only.
+    assert.equal(releaseCalls.filter(([, args]) => args[0] === 'release' && args[1] === 'verify').length, 6);
+    assert.deepEqual(waits, [15_000, 15_000, 15_000, 15_000, 15_000]);
+    assert.equal(releaseCalls.filter(([, args]) => args[0] === 'release' && args[1] === 'create').length, 1);
 
     const assetOutput = await writeGitHubReleaseOutput(
       prepared,
@@ -329,6 +335,7 @@ describe('reviewed GitHub Release publication', () => {
         assetOutput,
         liveGitHubCommand(prepared, assetCalls, (args) =>
           args[1] === 'verify-asset' && args[3] === path.join(assetOutput, 'THIRD_PARTY_LICENSES.txt')),
+        { attempts: 1 },
       ),
       (error) => error instanceof GitHubReleasePublicationError &&
         error.code === 'github_release_verification_failed' &&
@@ -338,6 +345,45 @@ describe('reviewed GitHub Release publication', () => {
       assetCalls.filter(([, args]) => args[0] === 'release' && args[1] === 'verify-asset').length,
       5,
     );
+  });
+
+  it('retries verification while GitHub finishes a just-created release', async () => {
+    const prepared = await prepareGitHubReleaseOutput(fixture.input);
+    const output = await writeGitHubReleaseOutput(prepared, path.join(fixture.root, 'github-settling-output'));
+    const calls = [];
+    let verifications = 0;
+    const result = await publishGitHubReleaseOutput(output,
+      liveGitHubCommand(prepared, calls, (args) => args[1] === 'verify' && (verifications += 1) <= 2),
+      { wait: async () => undefined });
+    assert.equal(result.status, 'published');
+    assert.equal(result.url, `https://github.com/${REPOSITORY}/releases/tag/${RELEASE}`);
+    assert.equal(calls.filter(([, args]) => args[0] === 'release' && args[1] === 'verify').length, 3);
+    assert.equal(calls.filter(([, args]) => args[0] === 'release' && args[1] === 'create').length, 1);
+  });
+
+  it('adopts an existing release only when it is exactly the reviewed output, without creating it again', async () => {
+    const prepared = await prepareGitHubReleaseOutput(fixture.input);
+    const output = await writeGitHubReleaseOutput(prepared, path.join(fixture.root, 'github-adopt-output'));
+    const calls = [];
+    const live = liveGitHubCommand(prepared, calls);
+    const existing = async (executable, args) => args[0] === 'release' && args[1] === 'view'
+      ? (calls.push([executable, args]), { code: 0, stdout: JSON.stringify({ tagName: RELEASE }), stderr: '' })
+      : live(executable, args);
+    const result = await publishGitHubReleaseOutput(output, existing, { wait: async () => assert.fail('no wait') });
+    assert.equal(result.status, 'published');
+    assert.equal(calls.some(([, args]) => args[0] === 'release' && args[1] === 'create'), false);
+    assert.equal(calls.filter(([, args]) => args[0] === 'release' && args[1] === 'verify-asset').length, 5);
+
+    const differentOutput = await writeGitHubReleaseOutput(prepared, path.join(fixture.root, 'github-adopt-different-output'));
+    const differentCalls = [];
+    const failing = liveGitHubCommand(prepared, differentCalls, (args) => args[1] === 'verify-asset');
+    await assert.rejects(
+      publishGitHubReleaseOutput(differentOutput, async (executable, args) => args[0] === 'release' && args[1] === 'view'
+        ? { code: 0, stdout: JSON.stringify({ tagName: RELEASE }), stderr: '' }
+        : failing(executable, args), { wait: async () => assert.fail('no wait') }),
+      (error) => error instanceof GitHubReleasePublicationError && error.code === 'github_release_exists',
+    );
+    assert.equal(differentCalls.some(([, args]) => args[0] === 'release' && args[1] === 'create'), false);
   });
 
   it('fails closed on a changed public verification artifact and an existing release', async () => {
@@ -436,7 +482,7 @@ describe('reviewed GitHub Release publication', () => {
           }),
           stderr: '',
         };
-      }),
+      }, { attempts: 1 }),
       (error) => error instanceof GitHubReleasePublicationError &&
         error.code === 'github_release_verification_failed',
     );
