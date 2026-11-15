@@ -70,8 +70,10 @@ tools, and resume that action. A handoff is not successful authorization.
 Until an installation's ten-minute window ends, only the person who started it
 can resume it. After that, anyone with management access, including an agent
 through `resume_mcp_source`, can take the recorded installation over and resume
-it. It then carries their name. An installation whose Access application creation was never
-confirmed still cannot be resumed by anyone; review it in Cloudflare first.
+it. It then carries their name. If Cloudflare never confirmed the creation of the
+connector's Access application, the resume first lists every Access application in the account. It
+creates the application only when none exists, adopts it when exactly the expected one exists, and
+otherwise stays at recovery required without changing anything.
 For Meta Ads, the browser handoff links to Connectors so you can enter your
 public Meta App ID and configure the displayed callback before consent.
 

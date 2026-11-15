@@ -3604,8 +3604,8 @@ function sourceActionCanRenew(action, actorEmail, now) {
   // A completed connection check has no outstanding write. Other recovery
   // work must wait out the previous execution window before rotating its key.
   // An unacknowledged hostname-less app creation has no authoritative locator:
-  // the zone listing cannot prove it absent. Built-in management recovery
-  // requires a successful account-wide listing before it can reconcile or retry.
+  // the zone listing cannot prove it absent, so its recovery requires a
+  // successful account-wide listing before it can reconcile or retry.
   // Before its window ends only the person who started it may renew; after
   // that no key of theirs works, so anyone with management access may take
   // the recorded installation over and resume it under their own name.
@@ -3615,8 +3615,7 @@ function sourceActionCanRenew(action, actorEmail, now) {
     (action.expiresAt <= now || sourceActionConnectionPaused(action) ||
       (action.bigquerySetupStarted === true && action.failureCode === 'bigquery_setup_required')) &&
     action.initialPolicyVersion === SOURCE_INITIAL_POLICY_VERSION &&
-    sourceActionState(action, now) === 'recovery_required' &&
-    !(action.pending?.kind === 'source_access_application' && action.pending.provider === null && !nativeSourceId(action.sourceId));
+    sourceActionState(action, now) === 'recovery_required';
 }
 
 // The fixed reasons an installation waits before the Portal with all source
@@ -4454,7 +4453,7 @@ async function processSourceAction(request, env, storage, nowMs = Date.now()) {
     if (action.pending) {
       const observed = await discoverResource(
         state, kind, parsed.claim.cloudflareAccessToken, action.pending.provider,
-        nativeSourceId(action.sourceId) && accessApplicationKind(kind) && action.pending.provider === null,
+        accessApplicationKind(kind) && action.pending.provider === null,
       );
       if (observed.status === 'absent') {
         action = await persistSourceAction(storage, { ...action, pending: null });
