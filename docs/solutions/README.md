@@ -54,3 +54,4 @@ when there is one.
 - [A constant named after a token or credential makes the release candidate unsignable](test-failures/release-secret-scan-flags-token-named-constants.md)
 - [Every source reads Not verified after Cloudflare adds a field to the Portal's tool mappings](integration-issues/portal-read-new-tool-fields-read-as-drift.md)
 - [GitHub release verification fails right after creation](integration-issues/github-release-verified-before-github-finishes-it.md)
+- [A new service-token connector's Access application is refused on the zone path](integration-issues/service-token-source-access-app-refused-on-zone-path.md)
