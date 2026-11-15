@@ -2257,6 +2257,32 @@ function providerOutcome(status, response) {
   });
 }
 
+// Cloudflare refuses to create a hostname-less MCP Access application through
+// the zone path when its MCP server uses bearer authentication (HTTP 400, code
+// 12130, "app and token domain mismatch"), as for a service-token source. The
+// account path creates it, and only the account path can then read, change or
+// delete it: the zone path answers 404. Zone-path calls on applications and
+// their policies therefore retry once on the account path after a 404.
+const ACCESS_APP_ZONE_CREATE_REFUSED = 12130;
+const ZONE_ACCESS_APP_PATH = /^\/zones\/[^/]+\/access\/apps(?=\/|$)/u;
+
+function accountAccessAppPath(path, accountId) {
+  return ZONE_ACCESS_APP_PATH.test(path)
+    ? path.replace(ZONE_ACCESS_APP_PATH, `/accounts/${encodeURIComponent(accountId)}/access/apps`) : null;
+}
+
+async function accessAppCall(path, accountId, token, init = {}) {
+  const response = await providerCall(path, token, init);
+  const accountPath = response.status === 'absent' ? accountAccessAppPath(path, accountId) : null;
+  return accountPath ? providerCall(accountPath, token, init) : response;
+}
+
+async function accessAppList(path, accountId, token, query = {}, signal) {
+  const response = await providerList(path, token, query, signal);
+  const accountPath = response.status === 'absent' ? accountAccessAppPath(path, accountId) : null;
+  return accountPath ? providerList(accountPath, token, query, signal) : response;
+}
+
 async function providerList(path, token, query = {}, signal) {
   const values = [];
   for (let page = 1; page <= MAX_PROVIDER_PAGES; page += 1) {
@@ -2498,7 +2524,7 @@ async function discoverResource(state, kind, token, hint = null, requireAccountL
     // A known application that is gone is absent; a listed one that vanishes
     // before its read is an unsettled answer, named with its status.
     const readApplication = async (id, listed) => {
-      const read = await providerCall(`/zones/${zone}/access/apps/${encodeURIComponent(id)}`, token);
+      const read = await accessAppCall(`/zones/${zone}/access/apps/${encodeURIComponent(id)}`, state.target.accountId, token);
       if (read.status === 'absent') {
         return listed ? providerOutcome('unknown', read) : Object.freeze({ status: 'absent', provider: null });
       }
@@ -2532,7 +2558,7 @@ async function discoverResource(state, kind, token, hint = null, requireAccountL
     if (!parent) return Object.freeze({ status: 'conflict', provider: null });
     // Policies stay a listing: a competing policy on the application must be seen.
     const policies = `/zones/${zone}/access/apps/${encodeURIComponent(parent.id)}/policies`;
-    const response = await providerList(policies, token);
+    const response = await accessAppList(policies, state.target.accountId, token);
     if (response.status !== 'ok') return providerOutcome(response.status, response);
     if (kind === 'source_access_policy' && desired.desired.allow.identitiesRef === 'team.sourceMembers' &&
         (response.result.length > 1 || (response.result.length === 1 &&
@@ -2675,7 +2701,15 @@ async function createResource(state, kind, token) {
       comment: marker(state.installationId, desired.key),
     };
   }
-  const response = await providerCall(path, token, { method: 'POST', body: canonicalJson(body) });
+  const init = { method: 'POST', body: canonicalJson(body) };
+  let response = accessPolicyKind(kind)
+    ? await accessAppCall(path, state.target.accountId, token, init)
+    : await providerCall(path, token, init);
+  // The zone path refused the application outright, so nothing was created there.
+  if (kind === 'source_access_application' && response.status === 'blocked' && response.httpStatus === 400 &&
+      response.providerCode === ACCESS_APP_ZONE_CREATE_REFUSED) {
+    response = await providerCall(accountAccessAppPath(path, state.target.accountId), token, init);
+  }
   if (response.status !== 'ok') return providerOutcome(response.status, response);
   const id = resultId(response.result);
   if (!id) return providerOutcome('unknown', response);
@@ -5621,7 +5655,9 @@ async function tokenSwitchPlacement(context, pending) {
   };
   const portalPath = `/accounts/${encodeURIComponent(control.accountId)}/access/ai-controls/mcp/portals/${encodeURIComponent(control.portal.id)}`;
   const appPath = `/zones/${encodeURIComponent(control.zoneId)}/access/apps/${encodeURIComponent(ownership.resources[1].provider.id)}`;
-  const [portal, app] = await Promise.all([providerCall(portalPath, token), providerCall(appPath, token)]);
+  const [portal, zoneApp] = await Promise.all([providerCall(portalPath, token), providerCall(appPath, token)]);
+  const accountAppPath = zoneApp.status === 'absent' ? accountAccessAppPath(appPath, control.accountId) : null;
+  const app = accountAppPath ? await providerCall(accountAppPath, token) : zoneApp;
   if (portal.status !== 'ok' || app.status !== 'ok') return Object.freeze({ unavailable: true });
   const portalAt = Object.keys(variants).filter((name) => portalExact(portal.result, control, variants[name]));
   const value = app.result;
@@ -5634,7 +5670,7 @@ async function tokenSwitchPlacement(context, pending) {
     : exactDestination(value, { type: 'via_mcp_server_portal', mcp_server_id: oauthId }) ? 'oauth'
       : exactDestination(value, { type: 'via_mcp_server_portal', mcp_server_id: tokenId }) ? 'token' : null;
   return Object.freeze({ portal: portal.result, portalAt: portalAt.length === 1 ? portalAt[0] : null, appAt, variants,
-    portalPath, appPath, appName: ownership.resources[1].marker, policies });
+    portalPath, appPath: accountAppPath ?? appPath, appName: ownership.resources[1].marker, policies });
 }
 
 /** One read of a switch record; for the token record, one sync is requested when it has no working token yet. */
@@ -7204,7 +7240,7 @@ function teardownOwnershipMatches(resource, result, authority, currentPolicies =
 }
 
 async function teardownResourceRead(root, resource, authority, token, currentPolicies = false, signal) {
-  const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { signal });
+  const response = await accessAppCall(teardownProviderPath(resource, root.receipt.target), root.receipt.target.accountId, token, { signal });
   if (response.status === 'absent' || response.status === 'auth' || response.status === 'unknown') {
     return response.status;
   }
@@ -7238,7 +7274,7 @@ async function teardownServersUnshared(root, authority, token, signal) {
 async function teardownApplicationChildrenMatch(root, resource, authority, token, signal) {
   if (!accessApplicationKind(resource.kind)) return true;
   const path = `${teardownProviderPath(resource, root.receipt.target)}/policies`;
-  const listed = await providerList(path, token, {}, signal);
+  const listed = await accessAppList(path, root.receipt.target.accountId, token, {}, signal);
   if (listed.status !== 'ok') return false;
   const owned = authority.resources.filter((entry) =>
     accessPolicyKind(entry.kind) &&
@@ -7253,7 +7289,7 @@ async function teardownApplicationChildrenMatch(root, resource, authority, token
 }
 
 async function teardownResourceDelete(root, resource, token, signal) {
-  const response = await providerCall(teardownProviderPath(resource, root.receipt.target), token, { method: 'DELETE', signal });
+  const response = await accessAppCall(teardownProviderPath(resource, root.receipt.target), root.receipt.target.accountId, token, { method: 'DELETE', signal });
   // Access may accept deletion asynchronously. Acceptance is not absence:
   // the caller still verifies the exact resource before recording removal.
   const accessResource = (accessApplicationKind(resource.kind) || accessPolicyKind(resource.kind));

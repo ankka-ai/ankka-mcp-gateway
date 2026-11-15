@@ -1281,7 +1281,7 @@ test('Gateway Management passes on the fixed provider detail of a refused resume
   await installManagementSource(gateway, ['list_mcp_source_actions', 'list_mcp_sources', 'resume_mcp_source']);
   const reject = () => gateway.provider.hook(({ record }) => record.method === 'POST' && record.pathname === API_APPS
     ? Response.json({ success: false, messages: [], result: null,
-      errors: [{ code: 12130, message: 'destinations: synthetic-private-provider-text' }] }, { status: 400 })
+      errors: [{ code: 12131, message: 'destinations: synthetic-private-provider-text' }] }, { status: 400 })
     : undefined);
   reject();
   const prepared = await prepareNewSource(gateway);
@@ -1293,7 +1293,7 @@ test('Gateway Management passes on the fixed provider detail of a refused resume
   const result = resumed.body.result.structuredContent;
   assert.equal(result.ok, false);
   assert.deepEqual(result.error, { code: 'source_action_recovery_required',
-    detail: 'source_access_application_create_blocked_http_400_code_12130_field_destinations' });
+    detail: 'source_access_application_create_blocked_http_400_code_12131_field_destinations' });
   assert.equal(JSON.stringify(resumed.body).includes('synthetic-private'), false);
 }));
 

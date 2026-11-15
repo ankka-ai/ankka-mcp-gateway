@@ -4,6 +4,12 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Fix installing a new connector that uses an Access service token. Cloudflare
+  refuses its Access application through the zone path (HTTP 400, code 12130,
+  "app and token domain mismatch"), so the installation stopped at **recovery
+  required**. The gateway now creates that application through the account
+  path. It finds, changes and removes such applications there too.
+
 - Show why a refused Gateway Management call stopped. When a connector
   installation stops at a Cloudflare step, the tool result now carries the
   same fixed `detail` the dashboard receives: the step, Cloudflare's HTTP

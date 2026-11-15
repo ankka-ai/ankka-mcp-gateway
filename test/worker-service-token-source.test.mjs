@@ -229,6 +229,64 @@ test('a service-token source installs a bearer record with only the placeholder 
   assert.notEqual(reconnect.status, 200);
 }));
 
+test('a fresh service-token source gets its Access application through the account path when the zone path refuses it', async () => fixture(async (gateway) => {
+  // As measured on a live account: Cloudflare refuses an MCP application for a
+  // bearer record through the zone path (400, code 12130), creates it through
+  // the account path, and the zone path then answers 404 for that application.
+  const ZONE_APPS = `/client/v4/zones/${ZONE_ID}/access/apps`;
+  const ACCOUNT_APPS = `/client/v4/accounts/${ACCOUNT_ID}/access/apps`;
+  const accountOnly = new Set();
+  gateway.hook(({ record, state }) => {
+    const bearer = (body) => body?.type === 'mcp' && body.destinations?.some((entry) =>
+      state.servers.get(entry.mcp_server_id)?.auth_type === 'bearer');
+    if (record.method === 'POST' && record.pathname === ZONE_APPS && bearer(record.body)) {
+      return Response.json({ success: false, messages: [], result: null,
+        errors: [{ code: 12130, message: 'access.api.error.invalid_request: app and token domain mismatch' }] }, { status: 400 });
+    }
+    if (record.method === 'POST' && record.pathname === ACCOUNT_APPS && bearer(record.body)) {
+      const created = { id: crypto.randomUUID().replaceAll('-', ''), ...record.body };
+      state.apps.set(created.id, created);
+      state.policies.set(created.id, []);
+      accountOnly.add(created.id);
+      return envelope(created);
+    }
+    if (record.pathname.startsWith(`${ZONE_APPS}/`) && accountOnly.has(record.pathname.slice(ZONE_APPS.length + 1).split('/')[0])) {
+      return envelope(null, 404);
+    }
+    return undefined;
+  });
+  gateway.coverOrigin();
+  const saved = await saveDraft(gateway, 'access_service_token');
+  const source = (await saved.json()).sources.find((entry) => entry.url === SOURCE_URL);
+  const baseline = gateway.provider.requests.length;
+  const paused = await install(gateway, source.id);
+  assert.equal((await paused.json()).error, 'source_credential_required');
+  assert.equal(accountOnly.size, 1, 'the application was created through the account path');
+  const [appId] = accountOnly;
+  const refused = gateway.provider.requests.slice(baseline).filter((entry) => entry.method === 'POST' && entry.pathname === ZONE_APPS);
+  assert.equal(refused.length, 1, 'the zone path was tried once');
+  assert.ok(gateway.provider.requests.some((entry) => entry.method === 'POST' && entry.pathname === `${ACCOUNT_APPS}/${appId}/policies`),
+    'its policy was created through the account path');
+  assert.equal(gateway.provider.state.policies.get(appId).length, 1);
+  const created = gateway.provider.requests.find((entry) => entry.method === 'POST' && entry.pathname === SERVERS && entry.body.hostname === SOURCE_URL);
+  await customerWritesToken(gateway, created.body.id);
+  const snapshot = (await (await gateway.api('/api/source-actions')).json()).actions.at(-1);
+  assert.equal((await (await install(gateway, source.id, snapshot.actionId)).json()).error, 'source_tools_required');
+  let { revision } = await (await gateway.api('/api/sources')).json();
+  const chosen = await gateway.api(`/api/source-actions/${snapshot.actionId}/tools`, { method: 'POST',
+    body: { schemaVersion: 1, revision, sourceId: source.id, enabledTools: ['warehouse_read'] } });
+  assert.equal(chosen.status, 200, await chosen.clone().text());
+  const done = await install(gateway, source.id, snapshot.actionId);
+  assert.equal(done.status, 200, await done.clone().text());
+  assert.equal(gateway.storage.snapshot(SOURCES_KEY).sources.find((entry) => entry.id === source.id).status, 'installed');
+  // Removal finds and deletes the account-path application and its policy.
+  ({ revision } = await (await gateway.api('/api/sources')).json());
+  const removal = await gateway.api(`/api/sources/${source.id}`, { method: 'DELETE', body: { schemaVersion: 1, revision } });
+  assert.equal(removal.status, 200, await removal.clone().text());
+  assert.equal(gateway.provider.state.apps.has(appId), false);
+  assert.equal(gateway.provider.state.servers.has(created.body.id), false);
+}));
+
 test('drift: a bearer record is accepted only for the service-token mode', async () => fixture(async (gateway) => {
   const source = await installedOauthSource(gateway);
   const serverId = gateway.storage.snapshot(CONTROL_KEY).sourceOwnership.find((entry) => entry.sourceId === source.id).resources[0].provider.id;
