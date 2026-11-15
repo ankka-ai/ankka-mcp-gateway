@@ -94,10 +94,12 @@ connector's allowed tools, the same list people see. Through the
    - An agent that can send only `Authorization: Bearer <token>`, such as a
      Claude Managed Agent, connects through the [agent entrance](#agent-entrance).
 
-Only a person with dashboard access can add, change or remove an agent. The
-gateway's own service identity cannot, Gateway Management's Team tool leaves
-agents as they are, and the service token the gateway's deployment opted into
-for management can never be registered as an agent.
+Anyone who can change Team access can add, change or remove an agent: a person
+with dashboard access on the Team page, or an agent through Gateway Management's
+`save_gateway_team` tool. Either way an agent names an existing service token by
+its client ID and token ID; the gateway never receives its secret. The service
+token the gateway's deployment opted into for management can never be
+registered as an agent.
 
 <a id="agent-entrance"></a>
 

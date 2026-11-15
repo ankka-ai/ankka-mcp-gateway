@@ -306,8 +306,10 @@ rest of the agent; it changes no Cloudflare policy. The entrance itself, its
 hostname and the agents' last use and recent calls are shown in the same
 section.
 
-Only a person with dashboard access can change agents. Gateway Management's
-Team tool and the service identity leave them as they are. A connector an
+Agents change with the same authority as the rest of Team: on the Team page, or
+through Gateway Management's `save_gateway_team` tool with its optional `agents`
+list. Either way an agent names an existing service token and the gateway never
+receives its secret. A connector an
 agent uses cannot be removed, and the gateway cannot be removed while any
 agent policy exists. Storing agents raises the minimum runtime release, so a
 rollback cannot reach a release that cannot read them.

@@ -4,6 +4,13 @@ Notable public product and repository changes are recorded here.
 
 ## Unreleased
 
+- Let Gateway Management change agents. `save_gateway_team` takes an optional
+  `agents` list that replaces your agents as read from `get_gateway_team`, so a
+  management agent can add an agent for an existing Access service token,
+  switch one off, or change its connectors and tools. Omitting `agents` keeps
+  them as they are. Gateway Management and connectors with individual sign-in
+  stay unavailable to agents, and the tool never takes a client secret.
+
 - Fix every connector showing **Not verified** on the Sources page. Cloudflare's
   Portal read now reports where each tool is switched on (`portal_enabled` and
   `server_enabled`), and your gateway read those unfamiliar fields as a changed

@@ -42,9 +42,13 @@ optional `teams` list that replaces the [named teams](TEAM_ACCESS.md#named-teams
 as the dashboard's Save does. Each team keeps its `id`, `name`, `memberEmails`
 and `sourceIds`, plus `allSources` for every current and future connector, so an
 agent can assign a source to a team or remove it. Omitting `teams` keeps the
-current named teams unchanged. It never changes [agents](AGENT_ACCESS.md):
-`get_gateway_team` shows them, and only a person with dashboard access edits
-them on the Team page. Changing the sources of a team an agent follows still
+current named teams unchanged. An optional `agents` list replaces the
+[agents](AGENT_ACCESS.md) the same way: each keeps its `id`, `name`, `clientId`,
+`tokenId` and `enabled`, either `sourceIds` or a `teamId` to follow, and an
+optional `tools` list, so an agent can add an agent, switch one off, or change
+the connectors and tools it reaches. A new agent names a service token a person
+created in Zero Trust; the tool takes no client secret. Omitting `agents` keeps
+them unchanged, and changing the sources of a team an agent follows still
 changes that agent's sources at the same save.
 It has no arbitrary HTTP, Cloudflare API, shell, account-selection, or credential
 input tool. Connector-specific provisioning, including BigQuery setup, continues

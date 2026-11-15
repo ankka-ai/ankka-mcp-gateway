@@ -7732,14 +7732,10 @@ test('an agent that follows a team gets that team\'s connectors at each save', (
   assert.deepEqual(await refused.json(), { schemaVersion: 1, error: 'team_agent_team_missing' });
 }));
 
-test('agent changes need a person with dashboard access, and the service identity is never an agent', () => fixture(async (gateway) => {
+test('the service identity may change agents but is never one, and invalid agents are refused', () => fixture(async (gateway) => {
   gateway.env.ANKKA_SERVICE_CLIENT_ID = SERVICE_CLIENT;
   const view = await gateway.view();
   const sourceId = installedSourceId(view);
-  const body = { schemaVersion: 1, expectedRevision: view.revision, members: view.members, agents: [agent({ sourceIds: [sourceId] })] };
-  const service = await gateway.serviceApi('/api/team-actions', { method: 'POST', body });
-  assert.equal(service.status, 400);
-  assert.deepEqual(await service.json(), { schemaVersion: 1, error: 'team_access_admin_required' });
   const reused = await saveTeam(gateway, view, { agents: [agent({ clientId: SERVICE_CLIENT, sourceIds: [sourceId] })] });
   assert.equal(reused.status, 400);
   for (const invalid of [
@@ -7755,6 +7751,48 @@ test('agent changes need a person with dashboard access, and the service identit
     agent({ id: 'agent-0000000000000002', clientId: SECOND_AGENT_CLIENT, sourceIds: [sourceId] })] });
   assert.equal(duplicate.status, 400);
   assert.deepEqual(agentPolicies(gateway, app(gateway, 'mcp_portal').id), []);
+  const body = { schemaVersion: 1, expectedRevision: view.revision, members: view.members, agents: [agent({ sourceIds: [sourceId] })] };
+  const service = await gateway.serviceApi('/api/team-actions', { method: 'POST', body });
+  assert.equal(service.status, 200, await service.clone().text());
+  assertAgentPolicy(gateway, app(gateway, 'mcp_portal').id, [AGENT_TOKEN]);
+}));
+
+test('shared Gateway Management adds, changes and keeps agents through save_gateway_team', () => fixture(async (gateway) => {
+  await installManagementSource(gateway, ['get_gateway_team', 'save_gateway_team'], null, true);
+  const read = async () => (await managementRpc(gateway, 'tools/call', { name: 'get_gateway_team', arguments: {} })).body.result.structuredContent.result;
+  const save = (args) => managementRpc(gateway, 'tools/call', { name: 'save_gateway_team', arguments: args });
+  let team = await read();
+  const sourceId = team.sources.find((entry) => entry.status === 'installed' && entry.agentAccess === 'available').id;
+  const portal = app(gateway, 'mcp_portal').id;
+  const source = app(gateway, 'mcp').id;
+  // Gateway Management itself is never an agent's connector.
+  const refused = await save({ expectedRevision: team.revision, members: team.members, agents: [agent({ sourceIds: [MANAGEMENT_ID] })] });
+  assert.equal(refused.body.result.structuredContent.error.code, 'team_agent_source_unsupported', JSON.stringify(refused.body));
+  // A client secret is not part of the tool's input.
+  const secret = await save({ expectedRevision: team.revision, members: team.members,
+    agents: [{ ...agent({ sourceIds: [sourceId] }), clientSecret: 'synthetic-never-accepted' }] });
+  assert.equal(secret.body.error.code, -32602);
+  assert.equal(JSON.stringify(secret.body).includes('synthetic-never-accepted'), false);
+  const added = await save({ expectedRevision: team.revision, members: team.members,
+    agents: [agent({ sourceIds: [sourceId], tools: [{ sourceId, name: 'search' }] })] });
+  assert.equal(added.body.result.structuredContent.ok, true, JSON.stringify(added.body));
+  assertAgentPolicy(gateway, portal, [AGENT_TOKEN]);
+  assertAgentPolicy(gateway, source, [AGENT_TOKEN]);
+  team = await read();
+  assert.deepEqual(team.agents.map(({ id, enabled, sourceIds, tools }) => ({ id, enabled, sourceIds, tools })),
+    [{ id: 'agent-0000000000000001', enabled: true, sourceIds: [sourceId], tools: [{ name: 'search', sourceId }] }]);
+  // Omitting agents keeps them.
+  const kept = await save({ expectedRevision: team.revision, members: [...team.members, { email: NEW_PERSON, sourceIds: [] }] });
+  assert.equal(kept.body.result.structuredContent.ok, true, JSON.stringify(kept.body));
+  assertAgentPolicy(gateway, portal, [AGENT_TOKEN]);
+  team = await read();
+  // Switched off as read back, without the read-only fields.
+  const off = await save({ expectedRevision: team.revision, members: team.members,
+    agents: team.agents.map(({ appliedSourceIds: _applied, lastUsedAt: _used, ...rest }) => ({ ...rest, enabled: false })) });
+  assert.equal(off.body.result.structuredContent.ok, true, JSON.stringify(off.body));
+  assertAgentPolicy(gateway, portal, []);
+  assertAgentPolicy(gateway, source, []);
+  assert.equal((await read()).agents[0].enabled, false);
 }));
 
 for (const change of ['altered', 'missing', 'unrecognized']) {
