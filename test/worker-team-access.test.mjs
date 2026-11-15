@@ -7788,7 +7788,7 @@ test('shared Gateway Management adds, changes and keeps agents through save_gate
   team = await read();
   // Switched off as read back, without the read-only fields.
   const off = await save({ expectedRevision: team.revision, members: team.members,
-    agents: team.agents.map(({ appliedSourceIds, lastUsedAt, ...rest }) => ({ ...rest, enabled: false })) });
+    agents: team.agents.map(({ appliedSourceIds: _applied, lastUsedAt: _used, ...rest }) => ({ ...rest, enabled: false })) });
   assert.equal(off.body.result.structuredContent.ok, true, JSON.stringify(off.body));
   assertAgentPolicy(gateway, portal, []);
   assertAgentPolicy(gateway, source, []);
