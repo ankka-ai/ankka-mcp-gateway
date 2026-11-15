@@ -10348,12 +10348,10 @@ async function prepareTeamAction(storage, env, input) {
   if (canonicalJson(dashboardEmails(plan.nextState.members, context.planner.adminEmails)) !==
       canonicalJson(dashboardEmails(context.team.members, context.planner.adminEmails)) &&
       (input.sharedConnection || !await dashboardActorAllowed(storage, env, input.actorEmail))) teamFail('team_access_admin_required');
-  // Agents are machine access: only a person with dashboard access adds,
-  // changes or removes one, never a management agent or the service identity.
-  const agentsChanged = canonicalJson(plan.nextState.agents ?? []) !== canonicalJson(context.team.agents ?? []);
-  if (agentsChanged && (input.sharedConnection || !await dashboardActorAllowed(storage, env, input.actorEmail))) {
-    teamFail('team_access_admin_required');
-  }
+  // Agents need the same Team authority as people and named teams, so Gateway
+  // Management may change them. Their tokens stay in the operator's Zero Trust
+  // account: an agent names an existing token and is never given its secret,
+  // and teamAgents keeps the gateway's own service identity from being one.
   const previous = context.team.pendingAction;
   const unfinished = previous && !['failed', 'succeeded'].includes(previous.status);
   // Resume only the exact retained proposal, including legacy OAuth proposals.
@@ -11608,6 +11606,18 @@ const MCP_ACTION_INPUT = { type: 'string', pattern: '^action_[A-Za-z0-9_-]{32}$'
 const MCP_SOURCE_INPUT = { type: 'string', pattern: '^source-[a-f0-9]{16}$' };
 const MCP_REVISION_INPUT = { type: 'integer', minimum: 1 };
 const MCP_ALL_TOOLS_INPUT = { type: 'boolean', description: 'Explicitly allow all current and future tools and MCP prompts. False uses only enabledTools.' };
+// Agents as get_gateway_team returns them, without appliedSourceIds and
+// lastUsedAt. Each names an existing Access service token, never its secret.
+const MCP_TEAM_AGENTS_INPUT = { type: 'array', maxItems: TEAM_MAX_AGENTS, description: 'Hosted agents that connect with their own Cloudflare Access service token. Keep each agent’s id, clientId and tokenId as read; a new agent uses agent- and 16 random lowercase hex digits and the client ID and token ID of a service token a person created in Zero Trust. Give either sourceIds or teamId (follow that named team’s sources). Gateway Management and connectors with individual sign-in are never available to agents.',
+  items: { type: 'object', additionalProperties: false, required: ['id', 'name', 'clientId', 'tokenId', 'enabled'], properties: {
+    id: { type: 'string', pattern: '^agent-[a-f0-9]{16}$' }, name: { type: 'string', maxLength: 80 },
+    clientId: { type: 'string', pattern: '^[a-f0-9]{32}\\.access$', description: 'The service token’s client ID; not a secret.' },
+    tokenId: { type: 'string', pattern: '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', description: 'The service token’s ID in Zero Trust; not a secret.' },
+    enabled: { type: 'boolean', description: 'False takes the agent’s token off every policy and keeps its settings.' },
+    sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT },
+    teamId: { type: 'string', pattern: '^team-[a-f0-9]{16}$' },
+    tools: { type: 'array', maxItems: AGENT_MAX_TOOLS, description: 'Exact tools the agent may call through the agent entrance. Omit to allow every allowed tool of its sources.',
+      items: mcpObject({ sourceId: MCP_SOURCE_INPUT, name: { type: 'string', pattern: '^[A-Za-z0-9_.:/-]{1,128}$' } }) } } } };
 const MCP_TOOLS_INPUT = { type: 'array', minItems: 0, maxItems: 500, uniqueItems: true,
   items: { type: 'string', pattern: '^[A-Za-z0-9_.:/-]{1,128}$' } };
 const MCP_TOOL_METADATA_INPUT = { type: 'array', maxItems: 500, items: mcpObject({
@@ -11698,7 +11708,7 @@ const MANAGEMENT_MCP_TOOLS = [
   ['rename_installed_source', 'Rename an installed connector. Optionally set Company for model discovery and tool descriptions; omit to preserve it or send an empty string to clear it. Assignments, the URL, and the tool allowlist do not change.', mcpObject({ sourceId: MCP_SOURCE_INPUT, revision: MCP_REVISION_INPUT, label: { type: 'string', minLength: 2, maxLength: 80 }, company: { type: 'string', minLength: 0, maxLength: 80 } }, ['sourceId', 'revision', 'label']), 'PUT', 'installed-label'],
   ['authorize_mcp_source', 'Return a gateway page where you sign in with the provider. This does not start OAuth or complete authorization; check the recorded action afterwards.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'GET', 'authorize'],
   ['cancel_mcp_source_action', 'Cancel only an unstarted source action the server permits. Does not undo writes.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'action'],
-  ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Only dashboard administrators may change dashboardAccess grants; omission preserves existing grants. Optional teams replaces the named teams exactly as read from get_gateway_team; omit it to keep the current named teams unchanged.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT }, dashboardAccess: { type: 'boolean' }, allSources: { type: 'boolean', description: 'Explicitly grant all installed and future MCP connectors. Omit or set false for only sourceIds.' } }, ['email', 'sourceIds']) }, teams: { type: 'array', maxItems: 16, items: mcpObject({ id: { type: 'string', pattern: '^team-[a-f0-9]{16}$', description: 'Keep an existing team’s id. A new team uses team- and 16 random lowercase hex digits.' }, name: { type: 'string', maxLength: 80 }, memberEmails: { type: 'array', maxItems: 1000, uniqueItems: true, items: { type: 'string', maxLength: 254 } }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT }, allSources: { type: 'boolean', description: 'Explicitly grant the team all installed and future MCP connectors. Omit or set false for only sourceIds.' } }, ['id', 'name', 'memberEmails', 'sourceIds']) } }, ['expectedRevision', 'members']), 'POST', '/api/team-actions'],
+  ['save_gateway_team', 'Replace source assignments with the reviewed roster and revision. Only dashboard administrators may change dashboardAccess grants; omission preserves existing grants. Optional teams replaces the named teams exactly as read from get_gateway_team; omit it to keep the current named teams unchanged. Optional agents replaces the agents the same way; omit it to keep them unchanged.', mcpObject({ expectedRevision: MCP_REVISION_INPUT, members: { type: 'array', maxItems: 1000, items: mcpObject({ email: { type: 'string', maxLength: 254 }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT }, dashboardAccess: { type: 'boolean' }, allSources: { type: 'boolean', description: 'Explicitly grant all installed and future MCP connectors. Omit or set false for only sourceIds.' } }, ['email', 'sourceIds']) }, teams: { type: 'array', maxItems: 16, items: mcpObject({ id: { type: 'string', pattern: '^team-[a-f0-9]{16}$', description: 'Keep an existing team’s id. A new team uses team- and 16 random lowercase hex digits.' }, name: { type: 'string', maxLength: 80 }, memberEmails: { type: 'array', maxItems: 1000, uniqueItems: true, items: { type: 'string', maxLength: 254 } }, sourceIds: { type: 'array', maxItems: 32, uniqueItems: true, items: MCP_SOURCE_INPUT }, allSources: { type: 'boolean', description: 'Explicitly grant the team all installed and future MCP connectors. Omit or set false for only sourceIds.' } }, ['id', 'name', 'memberEmails', 'sourceIds']) }, agents: MCP_TEAM_AGENTS_INPUT }, ['expectedRevision', 'members']), 'POST', '/api/team-actions'],
   ['cancel_gateway_team_action', 'Cancel an unstarted Team proposal only when the server permits.', mcpObject({ actionId: MCP_ACTION_INPUT }), 'DELETE', 'team-action'],
   ['remove_mcp_source_draft', 'Remove an unprovisioned source draft. Started installations retain their journal.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', '/api/sources'],
   ['remove_mcp_source', 'Remove a source and its owned resources after explicit instruction. Its tools and assignments stop being available.', mcpObject({ revision: MCP_REVISION_INPUT, sourceId: MCP_SOURCE_INPUT }), 'DELETE', 'source'],
