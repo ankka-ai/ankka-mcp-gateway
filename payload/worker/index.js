@@ -740,6 +740,7 @@ const DEFAULT_OAUTH_CALLBACKS = Object.freeze([
   'https://chatgpt.com/connector/oauth/*',
   'https://www.cursor.com/agents/mcp/oauth/callback',
   'https://playground.ai.cloudflare.com/agents/playground/*',
+  'https://antigravity.google/oauth-callback',
 ]);
 const REQUEST_LIMIT_BYTES = 96 * 1024;
 const BOOTSTRAP_REQUEST_LIMIT_BYTES = 128 * 1024;

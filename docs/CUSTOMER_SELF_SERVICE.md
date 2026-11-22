@@ -285,7 +285,8 @@ New installations configure these public, non-secret callbacks in the Portal's
 Managed OAuth **Allowed redirect URIs** for dynamic client registration (DCR).
 The Claude, ChatGPT, and Cursor documentation was reviewed on 2026-09-05;
 Cloudflare's Managed OAuth documentation and the live AI Playground callback
-were checked on 2026-09-24.
+were checked on 2026-09-24; Google Antigravity's MCP OAuth documentation was
+reviewed on 2026-11-22.
 
 | Client surface | Callback allowed during registration |
 | --- | --- |
@@ -294,6 +295,7 @@ were checked on 2026-09-24.
 | ChatGPT callback specific to a connector | `https://chatgpt.com/connector/oauth/*` |
 | Cursor web and Cursor Agents | `https://www.cursor.com/agents/mcp/oauth/callback` |
 | Cloudflare AI Playground | `https://playground.ai.cloudflare.com/agents/playground/*` |
+| Google Antigravity | `https://antigravity.google/oauth-callback` |
 
 ChatGPT uses the stable callback for eligible authorization servers with issuer
 identification and for older connections. Otherwise its callback contains a

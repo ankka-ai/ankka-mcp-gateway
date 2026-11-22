@@ -59,6 +59,7 @@ const DEFAULT_OAUTH_CALLBACKS = Object.freeze([
   'https://chatgpt.com/connector/oauth/*',
   'https://www.cursor.com/agents/mcp/oauth/callback',
   'https://playground.ai.cloudflare.com/agents/playground/*',
+  'https://antigravity.google/oauth-callback',
 ]);
 const stringSchema = v.string();
 const numberSchema = v.number();

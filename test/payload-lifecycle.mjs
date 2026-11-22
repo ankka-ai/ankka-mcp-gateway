@@ -57,6 +57,7 @@ export const MANAGED_OAUTH = Object.freeze({
       'https://chatgpt.com/connector/oauth/*',
       'https://www.cursor.com/agents/mcp/oauth/callback',
       'https://playground.ai.cloudflare.com/agents/playground/*',
+      'https://antigravity.google/oauth-callback',
     ],
     allow_any_on_localhost: true,
     allow_any_on_loopback: true,
