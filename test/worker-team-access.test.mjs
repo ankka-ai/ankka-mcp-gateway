@@ -4801,6 +4801,7 @@ async function installManagementSource(gateway, enabledTools = null, recover = n
     'https://claude.ai/api/mcp/auth_callback', 'https://chatgpt.com/connector_platform_oauth_redirect',
     'https://chatgpt.com/connector/oauth/*', 'https://www.cursor.com/agents/mcp/oauth/callback',
     'https://playground.ai.cloudflare.com/agents/playground/*',
+    'https://antigravity.google/oauth-callback',
     `${MANAGEMENT_ORIGIN}/__ankka/source-oauth/callback`,
     `${MANAGEMENT_ORIGIN}/api/mcp/oauth/callback`,
     `https://dash.cloudflare.com/${ACCOUNT_ID}/one/access-controls/ai-controls/mcp-server/oauth-callback/${server.id}`,
