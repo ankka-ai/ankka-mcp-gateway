@@ -22,6 +22,7 @@ const MAX_INTENT_BYTES = 8_192;
 const MAX_R2_KEY_BYTES = 1_024;
 const MAX_PAYLOAD_PATH_BYTES = 900;
 const LIST_PAGE_SIZE = 1_000;
+const R2_IO_CONCURRENCY = 6;
 const MAX_LIST_PAGES = Math.ceil(MAX_RELEASE_OBJECT_COUNT / LIST_PAGE_SIZE) + 1;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
 const RELEASE_PATTERN = /^gateway-v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
@@ -799,6 +800,21 @@ function assertExactSet(
   }
 }
 
+async function runBatched<T>(
+  items: readonly T[],
+  concurrency: number,
+  run: (item: T) => Promise<void>,
+): Promise<void> {
+  for (let offset = 0; offset < items.length; offset += concurrency) {
+    const results = await Promise.allSettled(
+      items.slice(offset, offset + concurrency).map((item) => run(item)),
+    );
+    for (const result of results) {
+      if (result.status === 'rejected') throw result.reason;
+    }
+  }
+}
+
 /**
  * Publishes one offline-signed release with consumer-atomic visibility. The
  * immutable intent burns the exact channel/release ID, every write is
@@ -826,7 +842,8 @@ export async function publishCreateOnlyR2Release(
   const before = await listedPrefixObjects(input.bucket, prepared.plan.prefix);
   assertExistingSubset(before, expected, !intent.existed);
 
-  for (const payload of prepared.payloads) await putCreateOnly(input.bucket, payload);
+  await runBatched(prepared.payloads, R2_IO_CONCURRENCY, (payload) =>
+    putCreateOnly(input.bucket, payload));
   await putCreateOnly(input.bucket, prepared.envelope);
 
   const after = await listedPrefixObjects(input.bucket, prepared.plan.prefix);
@@ -834,11 +851,11 @@ export async function publishCreateOnlyR2Release(
   const observedIntent = await readObject(input.bucket, intent.desired.key, intent.desired.byteSize);
   if (!observedIntent) conflict();
   assertExactRead(observedIntent, intent.desired);
-  for (const object of prepared.allReleaseObjects) {
+  await runBatched(prepared.allReleaseObjects, R2_IO_CONCURRENCY, async (object) => {
     const observed = await readObject(input.bucket, object.key, object.byteSize);
     if (!observed) conflict();
     assertExactRead(observed, object);
-  }
+  });
 
   return Object.freeze({
     schemaVersion: 1,
