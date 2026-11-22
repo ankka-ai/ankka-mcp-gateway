@@ -3,18 +3,21 @@ import type { ManagedSource } from '../api'
 import ankkaIcon from '../assets/ankka-icon.svg'
 import metaIcon from '../assets/connectors/meta.svg'
 import ahrefsIcon from '../assets/connectors/ahrefs.svg'
+import klaviyoIcon from '../assets/connectors/klaviyo.png'
 
 /** Icons bundled for providers whose own icon cannot be fetched, by the key the connect page receives. */
 export const BUNDLED_CONNECTOR_ICONS = {
   ankka: ankkaIcon,
   meta: metaIcon,
   ahrefs: ahrefsIcon,
+  klaviyo: klaviyoIcon,
 } as const
 export type BundledConnectorIcon = keyof typeof BUNDLED_CONNECTOR_ICONS
 
 const bundledIcons = new Map([
   ['https://mcp.facebook.com/ads', metaIcon],
   ['https://api.ahrefs.com/mcp/mcp', ahrefsIcon],
+  ['https://mcp.klaviyo.com/mcp', klaviyoIcon],
 ])
 
 /** A connector's icon, or its first letter until the icon loads or when it cannot. */
