@@ -85,18 +85,18 @@ test('the final workflow gate requires fresh history and refuses failed or cance
   const yaml = readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const gate = yaml.split('      - name: Every gate passed\n')[1].split('        run: |\n')[1]
     .split('      - name: Record the source')[0].split('\n').map((line) => line.slice(10)).join('\n');
-  for (const [reused, install, history, results, accepted] of [
-    ['false', 'success', 'success', 'success success success success success', true],
-    ['false', 'success', 'success', 'success skipped success success success', false],
-    ['true', 'success', 'success', 'success skipped skipped skipped success', true],
-    ['true', 'failure', 'success', 'failure skipped skipped skipped success', false],
-    ['true', 'success', 'failure', 'success skipped skipped skipped failure', false],
+  for (const [reused, install, reusedHistory, results, accepted] of [
+    ['false', 'success', 'skipped', 'success success success success success', true],
+    ['false', 'success', 'skipped', 'success skipped success success success', false],
+    ['true', 'success', 'success', 'success skipped skipped skipped skipped', true],
+    ['true', 'failure', 'success', 'failure skipped skipped skipped skipped', false],
+    ['true', 'success', 'failure', 'success skipped skipped skipped skipped', false],
     ['true', 'success', 'skipped', 'success skipped skipped skipped skipped', false],
-    ['true', 'success', 'success', 'success failure skipped skipped success', false],
-    ['true', 'success', 'success', 'success cancelled skipped skipped success', false],
+    ['true', 'success', 'success', 'success failure skipped skipped skipped', false],
+    ['true', 'success', 'success', 'success cancelled skipped skipped skipped', false],
   ]) {
     const run = () => execFileSync('bash', ['-e', '-c', gate], { stdio: 'pipe', env: {
-      ...process.env, REUSED: reused, INSTALL_RESULT: install, HISTORY_RESULT: history, RESULTS: results,
+      ...process.env, REUSED: reused, INSTALL_RESULT: install, REUSED_HISTORY_RESULT: reusedHistory, RESULTS: results,
     } });
     if (accepted) assert.doesNotThrow(run);
     else assert.throws(run);

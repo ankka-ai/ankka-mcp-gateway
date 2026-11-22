@@ -26,10 +26,18 @@ jobs:
     outputs:
       modules-key: ${{ steps.key.outputs.key }}
       reused: ${{ steps.source.outputs.reused }}
+      reused-history: ${{ steps.reused-history.outcome }}
       source-commit: ${{ steps.source.outputs.source-commit }}
       source-tree: ${{ steps.source.outputs.source-tree }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      # Push to main needs full history so a reused merge runs check:history
+      # directly here instead of spinning up a second runner.
+      - if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+      - if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: .nvmrc
@@ -51,6 +59,12 @@ jobs:
           key: ${{ steps.key.outputs.key }}
       - if: steps.modules.outputs.cache-hit != 'true'
         run: npm ci
+      - id: reused-history
+        name: Verify boundary and history for reused merge
+        if: steps.source.outputs.reused == 'true'
+        run: |
+          npm run check:boundary
+          npm run check:history
 
   lint-typecheck:
     needs: install
@@ -76,11 +90,12 @@ jobs:
       - run: npm run lint
       - run: npm run typecheck
 
-  # The installer suite runs on one worker, so its two slowest files run on
-  # their own runner. Measured 2026-10-10, the legs took about 60 and 90
-  # seconds; one installer leg would take about 130, the slowest job here. The
-  # rest leg excludes those files, so a new installer test file always runs;
-  # renaming one fails the slowest leg with no test files.
+  # Rebalanced 2026-11-22 from measured PR timings: admin tests (~50 s) run on
+  # their own runner separately from build + non-admin workspace suites (~34 s),
+  # and the single-worker installer rest suite (~75 s) splits across two shards
+  # (~38 s each) alongside the two slowest installer files (~49 s). Excluding
+  # the slowest pair from the sharded rest legs ensures every new installer
+  # test file always runs; renaming either excluded file fails installer-slowest.
   app-tests:
     name: app-tests (${{ matrix.part }})
     needs: install
@@ -90,7 +105,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [apps, installer-slowest, installer-rest]
+        part: [apps-other, admin, installer-slowest, installer-rest-1, installer-rest-2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -107,20 +122,32 @@ jobs:
       - if: steps.modules.outputs.cache-hit != 'true'
         run: npm ci
       - run: npm run check:toolchain
-      - if: matrix.part == 'apps'
-        run: npm run build
-      - if: matrix.part == 'apps'
-        run: npm run test:apps:quick
+      - if: matrix.part == 'apps-other'
+        run: |
+          npm run build
+          npm run test --workspace @ankka/api-source-runtime
+          npm run test --workspace @ankka/read-only-connectors
+          npm run test --workspace @ankka/search-console-adapter
+          npm run test:runtime
+      - if: matrix.part == 'admin'
+        run: npm run test --workspace @ankka/gateway-admin
       - if: matrix.part == 'installer-slowest'
         run: >-
           npm run test --workspace @ankka/gateway-installer --
           test/customer-bigquery-teardown-runtime.test.mjs
           test/customer-stage2-converger.test.ts
-      - if: matrix.part == 'installer-rest'
+      - if: matrix.part == 'installer-rest-1'
         run: >-
           npm run test --workspace @ankka/gateway-installer --
           --exclude test/customer-bigquery-teardown-runtime.test.mjs
           --exclude test/customer-stage2-converger.test.ts
+          --shard=1/2
+      - if: matrix.part == 'installer-rest-2'
+        run: >-
+          npm run test --workspace @ankka/gateway-installer --
+          --exclude test/customer-bigquery-teardown-runtime.test.mjs
+          --exclude test/customer-stage2-converger.test.ts
+          --shard=2/2
 
   core-tests:
     needs: install
@@ -148,6 +175,7 @@ jobs:
 
   boundary-history:
     needs: install
+    if: needs.install.outputs.reused != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -158,8 +186,6 @@ jobs:
         with:
           node-version-file: .nvmrc
           cache: npm
-      # History must be checked again after merge even when the file tree
-      # is identical to the tested PR. Its rules still need the module cache.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         id: modules
         with:
@@ -184,10 +210,14 @@ jobs:
           RESULTS: ${{ join(needs.*.result, ' ') }}
           REUSED: ${{ needs.install.outputs.reused }}
           INSTALL_RESULT: ${{ needs.install.result }}
-          HISTORY_RESULT: ${{ needs.boundary-history.result }}
+          REUSED_HISTORY_RESULT: ${{ needs.install.outputs.reused-history }}
         run: |
           echo "gate results: $RESULTS"
-          if [ "$INSTALL_RESULT" = "success" ] && [ "$HISTORY_RESULT" = "success" ] && [ "$REUSED" = "true" ]; then
+          if [ "$REUSED" = "true" ]; then
+            if [ "$INSTALL_RESULT" != "success" ] || [ "$REUSED_HISTORY_RESULT" != "success" ]; then
+              echo "reused gate did not verify boundary and history"
+              exit 1
+            fi
             for result in $RESULTS; do
               if [ "$result" != "success" ] && [ "$result" != "skipped" ]; then
                 exit 1

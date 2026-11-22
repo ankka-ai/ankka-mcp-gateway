@@ -550,4 +550,49 @@ describe('create-only R2 release publisher', () => {
     })).rejects.toEqual(expectCode('release_publication_invalid'));
     expect(r2.putCalls).toHaveLength(0);
   });
+
+  it('overlaps payload writes while keeping intent strictly first and envelope strictly last', async () => {
+    const input = await fixture();
+    const r2 = new FakeR2();
+    const base = r2.bucket();
+    let inFlightPayloads = 0;
+    let peakPayloadConcurrency = 0;
+    let intentFinished = false;
+    let payloadStartedBeforeIntentFinished = false;
+    let envelopeStartedWithPayloadInFlight = false;
+    const bucket: R2ReleaseBucket = {
+      list: base.list,
+      get: base.get,
+      put: async (key, value, options) => {
+        const isIntent = key === INTENT_KEY;
+        const isEnvelope = key === ENVELOPE_KEY;
+        const isPayload = !isIntent && !isEnvelope;
+        if (isPayload) {
+          if (!intentFinished) payloadStartedBeforeIntentFinished = true;
+          inFlightPayloads += 1;
+          peakPayloadConcurrency = Math.max(peakPayloadConcurrency, inFlightPayloads);
+        }
+        if (isEnvelope && inFlightPayloads > 0) envelopeStartedWithPayloadInFlight = true;
+        await new Promise((resolve) => { setTimeout(resolve, 10); });
+        try {
+          return await base.put(key, value, options);
+        } finally {
+          if (isIntent) intentFinished = true;
+          if (isPayload) inFlightPayloads -= 1;
+        }
+      },
+    };
+
+    const result = await publishCreateOnlyR2Release({
+      blobs: input.blobs,
+      bucket,
+      clock: clock(),
+      objectPlan: input.plan,
+    });
+    expect(result.status).toBe('published');
+    expect(peakPayloadConcurrency).toBeGreaterThan(1);
+    expect(peakPayloadConcurrency).toBeLessThanOrEqual(6);
+    expect(payloadStartedBeforeIntentFinished).toBe(false);
+    expect(envelopeStartedWithPayloadInFlight).toBe(false);
+  });
 });
