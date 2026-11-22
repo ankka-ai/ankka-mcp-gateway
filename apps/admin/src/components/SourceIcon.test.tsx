@@ -4,6 +4,7 @@ import { SourceIcon } from './SourceIcon'
 import type { ManagedSource } from '../api'
 import metaIcon from '../assets/connectors/meta.svg'
 import ahrefsIcon from '../assets/connectors/ahrefs.svg'
+import klaviyoIcon from '../assets/connectors/klaviyo.png'
 
 const source: ManagedSource = { id: 'source-1111111111111111', label: 'Custom service', url: 'https://custom.example.com/mcp',
   authMode: 'none', onBehalfOfUser: false, enabledTools: ['search'], status: 'installed' }
@@ -13,6 +14,7 @@ describe('SourceIcon', () => {
   it.each([
     ['Meta Ads', 'https://mcp.facebook.com/ads', metaIcon],
     ['Ahrefs', 'https://api.ahrefs.com/mcp/mcp', ahrefsIcon],
+    ['Klaviyo', 'https://mcp.klaviyo.com/mcp', klaviyoIcon],
   ])('uses the bundled %s logo for its official endpoint without probing protected metadata', (_provider, url, icon) => {
     const { container } = render(<SourceIcon source={{ ...source, label: 'Analytics', url }} />)
     const img = container.querySelector('img')
@@ -24,6 +26,7 @@ describe('SourceIcon', () => {
   it.each([
     ['Meta Ads', 'https://mcp.facebook.com.example.com/ads'],
     ['Ahrefs', 'https://api.ahrefs.com.example.com/mcp/mcp'],
+    ['Klaviyo', 'https://mcp.klaviyo.com.example.com/mcp'],
   ])('does not infer the %s icon from a connector label or a lookalike hostname', (label, url) => {
     const { container } = render(<SourceIcon source={{ ...source, label, url }} />)
     expect(container.querySelector('img')).toHaveAttribute('src', `/api/sources/${source.id}/icon`)

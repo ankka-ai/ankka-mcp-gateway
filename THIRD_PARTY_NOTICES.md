@@ -74,7 +74,7 @@ Provider icons under `apps/admin/src/assets/connectors/` include Dashboard Icons
 artwork published by Homarr Labs and contributors under Apache-2.0, and HubSpot,
 Intercom, Linear, and Meta artwork from Simple Icons contributors under CC0 1.0.
 Their licenses are retained under `third_party/licenses/`; exact sources and
-modifications are listed in `ORIGINS.md`. Ahrefs and Gorgias icons are official
+modifications are listed in `ORIGINS.md`. Ahrefs, Gorgias, and Klaviyo icons are official
 website favicons used by maintainer request to identify those providers; no
 separate asset license was supplied. All provider trademarks belong to their
 respective owners; inclusion does not imply endorsement or affiliation.

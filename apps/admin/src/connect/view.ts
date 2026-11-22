@@ -12,7 +12,7 @@ const connectViewSchema = v.strictObject({
   sources: v.array(v.strictObject({
     id: v.pipe(v.string(), v.regex(/^source-[a-f0-9]{16}$/u)),
     name: v.string(),
-    icon: v.nullable(v.picklist(['ankka', 'meta', 'ahrefs'])),
+    icon: v.nullable(v.picklist(['ankka', 'meta', 'ahrefs', 'klaviyo'])),
   })),
   examples: v.array(v.strictObject({ id: v.string(), prompt: v.string(), answer: v.optional(v.string()), sourceIds: v.array(v.string()) })),
 })

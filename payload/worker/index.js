@@ -12603,7 +12603,8 @@ const CONNECT_AHREFS_MCP_URL = 'https://api.ahrefs.com/mcp/mcp';
 function connectSourceIcon(source) {
   if (nativeSourceId(source.id)) return 'ankka';
   if (source.url === META_ADS_MCP_URL) return 'meta';
-  return source.url === CONNECT_AHREFS_MCP_URL ? 'ahrefs' : null;
+  if (source.url === CONNECT_AHREFS_MCP_URL) return 'ahrefs';
+  return source.url === KLAVIYO_MCP_URL ? 'klaviyo' : null;
 }
 
 function connectRoute(pathname) {
